@@ -232,7 +232,7 @@ async function syncRepositoryUnlocked({
     ref,
     remoteUrl,
     commitTimestamp,
-    storagePath
+    storagePath: path.join(storagePath, "files")
   };
   const persisted = await store.createSnapshot({ snapshot, files });
   if (persisted.id !== snapshot.id) {

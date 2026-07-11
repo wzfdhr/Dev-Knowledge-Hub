@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import cookie from "@fastify/cookie";
+import fastifyStatic from "@fastify/static";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import Fastify, {
   type FastifyInstance,
@@ -64,6 +65,7 @@ export interface ServerOptions {
   sessionSecret: string;
   dataDir: string;
   nodeEnv: "development" | "production" | "test";
+  clientDir?: string;
 }
 
 function sseEvent(event: BuildEvent): string {
@@ -95,6 +97,15 @@ function repositoryDto(repository: RepositoryRecord) {
 export function buildServer(options: ServerOptions): FastifyInstance {
   const server = Fastify({ logger: false });
   void server.register(cookie);
+  if (options.clientDir) {
+    void server.register(fastifyStatic, { root: options.clientDir });
+    server.setNotFoundHandler((request, reply) => {
+      if (request.method === "GET" && !request.url.startsWith("/api/") && request.url !== "/mcp") {
+        return reply.sendFile("index.html");
+      }
+      return sendError(reply, 404, "NOT_FOUND", "Route was not found");
+    });
+  }
 
   const cookieOptions = {
     path: "/",

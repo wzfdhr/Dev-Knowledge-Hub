@@ -53,9 +53,11 @@ describe("production bootstrap", () => {
       masterKey,
       sessionSecret: "production-session-secret",
       dataDir: "/var/lib/devkh",
-      nodeEnv: "production"
+      nodeEnv: "production",
+      clientDir: path.resolve("dist/client")
     });
     expect(server.addHook).toHaveBeenCalledWith("onClose", expect.any(Function));
     expect(server).toBe(vi.mocked(deps.buildServer).mock.results[0].value);
   });
 });
+import path from "node:path";

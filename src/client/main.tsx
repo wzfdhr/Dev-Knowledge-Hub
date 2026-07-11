@@ -1,23 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BookOpen } from "lucide-react";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
 
 import "./styles.css";
+import { App } from "./app";
 
-import { APP_NAME } from "../shared/contracts";
-
-const queryClient = new QueryClient();
-
-function App() {
-  return (
-    <main>
-      <BookOpen aria-hidden="true" size={28} />
-      <h1>{APP_NAME}</h1>
-      <p>The clean-room application foundation is ready for MVP development.</p>
-    </main>
-  );
-}
+const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 2_000, retry: 1 } } });
 
 const root = document.querySelector<HTMLDivElement>("#root");
 if (!root) throw new Error("Missing #root element");
@@ -25,7 +14,7 @@ if (!root) throw new Error("Missing #root element");
 createRoot(root).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <App />
+      <BrowserRouter><App /></BrowserRouter>
     </QueryClientProvider>
   </StrictMode>
 );

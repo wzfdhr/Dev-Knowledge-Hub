@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import path from "node:path";
 
 import { createDatabase } from "../db/client.js";
 import { runMigrations } from "../db/migrate.js";
@@ -51,7 +52,8 @@ export async function bootstrapServer(
     masterKey: env.masterKey,
     sessionSecret: env.sessionSecret,
     dataDir: env.dataDir,
-    nodeEnv: env.nodeEnv
+    nodeEnv: env.nodeEnv,
+    ...(mode === "production" ? { clientDir: path.resolve("dist/client") } : {})
   });
   server.addHook("onClose", async () => {
     await buildService.stop();

@@ -69,7 +69,8 @@ describe("immutable repository snapshots", () => {
     expect(store.sourceSnapshots[0]).toMatchObject({
       commitSha: summary.commitSha,
       ref: "main",
-      remoteUrl: null
+      remoteUrl: null,
+      storagePath: path.join(dataDir, "snapshots", summary.snapshotId, "files")
     });
     const source = "export const answer = 42;\n";
     expect(store.sourceFiles).toContainEqual(expect.objectContaining({

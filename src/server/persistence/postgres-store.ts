@@ -467,41 +467,56 @@ export class PostgresAppStore implements AppStore {
     return rows[0] ? buildRecord(rows[0]) : null;
   }
 
+  async claimBuild(buildId: string): Promise<BuildRecord | null> {
+    const { rows } = await this.pool.query<BuildRow>(
+      `WITH claimed AS (
+         UPDATE build_jobs
+         SET status = 'syncing', updated_at = now()
+         WHERE id = $1 AND status = 'queued'
+         RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
+                   status, warnings, cancel_requested, error_message
+       ), event AS (
+         INSERT INTO build_events (workspace_id, build_job_id, status)
+         SELECT workspace_id, id, status FROM claimed RETURNING id
+       )
+       SELECT * FROM claimed`,
+      [buildId]
+    );
+    return rows[0] ? buildRecord(rows[0]) : null;
+  }
+
   async transitionBuild(
     buildId: string,
+    expectedStatus: BuildStatus,
     status: BuildStatus,
     details?: { errorMessage?: string; warnings?: BuildRecord["warnings"] }
-  ): Promise<BuildRecord> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const updated = await client.query<BuildRow>(
-        `UPDATE build_jobs
-         SET status = $2, error_message = COALESCE($3, error_message),
-             warnings = COALESCE($4::jsonb, warnings), updated_at = now()
-         WHERE id = $1
+  ): Promise<BuildRecord | null> {
+    const { rows } = await this.pool.query<BuildRow>(
+      `WITH updated AS (
+         UPDATE build_jobs
+         SET status = $3, error_message = COALESCE($4, error_message),
+             warnings = COALESCE($5::jsonb, warnings), updated_at = now()
+         WHERE id = $1 AND status = $2
          RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
-                   status, warnings, cancel_requested, error_message`,
-        [buildId, status, details?.errorMessage ?? null,
-          details?.warnings ? JSON.stringify(details.warnings) : null]
-      );
-      if (!updated.rows[0]) throw new Error("Build not found");
-      await client.query(
-        `INSERT INTO build_events (workspace_id, build_job_id, status, payload)
-         VALUES ($1, $2, $3, $4::jsonb)`,
-        [updated.rows[0].workspace_id, buildId, status, JSON.stringify({
+                   status, warnings, cancel_requested, error_message
+       ), event AS (
+         INSERT INTO build_events (workspace_id, build_job_id, status, payload)
+         SELECT workspace_id, id, status, $6::jsonb FROM updated RETURNING id
+       )
+       SELECT * FROM updated`,
+      [
+        buildId,
+        expectedStatus,
+        status,
+        details?.errorMessage ?? null,
+        details?.warnings ? JSON.stringify(details.warnings) : null,
+        JSON.stringify({
           ...(details?.errorMessage ? { errorMessage: details.errorMessage } : {}),
           ...(details?.warnings ? { warnings: details.warnings } : {})
-        })]
-      );
-      await client.query("COMMIT");
-      return buildRecord(updated.rows[0]);
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+        })
+      ]
+    );
+    return rows[0] ? buildRecord(rows[0]) : null;
   }
 
   async requestBuildCancellation(workspaceId: string, buildId: string): Promise<BuildRecord | null> {
@@ -539,15 +554,17 @@ export class PostgresAppStore implements AppStore {
 
   async listBuildEvents(workspaceId: string, buildId: string): Promise<BuildEvent[]> {
     const { rows } = await this.pool.query<{
-      build_job_id: string; status: BuildStatus; created_at: Date; payload: { errorMessage?: string };
+      sequence: string; build_job_id: string; status: BuildStatus;
+      created_at: Date; payload: { errorMessage?: string };
     }>(
-      `SELECT e.build_job_id, e.status, e.created_at, e.payload
+      `SELECT e.sequence, e.build_job_id, e.status, e.created_at, e.payload
        FROM build_events e JOIN build_jobs b ON b.id = e.build_job_id
        WHERE e.workspace_id = $1 AND e.build_job_id = $2
-       ORDER BY e.created_at, e.id`,
+       ORDER BY e.sequence`,
       [workspaceId, buildId]
     );
     return rows.map((row) => ({
+      sequence: Number(row.sequence),
       buildId: row.build_job_id,
       status: row.status,
       occurredAt: row.created_at.toISOString(),
@@ -579,11 +596,13 @@ export class PostgresAppStore implements AppStore {
       for (const edge of index.edges) {
         await client.query(
           `INSERT INTO code_edges
-           (workspace_id, snapshot_id, kind, source_name, target_name, source_path, start_line, end_line)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           (workspace_id, snapshot_id, kind, source_name, target_name, source_path, target_path,
+            start_line, end_line)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            ON CONFLICT (snapshot_id, kind, source_name, target_name, source_path, start_line, end_line)
            DO NOTHING`,
-          [build.workspaceId, build.snapshotId, edge.kind, edge.source, edge.target, edge.citation.path,
+          [build.workspaceId, build.snapshotId, edge.kind, edge.source, edge.target,
+            edge.citation.path, edge.targetPath ?? null,
             edge.citation.startLine, edge.citation.endLine]
         );
       }
@@ -663,9 +682,17 @@ export class PostgresAppStore implements AppStore {
                    created_at, published_at`,
         [release.id]
       );
-      await client.query(
-        "UPDATE build_jobs SET status = 'published', updated_at = now() WHERE id = $1",
+      const publishedBuild = await client.query<{ id: string; workspace_id: string; status: BuildStatus }>(
+        `UPDATE build_jobs SET status = 'published', updated_at = now()
+         WHERE id = $1 AND status = 'ready'
+         RETURNING id, workspace_id, status`,
         [release.build_job_id]
+      );
+      if (!publishedBuild.rows[0]) throw new Error("Release build is no longer ready");
+      await client.query(
+        `INSERT INTO build_events (workspace_id, build_job_id, status)
+         VALUES ($1, $2, 'published')`,
+        [publishedBuild.rows[0].workspace_id, publishedBuild.rows[0].id]
       );
       await client.query("COMMIT");
       return releaseRecord(published.rows[0]);
@@ -769,8 +796,8 @@ export class PostgresAppStore implements AppStore {
          WHERE r.workspace_id = $1 AND r.repository_id = $2
            AND (($4::uuid IS NOT NULL AND r.id = $4) OR ($4::uuid IS NULL AND rc.id IS NOT NULL))
          LIMIT 1
-       ), symbol_matches AS (
-         SELECT CASE WHEN cs.kind = 'module' THEN 'module' ELSE 'symbol' END AS kind,
+       ), symbol_candidates AS (
+         SELECT DISTINCT CASE WHEN cs.kind = 'module' THEN 'module' ELSE 'symbol' END AS kind,
                 CASE WHEN cs.kind = 'module' THEN sf.path ELSE cs.name END AS title,
                 left(kp.body, 240) AS excerpt,
                 CASE
@@ -795,19 +822,46 @@ export class PostgresAppStore implements AppStore {
          ) kp ON true
          WHERE lower(cs.name) LIKE lower($3) || '%' OR lower(sf.path) LIKE lower($3) || '%'
             OR similarity(lower(cs.name), lower($3)) > 0.2
-       ), neighbor_matches AS (
-         SELECT 'dependency-neighbor' AS kind,
-                CASE WHEN lower(ce.target_name) = lower($3) THEN ce.source_name ELSE ce.target_name END AS title,
+       ), symbol_matches AS (
+         SELECT *, ROW_NUMBER() OVER (ORDER BY score DESC, title, page_id) AS symbol_rank
+         FROM symbol_candidates
+       ), neighbor_candidates AS (
+         SELECT DISTINCT 'dependency-neighbor' AS kind,
+                CASE WHEN kp.title LIKE 'Module: %' THEN substring(kp.title FROM 9)
+                     ELSE neighbor.name END AS title,
                 left(kp.body, 240) AS excerpt, 60::real AS score,
                 kp.id AS page_id, sr.id AS release_id, kc.citations
          FROM selected_release sr
          JOIN code_edges ce ON ce.workspace_id = sr.workspace_id
                             AND ce.snapshot_id = sr.snapshot_id
-         JOIN knowledge_pages kp ON kp.build_job_id = sr.build_job_id
+         CROSS JOIN LATERAL (SELECT
+           CASE WHEN lower(ce.target_name) = lower($3) THEN ce.source_name ELSE ce.target_name END AS name,
+           CASE WHEN lower(ce.target_name) = lower($3) THEN ce.source_path ELSE ce.target_path END AS path
+         ) neighbor
+         JOIN LATERAL (
+           SELECT p.* FROM knowledge_pages p
+           WHERE p.build_job_id = sr.build_job_id AND (
+             p.slug = 'modules/' || trim(both '-' from regexp_replace(
+               lower(neighbor.name), '[^a-z0-9]+', '-', 'g'
+             ))
+             OR p.slug = 'modules/' || trim(both '-' from regexp_replace(
+               lower(neighbor.path), '[^a-z0-9]+', '-', 'g'
+             ))
+             OR (p.title = neighbor.name AND EXISTS (
+               SELECT 1 FROM knowledge_chunks cited
+               WHERE cited.page_id = p.id
+                 AND cited.citations @> jsonb_build_array(jsonb_build_object('path', neighbor.path))
+             ))
+           )
+           ORDER BY p.slug LIMIT 1
+         ) kp ON true
          JOIN LATERAL (SELECT citations FROM knowledge_chunks WHERE page_id = kp.id LIMIT 1) kc ON true
          WHERE lower(ce.source_name) = lower($3) OR lower(ce.target_name) = lower($3)
-       ), text_matches AS (
-         SELECT 'page' AS kind, kp.title, left(kp.body, 240) AS excerpt,
+       ), neighbor_matches AS (
+         SELECT *, ROW_NUMBER() OVER (ORDER BY score DESC, title, page_id) AS neighbor_rank
+         FROM neighbor_candidates
+       ), text_candidates AS (
+         SELECT DISTINCT 'page' AS kind, kp.title, left(kp.body, 240) AS excerpt,
                 (20 + ts_rank_cd(to_tsvector('english', kp.title || ' ' || kp.body),
                                  plainto_tsquery('english', $3)) * 10
                     + similarity(lower(kp.title), lower($3)))::real AS score,
@@ -816,9 +870,19 @@ export class PostgresAppStore implements AppStore {
          JOIN LATERAL (SELECT citations FROM knowledge_chunks WHERE page_id = kp.id LIMIT 1) kc ON true
          WHERE to_tsvector('english', kp.title || ' ' || kp.body) @@ plainto_tsquery('english', $3)
             OR similarity(lower(kp.title), lower($3)) > 0.2
+       ), text_matches AS (
+         SELECT *, ROW_NUMBER() OVER (ORDER BY score DESC, title, page_id) AS text_rank
+         FROM text_candidates
        )
        SELECT * FROM (
-         SELECT * FROM symbol_matches UNION ALL SELECT * FROM neighbor_matches UNION ALL SELECT * FROM text_matches
+         SELECT kind, title, excerpt, score, page_id, release_id, citations
+         FROM symbol_matches WHERE symbol_rank <= 15
+         UNION ALL
+         SELECT kind, title, excerpt, score, page_id, release_id, citations
+         FROM neighbor_matches WHERE neighbor_rank <= 15
+         UNION ALL
+         SELECT kind, title, excerpt, score, page_id, release_id, citations
+         FROM text_matches WHERE text_rank <= 20
        ) ranked ORDER BY score DESC, title ASC, page_id ASC LIMIT 50`,
       [workspaceId, repositoryId, query, releaseId ?? null]
     );

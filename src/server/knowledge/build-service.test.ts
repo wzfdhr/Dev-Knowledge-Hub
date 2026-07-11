@@ -5,11 +5,13 @@ import { describe, expect, test, vi } from "vitest";
 
 import {
   BuildService,
+  type BuildEvent,
   type BuildJobQueue,
   type BuildPersistence,
   type BuildRecord,
   type PersistedKnowledge
 } from "./build-service";
+import { analyzeSnapshot } from "./intelligence";
 
 const fixtureRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -20,6 +22,8 @@ class FakeBuildPersistence implements BuildPersistence {
   readonly builds: BuildRecord[] = [];
   readonly transitions: string[] = [];
   readonly knowledge: PersistedKnowledge[] = [];
+  readonly buildEvents: BuildEvent[] = [];
+  private nextSequence = 1;
   currentReleaseId = "release-current";
 
   async createBuild(input: Omit<BuildRecord, "id" | "status" | "warnings" | "cancelRequested">) {
@@ -37,6 +41,10 @@ class FakeBuildPersistence implements BuildPersistence {
     };
     this.builds.push(build);
     this.transitions.push("queued");
+    this.buildEvents.push({
+      sequence: this.nextSequence++, buildId: build.id, status: "queued",
+      occurredAt: new Date().toISOString()
+    });
     return { build, created: true };
   }
 
@@ -44,15 +52,27 @@ class FakeBuildPersistence implements BuildPersistence {
     return this.builds.find((build) => build.workspaceId === workspaceId && build.id === buildId) ?? null;
   }
 
-  async transitionBuild(buildId: string, status: BuildRecord["status"], details?: {
+  async claimBuild(buildId: string) {
+    return this.transitionBuild(buildId, "queued", "syncing");
+  }
+
+  async transitionBuild(
+    buildId: string,
+    expectedStatus: BuildRecord["status"],
+    status: BuildRecord["status"], details?: {
     errorMessage?: string;
     warnings?: BuildRecord["warnings"];
   }) {
     const build = this.builds.find((candidate) => candidate.id === buildId)!;
+    if (build.status !== expectedStatus) return null;
     build.status = status;
     if (details?.errorMessage) build.errorMessage = details.errorMessage;
     if (details?.warnings) build.warnings = details.warnings;
     this.transitions.push(status);
+    this.buildEvents.push({
+      sequence: this.nextSequence++, buildId, status, occurredAt: new Date().toISOString(),
+      ...(details?.errorMessage ? { errorMessage: details.errorMessage } : {})
+    });
     return build;
   }
 
@@ -75,7 +95,9 @@ class FakeBuildPersistence implements BuildPersistence {
       build.workspaceId === workspaceId && build.repositoryId === repositoryId
     );
   }
-  async listBuildEvents() { return []; }
+  async listBuildEvents(_workspaceId: string, buildId: string) {
+    return this.buildEvents.filter((event) => event.buildId === buildId);
+  }
 }
 
 class FakeQueue implements BuildJobQueue {
@@ -172,5 +194,51 @@ describe("BuildService", () => {
     expect(queue.sent).toContain(recoverable.id);
     expect(missing.status).toBe("failed");
     expect(missing.errorMessage).toMatch(/snapshot/i);
+  });
+
+  test("marks an interrupted claimed build failed during restart recovery", async () => {
+    const persistence = new FakeBuildPersistence();
+    const queue = new FakeQueue();
+    const service = new BuildService(persistence, queue);
+    const interrupted = (await persistence.createBuild(input())).build;
+    await persistence.claimBuild(interrupted.id);
+    await persistence.transitionBuild(interrupted.id, "syncing", "parsing");
+
+    await service.recover();
+
+    expect(interrupted.status).toBe("failed");
+    expect(interrupted.errorMessage).toMatch(/restart/i);
+    expect(queue.sent).not.toContain(interrupted.id);
+  });
+
+  test("claims a queued build exactly once under concurrent redelivery", async () => {
+    const persistence = new FakeBuildPersistence();
+    const analyze = vi.fn(async (...args: Parameters<typeof analyzeSnapshot>) => analyzeSnapshot(...args));
+    const service = new BuildService(persistence, new FakeQueue(), { analyze });
+    const { build } = await service.startBuild(input());
+
+    await Promise.all([service.process(build.id), service.process(build.id)]);
+
+    expect(analyze).toHaveBeenCalledOnce();
+    expect(build.status).toBe("ready");
+    expect(persistence.transitions.filter((status) => status === "syncing")).toHaveLength(1);
+    expect(persistence.transitions.filter((status) => status === "ready")).toHaveLength(1);
+  });
+
+  test("a stale worker cannot mark a ready build failed", async () => {
+    const persistence = new FakeBuildPersistence();
+    const service = new BuildService(persistence, new FakeQueue(), {
+      analyze: vi.fn(async () => {
+        persistence.builds[0].status = "ready";
+        throw new Error("late worker failure");
+      })
+    });
+    const { build } = await service.startBuild(input());
+
+    await service.process(build.id);
+
+    expect(build.status).toBe("ready");
+    expect(build.errorMessage).toBeUndefined();
+    expect(persistence.transitions.at(-1)).not.toBe("failed");
   });
 });

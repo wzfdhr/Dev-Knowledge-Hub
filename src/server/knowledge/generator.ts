@@ -132,8 +132,16 @@ function modulePages(index: CodeIndex): KnowledgePageDraft[] {
 function symbolPages(index: CodeIndex): KnowledgePageDraft[] {
   const seen = new Set<string>();
   return index.symbols.filter((symbol) => symbol.kind !== "module").flatMap((symbol: CodeSymbol) => {
-    let slug = `symbols/${slugify(symbol.name)}`;
-    if (seen.has(slug)) slug = `${slug}-${slugify(symbol.path)}`;
+    const base = `symbols/${slugify(symbol.name)}`;
+    let slug = base;
+    if (seen.has(slug)) {
+      slug = `${base}-${slugify(symbol.path)}-l${symbol.startLine}-${symbol.endLine}-${symbol.kind}`;
+    }
+    if (seen.has(slug)) {
+      slug = `${slug}-${stableId([
+        symbol.name, symbol.path, symbol.startLine, symbol.endLine, symbol.kind, symbol.signature ?? ""
+      ].join(":"))}`;
+    }
     seen.add(slug);
     const body = `# ${symbol.name}\n\n- Kind: ${symbol.kind}\n- Source: ${symbol.path}:${symbol.startLine}-${symbol.endLine}${symbol.signature ? `\n- Signature: ${symbol.signature}` : ""}`;
     return [page(slug, symbol.name, body, [symbol], "symbol")];

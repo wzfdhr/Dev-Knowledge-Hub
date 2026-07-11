@@ -89,6 +89,31 @@ describe("PostgresAppStore repository reads", () => {
 });
 
 describe("PostgresAppStore knowledge releases", () => {
+  test("replays build events in monotonic sequence order", async () => {
+    const query = vi.fn(async (sql: string) => ({ rows: [], sql }));
+    const store = new PostgresAppStore({ query } as never);
+
+    await store.listBuildEvents("workspace-1", "build-1");
+
+    expect(String(query.mock.calls[0][0])).toContain("ORDER BY e.sequence");
+  });
+  test("claims only queued jobs and guards every transition by expected status", async () => {
+    const query = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+    const store = new PostgresAppStore({ query } as never);
+
+    await expect(store.claimBuild("build-1")).resolves.toBeNull();
+    await expect(store.transitionBuild("build-1", "parsing", "synthesizing"))
+      .resolves.toBeNull();
+
+    expect(String(query.mock.calls[0][0])).toContain("status = 'queued'");
+    expect(String(query.mock.calls[0][0])).toContain("RETURNING");
+    expect(String(query.mock.calls[1][0])).toContain("status = $2");
+    expect(query.mock.calls[1][1]).toEqual([
+      "build-1", "parsing", "synthesizing", null, null, "{}"
+    ]);
+  });
   test("publishes a ready release and channel pointer in one transaction", async () => {
     const releaseRow = {
       id: "release-1",
@@ -104,6 +129,9 @@ describe("PostgresAppStore knowledge releases", () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("FOR UPDATE")) return { rows: [releaseRow] };
       if (sql.includes("UPDATE releases")) return { rows: [releaseRow] };
+      if (sql.includes("UPDATE build_jobs")) return { rows: [{
+        id: "build-1", workspace_id: "workspace-1", status: "published"
+      }] };
       return { rows: [] };
     });
     const client = { query, release: vi.fn() };
@@ -112,10 +140,13 @@ describe("PostgresAppStore knowledge releases", () => {
     await store.publishRelease("workspace-1", "release-1");
 
     expect(query.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/)[0])).toEqual([
-      "BEGIN", "SELECT", "INSERT", "UPDATE", "UPDATE", "COMMIT"
+      "BEGIN", "SELECT", "INSERT", "UPDATE", "UPDATE", "INSERT", "COMMIT"
     ]);
     expect(query.mock.calls[2][0]).toContain("ON CONFLICT (repository_id, name)");
     expect(query.mock.calls[2][0]).toContain("release_id = EXCLUDED.release_id");
+    expect(query.mock.calls[4][0]).toContain("status = 'ready'");
+    expect(query.mock.calls[4][0]).toContain("RETURNING");
+    expect(query.mock.calls[5][0]).toContain("INSERT INTO build_events");
   });
 
   test("rolls back publication when the channel update fails", async () => {
@@ -156,6 +187,12 @@ describe("PostgresAppStore knowledge releases", () => {
     expect(sql).toContain("WHEN lower(cs.name) = lower($3) THEN 100");
     expect(sql).toContain("WHEN lower(sf.path) = lower($3) THEN 90");
     expect(sql).toContain("dependency-neighbor");
+    expect(sql).toContain("neighbor_candidates");
+    expect(sql).toContain("p.slug = 'modules/'");
+    expect(sql).toContain("ROW_NUMBER() OVER");
+    expect(sql).toContain("symbol_rank <= 15");
+    expect(sql).toContain("neighbor_rank <= 15");
+    expect(sql).toContain("text_rank <= 20");
     expect(sql).toContain("ts_rank_cd");
     expect(sql).toContain("similarity");
     expect(sql).toContain("ORDER BY score DESC, title ASC");

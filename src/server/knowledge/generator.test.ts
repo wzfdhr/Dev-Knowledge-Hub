@@ -89,4 +89,16 @@ describe("deterministic knowledge generation", () => {
       .toContain("# Architecture Overview");
     expect(() => validateKnowledge(output, index)).not.toThrow();
   });
+
+  test("uses collision-safe stable slugs for every overload declaration", async () => {
+    const output = await generateKnowledge(index);
+    const overloadPages = output.pages.filter((page) =>
+      page.kind === "symbol" && page.title === "format"
+    );
+
+    expect(overloadPages).toHaveLength(4);
+    expect(new Set(overloadPages.map((page) => page.slug)).size).toBe(4);
+    expect(new Set(output.pages.map((page) => page.slug)).size).toBe(output.pages.length);
+    expect(overloadPages.map((page) => page.slug)).toEqual([...overloadPages.map((page) => page.slug)].sort());
+  });
 });

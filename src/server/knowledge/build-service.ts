@@ -32,11 +32,13 @@ export interface BuildPersistence {
     input: Omit<BuildRecord, "id" | "status" | "warnings" | "cancelRequested">
   ): Promise<{ build: BuildRecord; created: boolean }>;
   getBuild(workspaceId: string, buildId: string): Promise<BuildRecord | null>;
+  claimBuild(buildId: string): Promise<BuildRecord | null>;
   transitionBuild(
     buildId: string,
+    expectedStatus: BuildStatus,
     status: BuildStatus,
     details?: { errorMessage?: string; warnings?: KnowledgeOutput["warnings"] }
-  ): Promise<BuildRecord>;
+  ): Promise<BuildRecord | null>;
   requestBuildCancellation(workspaceId: string, buildId: string): Promise<BuildRecord | null>;
   saveKnowledge(value: PersistedKnowledge): Promise<void>;
   listUnfinishedBuilds(): Promise<BuildRecord[]>;
@@ -51,6 +53,7 @@ export interface BuildJobQueue {
 }
 
 export interface BuildEvent {
+  sequence: number;
   buildId: string;
   status: BuildStatus;
   occurredAt: string;
@@ -62,6 +65,8 @@ class BuildCancelledError extends Error {
     super("Build cancelled");
   }
 }
+
+class StaleBuildWorkerError extends Error {}
 
 export class BuildService {
   private readonly events = new EventEmitter();
@@ -91,13 +96,9 @@ export class BuildService {
     return () => this.events.off(buildId, listener);
   }
 
-  private emit(build: BuildRecord): void {
-    this.events.emit(build.id, {
-      buildId: build.id,
-      status: build.status,
-      occurredAt: new Date().toISOString(),
-      ...(build.errorMessage ? { errorMessage: build.errorMessage } : {})
-    } satisfies BuildEvent);
+  private async emitLatest(build: BuildRecord): Promise<void> {
+    const event = (await this.persistence.listBuildEvents(build.workspaceId, build.id)).at(-1);
+    if (event) this.events.emit(build.id, event);
   }
 
   async start(): Promise<void> {
@@ -114,7 +115,7 @@ export class BuildService {
   ): Promise<{ build: BuildRecord; created: boolean }> {
     const result = await this.persistence.createBuild(input);
     if (result.created) {
-      this.emit(result.build);
+      await this.emitLatest(result.build);
       await this.queue.send(result.build.id);
     }
     return result;
@@ -138,11 +139,13 @@ export class BuildService {
 
   private async transition(
     buildId: string,
+    expectedStatus: BuildStatus,
     status: BuildStatus,
     details?: { errorMessage?: string; warnings?: KnowledgeOutput["warnings"] }
   ): Promise<BuildRecord> {
-    const build = await this.persistence.transitionBuild(buildId, status, details);
-    this.emit(build);
+    const build = await this.persistence.transitionBuild(buildId, expectedStatus, status, details);
+    if (!build) throw new StaleBuildWorkerError();
+    await this.emitLatest(build);
     return build;
   }
 
@@ -152,37 +155,56 @@ export class BuildService {
   }
 
   async process(buildId: string): Promise<void> {
-    const unfinished = await this.persistence.listUnfinishedBuilds();
-    const original = unfinished.find((build) => build.id === buildId);
+    const original = await this.persistence.claimBuild(buildId);
     if (!original) return;
+    let status: BuildStatus = "syncing";
     try {
-      await this.transition(buildId, "syncing");
+      await this.emitLatest(original);
       await this.checkCancellation(original);
-      await this.transition(buildId, "parsing");
+      await this.transition(buildId, status, "parsing");
+      status = "parsing";
       const index = await this.analyze(original.snapshotPath, original.commitSha);
       await this.checkCancellation(original);
-      await this.transition(buildId, "synthesizing");
+      await this.transition(buildId, status, "synthesizing");
+      status = "synthesizing";
       const output = await this.synthesize(index, this.enhancer);
       await this.checkCancellation(original);
-      await this.transition(buildId, "validating", { warnings: output.warnings });
+      await this.transition(buildId, status, "validating", { warnings: output.warnings });
+      status = "validating";
       this.validate(output, index);
       await this.checkCancellation(original);
       await this.persistence.saveKnowledge({ build: original, index, output });
-      await this.transition(buildId, "ready", { warnings: output.warnings });
+      await this.transition(buildId, status, "ready", { warnings: output.warnings });
     } catch (error) {
-      await this.transition(buildId, "failed", {
+      if (error instanceof StaleBuildWorkerError) return;
+      const failed = await this.persistence.transitionBuild(buildId, status, "failed", {
         errorMessage: error instanceof Error ? error.message : "Knowledge build failed"
       });
+      if (failed) await this.emitLatest(failed);
     }
   }
 
   async recover(): Promise<void> {
     for (const build of await this.persistence.listUnfinishedBuilds()) {
+      if (build.status !== "queued") {
+        await this.transition(
+          build.id,
+          build.status,
+          "failed",
+          { errorMessage: "Build interrupted by server restart" }
+        );
+        continue;
+      }
       try {
         await fs.access(build.snapshotPath);
         await this.queue.send(build.id);
       } catch {
-        await this.transition(build.id, "failed", { errorMessage: "Immutable snapshot is unavailable" });
+        await this.transition(
+          build.id,
+          build.status,
+          "failed",
+          { errorMessage: "Immutable snapshot is unavailable" }
+        );
       }
     }
   }

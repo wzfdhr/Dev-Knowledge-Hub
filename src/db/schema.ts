@@ -1,5 +1,6 @@
 import {
   boolean,
+  bigserial,
   foreignKey,
   index,
   integer,
@@ -149,6 +150,7 @@ export const codeEdges = pgTable("code_edges", {
   kind: text("kind").notNull(),
   sourceName: text("source_name").notNull().default(""),
   targetName: text("target_name").notNull().default(""),
+  targetPath: text("target_path"),
   sourcePath: text("source_path").notNull().default(""),
   snapshotId: uuid("snapshot_id"),
   startLine: integer("start_line").notNull().default(1),
@@ -274,6 +276,7 @@ export const releases = pgTable("releases", {
 
 export const buildEvents = pgTable("build_events", {
   id: uuid("id").primaryKey().defaultRandom(),
+  sequence: bigserial("sequence", { mode: "number" }).notNull(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   buildJobId: uuid("build_job_id").notNull(),
   status: buildJobStatus("status").notNull(),

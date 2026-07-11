@@ -65,4 +65,23 @@ describe("analyzeSnapshot", () => {
       expect.objectContaining({ name: "e2e", kind: "package-script", path: "package.json", startLine: 5, endLine: 5 })
     ]));
   });
+
+  test("emits calls only when the compiler resolves an in-snapshot declaration", async () => {
+    const index = await analyzeSnapshot(fixtureRoot, commitSha);
+    const calls = index.edges.filter((edge) =>
+      edge.kind === "calls" && edge.citation.path === "src/calls.ts"
+    );
+
+    expect(calls.map((edge) => `${edge.source}->${edge.target}@${edge.targetPath}`)).toEqual([
+      "exercise->directLocal@src/calls.ts",
+      "exercise->execute@src/calls.ts",
+      "exercise->localMethod@src/call-targets.ts",
+      "exercise->original@src/call-targets.ts",
+      "exercise->original@src/call-targets.ts",
+      "exercise->run@src/call-targets.ts"
+    ]);
+    expect(calls.map((edge) => edge.target)).not.toEqual(expect.arrayContaining([
+      "max", "stringify", "value"
+    ]));
+  });
 });

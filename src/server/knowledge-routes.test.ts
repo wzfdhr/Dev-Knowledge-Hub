@@ -98,6 +98,58 @@ describe("knowledge API contracts", () => {
     await app.close();
   });
 
+  test("subscribes before replay and merges a racing live event exactly once", async () => {
+    const { app, store, buildService, cookie } = await authenticatedApp();
+    const started = await app.inject({
+      method: "POST", url: "/api/builds", headers: { cookie },
+      payload: { snapshotId: "11111111-1111-4111-8111-111111111111" }
+    });
+    const buildId = started.json().build.id as string;
+    const queued = (await store.listBuildEvents((await store.defaultWorkspace())!.id, buildId))[0];
+    let listener: ((event: typeof queued) => void) | null = null;
+    buildService.subscribe = ((_id: string, candidate: (event: typeof queued) => void) => {
+      listener = candidate;
+      return () => { listener = null; };
+    }) as typeof buildService.subscribe;
+    store.listBuildEvents = (async () => {
+      listener?.({ ...queued, sequence: queued.sequence + 1, status: "syncing" });
+      return [queued];
+    }) as typeof store.listBuildEvents;
+
+    const response = await app.inject({
+      method: "GET", url: `/api/builds/${buildId}/events?once=true`, headers: { cookie }
+    });
+
+    expect(response.body.match(/^id: 1$/gm)).toHaveLength(1);
+    expect(response.body.match(/^id: 2$/gm)).toHaveLength(1);
+    expect(response.body.indexOf("id: 1")).toBeLessThan(response.body.indexOf("id: 2"));
+    await app.close();
+  });
+
+  test("closes immediately when replay already contains a terminal event", async () => {
+    const { app, store, buildService, cookie, workspaceId } = await authenticatedApp();
+    const started = await app.inject({
+      method: "POST", url: "/api/builds", headers: { cookie },
+      payload: { snapshotId: "11111111-1111-4111-8111-111111111111" }
+    });
+    const buildId = started.json().build.id as string;
+    const queued = (await store.listBuildEvents(workspaceId, buildId))[0];
+    store.listBuildEvents = (async () => [
+      queued,
+      { ...queued, sequence: queued.sequence + 1, status: "ready" as const }
+    ]) as typeof store.listBuildEvents;
+    buildService.subscribe = (() => () => {}) as typeof buildService.subscribe;
+
+    const response = await app.inject({
+      method: "GET", url: `/api/builds/${buildId}/events`, headers: { cookie }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain("\"status\":\"ready\"");
+    expect(response.body).toContain("id: 2");
+    await app.close();
+  });
+
   test("drafts and manually publishes a release, then serves pages, search, and source", async () => {
     const { app, store, cookie, repositoryId, workspaceId, index } = await authenticatedApp();
     const build = (await store.createBuild({
@@ -108,7 +160,7 @@ describe("knowledge API contracts", () => {
       commitSha: index.commitSha
     })).build;
     await store.saveKnowledge({ build, index, output: await generateKnowledge(index) });
-    await store.transitionBuild(build.id, "ready");
+    await store.transitionBuild(build.id, "queued", "ready");
 
     const draft = await app.inject({
       method: "POST", url: "/api/releases", headers: { cookie },

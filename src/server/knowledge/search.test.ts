@@ -36,7 +36,7 @@ beforeEach(async () => {
   index = await analyzeSnapshot(fixtureRoot, build.commitSha);
   const output = await generateKnowledge(index);
   await store.saveKnowledge({ build, index, output });
-  await store.transitionBuild(build.id, "ready");
+  await store.transitionBuild(build.id, "queued", "ready");
   const release = await store.createReleaseDraft(workspaceId, repositoryId, build.id, "1.0.0");
   await store.publishRelease(workspaceId, release.id);
 });
@@ -51,6 +51,14 @@ describe("weighted knowledge search", () => {
     );
     expect(results[0].releaseId).toBeTruthy();
     expect(results[0].citations[0]).toEqual(expect.objectContaining({ commitSha: build.commitSha }));
+    expect(results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "dependency-neighbor", title: "src/math.ts" })
+    ]));
+    const moduleNeighbor = results.find((result) =>
+      result.kind === "dependency-neighbor" && result.title === "src/math.ts"
+    );
+    expect(store.knowledgePages.find((page) => page.id === moduleNeighbor?.pageId)?.title)
+      .toBe("Module: src/math.ts");
   });
 
   test("ranks exact paths and dependency neighbors deterministically", async () => {
@@ -62,5 +70,52 @@ describe("weighted knowledge search", () => {
     expect(neighborResults).toEqual([...neighborResults].sort((left, right) =>
       right.score - left.score || left.title.localeCompare(right.title)
     ));
+  });
+
+  test("binds neighbors to their own pages, dedupes before a stable cap, and retains text results", async () => {
+    const citation = index.files.find((file) => file.path === "src/math.ts")!;
+    for (let position = 0; position < 55; position += 1) {
+      const source = `src/neighbors/${String(position).padStart(2, "0")}.ts`;
+      index.edges.push({
+        kind: "module-dependency",
+        source,
+        target: "src/util.js",
+        citation
+      });
+      store.knowledgePages.push({
+        id: `${build.id}:neighbor-${position}`,
+        workspaceId,
+        repositoryId,
+        buildId: build.id,
+        slug: `modules/src-neighbors-${String(position).padStart(2, "0")}-ts`,
+        title: `Module: ${source}`,
+        body: `# Module: ${source}\n\nUses src/util.js for bounded values.`,
+        chunks: [{
+          id: `${build.id}:neighbor-chunk-${position}`,
+          heading: `Module: ${source}`,
+          content: `Uses src/util.js for bounded values.`,
+          citations: [citation]
+        }]
+      });
+    }
+    index.edges.push({
+      kind: "module-dependency",
+      source: "src/missing-source.ts",
+      target: "src/util.js",
+      citation
+    });
+
+    const first = await store.searchKnowledge(workspaceId, repositoryId, "src/util.js");
+    const second = await store.searchKnowledge(workspaceId, repositoryId, "src/util.js");
+
+    expect(first).toEqual(second);
+    expect(first.length).toBeLessThanOrEqual(50);
+    expect(first.some((result) => result.kind === "page")).toBe(true);
+    expect(first.some((result) => result.title === "src/missing-source.ts")).toBe(false);
+    expect(first.filter((result) => result.kind === "dependency-neighbor").every((result) =>
+      store.knowledgePages.some((page) =>
+        page.id === result.pageId && page.title === `Module: ${result.title}`
+      )
+    )).toBe(true);
   });
 });

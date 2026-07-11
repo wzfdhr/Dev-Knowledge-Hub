@@ -54,7 +54,7 @@ export interface ServerOptions {
 }
 
 function sseEvent(event: BuildEvent): string {
-  return `event: build\ndata: ${JSON.stringify(event)}\n\n`;
+  return `id: ${event.sequence}\nevent: build\ndata: ${JSON.stringify(event)}\n\n`;
 }
 
 interface AuthenticatedRequest extends FastifyRequest {
@@ -334,11 +334,34 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
     const build = await options.store.getBuild(admin.workspaceId, params.data.id);
     if (!build) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    const buffered = new Map<number, BuildEvent>();
+    let streaming = false;
+    let lastSequence = 0;
+    let closed = false;
+    const terminal = (event: BuildEvent) => ["ready", "published", "failed"].includes(event.status);
+    const writeLive = (event: BuildEvent) => {
+      if (closed || event.sequence <= lastSequence) return;
+      if (!streaming) {
+        buffered.set(event.sequence, event);
+        return;
+      }
+      lastSequence = event.sequence;
+      reply.raw.write(sseEvent(event));
+      if (terminal(event)) {
+        closed = true;
+        reply.raw.end();
+      }
+    };
+    const unsubscribe = options.buildService?.subscribe(build.id, writeLive) ?? (() => {});
     const history = await options.store.listBuildEvents(admin.workspaceId, build.id);
+    const replay = [...new Map([...history, ...buffered.values()]
+      .map((event) => [event.sequence, event])).values()]
+      .sort((left, right) => left.sequence - right.sequence);
     reply.header("content-type", "text/event-stream; charset=utf-8");
     reply.header("cache-control", "no-cache");
-    if (query.data.once === "true" || !options.buildService) {
-      return reply.send(history.map(sseEvent).join(""));
+    if (query.data.once === "true" || !options.buildService || replay.some(terminal)) {
+      unsubscribe();
+      return reply.send(replay.map(sseEvent).join(""));
     }
     reply.hijack();
     reply.raw.writeHead(200, {
@@ -346,12 +369,20 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       "cache-control": "no-cache",
       connection: "keep-alive"
     });
-    for (const event of history) reply.raw.write(sseEvent(event));
-    const unsubscribe = options.buildService.subscribe(build.id, (event) => {
+    for (const event of replay) {
+      if (event.sequence <= lastSequence) continue;
+      lastSequence = event.sequence;
       reply.raw.write(sseEvent(event));
-      if (["ready", "published", "failed"].includes(event.status)) reply.raw.end();
+    }
+    streaming = true;
+    for (const event of [...buffered.values()].sort((left, right) => left.sequence - right.sequence)) {
+      writeLive(event);
+    }
+    buffered.clear();
+    request.raw.on("close", () => {
+      closed = true;
+      unsubscribe();
     });
-    request.raw.on("close", unsubscribe);
   });
 
   server.get("/api/knowledge/search", { preHandler: requireAdmin }, async (request, reply) => {

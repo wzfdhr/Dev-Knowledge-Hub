@@ -32,7 +32,7 @@ describe("immutable releases", () => {
       const output = await generateKnowledge(index);
       output.pages.find((page) => page.slug === "architecture-overview")!.body += `\n\n${versionMarker}`;
       await store.saveKnowledge({ build, index, output });
-      await store.transitionBuild(build.id, "ready");
+      await store.transitionBuild(build.id, "queued", "ready");
       return build;
     }
 
@@ -71,7 +71,7 @@ describe("immutable releases", () => {
       snapshotPath: fixtureRoot,
       commitSha: "0".repeat(40)
     })).build;
-    await store.transitionBuild(failed.id, "failed", { errorMessage: "validation failed" });
+    await store.transitionBuild(failed.id, "queued", "failed", { errorMessage: "validation failed" });
 
     await expect(store.createReleaseDraft(
       setup!.workspace.id, repository!.id, failed.id, "broken"

@@ -34,6 +34,7 @@ export class MemoryAppStore implements AppStore {
   readonly sourceFiles: SourceFileRecord[] = [];
   readonly builds: BuildRecord[] = [];
   readonly buildEvents: BuildEvent[] = [];
+  private nextBuildEventSequence = 1;
   readonly knowledgePages: KnowledgePageRecord[] = [];
   readonly releases: ReleaseRecord[] = [];
   private readonly indexes = new Map<string, CodeIndex>();
@@ -175,6 +176,7 @@ export class MemoryAppStore implements AppStore {
     };
     this.builds.push(build);
     this.buildEvents.push({
+      sequence: this.nextBuildEventSequence++,
       buildId: build.id,
       status: "queued",
       occurredAt: new Date().toISOString()
@@ -188,17 +190,24 @@ export class MemoryAppStore implements AppStore {
     ) ?? null;
   }
 
+  async claimBuild(buildId: string): Promise<BuildRecord | null> {
+    return this.transitionBuild(buildId, "queued", "syncing");
+  }
+
   async transitionBuild(
     buildId: string,
+    expectedStatus: BuildRecord["status"],
     status: BuildRecord["status"],
     details?: { errorMessage?: string; warnings?: BuildRecord["warnings"] }
-  ): Promise<BuildRecord> {
+  ): Promise<BuildRecord | null> {
     const build = this.builds.find((candidate) => candidate.id === buildId);
     if (!build) throw new Error("Build not found");
+    if (build.status !== expectedStatus) return null;
     build.status = status;
     if (details?.errorMessage) build.errorMessage = details.errorMessage;
     if (details?.warnings) build.warnings = details.warnings;
     this.buildEvents.push({
+      sequence: this.nextBuildEventSequence++,
       buildId,
       status,
       occurredAt: new Date().toISOString(),
@@ -289,9 +298,10 @@ export class MemoryAppStore implements AppStore {
     if (!release) throw new Error("Release not found");
     const build = await this.getBuild(workspaceId, release.buildId);
     if (!build || build.status !== "ready") throw new Error("Release build is not ready");
+    const published = await this.transitionBuild(build.id, "ready", "published");
+    if (!published) throw new Error("Release build is no longer ready");
     release.publishedAt = new Date();
     this.releaseChannels.set(`${workspaceId}:${release.repositoryId}:${channel}`, release.id);
-    build.status = "published";
     return release;
   }
 
@@ -355,8 +365,10 @@ export class MemoryAppStore implements AppStore {
       title: string,
       score: number,
       citations: KnowledgeSearchResult["citations"],
-      targetPage?: KnowledgePageRecord
+      targetPage?: KnowledgePageRecord,
+      requireTargetPage = false
     ) => {
+      if (requireTargetPage && !targetPage) return;
       const foundPage = targetPage ?? pages.find((page) =>
         page.title.toLowerCase() === title.toLowerCase()
         || page.slug.endsWith(title.toLowerCase().replace(/[^a-z0-9]+/g, "-"))
@@ -381,8 +393,25 @@ export class MemoryAppStore implements AppStore {
       else if (pathName.startsWith(normalized)) add("path", symbol.path, 70, [symbol]);
     }
     for (const edge of index.edges) {
-      if (edge.target.toLowerCase() === normalized) add("dependency-neighbor", edge.source, 60, [edge.citation]);
-      else if (edge.source.toLowerCase() === normalized) add("dependency-neighbor", edge.target, 60, [edge.citation]);
+      const neighbor = edge.target.toLowerCase() === normalized
+        ? edge.source
+        : edge.source.toLowerCase() === normalized ? edge.target : null;
+      if (neighbor) {
+        const neighborPath = edge.target.toLowerCase() === normalized
+          ? edge.citation.path
+          : edge.targetPath;
+        const targetPage = pages.find((page) =>
+          page.title === `Module: ${neighbor}`
+          || page.title === `Module: ${neighborPath}`
+          || (page.title === neighbor && page.chunks.some((chunk) =>
+            chunk.citations.some((citation) => citation.path === neighborPath)
+          ))
+        );
+        const title = targetPage?.title.startsWith("Module: ")
+          ? targetPage.title.slice("Module: ".length)
+          : neighbor;
+        add("dependency-neighbor", title, 60, [edge.citation], targetPage, true);
+      }
     }
     for (const candidate of pages) {
       if (`${candidate.title}\n${candidate.body}`.toLowerCase().includes(normalized)) {
@@ -395,8 +424,16 @@ export class MemoryAppStore implements AppStore {
       const existing = unique.get(key);
       if (!existing || existing.score < result.score) unique.set(key, result);
     }
-    return [...unique.values()].sort((left, right) =>
+    const sorted = [...unique.values()].sort((left, right) =>
       right.score - left.score || left.title.localeCompare(right.title) || left.pageId.localeCompare(right.pageId)
     );
+    const primary = sorted.filter((result) =>
+      result.kind !== "dependency-neighbor" && result.kind !== "page"
+    ).slice(0, 15);
+    const neighbors = sorted.filter((result) => result.kind === "dependency-neighbor").slice(0, 15);
+    const text = sorted.filter((result) => result.kind === "page").slice(0, 20);
+    return [...primary, ...neighbors, ...text].sort((left, right) =>
+      right.score - left.score || left.title.localeCompare(right.title) || left.pageId.localeCompare(right.pageId)
+    ).slice(0, 50);
   }
 }

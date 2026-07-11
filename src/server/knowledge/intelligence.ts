@@ -42,6 +42,7 @@ export interface CodeEdge {
   kind: EdgeKind;
   source: string;
   target: string;
+  targetPath?: string;
   citation: Citation;
 }
 
@@ -146,19 +147,43 @@ function enclosingCallSource(node: ts.CallExpression): string {
   return node.getSourceFile().fileName;
 }
 
-function callTarget(expression: ts.Expression): string | null {
-  if (ts.isIdentifier(expression)) return expression.text;
-  if (ts.isPropertyAccessExpression(expression)) return expression.name.text;
-  return null;
+function resolvedCallTarget(
+  node: ts.CallExpression,
+  checker: ts.TypeChecker,
+  rootPath: string
+): { name: string; path: string } | null {
+  const declaration = checker.getResolvedSignature(node)?.declaration;
+  if (!declaration) return null;
+  const absolutePath = path.resolve(declaration.getSourceFile().fileName);
+  const relativePath = path.relative(rootPath, absolutePath);
+  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return null;
+
+  let nameNode: ts.DeclarationName | undefined;
+  if (ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(declaration)) {
+    nameNode = declaration.name;
+  } else if (ts.isArrowFunction(declaration) || ts.isFunctionExpression(declaration)) {
+    if (declaration.name) nameNode = declaration.name;
+    else if (ts.isVariableDeclaration(declaration.parent)) nameNode = declaration.parent.name;
+    else if (ts.isPropertyAssignment(declaration.parent)) nameNode = declaration.parent.name;
+  } else {
+    return null;
+  }
+  if (!nameNode || !ts.isIdentifier(nameNode) && !ts.isStringLiteral(nameNode)) return null;
+  return {
+    name: nameNode.text,
+    path: relativePath.split(path.sep).join("/")
+  };
 }
 
 function codeSymbolsAndEdges(
   relativePath: string,
   content: string,
   commitSha: string,
-  knownPaths: Set<string>
+  knownPaths: Set<string>,
+  source: ts.SourceFile,
+  checker: ts.TypeChecker,
+  rootPath: string
 ): { symbols: CodeSymbol[]; edges: CodeEdge[]; configKeys: string[] } {
-  const source = ts.createSourceFile(relativePath, content, ts.ScriptTarget.Latest, true, scriptKind(relativePath));
   const baseCitation = citationFor(relativePath, content, commitSha);
   const symbols: CodeSymbol[] = [{
     ...baseCitation,
@@ -168,7 +193,6 @@ function codeSymbolsAndEdges(
   }];
   const edges: CodeEdge[] = [];
   const configKeys = new Set<string>();
-  const importedBindings = new Set<string>();
 
   function addSymbol(node: ts.Node, name: string, kind: SymbolKind, exported = isExported(node)) {
     symbols.push({
@@ -191,18 +215,13 @@ function codeSymbolsAndEdges(
         if (ts.isIdentifier(declaration.name)) addSymbol(node, declaration.name.text, "variable");
       }
     } else if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
-      if (node.importClause?.name) importedBindings.add(node.importClause.name.text);
-      const bindings = node.importClause?.namedBindings;
-      if (bindings && ts.isNamedImports(bindings)) {
-        for (const imported of bindings.elements) importedBindings.add(imported.name.text);
-      }
       const target = resolveModulePath(relativePath, node.moduleSpecifier.text, knownPaths);
       if (target) {
         const citation = { ...baseCitation, ...lineRange(source, node) };
-        edges.push({ kind: "imports", source: relativePath, target, citation });
-        edges.push({ kind: "module-dependency", source: relativePath, target, citation });
+        edges.push({ kind: "imports", source: relativePath, target, targetPath: target, citation });
+        edges.push({ kind: "module-dependency", source: relativePath, target, targetPath: target, citation });
         if (/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(relativePath)) {
-          edges.push({ kind: "test-of", source: relativePath, target, citation });
+          edges.push({ kind: "test-of", source: relativePath, target, targetPath: target, citation });
         }
       }
     } else if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
@@ -216,16 +235,18 @@ function codeSymbolsAndEdges(
         kind: "exports",
         source: relativePath,
         target,
+        targetPath: target,
         citation: { ...baseCitation, ...lineRange(source, node) }
       });
     } else if (ts.isExportAssignment(node)) {
       addSymbol(node, "default", "export", true);
     } else if (ts.isCallExpression(node)) {
-      const target = callTarget(node.expression);
-      if (target && !["test", "expect", "describe", "it"].includes(target)) edges.push({
+      const target = resolvedCallTarget(node, checker, rootPath);
+      if (target) edges.push({
         kind: "calls",
         source: enclosingCallSource(node),
-        target,
+        target: target.name,
+        targetPath: target.path,
         citation: { ...baseCitation, ...lineRange(source, node) }
       });
     } else if (ts.isPropertyAssignment(node)) {
@@ -234,13 +255,6 @@ function codeSymbolsAndEdges(
     ts.forEachChild(node, visit);
   }
   visit(source);
-  const callableNames = new Set(symbols
-    .filter((symbol) => symbol.kind === "function" || symbol.kind === "class")
-    .map((symbol) => symbol.name));
-  for (const binding of importedBindings) callableNames.add(binding);
-  const resolvableEdges = edges.filter((edge) => edge.kind !== "calls" || callableNames.has(edge.target));
-  edges.length = 0;
-  edges.push(...resolvableEdges);
   return { symbols, edges, configKeys: [...configKeys].sort() };
 }
 
@@ -313,6 +327,22 @@ function packageScriptSymbols(
 export async function analyzeSnapshot(rootPath: string, commitSha: string): Promise<CodeIndex> {
   const relativePaths = await walk(rootPath);
   const knownPaths = new Set(relativePaths);
+  const program = ts.createProgram({
+    rootNames: relativePaths
+      .filter((relativePath) => codeExtensions.has(path.extname(relativePath)))
+      .map((relativePath) => path.join(rootPath, relativePath)),
+    options: {
+      allowJs: true,
+      checkJs: false,
+      jsx: ts.JsxEmit.ReactJSX,
+      module: ts.ModuleKind.NodeNext,
+      moduleResolution: ts.ModuleResolutionKind.NodeNext,
+      noEmit: true,
+      skipLibCheck: true,
+      target: ts.ScriptTarget.ES2022
+    }
+  });
+  const checker = program.getTypeChecker();
   const files: Citation[] = [];
   const symbols: CodeSymbol[] = [];
   const edges: CodeEdge[] = [];
@@ -324,7 +354,17 @@ export async function analyzeSnapshot(rootPath: string, commitSha: string): Prom
     const citation = citationFor(relativePath, content, commitSha);
     files.push(citation);
     if (codeExtensions.has(path.extname(relativePath))) {
-      const extracted = codeSymbolsAndEdges(relativePath, content, commitSha, knownPaths);
+      const source = program.getSourceFile(path.join(rootPath, relativePath))
+        ?? ts.createSourceFile(relativePath, content, ts.ScriptTarget.Latest, true, scriptKind(relativePath));
+      const extracted = codeSymbolsAndEdges(
+        relativePath,
+        content,
+        commitSha,
+        knownPaths,
+        source,
+        checker,
+        rootPath
+      );
       symbols.push(...extracted.symbols);
       edges.push(...extracted.edges);
       const kind = configKind(relativePath);

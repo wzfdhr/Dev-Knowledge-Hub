@@ -101,4 +101,36 @@ describe("deterministic knowledge generation", () => {
     expect(new Set(output.pages.map((page) => page.slug)).size).toBe(output.pages.length);
     expect(overloadPages.map((page) => page.slug)).toEqual([...overloadPages.map((page) => page.slug)].sort());
   });
+
+  test("injects acknowledged feedback into deterministic and optional generation context", async () => {
+    const citation = index.files.find((file) => file.path === "src/math.ts")!;
+    const enhance = vi.fn(async ({ deterministicBody }: { deterministicBody: string }) => deterministicBody);
+    const purpose = {
+      kind: "feedback",
+      feedbackIds: ["feedback-1"],
+      feedbackContext: [{
+        feedbackId: "feedback-1",
+        releaseId: "release-1",
+        query: "How should add handle overflow?",
+        reason: "Overflow behavior is undocumented",
+        expected: "Document the accepted range",
+        citations: [citation]
+      }]
+    };
+
+    const generateWithPurpose = generateKnowledge as unknown as (
+      source: CodeIndex,
+      enhancer: { enhance: typeof enhance },
+      context: { purpose: typeof purpose }
+    ) => ReturnType<typeof generateKnowledge>;
+    const output = await generateWithPurpose(index, { enhance }, { purpose });
+
+    const feedbackPage = output.pages.find((page) => page.slug === "feedback-rebuild-context");
+    expect(feedbackPage?.body).toContain("How should add handle overflow?");
+    expect(feedbackPage?.body).toContain("Overflow behavior is undocumented");
+    expect(feedbackPage?.body).toContain("Document the accepted range");
+    expect(feedbackPage?.body).toContain("src/math.ts");
+    expect(enhance).toHaveBeenCalledWith(expect.objectContaining({ buildPurpose: purpose }));
+    expect(() => validateKnowledge(output, index)).not.toThrow();
+  });
 });

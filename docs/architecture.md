@@ -21,9 +21,9 @@ flowchart LR
 
 ## Data flow
 
-1. Repository sync resolves a clean local commit or fetches a credential-free HTTPS mirror with a temporary askpass helper.
-2. Tracked text files are copied into an immutable snapshot directory and recorded with content hashes.
-3. A durable build analyzes exact snapshot files, creates symbols/dependencies/pages/chunks/citations, and validates generated knowledge.
+1. Repository sync resolves a clean local commit or fetches a credential-free HTTPS mirror with the image's static askpass helper.
+2. Valid UTF-8 tracked text files are copied into an immutable snapshot directory and recorded with byte-level content hashes; invalid text is skipped before indexing.
+3. A durable build carries those persisted hashes into symbols/pages/citations, creates deterministic knowledge, and validates generated knowledge. Feedback rebuilds persist and inject their acknowledged feedback context.
 4. Operators create and explicitly publish a release. Only the current published release is visible through MCP.
 5. MCP responses pin `releaseId` and `commitSha`; citations include path, inclusive line range, commit, and blob hash.
 
@@ -40,7 +40,7 @@ flowchart LR
 
 ## Shutdown and recovery
 
-Signals call Fastify close once. Fastify stops accepting connections and closes active MCP servers; bootstrap then gracefully stops pg-boss before ending the PostgreSQL pool. On startup, queued builds with available snapshots are reenqueued. Builds interrupted after claiming are marked failed rather than silently resumed.
+Signals call Fastify close once. Fastify stops accepting connections and closes active MCP servers; bootstrap then gracefully stops pg-boss before ending the PostgreSQL pool. On startup, queued builds with available snapshots are reenqueued, and a periodic reconciler retries persisted jobs after dispatch failures. Builds interrupted after claiming are marked failed rather than silently resumed. Cancellation is checked around knowledge persistence and the final ready transition is compare-and-set guarded against cancellation.
 
 ## Deployment state
 

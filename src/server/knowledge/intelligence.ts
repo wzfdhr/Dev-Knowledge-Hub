@@ -67,7 +67,7 @@ export interface CodeIndex {
 
 const codeExtensions = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"]);
 
-function hash(content: string): string {
+function hash(content: Buffer): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
@@ -82,10 +82,11 @@ function citationFor(
   relativePath: string,
   content: string,
   commitSha: string,
+  blobHash: string,
   startLine = 1,
   endLine = Math.max(1, content.split(/\r?\n/).length - (content.endsWith("\n") ? 1 : 0))
 ): Citation {
-  return { path: relativePath, startLine, endLine, commitSha, blobHash: hash(content) };
+  return { path: relativePath, startLine, endLine, commitSha, blobHash };
 }
 
 async function walk(root: string, current = root): Promise<string[]> {
@@ -182,13 +183,14 @@ function codeSymbolsAndEdges(
   relativePath: string,
   content: string,
   commitSha: string,
+  blobHash: string,
   knownPaths: Set<string>,
   source: ts.SourceFile,
   checker: ts.TypeChecker,
   rootPath: string,
   indexedSourcePaths: ReadonlySet<string>
 ): { symbols: CodeSymbol[]; edges: CodeEdge[]; configKeys: string[] } {
-  const baseCitation = citationFor(relativePath, content, commitSha);
+  const baseCitation = citationFor(relativePath, content, commitSha, blobHash);
   const symbols: CodeSymbol[] = [{
     ...baseCitation,
     name: relativePath,
@@ -287,10 +289,11 @@ function configKind(relativePath: string): ConfigInfo["kind"] | null {
 function packageScriptSymbols(
   relativePath: string,
   content: string,
-  commitSha: string
+  commitSha: string,
+  blobHash: string
 ): { symbols: CodeSymbol[]; edges: CodeEdge[] } {
   const source = ts.parseJsonText(relativePath, content);
-  const base = citationFor(relativePath, content, commitSha);
+  const base = citationFor(relativePath, content, commitSha, blobHash);
   const symbols: CodeSymbol[] = [];
   const edges: CodeEdge[] = [];
   let packageName = "package";
@@ -367,8 +370,28 @@ function structuredConfig(content: string, kind: ConfigInfo["kind"]): unknown | 
   }
 }
 
-export async function analyzeSnapshot(rootPath: string, commitSha: string): Promise<CodeIndex> {
-  const relativePaths = await walk(rootPath);
+export async function analyzeSnapshot(
+  rootPath: string,
+  commitSha: string,
+  persistedHashes: ReadonlyMap<string, string> = new Map()
+): Promise<CodeIndex> {
+  const discoveredPaths = (await walk(rootPath)).filter((relativePath) =>
+    persistedHashes.size === 0 || persistedHashes.has(relativePath)
+  );
+  const decoded = new Map<string, { content: string; blobHash: string }>();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  for (const relativePath of discoveredPaths) {
+    const bytes = await fs.readFile(path.join(rootPath, relativePath));
+    try {
+      decoded.set(relativePath, {
+        content: decoder.decode(bytes),
+        blobHash: persistedHashes.get(relativePath) ?? hash(bytes)
+      });
+    } catch {
+      // Invalid UTF-8 is not text knowledge and is excluded from the index.
+    }
+  }
+  const relativePaths = [...decoded.keys()];
   const knownPaths = new Set(relativePaths);
   const rootNames = relativePaths
     .filter((relativePath) => codeExtensions.has(path.extname(relativePath)))
@@ -388,8 +411,8 @@ export async function analyzeSnapshot(rootPath: string, commitSha: string): Prom
   const configs: ConfigInfo[] = [];
 
   for (const relativePath of relativePaths) {
-    const content = await fs.readFile(path.join(rootPath, relativePath), "utf8");
-    const citation = citationFor(relativePath, content, commitSha);
+    const { content, blobHash } = decoded.get(relativePath)!;
+    const citation = citationFor(relativePath, content, commitSha, blobHash);
     files.push(citation);
     if (codeExtensions.has(path.extname(relativePath))) {
       const source = program.getSourceFile(path.join(rootPath, relativePath))
@@ -398,6 +421,7 @@ export async function analyzeSnapshot(rootPath: string, commitSha: string): Prom
         relativePath,
         content,
         commitSha,
+        blobHash,
         knownPaths,
         source,
         checker,
@@ -421,7 +445,7 @@ export async function analyzeSnapshot(rootPath: string, commitSha: string): Prom
       const parsed = structuredConfig(content, kind);
       configs.push({ ...citation, kind, keys: parsed === null ? [] : flattenKeys(parsed) });
       if (kind === "package" && parsed !== null) {
-        const packageData = packageScriptSymbols(relativePath, content, commitSha);
+        const packageData = packageScriptSymbols(relativePath, content, commitSha, blobHash);
         symbols.push(...packageData.symbols);
         edges.push(...packageData.edges);
       }

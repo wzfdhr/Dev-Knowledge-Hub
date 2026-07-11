@@ -1,0 +1,14 @@
+.progress {
+  width: 100%;
+  border: 0;
+  appearance: none;
+}
+
+.progress::-webkit-progress-bar {
+  background: #e8ecf1;
+}
+
+.progress::-webkit-progress-value,
+.progress::-moz-progress-bar {
+  background: var(--blue);
+}

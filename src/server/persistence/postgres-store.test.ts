@@ -110,8 +110,9 @@ describe("PostgresAppStore knowledge releases", () => {
     expect(String(query.mock.calls[0][0])).toContain("status = 'queued'");
     expect(String(query.mock.calls[0][0])).toContain("RETURNING");
     expect(String(query.mock.calls[1][0])).toContain("status = $2");
+    expect(String(query.mock.calls[1][0])).toContain("cancel_requested = false");
     expect(query.mock.calls[1][1]).toEqual([
-      "build-1", "parsing", "synthesizing", null, null, "{}"
+      "build-1", "parsing", "synthesizing", null, null, "{}", false
     ]);
   });
   test("publishes a ready release and channel pointer in one transaction", async () => {
@@ -197,6 +198,27 @@ describe("PostgresAppStore knowledge releases", () => {
     expect(sql).toContain("similarity");
     expect(sql).toContain("ORDER BY score DESC, title ASC");
   });
+
+  test("uses bounded targeted SQL for release page, module, symbol, and list reads", async () => {
+    const query = vi.fn(async (_sql: string, _values?: unknown[]) => {
+      void _sql;
+      void _values;
+      return { rows: [] };
+    });
+    const store = new PostgresAppStore({ query } as never);
+
+    await store.findKnowledgePageBySlug("workspace-1", "release-1", "architecture-overview");
+    await store.findKnowledgePageByModule("workspace-1", "release-1", "src/math.ts");
+    await store.findKnowledgePageBySymbol("workspace-1", "release-1", "add", "src/math.ts");
+    await store.listKnowledgePages("workspace-1", "release-1", { limit: 25, offset: 50 });
+
+    expect(query).toHaveBeenCalledTimes(4);
+    for (const [sql] of query.mock.calls) expect(String(sql)).toContain("LIMIT");
+    expect(String(query.mock.calls[0][0])).toContain("p.slug = $3");
+    expect(String(query.mock.calls[1][0])).toContain("p.title = 'Module: ' || $3");
+    expect(String(query.mock.calls[2][0])).toContain("p.title = $3");
+    expect(query.mock.calls[3][1]).toEqual(["workspace-1", "release-1", 25, 50]);
+  });
 });
 
 describe("PostgresAppStore audited mutations", () => {
@@ -234,8 +256,63 @@ describe("PostgresAppStore audited mutations", () => {
     cancel_requested: false,
     error_message: null
   };
+  const workspaceRow = { id: "workspace-1", name: "Default Workspace", slug: "default" };
+  const adminRow = {
+    id: "admin-1",
+    workspace_id: "workspace-1",
+    email: "admin@example.com",
+    password_hash: "hash"
+  };
+  const repositoryRow = {
+    id: "repo-1",
+    workspace_id: "workspace-1",
+    kind: "local",
+    name: "Fixture",
+    local_path: "/fixture",
+    clone_url: null,
+    default_branch: "main",
+    has_credential: false
+  };
+  const snapshotRow = {
+    id: "snapshot-1",
+    workspace_id: "workspace-1",
+    repository_id: "repo-1",
+    commit_sha: "b".repeat(40),
+    ref: "main",
+    remote_url: null,
+    commit_timestamp: new Date(),
+    storage_path: "/snapshot"
+  };
 
   test.each([
+    ["initial setup", (store: PostgresAppStore) =>
+      store.createInitialSetup("admin@example.com", "hash")],
+    ["repository create", (store: PostgresAppStore) => store.createRepositoryWithAudit(
+      "workspace-1",
+      { kind: "local", name: "Fixture", path: "/fixture" },
+      "admin-1"
+    )],
+    ["snapshot sync", (store: PostgresAppStore) => store.createSnapshotWithAudit({
+      snapshot: {
+        id: "snapshot-1",
+        workspaceId: "workspace-1",
+        repositoryId: "repo-1",
+        commitSha: "b".repeat(40),
+        ref: "main",
+        remoteUrl: null,
+        commitTimestamp: new Date(),
+        storagePath: "/snapshot"
+      },
+      files: [{
+        id: "file-1",
+        workspaceId: "workspace-1",
+        snapshotId: "snapshot-1",
+        path: "src/index.ts",
+        byteSize: 1,
+        contentHash: "c".repeat(64),
+        language: "typescript"
+      }]
+    }, "admin-1")],
     ["token create", (store: PostgresAppStore) => store.createMcpTokenWithAudit({
       workspaceId: "workspace-1",
       name: "CI",
@@ -265,6 +342,11 @@ describe("PostgresAppStore audited mutations", () => {
   ])("rolls back %s when the required audit insert fails", async (_name, invoke) => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("INSERT INTO audit_events")) throw new Error("audit unavailable");
+      if (sql.includes("INSERT INTO workspaces")) return { rows: [workspaceRow] };
+      if (sql.includes("INSERT INTO admin_users")) return { rows: [adminRow] };
+      if (sql.includes("SELECT 1 FROM admin_users")) return { rows: [] };
+      if (sql.includes("INSERT INTO repositories")) return { rows: [repositoryRow] };
+      if (sql.includes("INSERT INTO source_snapshots")) return { rows: [snapshotRow] };
       if (sql.includes("INSERT INTO mcp_tokens") || sql.includes("UPDATE mcp_tokens")) {
         return { rows: [tokenRow] };
       }

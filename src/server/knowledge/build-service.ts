@@ -4,9 +4,46 @@ import { promises as fs } from "node:fs";
 import type { BUILD_JOB_STATUSES } from "../../shared/contracts.js";
 import { generateKnowledge, type KnowledgeOutput, validateKnowledge } from "./generator.js";
 import type { KnowledgeEnhancer } from "./enhancer.js";
-import { analyzeSnapshot, type CodeIndex } from "./intelligence.js";
+import { analyzeSnapshot, type Citation, type CodeIndex } from "./intelligence.js";
 
 export type BuildStatus = (typeof BUILD_JOB_STATUSES)[number];
+
+export interface FeedbackGenerationContext {
+  feedbackId: string;
+  releaseId: string;
+  query: string;
+  reason: string;
+  expected: string | null;
+  citations: Citation[];
+}
+
+export type BuildPurpose =
+  | { kind: "standard"; feedbackIds: []; feedbackContext: [] }
+  | {
+      kind: "feedback";
+      feedbackIds: string[];
+      feedbackContext: FeedbackGenerationContext[];
+    };
+
+export const standardBuildPurpose = (): BuildPurpose => ({
+  kind: "standard",
+  feedbackIds: [],
+  feedbackContext: []
+});
+
+export interface BuildInput {
+  workspaceId: string;
+  repositoryId: string;
+  snapshotId: string;
+  snapshotPath: string;
+  commitSha: string;
+  purpose?: BuildPurpose;
+}
+
+export interface BuildPagination {
+  limit?: number;
+  offset?: number;
+}
 
 export interface BuildRecord {
   id: string;
@@ -18,6 +55,7 @@ export interface BuildRecord {
   status: BuildStatus;
   warnings: KnowledgeOutput["warnings"];
   cancelRequested: boolean;
+  purpose: BuildPurpose;
   errorMessage?: string;
 }
 
@@ -29,7 +67,7 @@ export interface PersistedKnowledge {
 
 export interface BuildPersistence {
   createBuild(
-    input: Omit<BuildRecord, "id" | "status" | "warnings" | "cancelRequested">
+    input: BuildInput
   ): Promise<{ build: BuildRecord; created: boolean }>;
   getBuild(workspaceId: string, buildId: string): Promise<BuildRecord | null>;
   claimBuild(buildId: string): Promise<BuildRecord | null>;
@@ -37,13 +75,26 @@ export interface BuildPersistence {
     buildId: string,
     expectedStatus: BuildStatus,
     status: BuildStatus,
-    details?: { errorMessage?: string; warnings?: KnowledgeOutput["warnings"] }
+    details?: {
+      errorMessage?: string;
+      warnings?: KnowledgeOutput["warnings"];
+      requireNotCancelled?: boolean;
+    }
   ): Promise<BuildRecord | null>;
   requestBuildCancellation(workspaceId: string, buildId: string): Promise<BuildRecord | null>;
   saveKnowledge(value: PersistedKnowledge): Promise<void>;
   listUnfinishedBuilds(): Promise<BuildRecord[]>;
-  listBuilds(workspaceId: string, repositoryId: string): Promise<BuildRecord[]>;
-  listBuildEvents(workspaceId: string, buildId: string): Promise<BuildEvent[]>;
+  listBuilds(
+    workspaceId: string,
+    repositoryId: string,
+    pagination?: BuildPagination
+  ): Promise<BuildRecord[]>;
+  listBuildEvents(
+    workspaceId: string,
+    buildId: string,
+    pagination?: BuildPagination
+  ): Promise<BuildEvent[]>;
+  sourceFileHashes(workspaceId: string, snapshotId: string): Promise<ReadonlyMap<string, string>>;
 }
 
 export interface BuildJobQueue {
@@ -75,6 +126,8 @@ export class BuildService {
   private readonly validate: typeof validateKnowledge;
   private readonly enhancer?: KnowledgeEnhancer;
   private readonly enhancerForWorkspace?: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>;
+  private readonly reconcileIntervalMs: number;
+  private reconcileTimer: ReturnType<typeof setInterval> | null = null;
   private startPromise: Promise<void> | null = null;
 
   constructor(
@@ -86,6 +139,7 @@ export class BuildService {
       validate?: typeof validateKnowledge;
       enhancer?: KnowledgeEnhancer;
       enhancerForWorkspace?: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>;
+      reconcileIntervalMs?: number;
     } = {}
   ) {
     this.analyze = dependencies.analyze ?? analyzeSnapshot;
@@ -93,6 +147,7 @@ export class BuildService {
     this.validate = dependencies.validate ?? validateKnowledge;
     this.enhancer = dependencies.enhancer;
     this.enhancerForWorkspace = dependencies.enhancerForWorkspace;
+    this.reconcileIntervalMs = dependencies.reconcileIntervalMs ?? 5_000;
   }
 
   subscribe(buildId: string, listener: (event: BuildEvent) => void): () => void {
@@ -118,16 +173,22 @@ export class BuildService {
   private async startOnce(): Promise<void> {
     const recoveredBuildIds = await this.recover();
     await this.queue.start((buildId) => this.process(buildId));
-    for (const buildId of recoveredBuildIds) await this.queue.send(buildId);
+    for (const buildId of recoveredBuildIds) await this.dispatch(buildId);
+    this.reconcileTimer = setInterval(() => {
+      void this.reconcileQueuedBuilds();
+    }, this.reconcileIntervalMs);
+    this.reconcileTimer.unref?.();
   }
 
   async stop(): Promise<void> {
+    if (this.reconcileTimer) clearInterval(this.reconcileTimer);
+    this.reconcileTimer = null;
     await this.queue.stop();
     this.startPromise = null;
   }
 
   async startBuild(
-    input: Omit<BuildRecord, "id" | "status" | "warnings" | "cancelRequested">
+    input: BuildInput
   ): Promise<{ build: BuildRecord; created: boolean }> {
     const result = await this.persistence.createBuild(input);
     return this.enqueueBuild(result);
@@ -138,9 +199,23 @@ export class BuildService {
   ): Promise<{ build: BuildRecord; created: boolean }> {
     if (result.created) {
       await this.emitLatest(result.build);
-      await this.queue.send(result.build.id);
+      await this.dispatch(result.build.id);
     }
     return result;
+  }
+
+  private async dispatch(buildId: string): Promise<void> {
+    try {
+      await this.queue.send(buildId);
+    } catch {
+      // The durable queued row is reconciled by the startup/periodic dispatcher.
+    }
+  }
+
+  private async reconcileQueuedBuilds(): Promise<void> {
+    for (const build of await this.persistence.listUnfinishedBuilds()) {
+      if (build.status === "queued") await this.dispatch(build.id);
+    }
   }
 
   async cancelBuild(workspaceId: string, buildId: string): Promise<BuildRecord | null> {
@@ -163,7 +238,11 @@ export class BuildService {
     buildId: string,
     expectedStatus: BuildStatus,
     status: BuildStatus,
-    details?: { errorMessage?: string; warnings?: KnowledgeOutput["warnings"] }
+    details?: {
+      errorMessage?: string;
+      warnings?: KnowledgeOutput["warnings"];
+      requireNotCancelled?: boolean;
+    }
   ): Promise<BuildRecord> {
     const build = await this.persistence.transitionBuild(buildId, expectedStatus, status, details);
     if (!build) throw new StaleBuildWorkerError();
@@ -185,21 +264,35 @@ export class BuildService {
       await this.checkCancellation(original);
       await this.transition(buildId, status, "parsing");
       status = "parsing";
-      const index = await this.analyze(original.snapshotPath, original.commitSha);
+      const hashes = await this.persistence.sourceFileHashes(
+        original.workspaceId,
+        original.snapshotId
+      );
+      const index = await this.analyze(original.snapshotPath, original.commitSha, hashes);
       await this.checkCancellation(original);
       await this.transition(buildId, status, "synthesizing");
       status = "synthesizing";
       const enhancer = this.enhancerForWorkspace
         ? await this.enhancerForWorkspace(original.workspaceId)
         : this.enhancer;
-      const output = await this.synthesize(index, enhancer);
+      const output = await this.synthesize(index, enhancer, { purpose: original.purpose });
       await this.checkCancellation(original);
       await this.transition(buildId, status, "validating", { warnings: output.warnings });
       status = "validating";
       this.validate(output, index);
       await this.checkCancellation(original);
       await this.persistence.saveKnowledge({ build: original, index, output });
-      await this.transition(buildId, status, "ready", { warnings: output.warnings });
+      await this.checkCancellation(original);
+      const ready = await this.persistence.transitionBuild(buildId, status, "ready", {
+        warnings: output.warnings,
+        requireNotCancelled: true
+      });
+      if (!ready) {
+        const latest = await this.persistence.getBuild(original.workspaceId, buildId);
+        if (latest?.status === status && latest.cancelRequested) throw new BuildCancelledError();
+        throw new StaleBuildWorkerError();
+      }
+      await this.emitLatest(ready);
     } catch (error) {
       if (error instanceof StaleBuildWorkerError) return;
       const failed = await this.persistence.transitionBuild(buildId, status, "failed", {

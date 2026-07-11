@@ -1,3 +1,5 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -117,5 +119,39 @@ describe("analyzeSnapshot", () => {
     expect(invalid.edges).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "calls", target: "localCall", targetPath: "src/main.ts" })
     ]));
+  });
+
+  test("uses persisted snapshot hashes without rehashing decoded text", async () => {
+    const expectedHash = "f".repeat(64);
+    const analyzeWithHashes = analyzeSnapshot as unknown as (
+      root: string,
+      sha: string,
+      hashes: ReadonlyMap<string, string>
+    ) => ReturnType<typeof analyzeSnapshot>;
+
+    const index = await analyzeWithHashes(
+      fixtureRoot,
+      commitSha,
+      new Map([["src/math.ts", expectedHash]])
+    );
+
+    expect(index.files.find((file) => file.path === "src/math.ts")?.blobHash).toBe(expectedHash);
+    expect(index.files.map((file) => file.path)).toEqual(["src/math.ts"]);
+    expect(index.symbols.filter((symbol) => symbol.path === "src/math.ts"))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ blobHash: expectedHash })]));
+  });
+
+  test("skips invalid UTF-8 text even when it contains no NUL byte", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-invalid-utf8-"));
+    try {
+      await writeFile(path.join(root, "invalid.ts"), Buffer.from([0xc3, 0x28, 0x0a]));
+
+      const index = await analyzeSnapshot(root, commitSha);
+
+      expect(index.files).toEqual([]);
+      expect(index.symbols).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

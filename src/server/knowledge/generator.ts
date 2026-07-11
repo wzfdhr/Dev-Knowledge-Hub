@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import type { KnowledgeEnhancer } from "./enhancer.js";
 import type { Citation, CodeIndex, CodeSymbol } from "./intelligence.js";
+import type { BuildPurpose } from "./build-service.js";
 
 export interface KnowledgeChunk {
   id: string;
@@ -17,7 +18,7 @@ export interface KnowledgePageDraft {
   body: string;
   citations: Citation[];
   chunks: KnowledgeChunk[];
-  kind: "required" | "module" | "symbol";
+  kind: "required" | "module" | "symbol" | "feedback";
 }
 
 export interface KnowledgeWarning {
@@ -148,6 +149,42 @@ function symbolPages(index: CodeIndex): KnowledgePageDraft[] {
   });
 }
 
+function feedbackPages(index: CodeIndex, purpose: BuildPurpose): KnowledgePageDraft[] {
+  if (purpose.kind !== "feedback") return [];
+  const files = new Map(index.files.map((file) => [file.path, file]));
+  const citations = uniqueCitations(purpose.feedbackContext.flatMap((feedback) =>
+    feedback.citations.filter((citation) => {
+      const source = files.get(citation.path);
+      return source
+        && citation.commitSha === source.commitSha
+        && citation.blobHash === source.blobHash
+        && citation.startLine >= 1
+        && citation.endLine >= citation.startLine
+        && citation.endLine <= source.endLine;
+    })
+  ));
+  const fallback = index.files[0];
+  if (!citations.length && !fallback) return [];
+  const body = [
+    "# Feedback Rebuild Context",
+    ...purpose.feedbackContext.flatMap((feedback) => [
+      `## Feedback ${feedback.feedbackId}`,
+      `- Query: ${feedback.query}`,
+      `- Reason: ${feedback.reason}`,
+      `- Expected: ${feedback.expected ?? "Not provided"}`,
+      `- Citations: ${feedback.citations.map((citation) =>
+        `${citation.path}:${citation.startLine}-${citation.endLine}`).join(", ") || "None provided"}`
+    ])
+  ].join("\n\n");
+  return [page(
+    "feedback-rebuild-context",
+    "Feedback Rebuild Context",
+    body,
+    citations.length ? citations : [fallback!],
+    "feedback"
+  )];
+}
+
 function splitLongText(text: string, maximum: number): string[] {
   if (text.length <= maximum) return [text];
   const pieces: string[] = [];
@@ -186,17 +223,26 @@ export function chunkPage(
 
 export async function generateKnowledge(
   index: CodeIndex,
-  enhancer?: KnowledgeEnhancer
+  enhancer?: KnowledgeEnhancer,
+  context: { purpose: BuildPurpose } = {
+    purpose: { kind: "standard", feedbackIds: [], feedbackContext: [] }
+  }
 ): Promise<KnowledgeOutput> {
-  const pages = [...requiredPages(index), ...modulePages(index), ...symbolPages(index)];
-    const warnings: KnowledgeWarning[] = [];
+  const pages = [
+    ...requiredPages(index),
+    ...feedbackPages(index, context.purpose),
+    ...modulePages(index),
+    ...symbolPages(index)
+  ];
+  const warnings: KnowledgeWarning[] = [];
   if (enhancer) {
     for (const draft of pages) {
       try {
         draft.body = await enhancer.enhance({
           slug: draft.slug,
           title: draft.title,
-          deterministicBody: draft.body
+          deterministicBody: draft.body,
+          buildPurpose: context.purpose
         });
         draft.chunks = chunkPage(draft);
       } catch (error) {

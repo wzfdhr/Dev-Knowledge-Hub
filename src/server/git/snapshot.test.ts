@@ -128,6 +128,7 @@ describe("immutable repository snapshots", () => {
     await writeFile(path.join(repositoryPath, ".env.example"), "TOKEN=\n");
     await writeFile(path.join(repositoryPath, "generated.ts"), "// @generated\nexport {};\n");
     await writeFile(path.join(repositoryPath, "binary.js"), Buffer.from([0, 1, 2, 3]));
+    await writeFile(path.join(repositoryPath, "invalid-utf8.ts"), Buffer.from([0xc3, 0x28, 0x0a]));
     await writeFile(path.join(repositoryPath, "large.ts"), Buffer.alloc(4 * 1024 * 1024 + 1, 65));
     await git(repositoryPath, "add", "-f", ".");
     await git(repositoryPath, "commit", "-m", "add filtering cases");

@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [codex/mvp]
+    branches: [main, codex/mvp]
   pull_request:
 
 permissions:
@@ -55,3 +55,32 @@ jobs:
             playwright-report/
             test-results/
           if-no-files-found: ignore
+
+  container-smoke:
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_PASSWORD: devkh-container-password
+      DEVKH_MASTER_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      DEVKH_SESSION_SECRET: container-smoke-session-secret-at-least-32-chars
+      DEVKH_PORT: 3000
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build --target runtime -t devkh:ci .
+      - name: Validate Compose
+        run: docker compose config --quiet
+      - name: Start production Compose services
+        run: docker compose up -d --build postgres app
+      - name: Probe application health
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3000/api/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs app
+          exit 1
+      - name: Stop Compose services
+        if: always()
+        run: docker compose down --volumes

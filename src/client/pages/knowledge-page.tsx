@@ -1,19 +1,23 @@
 import { useQuery } from "@tanstack/react-query";
 import { Braces, FileCode2, GitCompare, Network, Search, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import { errorMessage, type ApiClient } from "../api/client";
 import type { Citation, KnowledgePageRecord } from "../api/types";
 import { Empty, ErrorState, Loading } from "../components/ui";
 
 export function KnowledgePage({ api }: { api: ApiClient }) {
+  const [searchParams] = useSearchParams();
   const inputRef = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [citation, setCitation] = useState<Citation | null>(null);
   const repositoryStatus = useQuery({ queryKey: ["repository-status"], queryFn: api.getRepositoryStatus, retry: false });
   const releases = useQuery({ queryKey: ["releases", "knowledge"], queryFn: api.listReleases, retry: false });
-  const release = releases.data?.releases[0];
+  const requestedReleaseId = searchParams.get("releaseId");
+  const release = releases.data?.releases.find((candidate) => candidate.id === requestedReleaseId)
+    ?? releases.data?.releases[0];
   const pages = useQuery({
     queryKey: ["knowledge-pages", release?.id],
     queryFn: () => api.listKnowledgePages(release!.id),

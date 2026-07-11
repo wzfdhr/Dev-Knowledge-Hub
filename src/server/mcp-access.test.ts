@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { buildServer } from "./app";
 import { generateKnowledge } from "./knowledge/generator";
@@ -123,6 +123,8 @@ describe("MCP bearer tokens", () => {
     expect(JSON.stringify(persisted)).not.toContain(plaintext);
 
     const listed = await app.inject({ method: "GET", url: "/api/mcp/tokens", headers: { cookie } });
+    expect(listed.json().tokens[0].tokenPrefix).toBe(plaintext.slice(0, 12));
+    expect(listed.json().tokens[0]).not.toHaveProperty("prefix");
     expect(listed.json().tokens[0]).not.toHaveProperty("token");
     expect(listed.json().tokens[0]).not.toHaveProperty("tokenHash");
 
@@ -264,6 +266,101 @@ describe("MCP tool contract", () => {
     expect(response.isError).toBe(true);
     expect(JSON.parse(((response.content as Array<{ text: string }>)[0]).text).error.code)
       .toBe("NOT_FOUND");
+    await app.close();
+  });
+
+  test("reports a gap with a validated architecture citation when search has no hit", async () => {
+    const { store, workspaceId, release, index, app } = await publishedContext();
+    const client = await connectMcp(store, workspaceId);
+
+    const response = await client.callTool({
+      name: "dkh_report_gap",
+      arguments: { query: "xyzzynotfound", reason: "No matching guidance" }
+    });
+
+    expect(response.isError).not.toBe(true);
+    const envelope = response.structuredContent as {
+      releaseId: string;
+      citations: Array<{ path: string; commitSha: string }>;
+      result: { feedback: { citations: unknown[] } };
+    };
+    expect(envelope.releaseId).toBe(release.id);
+    expect(envelope.citations.length).toBeGreaterThan(0);
+    expect(envelope.citations[0]).toMatchObject({ commitSha: index.commitSha });
+    expect(envelope.result.feedback.citations).toEqual(envelope.citations);
+    await app.close();
+  });
+
+  test("uses targeted store lookups for architecture, module, and symbol reads", async () => {
+    const { store, workspaceId, app } = await publishedContext();
+    const client = await connectMcp(store, workspaceId);
+    const listPages = vi.spyOn(store, "listKnowledgePages");
+
+    await client.callTool({ name: "dkh_get_architecture", arguments: {} });
+    await client.callTool({ name: "dkh_get_module", arguments: { moduleId: "src/math.ts" } });
+    await client.callTool({
+      name: "dkh_get_symbol",
+      arguments: { name: "add", path: "src/math.ts" }
+    });
+
+    expect(listPages).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  test("bounds page, citation, and release-summary responses for a large release", async () => {
+    const { store, workspaceId, index, app } = await publishedContext();
+    const architecture = store.knowledgePages.find((page) => page.slug === "architecture-overview")!;
+    const manyCitations = index.files.flatMap((file) =>
+      Array.from({ length: Math.min(file.endLine, 20) }, (_, position) => ({
+        ...file,
+        startLine: position + 1,
+        endLine: position + 1
+      }))
+    ).slice(0, 120);
+    architecture.chunks[0].citations = manyCitations;
+    const client = await connectMcp(store, workspaceId);
+
+    const pageResponse = await client.callTool({ name: "dkh_get_architecture", arguments: {} });
+    const pageEnvelope = pageResponse.structuredContent as {
+      citations: unknown[];
+      result: { chunks: Array<{ citations: unknown[] }> };
+    };
+    expect(pageEnvelope.citations.length).toBeLessThanOrEqual(50);
+    expect(pageEnvelope.result.chunks.every((chunk) => chunk.citations.length <= 8)).toBe(true);
+
+    const releaseResponse = await client.callTool({ name: "dkh_get_release", arguments: {} });
+    const releaseEnvelope = releaseResponse.structuredContent as {
+      citations: unknown[];
+      result: Record<string, unknown>;
+    };
+    expect(releaseEnvelope.citations.length).toBeLessThanOrEqual(50);
+    expect(releaseEnvelope.result).toEqual(expect.objectContaining({
+      pageCount: expect.any(Number),
+      chunkCount: expect.any(Number),
+      citationCount: expect.any(Number)
+    }));
+    expect(releaseEnvelope.result).not.toHaveProperty("pages");
+    await app.close();
+  });
+
+  test("rejects oversized strings before querying release data", async () => {
+    const { store, workspaceId, app } = await publishedContext();
+    const client = await connectMcp(store, workspaceId);
+    const calls: Array<[string, Record<string, unknown>]> = [
+      ["dkh_search", { query: "q".repeat(501) }],
+      ["dkh_get_module", { moduleId: "m".repeat(501) }],
+      ["dkh_get_symbol", { name: "s".repeat(501) }],
+      ["dkh_get_change_context", { task: "t".repeat(2_001) }],
+      ["dkh_get_source", { path: "p".repeat(501) }],
+      ["dkh_report_gap", { query: "q", reason: "r".repeat(2_001) }]
+    ];
+
+    for (const [name, args] of calls) {
+      const response = await client.callTool({ name, arguments: args });
+      expect(response.isError, name).toBe(true);
+      expect(JSON.parse(((response.content as Array<{ text: string }>)[0]).text).error.code, name)
+        .toBe("INVALID_INPUT");
+    }
     await app.close();
   });
 

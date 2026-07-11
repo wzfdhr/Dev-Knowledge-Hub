@@ -4,6 +4,7 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 import { describe, expect, test } from "vitest";
 
 import {
+  buildJobs,
   encryptedCredentials,
   repositories,
   sourceFiles,
@@ -50,5 +51,20 @@ describe("Task 2 database contract", () => {
     expect(sql).toContain("ADD COLUMN metadata jsonb");
     expect(sql).toContain("encrypted_credentials_workspace_model_idx");
     expect(sql).toContain("ADD COLUMN citations jsonb");
+  });
+
+  test("final review migration persists feedback build identity and generation context", async () => {
+    expect(columnNames(buildJobs)).toEqual(expect.arrayContaining([
+      "purpose",
+      "feedback_ids",
+      "feedback_context"
+    ]));
+    const sql = await readFile(
+      new URL("../../drizzle/0007_final_production_review.sql", import.meta.url),
+      "utf8"
+    );
+    expect(sql).toContain("ADD COLUMN purpose text");
+    expect(sql).toContain("ADD COLUMN feedback_ids uuid[]");
+    expect(sql).toContain("ADD COLUMN feedback_context jsonb");
   });
 });

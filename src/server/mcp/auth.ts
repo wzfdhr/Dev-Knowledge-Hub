@@ -19,11 +19,15 @@ export async function authenticateMcpToken(
   return token;
 }
 
+export function createMcpAuthorizationGuard(store: AppStore, plaintext: string) {
+  return async (): Promise<boolean> => Boolean(await authenticateMcpToken(store, plaintext));
+}
+
 export function sanitizedMcpToken(token: McpTokenRecord) {
   return {
     id: token.id,
     name: token.name,
-    prefix: token.tokenPrefix,
+    tokenPrefix: token.tokenPrefix,
     createdAt: token.createdAt,
     lastUsedAt: token.lastUsedAt,
     revokedAt: token.revokedAt

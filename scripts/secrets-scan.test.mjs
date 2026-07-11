@@ -10,6 +10,8 @@ import { scanFileEntries, scanTrackedFiles } from "./secrets-scan.mjs";
 
 const execute = promisify(execFile);
 const temporaryDirectories = [];
+const privateKeyHeader = (kind = "") => ["-----BEGIN", kind, "PRIVATE KEY-----"]
+  .filter(Boolean).join(" ");
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) =>
@@ -19,7 +21,12 @@ afterEach(async () => {
 describe("secret scan", () => {
   test.each([
     ["committed environment file", ".env", "DATABASE_URL=placeholder", "committed-env"],
-    ["private key", "key.txt", ["-----BEGIN RSA", " PRIVATE KEY-----"].join(""), "private-key"],
+    ["private key", "key.txt", privateKeyHeader("RSA"), "private-key"],
+    ["encrypted private key", "key.txt", privateKeyHeader("ENCRYPTED"), "private-key"],
+    ["PKCS8 private key", "key.txt", privateKeyHeader(), "private-key"],
+    ["OpenSSH private key", "key.txt", privateKeyHeader("OPENSSH"), "private-key"],
+    ["EC private key", "key.txt", privateKeyHeader("EC"), "private-key"],
+    ["DSA private key", "key.txt", privateKeyHeader("DSA"), "private-key"],
     ["GitHub token", "notes.txt", `ghp_${"A".repeat(36)}`, "github-token"],
     ["OpenAI token", "notes.txt", `sk-proj-${"A".repeat(48)}`, "openai-token"],
     ["Anthropic token", "notes.txt", `sk-ant-${"A".repeat(48)}`, "anthropic-token"],

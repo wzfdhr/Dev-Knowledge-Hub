@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { access, chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { access, mkdir } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 
 import type { RepositoryRecord } from "../persistence/store.js";
@@ -56,32 +56,24 @@ export async function prepareRemoteRepository({
   const repositoriesDir = path.join(dataDir, "repos");
   const target = path.join(repositoriesDir, repository.id);
   await mkdir(repositoriesDir, { recursive: true });
-  const askPassDirectory = await mkdtemp(path.join(os.tmpdir(), "devkh-askpass-"));
-  const askPassPath = path.join(askPassDirectory, "askpass.sh");
-  await writeFile(
-    askPassPath,
-    "#!/bin/sh\ncase \"$1\" in *Username*) printf '%s\\n' 'x-access-token' ;; *) printf '%s\\n' \"$DEVKH_GIT_TOKEN\" ;; esac\n",
-    { mode: 0o700 }
-  );
-  await chmod(askPassPath, 0o700);
+  const askPassPath = process.env.DEVKH_GIT_ASKPASS_PATH
+    ?? path.resolve(process.cwd(), "scripts/git-askpass.sh");
+  await access(askPassPath, fsConstants.X_OK);
   const env = {
     GIT_ASKPASS: askPassPath,
+    GIT_ASKPASS_REQUIRE: "force",
     GIT_TERMINAL_PROMPT: "0",
     DEVKH_GIT_TOKEN: token ?? ""
   };
 
-  try {
-    if (await exists(path.join(target, ".git"))) {
-      await runner({ cwd: target, args: ["fetch", "--prune", "origin"], env });
-    } else {
-      await runner({
-        cwd: repositoriesDir,
-        args: ["clone", "--no-checkout", repository.cloneUrl, target],
-        env
-      });
-    }
-    return target;
-  } finally {
-    await rm(askPassDirectory, { recursive: true, force: true });
+  if (await exists(path.join(target, ".git"))) {
+    await runner({ cwd: target, args: ["fetch", "--prune", "origin"], env });
+  } else {
+    await runner({
+      cwd: repositoriesDir,
+      args: ["clone", "--no-checkout", repository.cloneUrl, target],
+      env
+    });
   }
+  return target;
 }

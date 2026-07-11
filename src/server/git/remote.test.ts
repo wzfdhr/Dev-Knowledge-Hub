@@ -1,11 +1,15 @@
-import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { describe, expect, test, vi } from "vitest";
 
 import type { RepositoryRecord } from "../persistence/store";
 import { prepareRemoteRepository, type GitRunner } from "./remote";
+
+const execute = promisify(execFile);
 
 const repository: RepositoryRecord = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -19,7 +23,7 @@ const repository: RepositoryRecord = {
 };
 
 describe("HTTPS Git authentication", () => {
-  test("clones with temporary askpass environment and never credentializes the URL", async () => {
+  test("uses the static askpass helper when temporary files are non-executable", async () => {
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-remote-test-"));
     const token = "github_pat_NEVER_IN_ARGUMENTS";
     let askPassPath = "";
@@ -29,7 +33,13 @@ describe("HTTPS Git authentication", () => {
       expect(env?.GIT_TERMINAL_PROMPT).toBe("0");
       expect(env?.DEVKH_GIT_TOKEN).toBe(token);
       askPassPath = env?.GIT_ASKPASS ?? "";
+      expect(askPassPath).toMatch(/scripts\/git-askpass\.sh$/);
+      expect(askPassPath.startsWith(os.tmpdir())).toBe(false);
       await expect(access(askPassPath)).resolves.toBeUndefined();
+      const username = await execute(askPassPath, ["Username for https://example.com"], { env });
+      const password = await execute(askPassPath, ["Password for https://example.com"], { env });
+      expect(username.stdout.trim()).toBe("x-access-token");
+      expect(password.stdout.trim()).toBe(token);
       const target = args.at(-1);
       if (target) await mkdir(path.join(target, ".git"), { recursive: true });
       return Buffer.alloc(0);
@@ -40,7 +50,8 @@ describe("HTTPS Git authentication", () => {
 
       expect(target).toBe(path.join(dataDir, "repos", repository.id));
       expect(runner).toHaveBeenCalledOnce();
-      await expect(access(askPassPath)).rejects.toThrow();
+      await expect(access(askPassPath)).resolves.toBeUndefined();
+      expect(await readFile(askPassPath, "utf8")).not.toContain(token);
     } finally {
       await rm(dataDir, { recursive: true });
     }

@@ -5,6 +5,8 @@ import { describe, expect, test, vi } from "vitest";
 
 import {
   BuildService,
+  standardBuildPurpose,
+  type BuildInput,
   type BuildEvent,
   type BuildJobQueue,
   type BuildPersistence,
@@ -27,14 +29,19 @@ class FakeBuildPersistence implements BuildPersistence {
   private nextSequence = 1;
   currentReleaseId = "release-current";
 
-  async createBuild(input: Omit<BuildRecord, "id" | "status" | "warnings" | "cancelRequested">) {
+  async createBuild(input: BuildInput) {
+    const purpose = input.purpose ?? standardBuildPurpose();
     const active = this.builds.find((build) =>
       build.repositoryId === input.repositoryId
+      && build.snapshotId === input.snapshotId
+      && build.purpose.kind === purpose.kind
+      && JSON.stringify(build.purpose.feedbackIds) === JSON.stringify(purpose.feedbackIds)
       && !["ready", "published", "failed"].includes(build.status)
     );
     if (active) return { build: active, created: false };
     const build: BuildRecord = {
       ...input,
+      purpose,
       id: `build-${this.builds.length + 1}`,
       status: "queued",
       warnings: [],
@@ -63,9 +70,11 @@ class FakeBuildPersistence implements BuildPersistence {
     status: BuildRecord["status"], details?: {
     errorMessage?: string;
     warnings?: BuildRecord["warnings"];
+    requireNotCancelled?: boolean;
   }) {
     const build = this.builds.find((candidate) => candidate.id === buildId)!;
     if (build.status !== expectedStatus) return null;
+    if (details?.requireNotCancelled && build.cancelRequested) return null;
     build.status = status;
     if (details?.errorMessage) build.errorMessage = details.errorMessage;
     if (details?.warnings) build.warnings = details.warnings;
@@ -99,6 +108,7 @@ class FakeBuildPersistence implements BuildPersistence {
   async listBuildEvents(_workspaceId: string, buildId: string) {
     return this.buildEvents.filter((event) => event.buildId === buildId);
   }
+  async sourceFileHashes() { return new Map<string, string>(); }
 }
 
 class FakeQueue implements BuildJobQueue {
@@ -112,6 +122,16 @@ class FakeQueue implements BuildJobQueue {
     this.handler = handler;
   }
   async stop() { this.handler = null; }
+}
+
+class FlakyQueue extends FakeQueue {
+  attempts = 0;
+
+  override async send(buildId: string) {
+    this.attempts += 1;
+    if (this.attempts === 1) throw new Error("queue unavailable");
+    await super.send(buildId);
+  }
 }
 
 class ClaimOnStartQueue extends FakeQueue {
@@ -173,17 +193,22 @@ describe("BuildService", () => {
     expect(events).toEqual(["queued", "syncing", "parsing", "synthesizing", "validating", "ready"]);
   });
 
-  test("returns the active build instead of enqueueing a second repository build", async () => {
+  test("reuses only a build with the same snapshot and purpose identity", async () => {
     const persistence = new FakeBuildPersistence();
     const queue = new FakeQueue();
     const service = new BuildService(persistence, queue);
 
-    const first = await service.startBuild(input());
-    const second = await service.startBuild({ ...input(), snapshotId: "snapshot-2" });
+    const [first, differentSnapshot] = await Promise.all([
+      service.startBuild(input()),
+      service.startBuild({ ...input(), snapshotId: "snapshot-2" })
+    ]);
+    const duplicate = await service.startBuild(input());
 
     expect(first.created).toBe(true);
-    expect(second).toEqual({ build: first.build, created: false });
-    expect(queue.sent).toEqual([first.build.id]);
+    expect(duplicate).toEqual({ build: first.build, created: false });
+    expect(differentSnapshot.created).toBe(true);
+    expect(differentSnapshot.build.id).not.toBe(first.build.id);
+    expect(queue.sent).toEqual([first.build.id, differentSnapshot.build.id]);
   });
 
   test("honors cancellation between stages and leaves the current release unchanged", async () => {
@@ -217,6 +242,41 @@ describe("BuildService", () => {
     expect(build.status).toBe("failed");
     expect(build.errorMessage).toBe("parse exploded");
     expect(persistence.currentReleaseId).toBe("release-current");
+  });
+
+  test("cannot transition a build to ready when cancellation arrives during persistence", async () => {
+    class CancellingPersistence extends FakeBuildPersistence {
+      override async saveKnowledge(value: PersistedKnowledge) {
+        await super.saveKnowledge(value);
+        await this.requestBuildCancellation(value.build.workspaceId, value.build.id);
+      }
+    }
+    const persistence = new CancellingPersistence();
+    const service = new BuildService(persistence, new FakeQueue());
+    const { build } = await service.startBuild(input());
+
+    await service.process(build.id);
+
+    expect(build.status).toBe("failed");
+    expect(build.errorMessage).toBe("Build cancelled");
+    expect(persistence.transitions).not.toContain("ready");
+  });
+
+  test("periodically reconciles a persisted queued build after dispatch failure", async () => {
+    const persistence = new FakeBuildPersistence();
+    const queue = new FlakyQueue();
+    const service = new BuildService(
+      persistence,
+      queue,
+      { reconcileIntervalMs: 10 } as never
+    );
+    await service.start();
+
+    const result = await service.startBuild(input());
+
+    expect(result.created).toBe(true);
+    await vi.waitFor(() => expect(queue.sent).toContain(result.build.id), { timeout: 500 });
+    await service.stop();
   });
 
   test("classifies recoverable unfinished builds and fails missing snapshots", async () => {

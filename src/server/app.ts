@@ -27,6 +27,7 @@ import { createSessionToken, verifySessionToken } from "./security/session.js";
 import type { BuildEvent, BuildService } from "./knowledge/build-service.js";
 import {
   authenticateMcpToken,
+  createMcpAuthorizationGuard,
   generateMcpToken,
   hashMcpToken,
   sanitizedMcpToken
@@ -63,6 +64,11 @@ const repositorySchema = z.discriminatedUnion("kind", [
     token: z.string().min(1).optional()
   })
 ]);
+
+const paginationQuerySchema = {
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  offset: z.coerce.number().int().min(0).optional()
+};
 
 export interface ServerOptions {
   store: AppStore;
@@ -184,13 +190,6 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     );
     if (!result) return sendError(reply, 409, "SETUP_COMPLETE", "Setup has already been completed");
 
-    await options.store.recordAudit({
-      workspaceId: result.workspace.id,
-      actorId: result.admin.id,
-      action: "setup.completed",
-      resourceType: "workspace",
-      resourceId: result.workspace.id
-    });
     return reply.code(201).send({
       workspace: result.workspace,
       admin: { id: result.admin.id, email: result.admin.email }
@@ -207,12 +206,12 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
     if (!valid || !admin) {
       if (workspace) {
-        await options.store.recordAudit({
+        void options.store.recordAudit({
           workspaceId: workspace.id,
           action: "session.login_failed",
           resourceType: "session",
           metadata: { email: parsed.success ? parsed.data.email : "invalid" }
-        });
+        }).catch(() => undefined);
       }
       return sendError(reply, 401, "INVALID_CREDENTIALS", "Invalid email or password");
     }
@@ -222,12 +221,12 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       options.sessionSecret
     );
     reply.setCookie(SESSION_COOKIE, token, cookieOptions);
-    await options.store.recordAudit({
+    void options.store.recordAudit({
       workspaceId: admin.workspaceId,
       actorId: admin.id,
       action: "session.login_succeeded",
       resourceType: "session"
-    });
+    }).catch(() => undefined);
     return { authenticated: true, admin: { id: admin.id, email: admin.email } };
   });
 
@@ -288,10 +287,13 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
 
-  server.get("/api/mcp/tokens", { preHandler: requireAdmin }, async (request) => {
+  server.get("/api/mcp/tokens", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object(paginationQuerySchema).safeParse(request.query);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid pagination");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     return {
-      tokens: (await options.store.listMcpTokens(admin.workspaceId)).map(sanitizedMcpToken)
+      tokens: (await options.store.listMcpTokens(admin.workspaceId, parsed.data))
+        .map(sanitizedMcpToken)
     };
   });
 
@@ -334,18 +336,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
             ? { encryptedToken: encryptSecret(parsed.data.token, options.masterKey) }
             : {})
         };
-    const repository = await options.store.createRepository(admin.workspaceId, input);
+    const repository = await options.store.createRepositoryWithAudit(
+      admin.workspaceId,
+      input,
+      admin.id
+    );
     if (!repository) {
       return sendError(reply, 409, "REPOSITORY_EXISTS", "A repository is already connected");
     }
-    await options.store.recordAudit({
-      workspaceId: admin.workspaceId,
-      actorId: admin.id,
-      action: "repository.connected",
-      resourceType: "repository",
-      resourceId: repository.id,
-      metadata: { kind: repository.kind }
-    });
     return reply.code(201).send(repositoryDto(repository));
   });
 
@@ -390,29 +388,22 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           repository,
           dataDir: options.dataDir,
           store: options.store,
+          actorId: admin.id,
           ...(encryptedCredential
             ? { token: decryptSecret(encryptedCredential, options.masterKey) }
             : {})
         });
-        await options.store.recordAudit({
-          workspaceId: admin.workspaceId,
-          actorId: admin.id,
-          action: "repository.sync_succeeded",
-          resourceType: "repository",
-          resourceId: repository.id,
-          metadata: { commitSha: summary.commitSha, unchanged: summary.unchanged }
-        });
         return summary;
       } catch (error) {
         const code = error instanceof DirtyWorktreeError ? error.code : "SYNC_FAILED";
-        await options.store.recordAudit({
+        void options.store.recordAudit({
           workspaceId: admin.workspaceId,
           actorId: admin.id,
           action: "repository.sync_failed",
           resourceType: "repository",
           resourceId: repository.id,
           metadata: { code }
-        });
+        }).catch(() => undefined);
         if (error instanceof DirtyWorktreeError) {
           return reply.code(409).send({
             error: { code: error.code, message: error.message, changedPaths: error.changedPaths }
@@ -447,10 +438,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
 
   server.get("/api/builds", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object(paginationQuerySchema).safeParse(request.query);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid pagination");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const repository = await options.store.currentRepository(admin.workspaceId);
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
-    return { builds: await options.store.listBuilds(admin.workspaceId, repository.id) };
+    return {
+      builds: await options.store.listBuilds(admin.workspaceId, repository.id, parsed.data)
+    };
   });
 
   server.get("/api/builds/:id", { preHandler: requireAdmin }, async (request, reply) => {
@@ -479,7 +474,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   server.get("/api/builds/:id/events", { preHandler: requireAdmin }, async (request, reply) => {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const params = z.object({ id: z.string().min(1) }).safeParse(request.params);
-    const query = z.object({ once: z.string().optional() }).safeParse(request.query);
+    const query = z.object({ once: z.string().optional(), ...paginationQuerySchema })
+      .safeParse(request.query);
     if (!params.success || !query.success) {
       return sendError(reply, 400, "INVALID_REQUEST", "Invalid build event request");
     }
@@ -504,7 +500,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       }
     };
     const unsubscribe = options.buildService?.subscribe(build.id, writeLive) ?? (() => {});
-    const history = await options.store.listBuildEvents(admin.workspaceId, build.id);
+    const history = await options.store.listBuildEvents(admin.workspaceId, build.id, query.data);
     const replay = [...new Map([...history, ...buffered.values()]
       .map((event) => [event.sequence, event])).values()]
       .sort((left, right) => left.sequence - right.sequence);
@@ -537,7 +533,10 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
 
   server.get("/api/knowledge/search", { preHandler: requireAdmin }, async (request, reply) => {
-    const parsed = z.object({ q: z.string().trim().min(1), releaseId: z.string().optional() })
+    const parsed = z.object({
+      q: z.string().trim().min(1).max(500),
+      releaseId: z.string().max(100).optional()
+    })
       .safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid search query");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
@@ -558,10 +557,19 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
 
   server.get("/api/knowledge/pages", { preHandler: requireAdmin }, async (request, reply) => {
-    const parsed = z.object({ releaseId: z.string().optional() }).safeParse(request.query);
+    const parsed = z.object({
+      releaseId: z.string().max(100).optional(),
+      ...paginationQuerySchema
+    }).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid page query");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    return { pages: await options.store.listKnowledgePages(admin.workspaceId, parsed.data.releaseId) };
+    return {
+      pages: await options.store.listKnowledgePages(
+        admin.workspaceId,
+        parsed.data.releaseId,
+        parsed.data
+      )
+    };
   });
 
   server.get("/api/knowledge/pages/:id", { preHandler: requireAdmin }, async (request, reply) => {
@@ -576,7 +584,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.get("/api/knowledge/source", { preHandler: requireAdmin }, async (request, reply) => {
     const parsed = z.object({
-      path: z.string().min(1),
+      path: z.string().min(1).max(500),
       startLine: z.coerce.number().int().positive(),
       endLine: z.coerce.number().int().positive(),
       releaseId: z.string().optional()
@@ -589,8 +597,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const repository = await options.store.currentRepository(admin.workspaceId);
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
     const release = parsed.data.releaseId
-      ? (await options.store.listReleases(admin.workspaceId, repository.id))
-        .find((candidate) => candidate.id === parsed.data.releaseId) ?? null
+      ? await options.store.getRelease(admin.workspaceId, parsed.data.releaseId)
       : await options.store.currentRelease(admin.workspaceId, repository.id);
     if (!release) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
     const snapshot = await options.store.findSnapshotById(admin.workspaceId, release.snapshotId);
@@ -603,9 +610,15 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!candidate || (!candidate.startsWith(`${root}${path.sep}`) && candidate !== root)) {
       return sendError(reply, 400, "INVALID_SOURCE_PATH", "Source path is outside the snapshot");
     }
-    const content = await fs.readFile(candidate, "utf8");
-    if (createHash("sha256").update(content).digest("hex") !== sourceFile.contentHash) {
+    const bytes = await fs.readFile(candidate);
+    if (createHash("sha256").update(bytes).digest("hex") !== sourceFile.contentHash) {
       return sendError(reply, 409, "SOURCE_CHANGED", "Snapshot source no longer matches its citation");
+    }
+    let content: string;
+    try {
+      content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      return sendError(reply, 409, "SOURCE_INVALID", "Snapshot source is not valid UTF-8 text");
     }
     const lines = content.split(/\r?\n/);
     if (parsed.data.endLine > lines.length) {
@@ -660,10 +673,16 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
 
   server.get("/api/releases", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object(paginationQuerySchema).safeParse(request.query);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid pagination");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const repository = await options.store.currentRepository(admin.workspaceId);
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
-    const releases = await options.store.listReleases(admin.workspaceId, repository.id);
+    const releases = await options.store.listReleases(
+      admin.workspaceId,
+      repository.id,
+      parsed.data
+    );
     return { releases: await Promise.all(releases.map(async (release) => ({
       ...release,
       commitSha: (await options.store.findSnapshotById(admin.workspaceId, release.snapshotId))?.commitSha ?? null
@@ -671,11 +690,20 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
 
   server.get("/api/feedback", { preHandler: requireAdmin }, async (request, reply) => {
-    const parsed = z.object({ status: z.enum(AGENT_FEEDBACK_STATUSES).optional() })
+    const parsed = z.object({
+      status: z.enum(AGENT_FEEDBACK_STATUSES).optional(),
+      ...paginationQuerySchema
+    })
       .safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid feedback filter");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    return { feedback: await options.store.listFeedback(admin.workspaceId, parsed.data.status) };
+    return {
+      feedback: await options.store.listFeedback(
+        admin.workspaceId,
+        parsed.data.status,
+        parsed.data
+      )
+    };
   });
 
   server.patch("/api/feedback/:id", { preHandler: requireAdmin }, async (request, reply) => {
@@ -706,8 +734,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const params = z.object({ id: z.uuid() }).safeParse(request.params);
     if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid feedback rebuild");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const feedback = (await options.store.listFeedback(admin.workspaceId))
-      .find((candidate) => candidate.id === params.data.id);
+    const feedback = await options.store.getFeedback(admin.workspaceId, params.data.id);
     if (!feedback) return sendError(reply, 404, "FEEDBACK_NOT_FOUND", "Feedback was not found");
     if (feedback.status !== "acknowledged") {
       return sendError(reply, 409, "FEEDBACK_NOT_ACKNOWLEDGED", "Feedback must be acknowledged first");
@@ -757,7 +784,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const match = /^Bearer (\S+)$/i.exec(authorization ?? "");
     const token = match ? await authenticateMcpToken(options.store, match[1]) : null;
     if (!token) return sendError(reply, 401, "UNAUTHORIZED", "Invalid or revoked MCP token");
-    const mcp = createRegisteredMcpServer({ store: options.store, workspaceId: token.workspaceId });
+    const mcp = createRegisteredMcpServer({
+      store: options.store,
+      workspaceId: token.workspaceId,
+      authorize: createMcpAuthorizationGuard(options.store, match![1]),
+      onUnauthorized: () => {
+        setImmediate(() => void mcp.close());
+      }
+    });
     activeMcpServers.add(mcp);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

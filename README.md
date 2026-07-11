@@ -20,6 +20,11 @@ npm run db:migrate
 npm run dev
 ```
 
+`npm run dev` explicitly loads `.env` and starts the Fastify API on `http://127.0.0.1:3000`
+plus the Vite console on `http://127.0.0.1:5173`. Use `npm run dev:api` or
+`npm run dev:web` when only one process is needed. `npm start` always sets
+`NODE_ENV=production` and loads `.env` before starting the built server.
+
 Generate production values instead of using the placeholders:
 
 ```bash
@@ -44,7 +49,7 @@ docker compose --profile test run --rm integration
 docker compose --profile test run --rm e2e
 ```
 
-Compose runs the non-root Node 22 app and PostgreSQL 16. The app waits for database health, uses a read-only root filesystem and a temporary `/tmp`, and persists PostgreSQL data, immutable snapshots, and Git mirrors in separate named volumes. Stop gracefully with `docker compose down`; do not add `--volumes` unless deleting all retained state is intentional.
+Compose runs the non-root Node 22 app and PostgreSQL 16. The app waits for database health, uses a read-only root filesystem and a no-exec temporary `/tmp`, and persists PostgreSQL data, immutable snapshots, and Git mirrors in separate named volumes. The image installs its Git askpass helper as a static executable under `/app/scripts`; PATs are passed only in the Git child environment. Stop gracefully with `docker compose down`; do not add `--volumes` unless deleting all retained state is intentional.
 
 PostgreSQL initialization creates `dev_knowledge_hub` for the app and a separate `devkh_test` used only by the Compose integration profile. Existing PostgreSQL volumes created before this isolation was added need the test database once before running integration tests:
 
@@ -107,7 +112,7 @@ Generic stdio configuration, suitable for clients that launch a local process:
 }
 ```
 
-Build before stdio use with `npm run build`. Both transports expose the same eight tools documented in [docs/api.md](docs/api.md).
+Build before stdio use with `npm run build`. Both transports expose the same eight tools documented in [docs/api.md](docs/api.md). Token authorization is rechecked before every tool call, so revocation also terminates established stdio use.
 
 ## Backup and restore
 
@@ -151,6 +156,6 @@ CI runs these gates with PostgreSQL 16 and uploads Playwright artifacts on failu
 - **MCP returns `UNAUTHORIZED`:** rotate/recreate the token in Settings and update the client environment. Revoked tokens stop working immediately.
 - **MCP returns `UNPUBLISHED`:** publish a ready release in the console; drafts are not agent-visible.
 - **Citations cannot be read:** restore the matching immutable snapshot volume and database backup together.
-- **Build interrupted:** the restarted worker fails interrupted active builds and safely reenqueues only queued builds with present snapshots.
+- **Build interrupted:** the restarted worker fails interrupted active builds and safely reenqueues only queued builds with present snapshots. Persisted queued work is also reconciled periodically after dispatch failures.
 
 See [architecture](docs/architecture.md), [security](docs/security.md), [HTTP/MCP API](docs/api.md), [commercialization roadmap](docs/commercialization-roadmap.md), and [clean-room provenance](docs/provenance.md).

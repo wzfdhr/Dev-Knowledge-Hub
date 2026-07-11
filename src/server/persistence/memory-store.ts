@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import {
   FeedbackNotAcknowledgedError,
-  InvalidFeedbackTransitionError
+  InvalidFeedbackTransitionError,
+  normalizePagination
 } from "./store.js";
 
 import type {
@@ -22,6 +23,7 @@ import type {
   ModelConfigRecord,
   ModelProvider,
   McpTokenRecord,
+  Pagination,
   ReleaseRecord,
   RepositoryConnectionInput,
   RepositoryRecord,
@@ -31,10 +33,12 @@ import type {
   WorkspaceRecord
 } from "./store.js";
 import type {
+  BuildInput,
   BuildEvent,
   BuildRecord,
   PersistedKnowledge
 } from "../knowledge/build-service.js";
+import { standardBuildPurpose } from "../knowledge/build-service.js";
 import type { CodeIndex } from "../knowledge/intelligence.js";
 
 export class MemoryAppStore implements AppStore {
@@ -61,18 +65,35 @@ export class MemoryAppStore implements AppStore {
 
   async createInitialSetup(email: string, passwordHash: string): Promise<SetupResult | null> {
     if (this.admin) return null;
-    this.workspace = {
-      id: randomUUID(),
-      name: "Default Workspace",
-      slug: "default"
-    };
-    this.admin = {
-      id: randomUUID(),
-      workspaceId: this.workspace.id,
-      email,
-      passwordHash
-    };
-    return { workspace: this.workspace, admin: this.admin };
+    const previousWorkspace = this.workspace;
+    const previousAdmin = this.admin;
+    const auditLength = this.auditEvents.length;
+    try {
+      this.workspace = {
+        id: randomUUID(),
+        name: "Default Workspace",
+        slug: "default"
+      };
+      this.admin = {
+        id: randomUUID(),
+        workspaceId: this.workspace.id,
+        email,
+        passwordHash
+      };
+      await this.recordAudit({
+        workspaceId: this.workspace.id,
+        actorId: this.admin.id,
+        action: "setup.completed",
+        resourceType: "workspace",
+        resourceId: this.workspace.id
+      });
+      return { workspace: this.workspace, admin: this.admin };
+    } catch (error) {
+      this.workspace = previousWorkspace;
+      this.admin = previousAdmin;
+      this.auditEvents.splice(auditLength);
+      throw error;
+    }
   }
 
   async findAdminByEmail(email: string): Promise<AdminRecord | null> {
@@ -128,8 +149,12 @@ export class MemoryAppStore implements AppStore {
     }
   }
 
-  async listMcpTokens(workspaceId: string): Promise<McpTokenRecord[]> {
-    return this.mcpTokens.filter((token) => token.workspaceId === workspaceId);
+  async listMcpTokens(workspaceId: string, pagination?: Pagination): Promise<McpTokenRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    return this.mcpTokens.filter((token) => token.workspaceId === workspaceId)
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()
+        || right.id.localeCompare(left.id))
+      .slice(offset, offset + limit);
   }
 
   async findActiveMcpToken(tokenHash: string): Promise<McpTokenRecord | null> {
@@ -219,11 +244,20 @@ export class MemoryAppStore implements AppStore {
 
   async listFeedback(
     workspaceId: string,
-    status?: AgentFeedbackStatus
+    status?: AgentFeedbackStatus,
+    pagination?: Pagination
   ): Promise<AgentFeedbackRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
     return this.feedback.filter((record) =>
       record.workspaceId === workspaceId && (!status || record.status === status)
-    );
+    ).sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()
+      || right.id.localeCompare(left.id)).slice(offset, offset + limit);
+  }
+
+  async getFeedback(workspaceId: string, feedbackId: string): Promise<AgentFeedbackRecord | null> {
+    return this.feedback.find((record) =>
+      record.workspaceId === workspaceId && record.id === feedbackId
+    ) ?? null;
   }
 
   async transitionFeedback(
@@ -310,7 +344,19 @@ export class MemoryAppStore implements AppStore {
       updatedAt: feedback.updatedAt
     };
     try {
-      const result = await this.createBuild(input.build);
+      const purpose = {
+        kind: "feedback" as const,
+        feedbackIds: [feedback.id],
+        feedbackContext: [{
+          feedbackId: feedback.id,
+          releaseId: input.releaseId,
+          query: feedback.query,
+          reason: feedback.reason,
+          expected: feedback.expected,
+          citations: feedback.citations
+        }]
+      };
+      const result = await this.createBuild({ ...input.build, purpose });
       await this.markFeedbackRebuild(input.workspaceId, input.feedbackId, result.build.id);
       await this.recordAudit({
         workspaceId: input.workspaceId,
@@ -361,6 +407,34 @@ export class MemoryAppStore implements AppStore {
     return this.repository;
   }
 
+  async createRepositoryWithAudit(
+    workspaceId: string,
+    input: RepositoryConnectionInput,
+    actorId: string
+  ): Promise<RepositoryRecord | null> {
+    const previousRepository = this.repository;
+    const credentialLength = this.encryptedCredentials.length;
+    const auditLength = this.auditEvents.length;
+    try {
+      const repository = await this.createRepository(workspaceId, input);
+      if (!repository) return null;
+      await this.recordAudit({
+        workspaceId,
+        actorId,
+        action: "repository.connected",
+        resourceType: "repository",
+        resourceId: repository.id,
+        metadata: { kind: repository.kind }
+      });
+      return repository;
+    } catch (error) {
+      this.repository = previousRepository;
+      this.encryptedCredentials.splice(credentialLength);
+      this.auditEvents.splice(auditLength);
+      throw error;
+    }
+  }
+
   async currentRepository(workspaceId: string): Promise<RepositoryRecord | null> {
     return this.repository?.workspaceId === workspaceId ? this.repository : null;
   }
@@ -389,6 +463,35 @@ export class MemoryAppStore implements AppStore {
     return snapshot;
   }
 
+  async createSnapshotWithAudit(
+    input: CreateSnapshotInput,
+    actorId: string
+  ): Promise<SourceSnapshotRecord> {
+    const snapshotLength = this.sourceSnapshots.length;
+    const fileLength = this.sourceFiles.length;
+    const auditLength = this.auditEvents.length;
+    try {
+      const persisted = await this.createSnapshot(input);
+      await this.recordAudit({
+        workspaceId: input.snapshot.workspaceId,
+        actorId,
+        action: "repository.sync_succeeded",
+        resourceType: "repository",
+        resourceId: input.snapshot.repositoryId,
+        metadata: {
+          commitSha: persisted.commitSha,
+          unchanged: persisted.id !== input.snapshot.id
+        }
+      });
+      return persisted;
+    } catch (error) {
+      this.sourceSnapshots.splice(snapshotLength);
+      this.sourceFiles.splice(fileLength);
+      this.auditEvents.splice(auditLength);
+      throw error;
+    }
+  }
+
   async findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null> {
     return this.sourceSnapshots.find((snapshot) =>
       snapshot.workspaceId === workspaceId && snapshot.id === snapshotId
@@ -413,6 +516,12 @@ export class MemoryAppStore implements AppStore {
 
   async countSnapshotFiles(snapshotId: string): Promise<number> {
     return this.sourceFiles.filter((file) => file.snapshotId === snapshotId).length;
+  }
+
+  async sourceFileHashes(workspaceId: string, snapshotId: string): Promise<ReadonlyMap<string, string>> {
+    return new Map(this.sourceFiles.filter((file) =>
+      file.workspaceId === workspaceId && file.snapshotId === snapshotId
+    ).map((file) => [file.path, file.contentHash]));
   }
 
   async repositoryCredential(workspaceId: string, repositoryId: string): Promise<string | null> {
@@ -464,16 +573,21 @@ export class MemoryAppStore implements AppStore {
   }
 
   async createBuild(
-    input: Omit<BuildRecord, "id" | "status" | "warnings" | "cancelRequested">
+    input: BuildInput
   ): Promise<{ build: BuildRecord; created: boolean }> {
+    const purpose = input.purpose ?? standardBuildPurpose();
     const active = this.builds.find((build) =>
       build.workspaceId === input.workspaceId
       && build.repositoryId === input.repositoryId
+      && build.snapshotId === input.snapshotId
+      && build.purpose.kind === purpose.kind
+      && JSON.stringify(build.purpose.feedbackIds) === JSON.stringify(purpose.feedbackIds)
       && !["ready", "published", "failed"].includes(build.status)
     );
     if (active) return { build: active, created: false };
     const build: BuildRecord = {
       ...input,
+      purpose,
       id: randomUUID(),
       status: "queued",
       warnings: [],
@@ -503,11 +617,16 @@ export class MemoryAppStore implements AppStore {
     buildId: string,
     expectedStatus: BuildRecord["status"],
     status: BuildRecord["status"],
-    details?: { errorMessage?: string; warnings?: BuildRecord["warnings"] }
+    details?: {
+      errorMessage?: string;
+      warnings?: BuildRecord["warnings"];
+      requireNotCancelled?: boolean;
+    }
   ): Promise<BuildRecord | null> {
     const build = this.builds.find((candidate) => candidate.id === buildId);
     if (!build) throw new Error("Build not found");
     if (build.status !== expectedStatus) return null;
+    if (details?.requireNotCancelled && build.cancelRequested) return null;
     build.status = status;
     if (details?.errorMessage) build.errorMessage = details.errorMessage;
     if (details?.warnings) build.warnings = details.warnings;
@@ -532,15 +651,26 @@ export class MemoryAppStore implements AppStore {
     return this.builds.filter((build) => !["ready", "published", "failed"].includes(build.status));
   }
 
-  async listBuilds(workspaceId: string, repositoryId: string): Promise<BuildRecord[]> {
+  async listBuilds(
+    workspaceId: string,
+    repositoryId: string,
+    pagination?: Pagination
+  ): Promise<BuildRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
     return this.builds.filter((build) =>
       build.workspaceId === workspaceId && build.repositoryId === repositoryId
-    ).reverse();
+    ).reverse().slice(offset, offset + limit);
   }
 
-  async listBuildEvents(workspaceId: string, buildId: string): Promise<BuildEvent[]> {
+  async listBuildEvents(
+    workspaceId: string,
+    buildId: string,
+    pagination?: Pagination
+  ): Promise<BuildEvent[]> {
     const build = await this.getBuild(workspaceId, buildId);
-    return build ? this.buildEvents.filter((event) => event.buildId === buildId) : [];
+    const { limit, offset } = normalizePagination(pagination);
+    return build ? this.buildEvents.filter((event) => event.buildId === buildId)
+      .slice(offset, offset + limit) : [];
   }
 
   async saveKnowledge({ build, index, output }: PersistedKnowledge): Promise<void> {
@@ -619,10 +749,20 @@ export class MemoryAppStore implements AppStore {
     return this.releases.find((release) => release.id === releaseId) ?? null;
   }
 
-  async listReleases(workspaceId: string, repositoryId: string): Promise<ReleaseRecord[]> {
+  async getRelease(workspaceId: string, releaseId: string): Promise<ReleaseRecord | null> {
+    return this.releaseById(workspaceId, releaseId);
+  }
+
+  async listReleases(
+    workspaceId: string,
+    repositoryId: string,
+    pagination?: Pagination
+  ): Promise<ReleaseRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
     return this.releases.filter((release) =>
       release.workspaceId === workspaceId && release.repositoryId === repositoryId
-    ).sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime());
+    ).sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()
+      || right.id.localeCompare(left.id)).slice(offset, offset + limit);
   }
 
   private releaseById(workspaceId: string, releaseId: string): ReleaseRecord | null {
@@ -631,22 +771,80 @@ export class MemoryAppStore implements AppStore {
     ) ?? null;
   }
 
-  async listKnowledgePages(workspaceId: string, releaseId?: string): Promise<KnowledgePageRecord[]> {
+  async listKnowledgePages(
+    workspaceId: string,
+    releaseId?: string,
+    pagination?: Pagination
+  ): Promise<KnowledgePageRecord[]> {
     let release = releaseId ? this.releaseById(workspaceId, releaseId) : null;
     if (!release && !releaseId) {
       const repository = this.repository?.workspaceId === workspaceId ? this.repository : null;
       if (repository) release = await this.currentRelease(workspaceId, repository.id);
     }
     if (!release) return [];
+    const { limit, offset } = normalizePagination(pagination);
     return this.knowledgePages.filter((page) =>
       page.workspaceId === workspaceId && page.buildId === release.buildId
-    ).sort((left, right) => left.slug.localeCompare(right.slug));
+    ).sort((left, right) => left.slug.localeCompare(right.slug) || left.id.localeCompare(right.id))
+      .slice(offset, offset + limit);
   }
 
   async getKnowledgePage(workspaceId: string, pageId: string): Promise<KnowledgePageRecord | null> {
     return this.knowledgePages.find((page) =>
       page.workspaceId === workspaceId && page.id === pageId
     ) ?? null;
+  }
+
+  async findKnowledgePageBySlug(
+    workspaceId: string,
+    releaseId: string,
+    slug: string
+  ): Promise<KnowledgePageRecord | null> {
+    const release = this.releaseById(workspaceId, releaseId);
+    return release ? this.knowledgePages.find((page) =>
+      page.workspaceId === workspaceId && page.buildId === release.buildId && page.slug === slug
+    ) ?? null : null;
+  }
+
+  async findKnowledgePageByModule(
+    workspaceId: string,
+    releaseId: string,
+    moduleId: string
+  ): Promise<KnowledgePageRecord | null> {
+    const release = this.releaseById(workspaceId, releaseId);
+    return release ? this.knowledgePages.find((page) =>
+      page.workspaceId === workspaceId && page.buildId === release.buildId
+      && (page.title === `Module: ${moduleId}` || page.slug === moduleId)
+    ) ?? null : null;
+  }
+
+  async findKnowledgePageBySymbol(
+    workspaceId: string,
+    releaseId: string,
+    name: string,
+    sourcePath?: string
+  ): Promise<KnowledgePageRecord | null> {
+    const release = this.releaseById(workspaceId, releaseId);
+    return release ? this.knowledgePages.find((page) =>
+      page.workspaceId === workspaceId && page.buildId === release.buildId
+      && page.title === name
+      && (!sourcePath || page.chunks.some((chunk) =>
+        chunk.citations.some((citation) => citation.path === sourcePath)
+      ))
+    ) ?? null : null;
+  }
+
+  async knowledgeReleaseSummary(workspaceId: string, releaseId: string) {
+    const release = this.releaseById(workspaceId, releaseId);
+    const pages = release ? this.knowledgePages.filter((page) =>
+      page.workspaceId === workspaceId && page.buildId === release.buildId
+    ) : [];
+    const chunks = pages.flatMap((page) => page.chunks);
+    return {
+      pageCount: pages.length,
+      chunkCount: chunks.length,
+      citationCount: chunks.reduce((total, chunk) => total + chunk.citations.length, 0)
+    };
   }
 
   async searchKnowledge(

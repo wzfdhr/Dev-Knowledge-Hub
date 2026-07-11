@@ -79,6 +79,15 @@ function isGenerated(content: Buffer): boolean {
     || header.includes("do not edit");
 }
 
+function isUtf8(content: Buffer): boolean {
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(content);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function languageFor(filePath: string): string | null {
   const extension = path.posix.extname(filePath).toLowerCase();
   return ({
@@ -135,12 +144,14 @@ async function syncRepositoryUnlocked({
   dataDir,
   store,
   token,
+  actorId,
   prepareRemote = prepareRemoteRepository
 }: {
   repository: RepositoryRecord;
   dataDir: string;
   store: AppStore;
   token?: string;
+  actorId?: string;
   prepareRemote?: typeof prepareRemoteRepository;
 }): Promise<SnapshotSummary> {
   const repositoryPath = repository.kind === "local"
@@ -169,6 +180,16 @@ async function syncRepositoryUnlocked({
     commitSha
   );
   if (existing) {
+    if (actorId) {
+      await store.recordAudit({
+        workspaceId: repository.workspaceId,
+        actorId,
+        action: "repository.sync_succeeded",
+        resourceType: "repository",
+        resourceId: repository.id,
+        metadata: { commitSha, unchanged: true }
+      });
+    }
     return {
       snapshotId: existing.id,
       commitSha,
@@ -198,7 +219,7 @@ async function syncRepositoryUnlocked({
     .sort();
 
   const snapshotId = randomUUID();
-  const storagePath = path.join(dataDir, "snapshots", snapshotId);
+  const snapshotDirectory = path.join(dataDir, "snapshots", snapshotId);
   const files: SourceFileRecord[] = [];
   for (const filePath of tracked) {
     const byteSize = Number((await runGit({
@@ -208,9 +229,10 @@ async function syncRepositoryUnlocked({
     if (!Number.isSafeInteger(byteSize) || byteSize > MAX_FILE_BYTES) continue;
 
     const content = await runGit({ cwd: repositoryPath, args: ["show", `${commitSha}:${filePath}`] });
-    if (content.length > MAX_FILE_BYTES || content.includes(0) || isGenerated(content)) continue;
+    if (content.length > MAX_FILE_BYTES || content.includes(0) || !isUtf8(content)
+      || isGenerated(content)) continue;
 
-    const outputPath = path.join(storagePath, "files", ...filePath.split("/"));
+    const outputPath = path.join(snapshotDirectory, "files", ...filePath.split("/"));
     await mkdir(path.dirname(outputPath), { recursive: true });
     await writeFile(outputPath, content, { flag: "wx" });
     files.push({
@@ -232,11 +254,19 @@ async function syncRepositoryUnlocked({
     ref,
     remoteUrl,
     commitTimestamp,
-    storagePath: path.join(storagePath, "files")
+    storagePath: path.join(snapshotDirectory, "files")
   };
-  const persisted = await store.createSnapshot({ snapshot, files });
+  let persisted: SourceSnapshotRecord;
+  try {
+    persisted = actorId
+      ? await store.createSnapshotWithAudit({ snapshot, files }, actorId)
+      : await store.createSnapshot({ snapshot, files });
+  } catch (error) {
+    await rm(snapshotDirectory, { recursive: true, force: true });
+    throw error;
+  }
   if (persisted.id !== snapshot.id) {
-    await rm(storagePath, { recursive: true, force: true });
+    await rm(snapshotDirectory, { recursive: true, force: true });
     return {
       snapshotId: persisted.id,
       commitSha: persisted.commitSha,

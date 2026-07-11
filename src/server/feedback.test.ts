@@ -81,7 +81,7 @@ async function context(store: MemoryAppStore = new MemoryAppStore()) {
   await store.transitionBuild(build.id, "queued", "ready");
   const release = await store.createReleaseDraft(workspaceId, repository.id, build.id, "1.0.0");
   await store.publishRelease(workspaceId, release.id);
-  return { app, store, queue, buildService, cookie, workspaceId, repository, release };
+  return { app, store, queue, buildService, cookie, workspaceId, repository, release, index };
 }
 
 describe("manual feedback workflow", () => {
@@ -128,13 +128,14 @@ describe("manual feedback workflow", () => {
   });
 
   test("rebuilds acknowledged feedback to ready without publishing it", async () => {
-    const { app, store, queue, cookie, workspaceId, release } = await context();
+    const { app, store, queue, cookie, workspaceId, release, index } = await context();
     const persistence = store as unknown as {
       createFeedback(input: Record<string, unknown>): Promise<{ id: string }>;
       transitionFeedback(workspaceId: string, id: string, status: string): Promise<unknown>;
     };
     const feedback = await persistence.createFeedback({
-      workspaceId, query: "deployment", reason: "missing", expected: "steps"
+      workspaceId, releaseId: release.id, query: "deployment", reason: "missing", expected: "steps",
+      citations: [index.files[0]]
     });
     await persistence.transitionFeedback(workspaceId, feedback.id, "acknowledged");
 
@@ -143,13 +144,52 @@ describe("manual feedback workflow", () => {
     });
     expect(response.statusCode).toBe(202);
     const buildId = response.json().build.id as string;
+    expect((await store.getBuild(workspaceId, buildId))?.purpose).toEqual({
+      kind: "feedback",
+      feedbackIds: [feedback.id],
+      feedbackContext: [expect.objectContaining({
+        feedbackId: feedback.id,
+        releaseId: release.id,
+        query: "deployment",
+        reason: "missing",
+        expected: "steps",
+        citations: [index.files[0]]
+      })]
+    });
     expect(queue.sent).toContain(buildId);
     await queue.handler!(buildId);
     expect((await store.getBuild(workspaceId, buildId))?.status).toBe("ready");
     expect((await store.currentRelease(workspaceId, release.repositoryId))?.id).toBe(release.id);
     expect(store.releases).toHaveLength(1);
+    expect(store.knowledgePages.find((page) =>
+      page.buildId === buildId && page.slug === "feedback-rebuild-context"
+    )?.body).toContain("deployment");
     expect(store.auditEvents.some((event) => event.action === "feedback.rebuild_requested"))
       .toBe(true);
+    await app.close();
+  });
+
+  test("does not reuse an active feedback rebuild for a different feedback identity", async () => {
+    const { app, store, cookie, workspaceId, release } = await context();
+    const first = await store.createFeedback({
+      workspaceId, releaseId: release.id, query: "deploy", reason: "missing steps"
+    });
+    const second = await store.createFeedback({
+      workspaceId, releaseId: release.id, query: "rollback", reason: "missing recovery"
+    });
+    await store.transitionFeedback(workspaceId, first.id, "acknowledged");
+    await store.transitionFeedback(workspaceId, second.id, "acknowledged");
+
+    const firstResponse = await app.inject({
+      method: "POST", url: `/api/feedback/${first.id}/rebuild`, headers: { cookie }
+    });
+    const secondResponse = await app.inject({
+      method: "POST", url: `/api/feedback/${second.id}/rebuild`, headers: { cookie }
+    });
+
+    expect(firstResponse.statusCode).toBe(202);
+    expect(secondResponse.statusCode).toBe(202);
+    expect(secondResponse.json().build.id).not.toBe(firstResponse.json().build.id);
     await app.close();
   });
 });

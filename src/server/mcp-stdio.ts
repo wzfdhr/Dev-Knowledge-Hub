@@ -5,7 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 import { createDatabase } from "../db/client.js";
 import { runMigrations } from "../db/migrate.js";
-import { authenticateMcpToken } from "./mcp/auth.js";
+import { authenticateMcpToken, createMcpAuthorizationGuard } from "./mcp/auth.js";
 import { createRegisteredMcpServer, type McpToolContext } from "./mcp/tools.js";
 import { PostgresAppStore } from "./persistence/postgres-store.js";
 import { installSignalShutdown } from "./lifecycle.js";
@@ -17,6 +17,7 @@ export function createMcpServer(context?: McpToolContext): McpServer {
 export async function runMcpStdio(context?: McpToolContext): Promise<void> {
   let selected = context;
   let closeDatabase: (() => Promise<void>) | undefined;
+  let terminateOnRevocation = () => {};
   if (!selected) {
     const databaseUrl = process.env.DATABASE_URL;
     const plaintext = process.env.DEVKH_MCP_TOKEN;
@@ -31,7 +32,12 @@ export async function runMcpStdio(context?: McpToolContext): Promise<void> {
       await database.pool.end();
       throw new Error("MCP token is invalid or revoked");
     }
-    selected = { store, workspaceId: token.workspaceId };
+    selected = {
+      store,
+      workspaceId: token.workspaceId,
+      authorize: createMcpAuthorizationGuard(store, plaintext),
+      onUnauthorized: () => terminateOnRevocation()
+    };
     closeDatabase = () => database.pool.end();
   }
   const server = createMcpServer(selected);
@@ -45,6 +51,7 @@ export async function runMcpStdio(context?: McpToolContext): Promise<void> {
     })();
     await closing;
   };
+  terminateOnRevocation = () => setImmediate(() => void close());
   installSignalShutdown({ close });
   process.once("beforeExit", close);
 }

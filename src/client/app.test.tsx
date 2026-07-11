@@ -3,7 +3,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { KnowledgePage } from "./pages/knowledge-page";
@@ -91,6 +91,51 @@ describe("overview primary command", () => {
     expect(container.querySelectorAll("button.button.primary")).toHaveLength(1);
   });
 
+  test("creates and selects a draft before navigating from ready-build review to Knowledge", async () => {
+    const user = userEvent.setup();
+    const createRelease = vi.fn().mockResolvedValue({ release: {
+      id: "release-1",
+      buildId: "build",
+      snapshotId: "snap",
+      version: "1.0.0",
+      createdAt: "2026-07-11",
+      publishedAt: null
+    } });
+    const api = {
+      getRepository: vi.fn().mockResolvedValue({ repository: {
+        id: "repo", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main"
+      } }),
+      listBuilds: vi.fn().mockResolvedValue({ builds: [{
+        id: "build", status: "ready", snapshotId: "snap", commitSha: "a".repeat(40),
+        warnings: [], cancelRequested: false
+      }] }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [] }),
+      listFeedback: vi.fn().mockResolvedValue({ feedback: [] }),
+      createRelease
+    } as unknown as ApiClient;
+    function Location() {
+      const location = useLocation();
+      return <p data-testid="location">{location.pathname}{location.search}</p>;
+    }
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
+    });
+    render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={["/"]}>
+      <Location />
+      <Routes>
+        <Route path="/" element={<OverviewPage api={api} />} />
+        <Route path="/knowledge" element={<p>Knowledge route</p>} />
+      </Routes>
+    </MemoryRouter></QueryClientProvider>);
+
+    await user.click(await screen.findByRole("button", { name: "Review ready build" }));
+    await user.click(screen.getByRole("button", { name: "Inspect knowledge" }));
+
+    await waitFor(() => expect(createRelease).toHaveBeenCalledWith("build", "1.0.0"));
+    expect(await screen.findByText("Knowledge route")).toBeVisible();
+    expect(screen.getByTestId("location")).toHaveTextContent("/knowledge?releaseId=release-1");
+  });
+
   test("keeps EventSource alive for native reconnect and reports connection state", async () => {
     class FakeEventSource {
       static instance: FakeEventSource;
@@ -113,8 +158,10 @@ describe("overview primary command", () => {
       listFeedback: vi.fn().mockResolvedValue({ feedback: [] })
     } as unknown as ApiClient;
 
-    renderPage(<OverviewPage api={api} />);
+    const { container } = renderPage(<OverviewPage api={api} />);
     await screen.findByText("synthesizing", { selector: "h2" });
+    expect(container.querySelector("progress")).toHaveAttribute("value", "66");
+    expect(container.querySelector(".progress [style]")).toBeNull();
     FakeEventSource.instance.onerror?.();
 
     await waitFor(() => expect(screen.getByText("synthesizing", { selector: "h2" }).closest("section"))

@@ -19,6 +19,7 @@ import {
   BUILD_JOB_STATUSES
 } from "../shared/contracts.js";
 import type { Citation } from "../server/knowledge/intelligence.js";
+import type { FeedbackGenerationContext } from "../server/knowledge/build-service.js";
 
 export { AGENT_FEEDBACK_STATUSES, BUILD_JOB_STATUSES } from "../shared/contracts.js";
 
@@ -193,6 +194,10 @@ export const buildJobs = pgTable("build_jobs", {
   errorMessage: text("error_message"),
   warnings: jsonb("warnings").notNull().default([]),
   cancelRequested: boolean("cancel_requested").notNull().default(false),
+  purpose: text("purpose").notNull().default("standard"),
+  feedbackIds: uuid("feedback_ids").array().notNull().default(sql`'{}'::uuid[]`),
+  feedbackContext: jsonb("feedback_context").$type<FeedbackGenerationContext[]>()
+    .notNull().default([]),
   ...timestamps
 }, (table) => [
   uniqueIndex("build_jobs_id_workspace_idx").on(table.id, table.workspaceId),

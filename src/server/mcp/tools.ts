@@ -36,17 +36,27 @@ export const MCP_TOOL_NAMES = [
 export interface McpToolContext {
   store: AppStore;
   workspaceId: string;
+  authorize?: () => Promise<boolean>;
+  onUnauthorized?: () => Promise<void> | void;
 }
 
 class McpToolError extends Error {
   constructor(
-    readonly code: "INVALID_INPUT" | "UNPUBLISHED" | "NOT_FOUND" | "CITATIONS_MISSING",
+    readonly code: "INVALID_INPUT" | "UNAUTHORIZED" | "UNPUBLISHED" | "NOT_FOUND" | "CITATIONS_MISSING",
     message: string,
     readonly details?: Array<{ path: string; code: string }>
   ) {
     super(message);
   }
 }
+
+const MAX_QUERY_LENGTH = 500;
+const MAX_TASK_LENGTH = 2_000;
+const MAX_PATH_LENGTH = 500;
+const MAX_PAGE_CHUNKS = 50;
+const MAX_CHUNK_CITATIONS = 8;
+const MAX_RESPONSE_CITATIONS = 50;
+const MAX_RESULTS = 20;
 
 function uniqueCitations(citations: Citation[]): Citation[] {
   return [...new Map(citations.map((citation) => [
@@ -59,6 +69,23 @@ function pageCitations(page: KnowledgePageRecord): Citation[] {
   return uniqueCitations(page.chunks.flatMap((chunk) => chunk.citations));
 }
 
+function boundedPage(page: KnowledgePageRecord): KnowledgePageRecord {
+  return {
+    ...page,
+    chunks: page.chunks.slice(0, MAX_PAGE_CHUNKS).map((chunk) => ({
+      ...chunk,
+      citations: uniqueCitations(chunk.citations).slice(0, MAX_CHUNK_CITATIONS)
+    }))
+  };
+}
+
+function boundedResults(results: KnowledgeSearchResult[]): KnowledgeSearchResult[] {
+  return results.slice(0, MAX_RESULTS).map((result) => ({
+    ...result,
+    citations: uniqueCitations(result.citations).slice(0, MAX_CHUNK_CITATIONS)
+  }));
+}
+
 function successful(
   release: ReleaseRecord,
   commitSha: string,
@@ -69,7 +96,12 @@ function successful(
   if (requireCitations && !citations.length) {
     throw new McpToolError("CITATIONS_MISSING", "Published knowledge has no citations");
   }
-  const envelope = { releaseId: release.id, commitSha, result, citations: uniqueCitations(citations) };
+  const envelope = {
+    releaseId: release.id,
+    commitSha,
+    result,
+    citations: uniqueCitations(citations).slice(0, MAX_RESPONSE_CITATIONS)
+  };
   return {
     content: [{ type: "text" as const, text: JSON.stringify(envelope) }],
     structuredContent: envelope as Record<string, unknown>
@@ -101,10 +133,6 @@ async function published(context?: McpToolContext) {
   const snapshot = await context.store.findSnapshotById(context.workspaceId, release.snapshotId);
   if (!snapshot) throw new McpToolError("NOT_FOUND", "Published snapshot was not found");
   return { context, repository, release, snapshot };
-}
-
-async function pagesFor(context: McpToolContext, release: ReleaseRecord) {
-  return context.store.listKnowledgePages(context.workspaceId, release.id);
 }
 
 const taskStopWords = new Set([
@@ -152,9 +180,15 @@ async function readSource(
   if (!candidate || (!candidate.startsWith(`${root}${path.sep}`) && candidate !== root)) {
     throw new McpToolError("NOT_FOUND", "Source file was not found");
   }
-  const content = await fs.readFile(candidate, "utf8");
-  if (createHash("sha256").update(content).digest("hex") !== sourceFile.contentHash) {
+  const bytes = await fs.readFile(candidate);
+  if (createHash("sha256").update(bytes).digest("hex") !== sourceFile.contentHash) {
     throw new McpToolError("NOT_FOUND", "Published source no longer matches its citation");
+  }
+  let content: string;
+  try {
+    content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new McpToolError("NOT_FOUND", "Published source is not valid UTF-8 text");
   }
   const lines = content.split(/\r?\n/);
   const first = startLine ?? 1;
@@ -173,6 +207,26 @@ async function readSource(
     result: { ...citation, content: lines.slice(first - 1, last).join("\n") },
     citations: [citation]
   };
+}
+
+async function validCurrentCitations(
+  context: McpToolContext,
+  release: ReleaseRecord,
+  commitSha: string,
+  candidates: Citation[]
+): Promise<Citation[]> {
+  const valid: Citation[] = [];
+  for (const citation of uniqueCitations(candidates)) {
+    if (valid.length >= MAX_CHUNK_CITATIONS || citation.commitSha !== commitSha
+      || citation.startLine < 1 || citation.endLine < citation.startLine) continue;
+    const source = await context.store.findSourceFile(
+      context.workspaceId,
+      release.snapshotId,
+      citation.path
+    );
+    if (source?.contentHash === citation.blobHash) valid.push(citation);
+  }
+  return valid;
 }
 
 export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
@@ -206,14 +260,14 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     "dkh_search",
     "Search the current published knowledge release",
     z.strictObject({
-      query: z.string().trim().min(1),
+      query: z.string().trim().min(1).max(MAX_QUERY_LENGTH),
       limit: z.number().int().min(1).max(20).optional()
     }),
     readOnly,
     async ({ query, limit }) => {
     try {
       const selected = await published(context);
-      const results = (await selected.context.store.searchKnowledge(
+      const results = boundedResults(await selected.context.store.searchKnowledge(
         selected.context.workspaceId, selected.repository.id, query, selected.release.id
       )).slice(0, limit ?? 10);
       if (!results.length) throw new McpToolError("NOT_FOUND", "No matching knowledge was found");
@@ -237,10 +291,14 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     async () => {
     try {
       const selected = await published(context);
-      const page = (await pagesFor(selected.context, selected.release))
-        .find((candidate) => candidate.slug === "architecture-overview");
+      const page = await selected.context.store.findKnowledgePageBySlug(
+        selected.context.workspaceId,
+        selected.release.id,
+        "architecture-overview"
+      );
       if (!page) throw new McpToolError("NOT_FOUND", "Architecture knowledge was not found");
-      return successful(selected.release, selected.snapshot.commitSha, page, pageCitations(page));
+      const bounded = boundedPage(page);
+      return successful(selected.release, selected.snapshot.commitSha, bounded, pageCitations(bounded));
     } catch (error) {
       return failed(error);
     }
@@ -250,16 +308,19 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
   register(
     "dkh_get_module",
     "Get a module from the current published release",
-    z.strictObject({ moduleId: z.string().trim().min(1) }),
+    z.strictObject({ moduleId: z.string().trim().min(1).max(MAX_PATH_LENGTH) }),
     readOnly,
     async ({ moduleId }) => {
     try {
       const selected = await published(context);
-      const page = (await pagesFor(selected.context, selected.release)).find((candidate) =>
-        candidate.title === `Module: ${moduleId}` || candidate.slug === moduleId
+      const page = await selected.context.store.findKnowledgePageByModule(
+        selected.context.workspaceId,
+        selected.release.id,
+        moduleId
       );
       if (!page) throw new McpToolError("NOT_FOUND", "Module knowledge was not found");
-      return successful(selected.release, selected.snapshot.commitSha, page, pageCitations(page));
+      const bounded = boundedPage(page);
+      return successful(selected.release, selected.snapshot.commitSha, bounded, pageCitations(bounded));
     } catch (error) {
       return failed(error);
     }
@@ -270,19 +331,22 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     "dkh_get_symbol",
     "Get a symbol from the current published release",
     z.strictObject({
-      name: z.string().trim().min(1),
-      path: z.string().trim().min(1).optional()
+      name: z.string().trim().min(1).max(MAX_QUERY_LENGTH),
+      path: z.string().trim().min(1).max(MAX_PATH_LENGTH).optional()
     }),
     readOnly,
     async ({ name, path: symbolPath }) => {
     try {
       const selected = await published(context);
-      const page = (await pagesFor(selected.context, selected.release)).find((candidate) =>
-        candidate.title === name
-        && (!symbolPath || pageCitations(candidate).some((citation) => citation.path === symbolPath))
+      const page = await selected.context.store.findKnowledgePageBySymbol(
+        selected.context.workspaceId,
+        selected.release.id,
+        name,
+        symbolPath
       );
       if (!page) throw new McpToolError("NOT_FOUND", "Symbol knowledge was not found");
-      return successful(selected.release, selected.snapshot.commitSha, page, pageCitations(page));
+      const bounded = boundedPage(page);
+      return successful(selected.release, selected.snapshot.commitSha, bounded, pageCitations(bounded));
     } catch (error) {
       return failed(error);
     }
@@ -293,8 +357,8 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     "dkh_get_change_context",
     "Get cited context for a proposed code change",
     z.strictObject({
-      task: z.string().trim().min(1),
-      paths: z.array(z.string().trim().min(1)).max(20).optional()
+      task: z.string().trim().min(1).max(MAX_TASK_LENGTH),
+      paths: z.array(z.string().trim().min(1).max(MAX_PATH_LENGTH)).max(20).optional()
     }),
     readOnly,
     async ({ task, paths }) => {
@@ -325,10 +389,14 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
         )));
       const discovered = mergeSearchResults([...initial, ...relatedGroups.flat()]);
       if (!discovered.length) throw new McpToolError("NOT_FOUND", "Change context was not found");
-      const pages = await pagesFor(selected.context, selected.release);
-      const support = pages.filter((page) =>
-        page.slug === "conventions" || page.slug === "run-test-guide"
-      ).map((page): KnowledgeSearchResult => ({
+      const supportPages = (await Promise.all(["conventions", "run-test-guide"].map((slug) =>
+        selected.context.store.findKnowledgePageBySlug(
+          selected.context.workspaceId,
+          selected.release.id,
+          slug
+        )
+      ))).filter((page): page is KnowledgePageRecord => Boolean(page));
+      const support = supportPages.map((page): KnowledgeSearchResult => ({
         kind: "page",
         title: page.title,
         excerpt: page.body.slice(0, 240),
@@ -338,10 +406,10 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
         citations: pageCitations(page)
       }));
       const supportIds = new Set(support.map((result) => result.pageId));
-      const results = [
+      const results = boundedResults([
         ...discovered.filter((result) => !supportIds.has(result.pageId)).slice(0, 18),
         ...support
-      ].slice(0, 20);
+      ]);
       return successful(
         selected.release,
         selected.snapshot.commitSha,
@@ -358,7 +426,7 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     "dkh_get_source",
     "Read a bounded source excerpt from the current published snapshot",
     z.strictObject({
-      path: z.string().trim().min(1),
+      path: z.string().trim().min(1).max(MAX_PATH_LENGTH),
       startLine: z.number().int().positive().optional(),
       endLine: z.number().int().positive().optional()
     }).refine((value) => {
@@ -391,12 +459,27 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     async () => {
     try {
       const selected = await published(context);
-      const pages = await pagesFor(selected.context, selected.release);
+      const summary = await selected.context.store.knowledgeReleaseSummary(
+        selected.context.workspaceId,
+        selected.release.id
+      );
+      const architecture = await selected.context.store.findKnowledgePageBySlug(
+        selected.context.workspaceId,
+        selected.release.id,
+        "architecture-overview"
+      );
+      const citations = architecture ? pageCitations(boundedPage(architecture)) : [];
       return successful(
         selected.release,
         selected.snapshot.commitSha,
-        selected.release,
-        pages.flatMap(pageCitations)
+        {
+          id: selected.release.id,
+          version: selected.release.version,
+          snapshotId: selected.release.snapshotId,
+          publishedAt: selected.release.publishedAt,
+          ...summary
+        },
+        citations
       );
     } catch (error) {
       return failed(error);
@@ -408,9 +491,9 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     "dkh_report_gap",
     "Report missing or inadequate published knowledge",
     z.strictObject({
-      query: z.string().trim().min(1),
-      reason: z.string().trim().min(1),
-      expected: z.string().trim().min(1).optional()
+      query: z.string().trim().min(1).max(MAX_QUERY_LENGTH),
+      reason: z.string().trim().min(1).max(MAX_TASK_LENGTH),
+      expected: z.string().trim().min(1).max(MAX_TASK_LENGTH).optional()
     }),
     { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     async ({ query, reason, expected }) => {
@@ -422,7 +505,28 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
         query,
         selected.release.id
       );
-      const citations = uniqueCitations(matches.flatMap((match) => match.citations)).slice(0, 8);
+      let citations = await validCurrentCitations(
+        selected.context,
+        selected.release,
+        selected.snapshot.commitSha,
+        matches.flatMap((match) => match.citations)
+      );
+      if (!citations.length) {
+        const architecture = await selected.context.store.findKnowledgePageBySlug(
+          selected.context.workspaceId,
+          selected.release.id,
+          "architecture-overview"
+        );
+        citations = await validCurrentCitations(
+          selected.context,
+          selected.release,
+          selected.snapshot.commitSha,
+          architecture ? pageCitations(architecture) : []
+        );
+      }
+      if (!citations.length) {
+        throw new McpToolError("CITATIONS_MISSING", "Published knowledge has no valid citation");
+      }
       const feedback = await selected.context.store.reportFeedbackWithAudit({
         workspaceId: selected.context.workspaceId,
         releaseId: selected.release.id,
@@ -435,8 +539,7 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
         selected.release,
         selected.snapshot.commitSha,
         { feedback },
-        citations,
-        false
+        citations
       );
     } catch (error) {
       return failed(error);
@@ -456,6 +559,10 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
   server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const tool = tools.find((candidate) => candidate.name === request.params.name);
     if (!tool) throw new McpError(ErrorCode.MethodNotFound, "Unknown MCP tool");
+    if (context?.authorize && !await context.authorize()) {
+      void context.onUnauthorized?.();
+      return failed(new McpToolError("UNAUTHORIZED", "MCP token is invalid or revoked"));
+    }
     const parsed = tool.schema.safeParse(request.params.arguments ?? {});
     if (!parsed.success) {
       const details = parsed.error.issues.map((issue) => ({

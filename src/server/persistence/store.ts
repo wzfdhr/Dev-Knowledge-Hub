@@ -1,5 +1,7 @@
 import type {
+  BuildInput,
   BuildPersistence,
+  BuildPurpose,
   BuildRecord,
   PersistedKnowledge
 } from "../knowledge/build-service.js";
@@ -87,7 +89,7 @@ export interface FeedbackRebuildInput {
   feedbackId: string;
   releaseId: string;
   actorId: string;
-  build: Omit<BuildRecord, "id" | "status" | "warnings" | "cancelRequested">;
+  build: BuildInput;
 }
 
 export type RepositoryKind = "local" | "git";
@@ -206,10 +208,55 @@ export interface KnowledgeMetadata {
   }>;
 }
 
+export interface Pagination {
+  limit?: number;
+  offset?: number;
+}
+
+export const DEFAULT_LIST_LIMIT = 50;
+export const MAX_LIST_LIMIT = 100;
+
+export function normalizePagination(pagination: Pagination = {}): Required<Pagination> {
+  return {
+    limit: Math.min(MAX_LIST_LIMIT, Math.max(1, pagination.limit ?? DEFAULT_LIST_LIMIT)),
+    offset: Math.max(0, pagination.offset ?? 0)
+  };
+}
+
+export interface KnowledgeReleaseSummary {
+  pageCount: number;
+  chunkCount: number;
+  citationCount: number;
+}
+
 export interface KnowledgeStore {
   saveKnowledge(value: PersistedKnowledge): Promise<void>;
-  listKnowledgePages(workspaceId: string, releaseId?: string): Promise<KnowledgePageRecord[]>;
+  listKnowledgePages(
+    workspaceId: string,
+    releaseId?: string,
+    pagination?: Pagination
+  ): Promise<KnowledgePageRecord[]>;
   getKnowledgePage(workspaceId: string, pageId: string): Promise<KnowledgePageRecord | null>;
+  findKnowledgePageBySlug(
+    workspaceId: string,
+    releaseId: string,
+    slug: string
+  ): Promise<KnowledgePageRecord | null>;
+  findKnowledgePageByModule(
+    workspaceId: string,
+    releaseId: string,
+    moduleId: string
+  ): Promise<KnowledgePageRecord | null>;
+  findKnowledgePageBySymbol(
+    workspaceId: string,
+    releaseId: string,
+    name: string,
+    path?: string
+  ): Promise<KnowledgePageRecord | null>;
+  knowledgeReleaseSummary(
+    workspaceId: string,
+    releaseId: string
+  ): Promise<KnowledgeReleaseSummary>;
   searchKnowledge(
     workspaceId: string,
     repositoryId: string,
@@ -229,7 +276,12 @@ export interface KnowledgeStore {
     repositoryId: string,
     channel?: string
   ): Promise<ReleaseRecord | null>;
-  listReleases(workspaceId: string, repositoryId: string): Promise<ReleaseRecord[]>;
+  getRelease(workspaceId: string, releaseId: string): Promise<ReleaseRecord | null>;
+  listReleases(
+    workspaceId: string,
+    repositoryId: string,
+    pagination?: Pagination
+  ): Promise<ReleaseRecord[]>;
 }
 
 export interface AppStore extends BuildPersistence, KnowledgeStore {
@@ -245,7 +297,7 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
     input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">,
     actorId: string
   ): Promise<McpTokenRecord>;
-  listMcpTokens(workspaceId: string): Promise<McpTokenRecord[]>;
+  listMcpTokens(workspaceId: string, pagination?: Pagination): Promise<McpTokenRecord[]>;
   findActiveMcpToken(tokenHash: string): Promise<McpTokenRecord | null>;
   touchMcpToken(tokenId: string): Promise<void>;
   revokeMcpToken(workspaceId: string, tokenId: string): Promise<McpTokenRecord | null>;
@@ -256,7 +308,12 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   ): Promise<McpTokenRecord | null>;
   createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord>;
   reportFeedbackWithAudit(input: CreateFeedbackInput): Promise<AgentFeedbackRecord>;
-  listFeedback(workspaceId: string, status?: AgentFeedbackStatus): Promise<AgentFeedbackRecord[]>;
+  listFeedback(
+    workspaceId: string,
+    status?: AgentFeedbackStatus,
+    pagination?: Pagination
+  ): Promise<AgentFeedbackRecord[]>;
+  getFeedback(workspaceId: string, feedbackId: string): Promise<AgentFeedbackRecord | null>;
   transitionFeedback(
     workspaceId: string,
     feedbackId: string,
@@ -280,6 +337,11 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
     workspaceId: string,
     input: RepositoryConnectionInput
   ): Promise<RepositoryRecord | null>;
+  createRepositoryWithAudit(
+    workspaceId: string,
+    input: RepositoryConnectionInput,
+    actorId: string
+  ): Promise<RepositoryRecord | null>;
   currentRepository(workspaceId: string): Promise<RepositoryRecord | null>;
   findSnapshotByCommit(
     workspaceId: string,
@@ -294,6 +356,7 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
     path: string
   ): Promise<SourceFileRecord | null>;
   createSnapshot(input: CreateSnapshotInput): Promise<SourceSnapshotRecord>;
+  createSnapshotWithAudit(input: CreateSnapshotInput, actorId: string): Promise<SourceSnapshotRecord>;
   countSnapshotFiles(snapshotId: string): Promise<number>;
   repositoryCredential(workspaceId: string, repositoryId: string): Promise<string | null>;
   getModelConfig(workspaceId: string): Promise<ModelConfigRecord | null>;
@@ -304,4 +367,4 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   ): Promise<ModelConfigRecord>;
 }
 
-export type { BuildRecord };
+export type { BuildPurpose, BuildRecord };

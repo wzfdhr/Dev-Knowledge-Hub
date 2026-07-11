@@ -26,6 +26,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 FROM node:22-bookworm-slim AS runtime
 
 ENV NODE_ENV=production
+ENV DEVKH_GIT_ASKPASS_PATH=/app/scripts/git-askpass.sh
 WORKDIR /app
 
 RUN apt-get update \
@@ -38,6 +39,7 @@ COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_m
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/drizzle ./drizzle
 COPY --chown=node:node package.json package-lock.json ./
+COPY --chown=node:node --chmod=755 scripts/git-askpass.sh ./scripts/git-askpass.sh
 
 USER node
 EXPOSE 3000

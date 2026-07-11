@@ -2,7 +2,7 @@
 
 ## Conventions
 
-The administration API uses JSON under `/api`. Except health, setup status, setup, and login, routes require the `devkh_session` cookie. Errors use `{ "error": { "code": string, "message": string } }`. JSON bodies are limited to 1 MiB. Source line ranges are inclusive and capped at 500 lines.
+The administration API uses JSON under `/api`. Except health, setup status, setup, and login, routes require the `devkh_session` cookie. Errors use `{ "error": { "code": string, "message": string } }`. JSON bodies are limited to 1 MiB. Source line ranges are inclusive and capped at 500 lines. List routes accept `limit` (1-100, default 50) and `offset` (default 0) and return stable ordering.
 
 ## HTTP routes
 
@@ -52,11 +52,11 @@ Both HTTP and stdio expose exactly these tools:
 | `dkh_get_symbol` | `{name,path?}` | Symbol page, optionally path-scoped |
 | `dkh_get_change_context` | `{task,paths?}` (max 20 optional hints) | Discovers affected modules, relationships, tests, and conventions from task terms; paths only refine context |
 | `dkh_get_source` | `{path,startLine?,endLine?}` | Hash-verified excerpt, maximum 500 lines |
-| `dkh_get_release` | `{}` | Current published release metadata |
-| `dkh_report_gap` | `{query,reason,expected?}` | Only mutating tool; create cited feedback |
+| `dkh_get_release` | `{}` | Current published release metadata plus page/chunk/citation counts |
+| `dkh_report_gap` | `{query,reason,expected?}` | Only mutating tool; create feedback with at least one validated current-release citation |
 
-Successful tools return `{releaseId,commitSha,result,citations}` in structured content. Citations contain `path`, inclusive `startLine`/`endLine`, `commitSha`, and `blobHash`. Stable tool errors include `INVALID_INPUT`, `UNPUBLISHED`, `NOT_FOUND`, `CITATIONS_MISSING`, and `INTERNAL_ERROR`. Draft knowledge is never returned.
+Successful tools return `{releaseId,commitSha,result,citations}` in structured content. Citations contain `path`, inclusive `startLine`/`endLine`, `commitSha`, and `blobHash`. Tool strings are bounded (500 characters for queries, names, modules, and paths; 2,000 for task/reason/expected text), search results are capped at 20, page chunks at 50, citations per chunk at 8, and envelope citations at 50. `dkh_get_release` returns counts rather than every release citation. Stable tool errors include `INVALID_INPUT`, `UNAUTHORIZED`, `UNPUBLISHED`, `NOT_FOUND`, `CITATIONS_MISSING`, and `INTERNAL_ERROR`. Draft knowledge is never returned. Authorization is rechecked before every HTTP or stdio tool call.
 
 ## Feedback transitions
 
-Allowed transitions are `open -> acknowledged|dismissed` and `acknowledged -> fixed|dismissed`. Rebuild requires `acknowledged`, creates or reuses a build for the current published snapshot, and does not draft or publish a release.
+Allowed transitions are `open -> acknowledged|dismissed` and `acknowledged -> fixed|dismissed`. Rebuild requires `acknowledged`, persists the feedback IDs plus query/reason/expected/citations as generation context, and does not draft or publish a release. An active build is reused only when snapshot, build purpose, and feedback identity all match.

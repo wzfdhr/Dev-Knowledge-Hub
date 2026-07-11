@@ -1,4 +1,9 @@
-import type { Pool, QueryResultRow } from "pg";
+import type { Pool, PoolClient, QueryResultRow } from "pg";
+
+import {
+  FeedbackNotAcknowledgedError,
+  InvalidFeedbackTransitionError
+} from "./store.js";
 
 import type {
   AdminRecord,
@@ -8,6 +13,7 @@ import type {
   AuditEventInput,
   CreateFeedbackInput,
   CreateSnapshotInput,
+  FeedbackRebuildInput,
   KnowledgePageRecord,
   KnowledgeSearchResult,
   McpTokenRecord,
@@ -186,6 +192,37 @@ function feedbackRecord(row: FeedbackRow): AgentFeedbackRecord {
 export class PostgresAppStore implements AppStore {
   constructor(private readonly pool: Pool & Queryable) {}
 
+  private async transaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await work(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  private async insertAudit(queryable: Queryable, event: AuditEventInput): Promise<void> {
+    await queryable.query(
+      `INSERT INTO audit_events
+       (workspace_id, actor_id, action, resource_type, resource_id, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+      [
+        event.workspaceId,
+        event.actorId ?? null,
+        event.action,
+        event.resourceType,
+        event.resourceId ?? null,
+        JSON.stringify(event.metadata ?? {})
+      ]
+    );
+  }
+
   async isSetupComplete(): Promise<boolean> {
     const { rows } = await this.pool.query<{ exists: boolean }>(
       "SELECT EXISTS (SELECT 1 FROM admin_users) AS exists"
@@ -278,19 +315,7 @@ export class PostgresAppStore implements AppStore {
   }
 
   async recordAudit(event: AuditEventInput): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO audit_events
-       (workspace_id, actor_id, action, resource_type, resource_id, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
-      [
-        event.workspaceId,
-        event.actorId ?? null,
-        event.action,
-        event.resourceType,
-        event.resourceId ?? null,
-        JSON.stringify(event.metadata ?? {})
-      ]
-    );
+    await this.insertAudit(this.pool, event);
   }
 
   async createMcpToken(
@@ -304,6 +329,30 @@ export class PostgresAppStore implements AppStore {
       [input.workspaceId, input.name, input.tokenHash, input.tokenPrefix]
     );
     return mcpTokenRecord(rows[0]);
+  }
+
+  async createMcpTokenWithAudit(
+    input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">,
+    actorId: string
+  ): Promise<McpTokenRecord> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<McpTokenRow>(
+        `INSERT INTO mcp_tokens (workspace_id, name, token_hash, token_prefix)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id, workspace_id, name, token_hash, token_prefix,
+                   created_at, last_used_at, revoked_at`,
+        [input.workspaceId, input.name, input.tokenHash, input.tokenPrefix]
+      );
+      const token = mcpTokenRecord(rows[0]);
+      await this.insertAudit(client, {
+        workspaceId: input.workspaceId,
+        actorId,
+        action: "mcp_token.created",
+        resourceType: "mcp_token",
+        resourceId: token.id
+      });
+      return token;
+    });
   }
 
   async listMcpTokens(workspaceId: string): Promise<McpTokenRecord[]> {
@@ -344,6 +393,32 @@ export class PostgresAppStore implements AppStore {
     return rows[0] ? mcpTokenRecord(rows[0]) : null;
   }
 
+  async revokeMcpTokenWithAudit(
+    workspaceId: string,
+    tokenId: string,
+    actorId: string
+  ): Promise<McpTokenRecord | null> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<McpTokenRow>(
+        `UPDATE mcp_tokens SET revoked_at = COALESCE(revoked_at, now()), updated_at = now()
+         WHERE workspace_id = $1 AND id = $2
+         RETURNING id, workspace_id, name, token_hash, token_prefix,
+                   created_at, last_used_at, revoked_at`,
+        [workspaceId, tokenId]
+      );
+      if (!rows[0]) return null;
+      const token = mcpTokenRecord(rows[0]);
+      await this.insertAudit(client, {
+        workspaceId,
+        actorId,
+        action: "mcp_token.revoked",
+        resourceType: "mcp_token",
+        resourceId: token.id
+      });
+      return token;
+    });
+  }
+
   async createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord> {
     const { rows } = await this.pool.query<FeedbackRow>(
       `INSERT INTO agent_feedback
@@ -360,6 +435,34 @@ export class PostgresAppStore implements AppStore {
       ]
     );
     return feedbackRecord(rows[0]);
+  }
+
+  async reportFeedbackWithAudit(input: CreateFeedbackInput): Promise<AgentFeedbackRecord> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<FeedbackRow>(
+        `INSERT INTO agent_feedback
+         (workspace_id, release_id, query, reason, expected)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, workspace_id, release_id, query, reason, expected, status,
+                   rebuild_build_id, created_at, updated_at`,
+        [
+          input.workspaceId,
+          input.releaseId ?? null,
+          input.query,
+          input.reason,
+          input.expected ?? null
+        ]
+      );
+      const feedback = feedbackRecord(rows[0]);
+      await this.insertAudit(client, {
+        workspaceId: input.workspaceId,
+        action: "feedback.reported",
+        resourceType: "agent_feedback",
+        resourceId: feedback.id,
+        metadata: { releaseId: input.releaseId }
+      });
+      return feedback;
+    });
   }
 
   async listFeedback(
@@ -390,7 +493,7 @@ export class PostgresAppStore implements AppStore {
       fixed: [],
       dismissed: []
     };
-    if (!allowed[existing.status].includes(status)) throw new Error("Invalid feedback transition");
+    if (!allowed[existing.status].includes(status)) throw new InvalidFeedbackTransitionError();
     const { rows } = await this.pool.query<FeedbackRow>(
       `UPDATE agent_feedback SET status = $3, updated_at = now()
        WHERE workspace_id = $1 AND id = $2 AND status = $4
@@ -398,8 +501,50 @@ export class PostgresAppStore implements AppStore {
                  rebuild_build_id, created_at, updated_at`,
       [workspaceId, feedbackId, status, existing.status]
     );
-    if (!rows[0]) throw new Error("Invalid feedback transition");
+    if (!rows[0]) throw new InvalidFeedbackTransitionError();
     return feedbackRecord(rows[0]);
+  }
+
+  async transitionFeedbackWithAudit(
+    workspaceId: string,
+    feedbackId: string,
+    status: AgentFeedbackStatus,
+    actorId: string
+  ): Promise<AgentFeedbackRecord | null> {
+    return this.transaction(async (client) => {
+      const selected = await client.query<FeedbackRow>(
+        `SELECT id, workspace_id, release_id, query, reason, expected, status,
+                rebuild_build_id, created_at, updated_at
+         FROM agent_feedback WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+        [workspaceId, feedbackId]
+      );
+      const existing = selected.rows[0];
+      if (!existing) return null;
+      const allowed: Record<AgentFeedbackStatus, AgentFeedbackStatus[]> = {
+        open: ["acknowledged", "dismissed"],
+        acknowledged: ["fixed", "dismissed"],
+        fixed: [],
+        dismissed: []
+      };
+      if (!allowed[existing.status].includes(status)) throw new InvalidFeedbackTransitionError();
+      const { rows } = await client.query<FeedbackRow>(
+        `UPDATE agent_feedback SET status = $3, updated_at = now()
+         WHERE workspace_id = $1 AND id = $2
+         RETURNING id, workspace_id, release_id, query, reason, expected, status,
+                   rebuild_build_id, created_at, updated_at`,
+        [workspaceId, feedbackId, status]
+      );
+      const feedback = feedbackRecord(rows[0]);
+      await this.insertAudit(client, {
+        workspaceId,
+        actorId,
+        action: "feedback.transitioned",
+        resourceType: "agent_feedback",
+        resourceId: feedback.id,
+        metadata: { status }
+      });
+      return feedback;
+    });
   }
 
   async markFeedbackRebuild(
@@ -415,6 +560,73 @@ export class PostgresAppStore implements AppStore {
       [workspaceId, feedbackId, buildId]
     );
     return rows[0] ? feedbackRecord(rows[0]) : null;
+  }
+
+  async requestFeedbackRebuildWithAudit(
+    input: FeedbackRebuildInput
+  ): Promise<{ build: BuildRecord; created: boolean }> {
+    return this.transaction(async (client) => {
+      const selected = await client.query<FeedbackRow>(
+        `SELECT id, workspace_id, release_id, query, reason, expected, status,
+                rebuild_build_id, created_at, updated_at
+         FROM agent_feedback WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+        [input.workspaceId, input.feedbackId]
+      );
+      if (!selected.rows[0] || selected.rows[0].status !== "acknowledged") {
+        throw new FeedbackNotAcknowledgedError();
+      }
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [input.build.repositoryId]);
+      const active = await client.query<BuildRow>(
+        `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
+                status, warnings, cancel_requested, error_message
+         FROM build_jobs
+         WHERE workspace_id = $1 AND repository_id = $2
+           AND status NOT IN ('ready', 'published', 'failed')
+         ORDER BY created_at DESC LIMIT 1`,
+        [input.workspaceId, input.build.repositoryId]
+      );
+      let build: BuildRecord;
+      let created = false;
+      if (active.rows[0]) {
+        build = buildRecord(active.rows[0]);
+      } else {
+        const inserted = await client.query<BuildRow>(
+          `INSERT INTO build_jobs
+           (workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha, status)
+           VALUES ($1, $2, $3, $4, $5, 'queued')
+           RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
+                     status, warnings, cancel_requested, error_message`,
+          [
+            input.build.workspaceId,
+            input.build.repositoryId,
+            input.build.snapshotId,
+            input.build.snapshotPath,
+            input.build.commitSha
+          ]
+        );
+        build = buildRecord(inserted.rows[0]);
+        created = true;
+        await client.query(
+          `INSERT INTO build_events (workspace_id, build_job_id, status)
+           VALUES ($1, $2, 'queued')`,
+          [build.workspaceId, build.id]
+        );
+      }
+      await client.query(
+        `UPDATE agent_feedback SET rebuild_build_id = $3, updated_at = now()
+         WHERE workspace_id = $1 AND id = $2`,
+        [input.workspaceId, input.feedbackId, build.id]
+      );
+      await this.insertAudit(client, {
+        workspaceId: input.workspaceId,
+        actorId: input.actorId,
+        action: "feedback.rebuild_requested",
+        resourceType: "agent_feedback",
+        resourceId: input.feedbackId,
+        metadata: { buildId: build.id, releaseId: input.releaseId }
+      });
+      return { build, created };
+    });
   }
 
   async createRepository(

@@ -12,8 +12,13 @@ import Fastify, {
 import { z } from "zod";
 
 import { AGENT_FEEDBACK_STATUSES, SERVICE_NAME } from "../shared/contracts.js";
-import type { AdminRecord, AppStore } from "./persistence/store.js";
-import type { RepositoryRecord } from "./persistence/store.js";
+import {
+  FeedbackNotAcknowledgedError,
+  InvalidFeedbackTransitionError,
+  type AdminRecord,
+  type AppStore,
+  type RepositoryRecord
+} from "./persistence/store.js";
 import { decryptSecret, encryptSecret } from "./security/crypto.js";
 import { DirtyWorktreeError, syncRepository } from "./git/snapshot.js";
 import { hashPassword, verifyPassword } from "./security/password.js";
@@ -196,20 +201,17 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MCP token");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const plaintext = generateMcpToken();
-    const token = await options.store.createMcpToken({
-      workspaceId: admin.workspaceId,
-      name: parsed.data.name,
-      tokenHash: hashMcpToken(plaintext),
-      tokenPrefix: plaintext.slice(0, 12)
-    });
-    await options.store.recordAudit({
-      workspaceId: admin.workspaceId,
-      actorId: admin.id,
-      action: "mcp_token.created",
-      resourceType: "mcp_token",
-      resourceId: token.id
-    });
-    return reply.code(201).send({ ...sanitizedMcpToken(token), token: plaintext });
+    try {
+      const token = await options.store.createMcpTokenWithAudit({
+        workspaceId: admin.workspaceId,
+        name: parsed.data.name,
+        tokenHash: hashMcpToken(plaintext),
+        tokenPrefix: plaintext.slice(0, 12)
+      }, admin.id);
+      return reply.code(201).send({ ...sanitizedMcpToken(token), token: plaintext });
+    } catch {
+      return sendError(reply, 500, "TOKEN_OPERATION_FAILED", "MCP token creation failed");
+    }
   });
 
   server.get("/api/mcp/tokens", { preHandler: requireAdmin }, async (request) => {
@@ -223,16 +225,15 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const parsed = z.object({ id: z.uuid() }).safeParse(request.params);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MCP token");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const token = await options.store.revokeMcpToken(admin.workspaceId, parsed.data.id);
-    if (!token) return sendError(reply, 404, "TOKEN_NOT_FOUND", "MCP token was not found");
-    await options.store.recordAudit({
-      workspaceId: admin.workspaceId,
-      actorId: admin.id,
-      action: "mcp_token.revoked",
-      resourceType: "mcp_token",
-      resourceId: token.id
-    });
-    return { token: sanitizedMcpToken(token) };
+    try {
+      const token = await options.store.revokeMcpTokenWithAudit(
+        admin.workspaceId, parsed.data.id, admin.id
+      );
+      if (!token) return sendError(reply, 404, "TOKEN_NOT_FOUND", "MCP token was not found");
+      return { token: sanitizedMcpToken(token) };
+    } catch {
+      return sendError(reply, 500, "TOKEN_OPERATION_FAILED", "MCP token revocation failed");
+    }
   });
 
   server.get("/api/mcp/connection", { preHandler: requireAdmin }, async () => ({
@@ -482,7 +483,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       startLine: z.coerce.number().int().positive(),
       endLine: z.coerce.number().int().positive(),
       releaseId: z.string().optional()
-    }).refine((value) => value.endLine >= value.startLine && value.endLine - value.startLine <= 500)
+    }).refine((value) =>
+      value.endLine >= value.startLine && value.endLine - value.startLine + 1 <= 500
+    )
       .safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid source range");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
@@ -581,21 +584,16 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     try {
-      const feedback = await options.store.transitionFeedback(
-        admin.workspaceId, params.data.id, body.data.status
+      const feedback = await options.store.transitionFeedbackWithAudit(
+        admin.workspaceId, params.data.id, body.data.status, admin.id
       );
       if (!feedback) return sendError(reply, 404, "FEEDBACK_NOT_FOUND", "Feedback was not found");
-      await options.store.recordAudit({
-        workspaceId: admin.workspaceId,
-        actorId: admin.id,
-        action: "feedback.transitioned",
-        resourceType: "agent_feedback",
-        resourceId: feedback.id,
-        metadata: { status: feedback.status }
-      });
       return { feedback };
-    } catch {
-      return sendError(reply, 409, "INVALID_FEEDBACK_TRANSITION", "Feedback transition is not allowed");
+    } catch (error) {
+      if (error instanceof InvalidFeedbackTransitionError) {
+        return sendError(reply, 409, "INVALID_FEEDBACK_TRANSITION", "Feedback transition is not allowed");
+      }
+      return sendError(reply, 500, "FEEDBACK_OPERATION_FAILED", "Feedback transition failed");
     }
   });
 
@@ -622,23 +620,28 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!repository || !release || !snapshot) {
       return sendError(reply, 409, "UNPUBLISHED", "No published release can be rebuilt");
     }
-    const result = await options.buildService.startBuild({
-      workspaceId: admin.workspaceId,
-      repositoryId: repository.id,
-      snapshotId: snapshot.id,
-      snapshotPath: snapshot.storagePath,
-      commitSha: snapshot.commitSha
-    });
-    await options.store.markFeedbackRebuild(admin.workspaceId, feedback.id, result.build.id);
-    await options.store.recordAudit({
-      workspaceId: admin.workspaceId,
-      actorId: admin.id,
-      action: "feedback.rebuild_requested",
-      resourceType: "agent_feedback",
-      resourceId: feedback.id,
-      metadata: { buildId: result.build.id, releaseId: release.id }
-    });
-    return reply.code(result.created ? 202 : 200).send(result);
+    try {
+      const result = await options.store.requestFeedbackRebuildWithAudit({
+        workspaceId: admin.workspaceId,
+        feedbackId: feedback.id,
+        releaseId: release.id,
+        actorId: admin.id,
+        build: {
+          workspaceId: admin.workspaceId,
+          repositoryId: repository.id,
+          snapshotId: snapshot.id,
+          snapshotPath: snapshot.storagePath,
+          commitSha: snapshot.commitSha
+        }
+      });
+      await options.buildService.enqueueBuild(result);
+      return reply.code(result.created ? 202 : 200).send(result);
+    } catch (error) {
+      if (error instanceof FeedbackNotAcknowledgedError) {
+        return sendError(reply, 409, "FEEDBACK_NOT_ACKNOWLEDGED", "Feedback must be acknowledged first");
+      }
+      return sendError(reply, 500, "FEEDBACK_OPERATION_FAILED", "Feedback rebuild failed");
+    }
   });
 
   server.all("/mcp", async (request, reply) => {

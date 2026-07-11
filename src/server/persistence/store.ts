@@ -66,6 +66,28 @@ export interface CreateFeedbackInput {
   expected?: string;
 }
 
+export class InvalidFeedbackTransitionError extends Error {
+  constructor() {
+    super("Invalid feedback transition");
+    this.name = "InvalidFeedbackTransitionError";
+  }
+}
+
+export class FeedbackNotAcknowledgedError extends Error {
+  constructor() {
+    super("Feedback must be acknowledged first");
+    this.name = "FeedbackNotAcknowledgedError";
+  }
+}
+
+export interface FeedbackRebuildInput {
+  workspaceId: string;
+  feedbackId: string;
+  releaseId: string;
+  actorId: string;
+  build: Omit<BuildRecord, "id" | "status" | "warnings" | "cancelRequested">;
+}
+
 export type RepositoryKind = "local" | "git";
 
 export interface RepositoryRecord {
@@ -197,22 +219,41 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   recordAudit(event: AuditEventInput): Promise<void>;
   createMcpToken(input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">):
     Promise<McpTokenRecord>;
+  createMcpTokenWithAudit(
+    input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">,
+    actorId: string
+  ): Promise<McpTokenRecord>;
   listMcpTokens(workspaceId: string): Promise<McpTokenRecord[]>;
   findActiveMcpToken(tokenHash: string): Promise<McpTokenRecord | null>;
   touchMcpToken(tokenId: string): Promise<void>;
   revokeMcpToken(workspaceId: string, tokenId: string): Promise<McpTokenRecord | null>;
+  revokeMcpTokenWithAudit(
+    workspaceId: string,
+    tokenId: string,
+    actorId: string
+  ): Promise<McpTokenRecord | null>;
   createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord>;
+  reportFeedbackWithAudit(input: CreateFeedbackInput): Promise<AgentFeedbackRecord>;
   listFeedback(workspaceId: string, status?: AgentFeedbackStatus): Promise<AgentFeedbackRecord[]>;
   transitionFeedback(
     workspaceId: string,
     feedbackId: string,
     status: AgentFeedbackStatus
   ): Promise<AgentFeedbackRecord | null>;
+  transitionFeedbackWithAudit(
+    workspaceId: string,
+    feedbackId: string,
+    status: AgentFeedbackStatus,
+    actorId: string
+  ): Promise<AgentFeedbackRecord | null>;
   markFeedbackRebuild(
     workspaceId: string,
     feedbackId: string,
     buildId: string
   ): Promise<AgentFeedbackRecord | null>;
+  requestFeedbackRebuildWithAudit(
+    input: FeedbackRebuildInput
+  ): Promise<{ build: BuildRecord; created: boolean }>;
   createRepository(
     workspaceId: string,
     input: RepositoryConnectionInput

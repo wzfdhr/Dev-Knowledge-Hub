@@ -197,4 +197,34 @@ describe("knowledge API contracts", () => {
       .toHaveLength(1);
     await app.close();
   });
+
+  test("accepts a 500-line source request and rejects 501 lines during validation", async () => {
+    const { app, store, cookie, repositoryId, workspaceId, index } = await authenticatedApp();
+    const build = (await store.createBuild({
+      workspaceId,
+      repositoryId,
+      snapshotId: "11111111-1111-4111-8111-111111111111",
+      snapshotPath: fixtureRoot,
+      commitSha: index.commitSha
+    })).build;
+    await store.saveKnowledge({ build, index, output: await generateKnowledge(index) });
+    await store.transitionBuild(build.id, "queued", "ready");
+    const release = await store.createReleaseDraft(workspaceId, repositoryId, build.id, "1.0.0");
+    await store.publishRelease(workspaceId, release.id);
+
+    const fiveHundred = await app.inject({
+      method: "GET",
+      url: "/api/knowledge/source?path=src/math.ts&startLine=1&endLine=500",
+      headers: { cookie }
+    });
+    const fiveHundredOne = await app.inject({
+      method: "GET",
+      url: "/api/knowledge/source?path=src/math.ts&startLine=1&endLine=501",
+      headers: { cookie }
+    });
+
+    expect(fiveHundred.json().error.code).toBe("INVALID_SOURCE_RANGE");
+    expect(fiveHundredOne.json().error.code).toBe("INVALID_REQUEST");
+    await app.close();
+  });
 });

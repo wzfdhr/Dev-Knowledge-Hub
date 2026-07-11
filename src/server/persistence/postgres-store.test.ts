@@ -198,3 +198,92 @@ describe("PostgresAppStore knowledge releases", () => {
     expect(sql).toContain("ORDER BY score DESC, title ASC");
   });
 });
+
+describe("PostgresAppStore audited mutations", () => {
+  const tokenRow = {
+    id: "token-1",
+    workspace_id: "workspace-1",
+    name: "CI",
+    token_hash: "a".repeat(64),
+    token_prefix: "dkh_example",
+    created_at: new Date(),
+    last_used_at: null,
+    revoked_at: null
+  };
+  const feedbackRow = {
+    id: "feedback-1",
+    workspace_id: "workspace-1",
+    release_id: "release-1",
+    query: "deploy",
+    reason: "missing",
+    expected: null,
+    status: "acknowledged",
+    rebuild_build_id: null,
+    created_at: new Date(),
+    updated_at: new Date()
+  };
+  const buildRow = {
+    id: "build-1",
+    workspace_id: "workspace-1",
+    repository_id: "repo-1",
+    snapshot_id: "snapshot-1",
+    snapshot_path: "/snapshot",
+    commit_sha: "b".repeat(40),
+    status: "queued",
+    warnings: [],
+    cancel_requested: false,
+    error_message: null
+  };
+
+  test.each([
+    ["token create", (store: PostgresAppStore) => store.createMcpTokenWithAudit({
+      workspaceId: "workspace-1",
+      name: "CI",
+      tokenHash: "a".repeat(64),
+      tokenPrefix: "dkh_example"
+    }, "admin-1")],
+    ["token revoke", (store: PostgresAppStore) =>
+      store.revokeMcpTokenWithAudit("workspace-1", "token-1", "admin-1")],
+    ["feedback report", (store: PostgresAppStore) => store.reportFeedbackWithAudit({
+      workspaceId: "workspace-1", releaseId: "release-1", query: "deploy", reason: "missing"
+    })],
+    ["feedback transition", (store: PostgresAppStore) =>
+      store.transitionFeedbackWithAudit("workspace-1", "feedback-1", "fixed", "admin-1")],
+    ["feedback rebuild", (store: PostgresAppStore) => store.requestFeedbackRebuildWithAudit({
+      workspaceId: "workspace-1",
+      feedbackId: "feedback-1",
+      releaseId: "release-1",
+      actorId: "admin-1",
+      build: {
+        workspaceId: "workspace-1",
+        repositoryId: "repo-1",
+        snapshotId: "snapshot-1",
+        snapshotPath: "/snapshot",
+        commitSha: "b".repeat(40)
+      }
+    })]
+  ])("rolls back %s when the required audit insert fails", async (_name, invoke) => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("INSERT INTO audit_events")) throw new Error("audit unavailable");
+      if (sql.includes("INSERT INTO mcp_tokens") || sql.includes("UPDATE mcp_tokens")) {
+        return { rows: [tokenRow] };
+      }
+      if (sql.includes("FROM agent_feedback") && sql.includes("FOR UPDATE")) {
+        return { rows: [feedbackRow] };
+      }
+      if (sql.includes("INSERT INTO agent_feedback") || sql.includes("UPDATE agent_feedback")) {
+        return { rows: [feedbackRow] };
+      }
+      if (sql.includes("FROM build_jobs")) return { rows: [buildRow] };
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+
+    await expect(invoke(store)).rejects.toThrow("audit unavailable");
+
+    expect(query.mock.calls[0][0]).toBe("BEGIN");
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    expect(query.mock.calls.some(([sql]) => sql === "COMMIT")).toBe(false);
+  });
+});

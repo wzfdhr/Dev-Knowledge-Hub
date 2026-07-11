@@ -1,13 +1,17 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, test } from "vitest";
 
 import { buildServer } from "./app";
 import { BuildService, type BuildJobQueue } from "./knowledge/build-service";
 import { generateKnowledge } from "./knowledge/generator";
 import { analyzeSnapshot } from "./knowledge/intelligence";
+import { createMcpServer } from "./mcp-stdio";
 import { MemoryAppStore } from "./persistence/memory-store";
+import type { AuditEventInput } from "./persistence/store";
 
 const fixtureRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -22,8 +26,16 @@ class ControlledQueue implements BuildJobQueue {
   async stop() {}
 }
 
-async function context() {
-  const store = new MemoryAppStore();
+class FailingAuditStore extends MemoryAppStore {
+  failAudit = false;
+
+  override async recordAudit(event: AuditEventInput) {
+    await super.recordAudit(event);
+    if (this.failAudit) throw new Error("audit unavailable");
+  }
+}
+
+async function context(store: MemoryAppStore = new MemoryAppStore()) {
   const queue = new ControlledQueue();
   const buildService = new BuildService(store, queue);
   await buildService.start();
@@ -131,6 +143,112 @@ describe("manual feedback workflow", () => {
     expect(store.releases).toHaveLength(1);
     expect(store.auditEvents.some((event) => event.action === "feedback.rebuild_requested"))
       .toBe(true);
+    await app.close();
+  });
+});
+
+describe("audited mutation atomicity", () => {
+  test("does not persist a token hash when token creation audit fails", async () => {
+    const store = new FailingAuditStore();
+    const { app, cookie } = await context(store);
+    const auditCount = store.auditEvents.length;
+    store.failAudit = true;
+
+    const response = await app.inject({
+      method: "POST", url: "/api/mcp/tokens", headers: { cookie }, payload: { name: "CI" }
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(store.mcpTokens).toEqual([]);
+    expect(store.auditEvents).toHaveLength(auditCount);
+    await app.close();
+  });
+
+  test("does not revoke a token when revocation audit fails", async () => {
+    const store = new FailingAuditStore();
+    const { app, cookie, workspaceId } = await context(store);
+    const token = await store.createMcpToken({
+      workspaceId, name: "CI", tokenHash: "c".repeat(64), tokenPrefix: "dkh_example"
+    });
+    const auditCount = store.auditEvents.length;
+    store.failAudit = true;
+
+    const response = await app.inject({
+      method: "POST", url: `/api/mcp/tokens/${token.id}/revoke`, headers: { cookie }
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(store.mcpTokens[0].revokedAt).toBeNull();
+    expect(store.auditEvents).toHaveLength(auditCount);
+    await app.close();
+  });
+
+  test("does not persist reported feedback when its audit fails", async () => {
+    const store = new FailingAuditStore();
+    const { app, workspaceId } = await context(store);
+    const auditCount = store.auditEvents.length;
+    store.failAudit = true;
+    const factory = createMcpServer as unknown as (value: {
+      store: MemoryAppStore; workspaceId: string;
+    }) => ReturnType<typeof createMcpServer>;
+    const server = factory({ store, workspaceId });
+    const client = new Client({ name: "audit-test", version: "0.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const response = await client.callTool({
+      name: "dkh_report_gap", arguments: { query: "deploy", reason: "missing" }
+    });
+
+    expect(response.isError).toBe(true);
+    expect(store.feedback).toEqual([]);
+    expect(store.auditEvents).toHaveLength(auditCount);
+    await client.close();
+    await server.close();
+    await app.close();
+  });
+
+  test("rolls back a feedback transition and maps audit failure as server failure", async () => {
+    const store = new FailingAuditStore();
+    const { app, cookie, workspaceId } = await context(store);
+    const feedback = await store.createFeedback({ workspaceId, query: "deploy", reason: "missing" });
+    const auditCount = store.auditEvents.length;
+    store.failAudit = true;
+
+    const response = await app.inject({
+      method: "PATCH", url: `/api/feedback/${feedback.id}`,
+      headers: { cookie }, payload: { status: "acknowledged" }
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json().error.code).toBe("FEEDBACK_OPERATION_FAILED");
+    expect(store.feedback[0].status).toBe("open");
+    expect(store.auditEvents).toHaveLength(auditCount);
+    await app.close();
+  });
+
+  test("rolls back rebuild creation and association when its audit fails", async () => {
+    const store = new FailingAuditStore();
+    const { app, cookie, workspaceId, release } = await context(store);
+    const feedback = await store.createFeedback({ workspaceId, query: "deploy", reason: "missing" });
+    await store.transitionFeedback(workspaceId, feedback.id, "acknowledged");
+    const buildCount = store.builds.length;
+    const eventCount = store.buildEvents.length;
+    const auditCount = store.auditEvents.length;
+    store.failAudit = true;
+
+    const response = await app.inject({
+      method: "POST", url: `/api/feedback/${feedback.id}/rebuild`, headers: { cookie }
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(store.builds).toHaveLength(buildCount);
+    expect(store.buildEvents).toHaveLength(eventCount);
+    expect(store.feedback.find((candidate) => candidate.id === feedback.id)?.rebuildBuildId).toBeNull();
+    expect(store.auditEvents).toHaveLength(auditCount);
+    expect(store.releases).toHaveLength(1);
+    expect(store.releases[0].id).toBe(release.id);
     await app.close();
   });
 });

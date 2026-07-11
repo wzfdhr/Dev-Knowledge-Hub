@@ -1,3 +1,5 @@
+import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -48,12 +50,12 @@ async function adminContext() {
   };
 }
 
-async function publishedContext() {
+async function publishedContext(root = fixtureRoot) {
   const context = await adminContext();
   const repository = (await context.store.createRepository(context.workspaceId, {
-    kind: "local", name: "Fixture", path: fixtureRoot
+    kind: "local", name: "Fixture", path: root
   }))!;
-  const index = await analyzeSnapshot(fixtureRoot, "a".repeat(40));
+  const index = await analyzeSnapshot(root, "a".repeat(40));
   const snapshotId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   await context.store.createSnapshot({
     snapshot: {
@@ -64,7 +66,7 @@ async function publishedContext() {
       ref: "main",
       remoteUrl: null,
       commitTimestamp: new Date("2026-07-11T00:00:00Z"),
-      storagePath: fixtureRoot
+      storagePath: root
     },
     files: index.files.map((file, position) => ({
       id: `aaaaaaaa-aaaa-4aaa-8aaa-${String(position + 1).padStart(12, "0")}`,
@@ -80,7 +82,7 @@ async function publishedContext() {
     workspaceId: context.workspaceId,
     repositoryId: repository.id,
     snapshotId,
-    snapshotPath: fixtureRoot,
+    snapshotPath: root,
     commitSha: index.commitSha
   })).build;
   await context.store.saveKnowledge({ build, index, output: await generateKnowledge(index) });
@@ -165,7 +167,7 @@ describe("MCP bearer tokens", () => {
 });
 
 describe("MCP tool contract", () => {
-  test("returns the common release envelope from every read-only tool", async () => {
+  test("returns the exact common release envelope from all eight tools", async () => {
     const { store, workspaceId, release, index, app } = await publishedContext();
     const client = await connectMcp(store, workspaceId);
     const calls: Array<[string, Record<string, unknown>]> = [
@@ -175,29 +177,51 @@ describe("MCP tool contract", () => {
       ["dkh_get_symbol", { name: "add", path: "src/math.ts" }],
       ["dkh_get_change_context", { task: "change add", paths: ["src/math.ts"] }],
       ["dkh_get_source", { path: "src/math.ts", startLine: 16, endLine: 18 }],
-      ["dkh_get_release", {}]
+      ["dkh_get_release", {}],
+      ["dkh_report_gap", {
+        query: "How do I deploy?", reason: "No deployment guide", expected: "commands"
+      }]
     ];
 
     for (const [name, args] of calls) {
       const response = await client.callTool({ name, arguments: args });
       expect(response.isError, name).not.toBe(true);
-      expect(response.structuredContent, name).toMatchObject({
+      const envelope = response.structuredContent as {
+        releaseId: string;
+        commitSha: string;
+        result: unknown;
+        citations: unknown[];
+      };
+      expect(Object.keys(envelope).sort(), name).toEqual([
+        "citations", "commitSha", "releaseId", "result"
+      ]);
+      expect(envelope, name).toMatchObject({
         releaseId: release.id,
         commitSha: index.commitSha,
-        citations: expect.arrayContaining([expect.objectContaining({
-          path: expect.any(String),
-          startLine: expect.any(Number),
-          endLine: expect.any(Number),
-          commitSha: index.commitSha,
-          blobHash: expect.any(String)
-        })])
+        citations: expect.any(Array)
       });
-      expect(response.structuredContent, name).toHaveProperty("result");
+      if (name === "dkh_report_gap") {
+        expect(envelope.citations).toEqual([]);
+        expect(envelope.result).toEqual({
+          feedback: expect.objectContaining({ query: "How do I deploy?", status: "open" })
+        });
+      } else {
+        expect(envelope.citations).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            path: expect.any(String),
+            startLine: expect.any(Number),
+            endLine: expect.any(Number),
+            commitSha: index.commitSha,
+            blobHash: expect.any(String)
+          })
+        ]));
+      }
+      expect(envelope, name).toHaveProperty("result");
     }
     await app.close();
   });
 
-  test("validates inputs and returns stable unpublished and missing-citation errors", async () => {
+  test("returns stable unpublished and missing-citation errors", async () => {
     const unpublished = await adminContext();
     await unpublished.store.createRepository(unpublished.workspaceId, {
       kind: "local", name: "Fixture", path: fixtureRoot
@@ -216,12 +240,61 @@ describe("MCP tool contract", () => {
     expect(missing).toMatchObject({ isError: true });
     expect(JSON.stringify(missing)).toContain("CITATIONS_MISSING");
 
-    const invalid = await citedClient.callTool({
-      name: "dkh_get_source", arguments: { path: "src/math.ts", startLine: 0 }
-    });
-    expect(invalid).toMatchObject({ isError: true });
     await unpublished.app.close();
     await published.app.close();
+  });
+
+  test("returns INVALID_INPUT with deterministic details for every tool", async () => {
+    const { store, workspaceId, app } = await publishedContext();
+    const client = await connectMcp(store, workspaceId);
+    const invalidCalls: Array<[string, Record<string, unknown>]> = [
+      ["dkh_search", { limit: 0 }],
+      ["dkh_get_architecture", { unexpected: true }],
+      ["dkh_get_module", { moduleId: "" }],
+      ["dkh_get_symbol", { name: "" }],
+      ["dkh_get_change_context", { task: "", paths: [] }],
+      ["dkh_get_source", { path: "src/math.ts", startLine: 0 }],
+      ["dkh_get_release", { unexpected: true }],
+      ["dkh_report_gap", { query: "", reason: "" }]
+    ];
+
+    for (const [name, args] of invalidCalls) {
+      const response = await client.callTool({ name, arguments: args });
+      expect(response.isError, name).toBe(true);
+      const body = JSON.parse(((response.content as Array<{ text: string }>)[0]).text);
+      expect(body.error.code, name).toBe("INVALID_INPUT");
+      expect(body.error.message, name).toBe("Tool input is invalid");
+      expect(body.error.details, name).toEqual(expect.arrayContaining([
+        expect.objectContaining({ path: expect.any(String), code: expect.any(String) })
+      ]));
+      const repeated = await client.callTool({ name, arguments: args });
+      expect(JSON.parse(((repeated.content as Array<{ text: string }>)[0]).text), name).toEqual(body);
+    }
+    await app.close();
+  });
+
+  test("accepts exactly 500 source lines and rejects 501", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "devkh-mcp-lines-"));
+    await fs.cp(fixtureRoot, root, { recursive: true });
+    await fs.writeFile(
+      path.join(root, "long.ts"),
+      Array.from({ length: 501 }, (_, index) => `export const line${index + 1} = ${index + 1};`).join("\n")
+    );
+    const { store, workspaceId, app } = await publishedContext(root);
+    const client = await connectMcp(store, workspaceId);
+
+    const accepted = await client.callTool({
+      name: "dkh_get_source", arguments: { path: "long.ts", startLine: 1, endLine: 500 }
+    });
+    expect(accepted.isError).not.toBe(true);
+    const rejected = await client.callTool({
+      name: "dkh_get_source", arguments: { path: "long.ts", startLine: 1, endLine: 501 }
+    });
+    expect(rejected.isError).toBe(true);
+    expect(JSON.parse(((rejected.content as Array<{ text: string }>)[0]).text).error.code)
+      .toBe("INVALID_INPUT");
+    await app.close();
+    await fs.rm(root, { recursive: true, force: true });
   });
 
   test("keeps seven tools read-only and lets only report-gap create feedback", async () => {

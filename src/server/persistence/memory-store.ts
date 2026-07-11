@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
 
+import {
+  FeedbackNotAcknowledgedError,
+  InvalidFeedbackTransitionError
+} from "./store.js";
+
 import type {
   AdminRecord,
   AgentFeedbackRecord,
@@ -10,6 +15,7 @@ import type {
   CreateSnapshotInput,
   CreateFeedbackInput,
   EncryptedCredentialRecord,
+  FeedbackRebuildInput,
   KnowledgePageRecord,
   KnowledgeSearchResult,
   McpTokenRecord,
@@ -96,6 +102,29 @@ export class MemoryAppStore implements AppStore {
     return record;
   }
 
+  async createMcpTokenWithAudit(
+    input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">,
+    actorId: string
+  ): Promise<McpTokenRecord> {
+    const tokenLength = this.mcpTokens.length;
+    const auditLength = this.auditEvents.length;
+    try {
+      const token = await this.createMcpToken(input);
+      await this.recordAudit({
+        workspaceId: input.workspaceId,
+        actorId,
+        action: "mcp_token.created",
+        resourceType: "mcp_token",
+        resourceId: token.id
+      });
+      return token;
+    } catch (error) {
+      this.mcpTokens.splice(tokenLength);
+      this.auditEvents.splice(auditLength);
+      throw error;
+    }
+  }
+
   async listMcpTokens(workspaceId: string): Promise<McpTokenRecord[]> {
     return this.mcpTokens.filter((token) => token.workspaceId === workspaceId);
   }
@@ -118,6 +147,34 @@ export class MemoryAppStore implements AppStore {
     return token;
   }
 
+  async revokeMcpTokenWithAudit(
+    workspaceId: string,
+    tokenId: string,
+    actorId: string
+  ): Promise<McpTokenRecord | null> {
+    const token = this.mcpTokens.find((candidate) =>
+      candidate.id === tokenId && candidate.workspaceId === workspaceId
+    );
+    if (!token) return null;
+    const previousRevokedAt = token.revokedAt;
+    const auditLength = this.auditEvents.length;
+    try {
+      await this.revokeMcpToken(workspaceId, tokenId);
+      await this.recordAudit({
+        workspaceId,
+        actorId,
+        action: "mcp_token.revoked",
+        resourceType: "mcp_token",
+        resourceId: tokenId
+      });
+      return token;
+    } catch (error) {
+      token.revokedAt = previousRevokedAt;
+      this.auditEvents.splice(auditLength);
+      throw error;
+    }
+  }
+
   async createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord> {
     const now = new Date();
     const record: AgentFeedbackRecord = {
@@ -134,6 +191,26 @@ export class MemoryAppStore implements AppStore {
     };
     this.feedback.push(record);
     return record;
+  }
+
+  async reportFeedbackWithAudit(input: CreateFeedbackInput): Promise<AgentFeedbackRecord> {
+    const feedbackLength = this.feedback.length;
+    const auditLength = this.auditEvents.length;
+    try {
+      const feedback = await this.createFeedback(input);
+      await this.recordAudit({
+        workspaceId: input.workspaceId,
+        action: "feedback.reported",
+        resourceType: "agent_feedback",
+        resourceId: feedback.id,
+        metadata: { releaseId: input.releaseId }
+      });
+      return feedback;
+    } catch (error) {
+      this.feedback.splice(feedbackLength);
+      this.auditEvents.splice(auditLength);
+      throw error;
+    }
   }
 
   async listFeedback(
@@ -160,10 +237,41 @@ export class MemoryAppStore implements AppStore {
       fixed: [],
       dismissed: []
     };
-    if (!allowed[record.status].includes(status)) throw new Error("Invalid feedback transition");
+    if (!allowed[record.status].includes(status)) throw new InvalidFeedbackTransitionError();
     record.status = status;
     record.updatedAt = new Date();
     return record;
+  }
+
+  async transitionFeedbackWithAudit(
+    workspaceId: string,
+    feedbackId: string,
+    status: AgentFeedbackStatus,
+    actorId: string
+  ): Promise<AgentFeedbackRecord | null> {
+    const record = this.feedback.find((candidate) =>
+      candidate.workspaceId === workspaceId && candidate.id === feedbackId
+    );
+    if (!record) return null;
+    const previous = { status: record.status, updatedAt: record.updatedAt };
+    const auditLength = this.auditEvents.length;
+    try {
+      await this.transitionFeedback(workspaceId, feedbackId, status);
+      await this.recordAudit({
+        workspaceId,
+        actorId,
+        action: "feedback.transitioned",
+        resourceType: "agent_feedback",
+        resourceId: feedbackId,
+        metadata: { status }
+      });
+      return record;
+    } catch (error) {
+      record.status = previous.status;
+      record.updatedAt = previous.updatedAt;
+      this.auditEvents.splice(auditLength);
+      throw error;
+    }
   }
 
   async markFeedbackRebuild(
@@ -178,6 +286,46 @@ export class MemoryAppStore implements AppStore {
     record.rebuildBuildId = buildId;
     record.updatedAt = new Date();
     return record;
+  }
+
+  async requestFeedbackRebuildWithAudit(
+    input: FeedbackRebuildInput
+  ): Promise<{ build: BuildRecord; created: boolean }> {
+    const feedback = this.feedback.find((candidate) =>
+      candidate.workspaceId === input.workspaceId && candidate.id === input.feedbackId
+    );
+    if (!feedback || feedback.status !== "acknowledged") {
+      throw new FeedbackNotAcknowledgedError();
+    }
+    const buildLength = this.builds.length;
+    const eventLength = this.buildEvents.length;
+    const auditLength = this.auditEvents.length;
+    const previousSequence = this.nextBuildEventSequence;
+    const previousFeedback = {
+      rebuildBuildId: feedback.rebuildBuildId,
+      updatedAt: feedback.updatedAt
+    };
+    try {
+      const result = await this.createBuild(input.build);
+      await this.markFeedbackRebuild(input.workspaceId, input.feedbackId, result.build.id);
+      await this.recordAudit({
+        workspaceId: input.workspaceId,
+        actorId: input.actorId,
+        action: "feedback.rebuild_requested",
+        resourceType: "agent_feedback",
+        resourceId: input.feedbackId,
+        metadata: { buildId: result.build.id, releaseId: input.releaseId }
+      });
+      return result;
+    } catch (error) {
+      this.builds.splice(buildLength);
+      this.buildEvents.splice(eventLength);
+      this.auditEvents.splice(auditLength);
+      this.nextBuildEventSequence = previousSequence;
+      feedback.rebuildBuildId = previousFeedback.rebuildBuildId;
+      feedback.updatedAt = previousFeedback.updatedAt;
+      throw error;
+    }
   }
 
   async createRepository(

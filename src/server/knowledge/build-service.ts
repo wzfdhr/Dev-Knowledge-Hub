@@ -127,6 +127,12 @@ export class BuildService {
     input: Omit<BuildRecord, "id" | "status" | "warnings" | "cancelRequested">
   ): Promise<{ build: BuildRecord; created: boolean }> {
     const result = await this.persistence.createBuild(input);
+    return this.enqueueBuild(result);
+  }
+
+  async enqueueBuild(
+    result: { build: BuildRecord; created: boolean }
+  ): Promise<{ build: BuildRecord; created: boolean }> {
     if (result.created) {
       await this.emitLatest(result.build);
       await this.queue.send(result.build.id);

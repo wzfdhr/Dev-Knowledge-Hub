@@ -252,6 +252,21 @@ describe("MCP tool contract", () => {
     await published.app.close();
   });
 
+  test("does not substitute generic support pages for undiscovered change context", async () => {
+    const { store, workspaceId, app } = await publishedContext();
+    const client = await connectMcp(store, workspaceId);
+
+    const response = await client.callTool({
+      name: "dkh_get_change_context",
+      arguments: { task: "modify xyzzynotfound behavior" }
+    });
+
+    expect(response.isError).toBe(true);
+    expect(JSON.parse(((response.content as Array<{ text: string }>)[0]).text).error.code)
+      .toBe("NOT_FOUND");
+    await app.close();
+  });
+
   test("returns INVALID_INPUT with deterministic details for every tool", async () => {
     const { store, workspaceId, app } = await publishedContext();
     const client = await connectMcp(store, workspaceId);

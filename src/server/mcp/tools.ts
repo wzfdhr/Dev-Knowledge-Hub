@@ -18,6 +18,7 @@ import type { Citation } from "../knowledge/intelligence.js";
 import type {
   AppStore,
   KnowledgePageRecord,
+  KnowledgeSearchResult,
   ReleaseRecord
 } from "../persistence/store.js";
 
@@ -104,6 +105,36 @@ async function published(context?: McpToolContext) {
 
 async function pagesFor(context: McpToolContext, release: ReleaseRecord) {
   return context.store.listKnowledgePages(context.workspaceId, release.id);
+}
+
+const taskStopWords = new Set([
+  "a", "an", "and", "change", "for", "in", "of", "on", "the", "to", "update", "with"
+]);
+
+function taskTerms(task: string): string[] {
+  return [...new Set(task.toLowerCase().match(/[a-z0-9_.-]+/g) ?? [])]
+    .filter((term) => term.length >= 3 && !taskStopWords.has(term))
+    .slice(0, 12);
+}
+
+function mergeSearchResults(results: KnowledgeSearchResult[]): KnowledgeSearchResult[] {
+  const merged = new Map<string, KnowledgeSearchResult>();
+  for (const result of results) {
+    const existing = merged.get(result.pageId);
+    if (!existing) {
+      merged.set(result.pageId, result);
+      continue;
+    }
+    existing.citations = uniqueCitations([...existing.citations, ...result.citations]);
+    if (result.score > existing.score) {
+      existing.score = result.score;
+      existing.kind = result.kind;
+      existing.title = result.title;
+      existing.excerpt = result.excerpt;
+    }
+  }
+  return [...merged.values()].sort((left, right) =>
+    right.score - left.score || left.title.localeCompare(right.title) || left.pageId.localeCompare(right.pageId));
 }
 
 async function readSource(
@@ -269,13 +300,48 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     async ({ task, paths }) => {
     try {
       const selected = await published(context);
-      const queries = [task, ...(paths ?? [])];
+      const terms = taskTerms(task);
+      const queries = [...new Set([task, ...terms, ...(paths ?? [])])];
       const groups = await Promise.all(queries.map((query) => selected.context.store.searchKnowledge(
         selected.context.workspaceId, selected.repository.id, query, selected.release.id
       )));
-      const results = [...new Map(groups.flat().map((result) => [result.pageId, result])).values()]
-        .slice(0, 20);
-      if (!results.length) throw new McpToolError("NOT_FOUND", "Change context was not found");
+      const initial = mergeSearchResults(groups.flat());
+      const discoveredPaths = new Set(initial.flatMap((result) =>
+        result.citations.map((citation) => citation.path.toLowerCase())));
+      const metadata = await selected.context.store.knowledgeMetadata(
+        selected.context.workspaceId, selected.release.id
+      );
+      const relatedQueries = metadata.dependencies.flatMap((dependency) => {
+        const values = [dependency.source, dependency.target, dependency.path];
+        const related = values.some((value) => {
+          const normalized = value.toLowerCase();
+          return discoveredPaths.has(normalized) || terms.some((term) => normalized.includes(term));
+        });
+        return related ? values : [];
+      }).slice(0, 20);
+      const relatedGroups = await Promise.all([...new Set(relatedQueries)].map((query) =>
+        selected.context.store.searchKnowledge(
+          selected.context.workspaceId, selected.repository.id, query, selected.release.id
+        )));
+      const discovered = mergeSearchResults([...initial, ...relatedGroups.flat()]);
+      if (!discovered.length) throw new McpToolError("NOT_FOUND", "Change context was not found");
+      const pages = await pagesFor(selected.context, selected.release);
+      const support = pages.filter((page) =>
+        page.slug === "conventions" || page.slug === "run-test-guide"
+      ).map((page): KnowledgeSearchResult => ({
+        kind: "page",
+        title: page.title,
+        excerpt: page.body.slice(0, 240),
+        score: 10,
+        pageId: page.id,
+        releaseId: selected.release.id,
+        citations: pageCitations(page)
+      }));
+      const supportIds = new Set(support.map((result) => result.pageId));
+      const results = [
+        ...discovered.filter((result) => !supportIds.has(result.pageId)).slice(0, 18),
+        ...support
+      ].slice(0, 20);
       return successful(
         selected.release,
         selected.snapshot.commitSha,

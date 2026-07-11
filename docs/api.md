@@ -50,7 +50,7 @@ Both HTTP and stdio expose exactly these tools:
 | `dkh_get_architecture` | `{}` | Architecture overview |
 | `dkh_get_module` | `{moduleId}` | Module page by title/slug |
 | `dkh_get_symbol` | `{name,path?}` | Symbol page, optionally path-scoped |
-| `dkh_get_change_context` | `{task,paths?}` (max 20 paths) | Affected cited knowledge for a proposed change |
+| `dkh_get_change_context` | `{task,paths?}` (max 20 optional hints) | Discovers affected modules, relationships, tests, and conventions from task terms; paths only refine context |
 | `dkh_get_source` | `{path,startLine?,endLine?}` | Hash-verified excerpt, maximum 500 lines |
 | `dkh_get_release` | `{}` | Current published release metadata |
 | `dkh_report_gap` | `{query,reason,expected?}` | Only mutating tool; create cited feedback |

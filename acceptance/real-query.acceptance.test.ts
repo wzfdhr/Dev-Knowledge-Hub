@@ -84,26 +84,43 @@ test("real MCP change context identifies affected modules, conventions, and test
   const response = await client.callTool({
     name: "dkh_get_change_context",
     arguments: {
-      task: "change the retry policy",
-      paths: [
-        "src/request.ts",
-        "src/retry-policy.ts",
-        "CONTRIBUTING.md",
-        "tests/retry-policy.test.ts"
-      ]
+      task: "change the retry policy"
     }
   });
 
   expect(response.isError).not.toBe(true);
   const envelope = response.structuredContent as {
     commitSha: string;
-    citations: Array<{ path: string; startLine: number; endLine: number; commitSha: string }>;
+    citations: Array<{
+      path: string;
+      startLine: number;
+      endLine: number;
+      commitSha: string;
+      blobHash: string;
+    }>;
   };
   expect(envelope.commitSha).toBe(commitSha);
-  expect(envelope.citations).toEqual(expect.arrayContaining([
-    expect.objectContaining({ path: "src/request.ts", startLine: 1, endLine: 12, commitSha }),
-    expect.objectContaining({ path: "src/retry-policy.ts", startLine: 1, endLine: 5, commitSha }),
-    expect.objectContaining({ path: "CONTRIBUTING.md", startLine: 1, endLine: 4, commitSha }),
-    expect.objectContaining({ path: "tests/retry-policy.test.ts", startLine: 1, endLine: 8, commitSha })
-  ]));
+  const expectedCitations = [
+    { path: "src/request.ts", startLine: 1, endLine: 12 },
+    { path: "src/retry-policy.ts", startLine: 1, endLine: 5 },
+    { path: "CONTRIBUTING.md", startLine: 1, endLine: 4 },
+    { path: "tests/retry-policy.test.ts", startLine: 1, endLine: 8 }
+  ];
+  for (const expected of expectedCitations) {
+    const citation = envelope.citations.find((candidate) =>
+      candidate.path === expected.path
+      && candidate.startLine === expected.startLine
+      && candidate.endLine === expected.endLine
+    );
+    expect(citation, `missing exact citation for ${expected.path}`).toBeDefined();
+    expect(citation!.startLine).toBeGreaterThanOrEqual(1);
+    expect(citation!.endLine).toBeGreaterThanOrEqual(citation!.startLine);
+    expect(citation!.commitSha).toBe(commitSha);
+    expect(citation!.blobHash).toMatch(/^[a-f0-9]{64}$/);
+    const sourceFile = await store.findSourceFile(
+      setup.workspace.id, snapshot.snapshotId, expected.path
+    );
+    expect(sourceFile).not.toBeNull();
+    expect(citation!.blobHash).toBe(sourceFile!.contentHash);
+  }
 });

@@ -15,7 +15,10 @@ import type {
   CreateSnapshotInput,
   FeedbackRebuildInput,
   KnowledgePageRecord,
+  KnowledgeMetadata,
   KnowledgeSearchResult,
+  ModelConfigRecord,
+  ModelProvider,
   McpTokenRecord,
   ReleaseRecord,
   RepositoryConnectionInput,
@@ -101,6 +104,7 @@ interface FeedbackRow extends QueryResultRow {
   query: string;
   reason: string;
   expected: string | null;
+  citations: Citation[];
   status: AgentFeedbackStatus;
   rebuild_build_id: string | null;
   created_at: Date;
@@ -182,6 +186,7 @@ function feedbackRecord(row: FeedbackRow): AgentFeedbackRecord {
     query: row.query,
     reason: row.reason,
     expected: row.expected,
+    citations: row.citations ?? [],
     status: row.status,
     rebuildBuildId: row.rebuild_build_id,
     createdAt: row.created_at,
@@ -422,16 +427,17 @@ export class PostgresAppStore implements AppStore {
   async createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord> {
     const { rows } = await this.pool.query<FeedbackRow>(
       `INSERT INTO agent_feedback
-       (workspace_id, release_id, query, reason, expected)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, workspace_id, release_id, query, reason, expected, status,
+       (workspace_id, release_id, query, reason, expected, citations)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+       RETURNING id, workspace_id, release_id, query, reason, expected, citations, status,
                  rebuild_build_id, created_at, updated_at`,
       [
         input.workspaceId,
         input.releaseId ?? null,
         input.query,
         input.reason,
-        input.expected ?? null
+        input.expected ?? null,
+        JSON.stringify(input.citations ?? [])
       ]
     );
     return feedbackRecord(rows[0]);
@@ -441,16 +447,17 @@ export class PostgresAppStore implements AppStore {
     return this.transaction(async (client) => {
       const { rows } = await client.query<FeedbackRow>(
         `INSERT INTO agent_feedback
-         (workspace_id, release_id, query, reason, expected)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, workspace_id, release_id, query, reason, expected, status,
+         (workspace_id, release_id, query, reason, expected, citations)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+         RETURNING id, workspace_id, release_id, query, reason, expected, citations, status,
                    rebuild_build_id, created_at, updated_at`,
         [
           input.workspaceId,
           input.releaseId ?? null,
           input.query,
           input.reason,
-          input.expected ?? null
+          input.expected ?? null,
+          JSON.stringify(input.citations ?? [])
         ]
       );
       const feedback = feedbackRecord(rows[0]);
@@ -470,7 +477,7 @@ export class PostgresAppStore implements AppStore {
     status?: AgentFeedbackStatus
   ): Promise<AgentFeedbackRecord[]> {
     const { rows } = await this.pool.query<FeedbackRow>(
-      `SELECT id, workspace_id, release_id, query, reason, expected, status,
+      `SELECT id, workspace_id, release_id, query, reason, expected, citations, status,
               rebuild_build_id, created_at, updated_at
        FROM agent_feedback
        WHERE workspace_id = $1 AND ($2::agent_feedback_status IS NULL OR status = $2)
@@ -497,7 +504,7 @@ export class PostgresAppStore implements AppStore {
     const { rows } = await this.pool.query<FeedbackRow>(
       `UPDATE agent_feedback SET status = $3, updated_at = now()
        WHERE workspace_id = $1 AND id = $2 AND status = $4
-       RETURNING id, workspace_id, release_id, query, reason, expected, status,
+       RETURNING id, workspace_id, release_id, query, reason, expected, citations, status,
                  rebuild_build_id, created_at, updated_at`,
       [workspaceId, feedbackId, status, existing.status]
     );
@@ -513,7 +520,7 @@ export class PostgresAppStore implements AppStore {
   ): Promise<AgentFeedbackRecord | null> {
     return this.transaction(async (client) => {
       const selected = await client.query<FeedbackRow>(
-        `SELECT id, workspace_id, release_id, query, reason, expected, status,
+        `SELECT id, workspace_id, release_id, query, reason, expected, citations, status,
                 rebuild_build_id, created_at, updated_at
          FROM agent_feedback WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
         [workspaceId, feedbackId]
@@ -530,7 +537,7 @@ export class PostgresAppStore implements AppStore {
       const { rows } = await client.query<FeedbackRow>(
         `UPDATE agent_feedback SET status = $3, updated_at = now()
          WHERE workspace_id = $1 AND id = $2
-         RETURNING id, workspace_id, release_id, query, reason, expected, status,
+         RETURNING id, workspace_id, release_id, query, reason, expected, citations, status,
                    rebuild_build_id, created_at, updated_at`,
         [workspaceId, feedbackId, status]
       );
@@ -555,7 +562,7 @@ export class PostgresAppStore implements AppStore {
     const { rows } = await this.pool.query<FeedbackRow>(
       `UPDATE agent_feedback SET rebuild_build_id = $3, updated_at = now()
        WHERE workspace_id = $1 AND id = $2 AND status = 'acknowledged'
-       RETURNING id, workspace_id, release_id, query, reason, expected, status,
+       RETURNING id, workspace_id, release_id, query, reason, expected, citations, status,
                  rebuild_build_id, created_at, updated_at`,
       [workspaceId, feedbackId, buildId]
     );
@@ -567,7 +574,7 @@ export class PostgresAppStore implements AppStore {
   ): Promise<{ build: BuildRecord; created: boolean }> {
     return this.transaction(async (client) => {
       const selected = await client.query<FeedbackRow>(
-        `SELECT id, workspace_id, release_id, query, reason, expected, status,
+        `SELECT id, workspace_id, release_id, query, reason, expected, citations, status,
                 rebuild_build_id, created_at, updated_at
          FROM agent_feedback WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
         [input.workspaceId, input.feedbackId]
@@ -711,6 +718,17 @@ export class PostgresAppStore implements AppStore {
     return rows[0] ? snapshotRecord(rows[0]) : null;
   }
 
+  async latestSnapshot(workspaceId: string, repositoryId: string): Promise<SourceSnapshotRecord | null> {
+    const { rows } = await this.pool.query<SnapshotRow>(
+      `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
+              commit_timestamp, storage_path
+       FROM source_snapshots WHERE workspace_id = $1 AND repository_id = $2
+       ORDER BY commit_timestamp DESC, created_at DESC, id DESC LIMIT 1`,
+      [workspaceId, repositoryId]
+    );
+    return rows[0] ? snapshotRecord(rows[0]) : null;
+  }
+
   async findSourceFile(workspaceId: string, snapshotId: string, filePath: string) {
     const { rows } = await this.pool.query<{
       id: string; workspace_id: string; snapshot_id: string; path: string;
@@ -803,6 +821,65 @@ export class PostgresAppStore implements AppStore {
       [workspaceId, repositoryId]
     );
     return rows[0]?.ciphertext ?? null;
+  }
+
+  async getModelConfig(workspaceId: string): Promise<ModelConfigRecord | null> {
+    const { rows } = await this.pool.query<{
+      ciphertext: string;
+      metadata: { provider?: string; model?: string };
+    }>(
+      `SELECT ciphertext, metadata FROM encrypted_credentials
+       WHERE workspace_id = $1 AND repository_id IS NULL AND name = 'model-provider'`,
+      [workspaceId]
+    );
+    const row = rows[0];
+    if (!row?.metadata.provider || !row.metadata.model) return null;
+    return {
+      workspaceId,
+      provider: row.metadata.provider as ModelProvider,
+      model: row.metadata.model,
+      encryptedApiKey: row.ciphertext
+    };
+  }
+
+  async upsertModelConfig(
+    workspaceId: string,
+    input: { provider: ModelProvider; model: string; encryptedApiKey?: string },
+    actorId: string
+  ): Promise<ModelConfigRecord> {
+    return this.transaction(async (client) => {
+      const existing = await client.query<{ id: string; ciphertext: string }>(
+        `SELECT id, ciphertext FROM encrypted_credentials
+         WHERE workspace_id = $1 AND repository_id IS NULL AND name = 'model-provider'
+         FOR UPDATE`,
+        [workspaceId]
+      );
+      if (!existing.rows[0] && !input.encryptedApiKey) throw new Error("An API key is required");
+      const metadata = JSON.stringify({ provider: input.provider, model: input.model });
+      if (existing.rows[0]) {
+        await client.query(
+          `UPDATE encrypted_credentials
+           SET ciphertext = COALESCE($2, ciphertext), metadata = $3::jsonb, updated_at = now()
+           WHERE workspace_id = $1 AND id = $4`,
+          [workspaceId, input.encryptedApiKey ?? null, metadata, existing.rows[0].id]
+        );
+      } else {
+        await client.query(
+          `INSERT INTO encrypted_credentials
+           (workspace_id, repository_id, name, ciphertext, metadata)
+           VALUES ($1, NULL, 'model-provider', $2, $3::jsonb)`,
+          [workspaceId, input.encryptedApiKey, metadata]
+        );
+      }
+      await this.insertAudit(client, {
+        workspaceId, actorId, action: "model_config.updated", resourceType: "model_config",
+        metadata: { provider: input.provider, model: input.model }
+      });
+      return {
+        workspaceId, provider: input.provider, model: input.model,
+        encryptedApiKey: input.encryptedApiKey ?? existing.rows[0].ciphertext
+      };
+    });
   }
 
   async createBuild(
@@ -1287,5 +1364,39 @@ export class PostgresAppStore implements AppStore {
       releaseId: row.release_id,
       citations: row.citations
     }));
+  }
+
+  async knowledgeMetadata(workspaceId: string, releaseId: string): Promise<KnowledgeMetadata> {
+    const symbols = await this.pool.query<{
+      name: string; kind: string; path: string; start_line: number; end_line: number; exported: boolean;
+    }>(
+      `SELECT cs.name, cs.kind, sf.path, cs.start_line, cs.end_line, cs.exported
+       FROM releases r
+       JOIN source_files sf ON sf.snapshot_id = r.snapshot_id
+       JOIN code_symbols cs ON cs.source_file_id = sf.id
+       WHERE r.workspace_id = $1 AND r.id = $2
+       ORDER BY sf.path, cs.start_line, cs.name`,
+      [workspaceId, releaseId]
+    );
+    const dependencies = await this.pool.query<{
+      source_name: string; target_name: string; kind: string; source_path: string;
+      start_line: number; end_line: number;
+    }>(
+      `SELECT ce.source_name, ce.target_name, ce.kind, ce.source_path, ce.start_line, ce.end_line
+       FROM releases r JOIN code_edges ce ON ce.snapshot_id = r.snapshot_id
+       WHERE r.workspace_id = $1 AND r.id = $2
+       ORDER BY ce.source_path, ce.start_line, ce.source_name, ce.target_name`,
+      [workspaceId, releaseId]
+    );
+    return {
+      symbols: symbols.rows.map((row) => ({
+        name: row.name, kind: row.kind, path: row.path,
+        startLine: row.start_line, endLine: row.end_line, exported: row.exported
+      })),
+      dependencies: dependencies.rows.map((row) => ({
+        source: row.source_name, target: row.target_name, kind: row.kind, path: row.source_path,
+        startLine: row.start_line, endLine: row.end_line
+      }))
+    };
   }
 }

@@ -207,6 +207,35 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return { authenticated: true, admin: { id: admin.id, email: admin.email } };
   });
 
+  const modelConfigDto = (config: Awaited<ReturnType<AppStore["getModelConfig"]>>) => ({
+    config: config ? { provider: config.provider, model: config.model, hasApiKey: true } : null
+  });
+
+  server.get("/api/settings/model", { preHandler: requireAdmin }, async (request) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    return modelConfigDto(await options.store.getModelConfig(admin.workspaceId));
+  });
+
+  server.put("/api/settings/model", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({
+      provider: z.enum(["openai", "anthropic"]),
+      model: z.string().trim().min(1).max(200),
+      apiKey: z.string().max(10_000).optional().default("")
+    }).safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid model settings");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    try {
+      const config = await options.store.upsertModelConfig(admin.workspaceId, {
+        provider: parsed.data.provider,
+        model: parsed.data.model,
+        ...(parsed.data.apiKey ? { encryptedApiKey: encryptSecret(parsed.data.apiKey, options.masterKey) } : {})
+      }, admin.id);
+      return modelConfigDto(config);
+    } catch (error) {
+      return sendError(reply, 400, "MODEL_CONFIG_INVALID", error instanceof Error ? error.message : "Model settings failed");
+    }
+  });
+
   server.post("/api/mcp/tokens", { preHandler: requireAdmin }, async (request, reply) => {
     const parsed = z.object({ name: z.string().trim().min(1).max(100) }).safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MCP token");
@@ -291,6 +320,22 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const repository = await options.store.currentRepository(admin.workspaceId);
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
     return repositoryDto(repository);
+  });
+
+  server.get("/api/repositories/current/status", { preHandler: requireAdmin }, async (request, reply) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repository = await options.store.currentRepository(admin.workspaceId);
+    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    const latest = await options.store.latestSnapshot(admin.workspaceId, repository.id);
+    return {
+      ...repositoryDto(repository),
+      latestSnapshot: latest ? {
+        id: latest.id,
+        commitSha: latest.commitSha,
+        ref: latest.ref,
+        commitTimestamp: latest.commitTimestamp
+      } : null
+    };
   });
 
   server.post(
@@ -471,6 +516,13 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     };
   });
 
+  server.get("/api/knowledge/metadata", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({ releaseId: z.string().min(1) }).safeParse(request.query);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid metadata query");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    return options.store.knowledgeMetadata(admin.workspaceId, parsed.data.releaseId);
+  });
+
   server.get("/api/knowledge/pages", { preHandler: requireAdmin }, async (request, reply) => {
     const parsed = z.object({ releaseId: z.string().optional() }).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid page query");
@@ -569,14 +621,19 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
     const release = await options.store.currentRelease(admin.workspaceId, repository.id);
     if (!release) return sendError(reply, 404, "RELEASE_NOT_FOUND", "No release is published");
-    return { release };
+    const snapshot = await options.store.findSnapshotById(admin.workspaceId, release.snapshotId);
+    return { release: { ...release, commitSha: snapshot?.commitSha ?? null } };
   });
 
   server.get("/api/releases", { preHandler: requireAdmin }, async (request, reply) => {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const repository = await options.store.currentRepository(admin.workspaceId);
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
-    return { releases: await options.store.listReleases(admin.workspaceId, repository.id) };
+    const releases = await options.store.listReleases(admin.workspaceId, repository.id);
+    return { releases: await Promise.all(releases.map(async (release) => ({
+      ...release,
+      commitSha: (await options.store.findSnapshotById(admin.workspaceId, release.snapshotId))?.commitSha ?? null
+    }))) };
   });
 
   server.get("/api/feedback", { preHandler: requireAdmin }, async (request, reply) => {

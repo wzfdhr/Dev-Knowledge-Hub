@@ -195,6 +195,23 @@ describe("knowledge API contracts", () => {
     expect(source.json().content).toContain("export function add");
     expect((await app.inject({ method: "GET", url: "/api/releases", headers: { cookie } })).json().releases)
       .toHaveLength(1);
+    const status = await app.inject({
+      method: "GET", url: "/api/repositories/current/status", headers: { cookie }
+    });
+    expect(status.json().latestSnapshot).toMatchObject({
+      id: "11111111-1111-4111-8111-111111111111",
+      commitSha: index.commitSha,
+      ref: "main"
+    });
+    const releaseList = await app.inject({ method: "GET", url: "/api/releases", headers: { cookie } });
+    expect(releaseList.json().releases[0].commitSha).toBe(index.commitSha);
+    const metadata = await app.inject({
+      method: "GET", url: `/api/knowledge/metadata?releaseId=${releaseId}`, headers: { cookie }
+    });
+    expect(metadata.json().symbols).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "add", kind: "function", path: "src/math.ts" })
+    ]));
+    expect(metadata.json().dependencies).toEqual(expect.any(Array));
     await app.close();
   });
 

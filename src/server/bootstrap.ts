@@ -9,13 +9,19 @@ import { PostgresAppStore } from "./persistence/postgres-store.js";
 import type { AppStore } from "./persistence/store.js";
 import { BuildService, type BuildJobQueue } from "./knowledge/build-service.js";
 import { PgBossBuildJobQueue } from "./knowledge/job-queue.js";
+import { anthropicEnhancer, openAiCompatibleEnhancer, type KnowledgeEnhancer } from "./knowledge/enhancer.js";
+import { decryptSecret } from "./security/crypto.js";
 
 export interface BootstrapDependencies {
   createDatabase: typeof createDatabase;
   runMigrations: typeof runMigrations;
   createStore: (pool: Pool) => AppStore;
   createBuildQueue: (connectionString: string) => BuildJobQueue;
-  createBuildService: (store: AppStore, queue: BuildJobQueue) => BuildService;
+  createBuildService: (
+    store: AppStore,
+    queue: BuildJobQueue,
+    enhancerForWorkspace: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>
+  ) => BuildService;
   buildServer: typeof buildServer;
 }
 
@@ -24,7 +30,8 @@ const defaultDependencies: BootstrapDependencies = {
   runMigrations,
   createStore: (pool) => new PostgresAppStore(pool),
   createBuildQueue: (connectionString) => new PgBossBuildJobQueue(connectionString),
-  createBuildService: (store, queue) => new BuildService(store, queue),
+  createBuildService: (store, queue, enhancerForWorkspace) =>
+    new BuildService(store, queue, { enhancerForWorkspace }),
   buildServer
 };
 
@@ -44,7 +51,15 @@ export async function bootstrapServer(
   await dependencies.runMigrations(database.pool);
   const store = dependencies.createStore(database.pool);
   const queue = dependencies.createBuildQueue(env.databaseUrl);
-  const buildService = dependencies.createBuildService(store, queue);
+  const enhancerForWorkspace = async (workspaceId: string): Promise<KnowledgeEnhancer | undefined> => {
+    const config = await store.getModelConfig(workspaceId);
+    if (!config) return undefined;
+    const apiKey = decryptSecret(config.encryptedApiKey, env.masterKey!);
+    return config.provider === "anthropic"
+      ? anthropicEnhancer({ apiKey, model: config.model })
+      : openAiCompatibleEnhancer({ apiKey, model: config.model });
+  };
+  const buildService = dependencies.createBuildService(store, queue, enhancerForWorkspace);
   await buildService.start();
   const server = dependencies.buildServer({
     store,

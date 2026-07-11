@@ -179,7 +179,7 @@ describe("MCP tool contract", () => {
       ["dkh_get_source", { path: "src/math.ts", startLine: 16, endLine: 18 }],
       ["dkh_get_release", {}],
       ["dkh_report_gap", {
-        query: "How do I deploy?", reason: "No deployment guide", expected: "commands"
+        query: "add", reason: "The result needs more detail", expected: "examples"
       }]
     ];
 
@@ -201,9 +201,15 @@ describe("MCP tool contract", () => {
         citations: expect.any(Array)
       });
       if (name === "dkh_report_gap") {
-        expect(envelope.citations).toEqual([]);
+        expect(envelope.citations).toEqual(expect.arrayContaining([
+          expect.objectContaining({ path: "src/math.ts", commitSha: index.commitSha })
+        ]));
         expect(envelope.result).toEqual({
-          feedback: expect.objectContaining({ query: "How do I deploy?", status: "open" })
+          feedback: expect.objectContaining({
+            query: "add",
+            status: "open",
+            citations: envelope.citations
+          })
         });
       } else {
         expect(envelope.citations).toEqual(expect.arrayContaining([

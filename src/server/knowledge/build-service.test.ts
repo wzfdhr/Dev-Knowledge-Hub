@@ -12,6 +12,7 @@ import {
   type PersistedKnowledge
 } from "./build-service";
 import { analyzeSnapshot } from "./intelligence";
+import { generateKnowledge } from "./generator";
 
 const fixtureRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -138,6 +139,24 @@ function input(repositoryId = "repo-1") {
 }
 
 describe("BuildService", () => {
+  test("resolves an optional enhancer for the build workspace at synthesis time", async () => {
+    const persistence = new FakeBuildPersistence();
+    const enhancer = { enhance: vi.fn() };
+    const enhancerForWorkspace = vi.fn(async () => enhancer);
+    const synthesize = vi.fn(async (...args: Parameters<typeof generateKnowledge>) =>
+      generateKnowledge(args[0])
+    );
+    const service = new BuildService(persistence, new FakeQueue(), {
+      enhancerForWorkspace,
+      synthesize
+    });
+    const { build } = await service.startBuild(input());
+
+    await service.process(build.id);
+
+    expect(enhancerForWorkspace).toHaveBeenCalledWith("workspace-1");
+    expect(synthesize.mock.calls[0][1]).toBe(enhancer);
+  });
   test("runs the durable state machine and persists validated knowledge", async () => {
     const persistence = new FakeBuildPersistence();
     const service = new BuildService(persistence, new FakeQueue());

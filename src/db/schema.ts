@@ -12,11 +12,13 @@ import {
   uniqueIndex,
   uuid
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 import {
   AGENT_FEEDBACK_STATUSES,
   BUILD_JOB_STATUSES
 } from "../shared/contracts.js";
+import type { Citation } from "../server/knowledge/intelligence.js";
 
 export { AGENT_FEEDBACK_STATUSES, BUILD_JOB_STATUSES } from "../shared/contracts.js";
 
@@ -66,10 +68,14 @@ export const encryptedCredentials = pgTable("encrypted_credentials", {
   repositoryId: uuid("repository_id"),
   name: text("name").notNull(),
   ciphertext: text("ciphertext").notNull(),
+  metadata: jsonb("metadata").$type<Record<string, string>>().notNull().default({}),
   ...timestamps
 }, (table) => [
   uniqueIndex("encrypted_credentials_id_workspace_idx").on(table.id, table.workspaceId),
   uniqueIndex("encrypted_credentials_repo_name_idx").on(table.repositoryId, table.name),
+  uniqueIndex("encrypted_credentials_workspace_model_idx")
+    .on(table.workspaceId, table.name)
+    .where(sql`${table.repositoryId} IS NULL`),
   index("encrypted_credentials_workspace_idx").on(table.workspaceId),
   foreignKey({
     columns: [table.repositoryId, table.workspaceId],
@@ -337,6 +343,8 @@ export const agentFeedback = pgTable("agent_feedback", {
   query: text("query").notNull(),
   reason: text("reason").notNull(),
   expected: text("expected"),
+  citations: jsonb("citations").$type<Citation[]>()
+    .notNull().default([]),
   rebuildBuildId: uuid("rebuild_build_id"),
   ...timestamps
 }, (table) => [

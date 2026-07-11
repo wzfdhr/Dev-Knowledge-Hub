@@ -91,13 +91,20 @@ describe("manual feedback workflow", () => {
       createFeedback(input: Record<string, unknown>): Promise<{ id: string }>;
     };
     const feedback = await persistence.createFeedback({
-      workspaceId, query: "deployment", reason: "missing", expected: "steps"
+      workspaceId, query: "deployment", reason: "missing", expected: "steps",
+      citations: [{
+        path: "src/math.ts", startLine: 16, endLine: 18,
+        commitSha: "b".repeat(40), blobHash: "c".repeat(64)
+      }]
     });
 
     const open = await app.inject({
       method: "GET", url: "/api/feedback?status=open", headers: { cookie }
     });
     expect(open.json().feedback).toHaveLength(1);
+    expect(open.json().feedback[0].citations).toEqual([
+      expect.objectContaining({ path: "src/math.ts", startLine: 16, endLine: 18 })
+    ]);
 
     expect((await app.inject({
       method: "PATCH", url: `/api/feedback/${feedback.id}`,

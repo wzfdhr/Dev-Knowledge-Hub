@@ -44,4 +44,11 @@ describe("Task 2 database contract", () => {
     expect(sql).toContain("source_snapshots_repo_commit_idx");
     expect(sql).toContain("ADD COLUMN byte_size integer");
   });
+
+  test("console settings migration adds credential metadata and one workspace model config", async () => {
+    const sql = await readFile(new URL("../../drizzle/0006_console_review_fixes.sql", import.meta.url), "utf8");
+    expect(sql).toContain("ADD COLUMN metadata jsonb");
+    expect(sql).toContain("encrypted_credentials_workspace_model_idx");
+    expect(sql).toContain("ADD COLUMN citations jsonb");
+  });
 });

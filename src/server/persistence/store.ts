@@ -52,6 +52,7 @@ export interface AgentFeedbackRecord {
   query: string;
   reason: string;
   expected: string | null;
+  citations: Citation[];
   status: AgentFeedbackStatus;
   rebuildBuildId: string | null;
   createdAt: Date;
@@ -64,6 +65,7 @@ export interface CreateFeedbackInput {
   query: string;
   reason: string;
   expected?: string;
+  citations?: Citation[];
 }
 
 export class InvalidFeedbackTransitionError extends Error {
@@ -104,9 +106,19 @@ export interface RepositoryRecord {
 export interface EncryptedCredentialRecord {
   id: string;
   workspaceId: string;
-  repositoryId: string;
+  repositoryId: string | null;
   name: string;
   ciphertext: string;
+  metadata: Record<string, string>;
+}
+
+export type ModelProvider = "openai" | "anthropic";
+
+export interface ModelConfigRecord {
+  workspaceId: string;
+  provider: ModelProvider;
+  model: string;
+  encryptedApiKey: string;
 }
 
 export type RepositoryConnectionInput =
@@ -185,6 +197,15 @@ export interface KnowledgeSearchResult {
   citations: Citation[];
 }
 
+export interface KnowledgeMetadata {
+  symbols: Array<{
+    name: string; kind: string; path: string; startLine: number; endLine: number; exported: boolean;
+  }>;
+  dependencies: Array<{
+    source: string; target: string; kind: string; path: string; startLine: number; endLine: number;
+  }>;
+}
+
 export interface KnowledgeStore {
   saveKnowledge(value: PersistedKnowledge): Promise<void>;
   listKnowledgePages(workspaceId: string, releaseId?: string): Promise<KnowledgePageRecord[]>;
@@ -195,6 +216,7 @@ export interface KnowledgeStore {
     query: string,
     releaseId?: string
   ): Promise<KnowledgeSearchResult[]>;
+  knowledgeMetadata(workspaceId: string, releaseId: string): Promise<KnowledgeMetadata>;
   createReleaseDraft(
     workspaceId: string,
     repositoryId: string,
@@ -265,6 +287,7 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
     commitSha: string
   ): Promise<SourceSnapshotRecord | null>;
   findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null>;
+  latestSnapshot(workspaceId: string, repositoryId: string): Promise<SourceSnapshotRecord | null>;
   findSourceFile(
     workspaceId: string,
     snapshotId: string,
@@ -273,6 +296,12 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   createSnapshot(input: CreateSnapshotInput): Promise<SourceSnapshotRecord>;
   countSnapshotFiles(snapshotId: string): Promise<number>;
   repositoryCredential(workspaceId: string, repositoryId: string): Promise<string | null>;
+  getModelConfig(workspaceId: string): Promise<ModelConfigRecord | null>;
+  upsertModelConfig(
+    workspaceId: string,
+    input: { provider: ModelProvider; model: string; encryptedApiKey?: string },
+    actorId: string
+  ): Promise<ModelConfigRecord>;
 }
 
 export type { BuildRecord };

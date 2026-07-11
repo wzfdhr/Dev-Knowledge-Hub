@@ -74,6 +74,7 @@ export class BuildService {
   private readonly synthesize: typeof generateKnowledge;
   private readonly validate: typeof validateKnowledge;
   private readonly enhancer?: KnowledgeEnhancer;
+  private readonly enhancerForWorkspace?: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>;
   private startPromise: Promise<void> | null = null;
 
   constructor(
@@ -84,12 +85,14 @@ export class BuildService {
       synthesize?: typeof generateKnowledge;
       validate?: typeof validateKnowledge;
       enhancer?: KnowledgeEnhancer;
+      enhancerForWorkspace?: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>;
     } = {}
   ) {
     this.analyze = dependencies.analyze ?? analyzeSnapshot;
     this.synthesize = dependencies.synthesize ?? generateKnowledge;
     this.validate = dependencies.validate ?? validateKnowledge;
     this.enhancer = dependencies.enhancer;
+    this.enhancerForWorkspace = dependencies.enhancerForWorkspace;
   }
 
   subscribe(buildId: string, listener: (event: BuildEvent) => void): () => void {
@@ -186,7 +189,10 @@ export class BuildService {
       await this.checkCancellation(original);
       await this.transition(buildId, status, "synthesizing");
       status = "synthesizing";
-      const output = await this.synthesize(index, this.enhancer);
+      const enhancer = this.enhancerForWorkspace
+        ? await this.enhancerForWorkspace(original.workspaceId)
+        : this.enhancer;
+      const output = await this.synthesize(index, enhancer);
       await this.checkCancellation(original);
       await this.transition(buildId, status, "validating", { warnings: output.warnings });
       status = "validating";

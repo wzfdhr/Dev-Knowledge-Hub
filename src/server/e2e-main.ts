@@ -48,12 +48,18 @@ app.post("/__test__/feedback", async (_request, reply) => {
   const repository = workspace ? await store.currentRepository(workspace.id) : null;
   const release = workspace && repository ? await store.currentRelease(workspace.id, repository.id) : null;
   if (!workspace || !release) return reply.code(409).send({ error: "Publish a release first" });
+  const matches = await store.searchKnowledge(workspace.id, repository!.id, "add", release.id);
+  const citations = [...new Map(matches.flatMap((match) => match.citations).map((citation) => [
+    `${citation.path}:${citation.startLine}:${citation.endLine}:${citation.blobHash}`,
+    citation
+  ])).values()].slice(0, 5);
   return reply.code(201).send({ feedback: await store.createFeedback({
     workspaceId: workspace.id,
     releaseId: release.id,
     query: "How do I deploy the service?",
     reason: "Deployment steps are incomplete",
-    expected: "A verified command sequence"
+    expected: "A verified command sequence",
+    citations
   }) });
 });
 

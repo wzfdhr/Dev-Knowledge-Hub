@@ -17,7 +17,10 @@ import type {
   EncryptedCredentialRecord,
   FeedbackRebuildInput,
   KnowledgePageRecord,
+  KnowledgeMetadata,
   KnowledgeSearchResult,
+  ModelConfigRecord,
+  ModelProvider,
   McpTokenRecord,
   ReleaseRecord,
   RepositoryConnectionInput,
@@ -184,6 +187,7 @@ export class MemoryAppStore implements AppStore {
       query: input.query,
       reason: input.reason,
       expected: input.expected ?? null,
+      citations: input.citations ?? [],
       status: "open",
       rebuildBuildId: null,
       createdAt: now,
@@ -350,7 +354,8 @@ export class MemoryAppStore implements AppStore {
         workspaceId,
         repositoryId,
         name: "repository-pat",
-        ciphertext: input.encryptedToken
+        ciphertext: input.encryptedToken,
+        metadata: {}
       });
     }
     return this.repository;
@@ -390,6 +395,12 @@ export class MemoryAppStore implements AppStore {
     ) ?? null;
   }
 
+  async latestSnapshot(workspaceId: string, repositoryId: string): Promise<SourceSnapshotRecord | null> {
+    return this.sourceSnapshots.filter((snapshot) =>
+      snapshot.workspaceId === workspaceId && snapshot.repositoryId === repositoryId
+    ).sort((left, right) => right.commitTimestamp.getTime() - left.commitTimestamp.getTime())[0] ?? null;
+  }
+
   async findSourceFile(
     workspaceId: string,
     snapshotId: string,
@@ -408,6 +419,48 @@ export class MemoryAppStore implements AppStore {
     return this.encryptedCredentials.find((credential) =>
       credential.workspaceId === workspaceId && credential.repositoryId === repositoryId
     )?.ciphertext ?? null;
+  }
+
+  async getModelConfig(workspaceId: string): Promise<ModelConfigRecord | null> {
+    const credential = this.encryptedCredentials.find((candidate) =>
+      candidate.workspaceId === workspaceId
+      && candidate.repositoryId === null
+      && candidate.name === "model-provider"
+    );
+    if (!credential) return null;
+    return {
+      workspaceId,
+      provider: credential.metadata.provider as ModelProvider,
+      model: credential.metadata.model,
+      encryptedApiKey: credential.ciphertext
+    };
+  }
+
+  async upsertModelConfig(
+    workspaceId: string,
+    input: { provider: ModelProvider; model: string; encryptedApiKey?: string },
+    actorId: string
+  ): Promise<ModelConfigRecord> {
+    const existing = this.encryptedCredentials.find((candidate) =>
+      candidate.workspaceId === workspaceId
+      && candidate.repositoryId === null
+      && candidate.name === "model-provider"
+    );
+    if (!existing && !input.encryptedApiKey) throw new Error("An API key is required");
+    if (existing) {
+      existing.metadata = { provider: input.provider, model: input.model };
+      if (input.encryptedApiKey) existing.ciphertext = input.encryptedApiKey;
+    } else {
+      this.encryptedCredentials.push({
+        id: randomUUID(), workspaceId, repositoryId: null, name: "model-provider",
+        ciphertext: input.encryptedApiKey!, metadata: { provider: input.provider, model: input.model }
+      });
+    }
+    await this.recordAudit({
+      workspaceId, actorId, action: "model_config.updated",
+      resourceType: "model_config", metadata: { provider: input.provider, model: input.model }
+    });
+    return (await this.getModelConfig(workspaceId))!;
   }
 
   async createBuild(
@@ -687,5 +740,21 @@ export class MemoryAppStore implements AppStore {
     return [...primary, ...neighbors, ...text].sort((left, right) =>
       right.score - left.score || left.title.localeCompare(right.title) || left.pageId.localeCompare(right.pageId)
     ).slice(0, 50);
+  }
+
+  async knowledgeMetadata(workspaceId: string, releaseId: string): Promise<KnowledgeMetadata> {
+    const release = this.releaseById(workspaceId, releaseId);
+    const index = release ? this.indexes.get(release.buildId) : undefined;
+    if (!index) return { symbols: [], dependencies: [] };
+    return {
+      symbols: index.symbols.map((symbol) => ({
+        name: symbol.name, kind: symbol.kind, path: symbol.path,
+        startLine: symbol.startLine, endLine: symbol.endLine, exported: symbol.exported
+      })),
+      dependencies: index.edges.map((edge) => ({
+        source: edge.source, target: edge.target, kind: edge.kind, path: edge.citation.path,
+        startLine: edge.citation.startLine, endLine: edge.citation.endLine
+      }))
+    };
   }
 }

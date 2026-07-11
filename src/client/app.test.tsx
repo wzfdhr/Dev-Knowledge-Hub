@@ -4,15 +4,16 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { KnowledgePage } from "./pages/knowledge-page";
 import { FeedbackPage } from "./pages/feedback-page";
 import { SettingsPage } from "./pages/settings-page";
-import { derivePrimaryAction } from "./pages/overview-page";
+import { derivePrimaryAction, OverviewPage } from "./pages/overview-page";
 import type { ApiClient } from "./api/client";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+beforeEach(() => sessionStorage.clear());
 
 function renderPage(node: React.ReactNode) {
   const queryClient = new QueryClient({
@@ -50,13 +51,104 @@ describe("overview primary command", () => {
       snapshotId: "snap"
     }).kind).toBe("sync");
   });
+
+  test("blocks state-derived commands when build state fails to load", async () => {
+    const api = {
+      getRepository: vi.fn().mockResolvedValue({ repository: {
+        id: "repo", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main"
+      } }),
+      listBuilds: vi.fn().mockRejectedValue(new Error("Build state unavailable")),
+      listReleases: vi.fn().mockResolvedValue({ releases: [] }),
+      listFeedback: vi.fn().mockResolvedValue({ feedback: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<OverviewPage api={api} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Build state unavailable");
+    expect(screen.queryByRole("button", { name: /sync repository|start knowledge build|review ready build|publish release/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry overview data" })).toBeVisible();
+  });
+
+  test("review mode keeps exactly one blue primary command", async () => {
+    const user = userEvent.setup();
+    const api = {
+      getRepository: vi.fn().mockResolvedValue({ repository: {
+        id: "repo", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main"
+      } }),
+      listBuilds: vi.fn().mockResolvedValue({ builds: [{
+        id: "build", status: "ready", snapshotId: "snap", commitSha: "a".repeat(40),
+        warnings: [], cancelRequested: false
+      }] }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [] }),
+      listFeedback: vi.fn().mockResolvedValue({ feedback: [] }),
+      createRelease: vi.fn().mockResolvedValue({ release: { id: "release" } })
+    } as unknown as ApiClient;
+
+    const { container } = renderPage(<OverviewPage api={api} />);
+    await user.click(await screen.findByRole("button", { name: "Review ready build" }));
+
+    expect(screen.getByRole("button", { name: "Create release draft" })).toBeVisible();
+    expect(container.querySelectorAll("button.button.primary")).toHaveLength(1);
+  });
+
+  test("keeps EventSource alive for native reconnect and reports connection state", async () => {
+    class FakeEventSource {
+      static instance: FakeEventSource;
+      onerror: (() => void) | null = null;
+      onopen: (() => void) | null = null;
+      close = vi.fn();
+      constructor(readonly url: string) { FakeEventSource.instance = this; }
+      addEventListener() {}
+    }
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const api = {
+      getRepository: vi.fn().mockResolvedValue({ repository: {
+        id: "repo", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main"
+      } }),
+      listBuilds: vi.fn().mockResolvedValue({ builds: [{
+        id: "build", status: "synthesizing", snapshotId: "snap", commitSha: "a".repeat(40),
+        warnings: [], cancelRequested: false
+      }] }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [] }),
+      listFeedback: vi.fn().mockResolvedValue({ feedback: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<OverviewPage api={api} />);
+    await screen.findByText("synthesizing", { selector: "h2" });
+    FakeEventSource.instance.onerror?.();
+
+    await waitFor(() => expect(screen.getByText("synthesizing", { selector: "h2" }).closest("section"))
+      .toHaveTextContent("Reconnecting to build updates"));
+    expect(FakeEventSource.instance.close).not.toHaveBeenCalled();
+  });
+
+  test("shows failed build details with a targeted retry command", async () => {
+    const api = {
+      getRepository: vi.fn().mockResolvedValue({ repository: {
+        id: "repo", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main"
+      } }),
+      listBuilds: vi.fn().mockResolvedValue({ builds: [{
+        id: "build", status: "failed", snapshotId: "snap", commitSha: "a".repeat(40),
+        warnings: [], cancelRequested: false, errorMessage: "Provider rejected the request"
+      }] }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [] }),
+      listFeedback: vi.fn().mockResolvedValue({ feedback: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<OverviewPage api={api} />);
+
+    expect(await screen.findByText("Provider rejected the request")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Retry knowledge build" })).toBeVisible();
+  });
 });
 
 describe("knowledge citations", () => {
   test("opens the exact cited source range and identifiers", async () => {
     const user = userEvent.setup();
     const api = {
+      getRepositoryStatus: vi.fn().mockResolvedValue({ repository: { id: "repo", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main" }, latestSnapshot: { id: "snapshot-1", commitSha: "a".repeat(40), ref: "main", commitTimestamp: "2026-07-11" } }),
       listReleases: vi.fn().mockResolvedValue({ releases: [{ id: "release-1", buildId: "build-1", snapshotId: "snapshot-1", version: "1.0.0", createdAt: "2026-07-11", publishedAt: "2026-07-11" }] }),
+      getKnowledgeMetadata: vi.fn().mockResolvedValue({ symbols: [], dependencies: [] }),
       listKnowledgePages: vi.fn().mockResolvedValue({ pages: [{
         id: "page-1", slug: "module-math", title: "Module: math", body: "Math module.", chunks: [{
           id: "chunk-1", heading: "add", content: "Adds numbers.", citations: [{
@@ -88,6 +180,58 @@ describe("knowledge citations", () => {
     expect(screen.getByText(`Commit ${"a".repeat(12)}`)).toBeVisible();
     expect(screen.getByText(`Blob ${"b".repeat(12)}`)).toBeVisible();
   });
+
+  test("renders release errors without falling through to unpublished or empty", async () => {
+    const api = {
+      getRepositoryStatus: vi.fn().mockResolvedValue({ repository: { id: "repo" }, latestSnapshot: null }),
+      listReleases: vi.fn().mockRejectedValue(new Error("Release catalog unavailable"))
+    } as unknown as ApiClient;
+
+    renderPage(<KnowledgePage api={api} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Release catalog unavailable");
+    expect(screen.queryByText(/publish a release to browse/i)).not.toBeInTheDocument();
+  });
+
+  test("distinguishes unpublished and stale release states", async () => {
+    const api = {
+      getRepositoryStatus: vi.fn().mockResolvedValue({
+        repository: { id: "repo" },
+        latestSnapshot: { id: "snapshot-new", commitSha: "b".repeat(40), ref: "main", commitTimestamp: "2026-07-11" }
+      }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [{
+        id: "release-1", buildId: "build-1", snapshotId: "snapshot-old", commitSha: "a".repeat(40),
+        version: "1.0.0", createdAt: "2026-07-11", publishedAt: null
+      }] }),
+      listKnowledgePages: vi.fn().mockResolvedValue({ pages: [] }),
+      getKnowledgeMetadata: vi.fn().mockResolvedValue({ symbols: [], dependencies: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<KnowledgePage api={api} />);
+
+    expect(await screen.findByText("Unpublished draft")).toBeVisible();
+    expect(screen.getByText(/newer repository snapshot/i)).toBeVisible();
+    expect(screen.getByText(`${"a".repeat(12)} → ${"b".repeat(12)}`)).toBeVisible();
+  });
+
+  test("displays backend symbol and dependency metadata", async () => {
+    const api = {
+      getRepositoryStatus: vi.fn().mockResolvedValue({ repository: { id: "repo" }, latestSnapshot: { id: "snap", commitSha: "a".repeat(40), ref: "main", commitTimestamp: "2026-07-11" } }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [{ id: "release-1", buildId: "build-1", snapshotId: "snap", commitSha: "a".repeat(40), version: "1.0.0", createdAt: "2026-07-11", publishedAt: "2026-07-11" }] }),
+      listKnowledgePages: vi.fn().mockResolvedValue({ pages: [] }),
+      getKnowledgeMetadata: vi.fn().mockResolvedValue({
+        symbols: [{ name: "add", kind: "function", path: "src/math.ts", startLine: 16, endLine: 18, exported: true }],
+        dependencies: [{ source: "math", target: "util", kind: "imports", path: "src/math.ts", startLine: 1, endLine: 1 }]
+      })
+    } as unknown as ApiClient;
+
+    renderPage(<KnowledgePage api={api} />);
+
+    expect(await screen.findByText("add")).toBeVisible();
+    expect(screen.getByText("function · src/math.ts:16-18")).toBeVisible();
+    expect(screen.getByText("math → util")).toBeVisible();
+    expect(screen.getByText("imports · src/math.ts:1")).toBeVisible();
+  });
 });
 
 describe("feedback workflow", () => {
@@ -96,12 +240,12 @@ describe("feedback workflow", () => {
     const listFeedback = vi.fn()
       .mockResolvedValueOnce({ feedback: [{
         id: "f1", releaseId: "r1", query: "How do I deploy?", reason: "Missing runbook",
-        expected: "Commands", status: "open", rebuildBuildId: null,
+        expected: "Commands", status: "open", rebuildBuildId: null, citations: [],
         createdAt: "2026-07-11T00:00:00Z", updatedAt: "2026-07-11T00:00:00Z"
       }] })
       .mockResolvedValue({ feedback: [{
         id: "f1", releaseId: "r1", query: "How do I deploy?", reason: "Missing runbook",
-        expected: "Commands", status: "acknowledged", rebuildBuildId: null,
+        expected: "Commands", status: "acknowledged", rebuildBuildId: null, citations: [],
         createdAt: "2026-07-11T00:00:00Z", updatedAt: "2026-07-11T00:01:00Z"
       }] });
     const transitionFeedback = vi.fn().mockResolvedValue({ feedback: { id: "f1" } });
@@ -117,6 +261,34 @@ describe("feedback workflow", () => {
     await waitFor(() => expect(transitionFeedback).toHaveBeenCalledWith("f1", "acknowledged"));
     expect(await screen.findByRole("button", { name: "Request rebuild" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Mark fixed" })).toBeVisible();
+  });
+
+  test("opens a persisted feedback citation as an exact source excerpt", async () => {
+    const user = userEvent.setup();
+    const citation = {
+      path: "src/math.ts", startLine: 16, endLine: 18,
+      commitSha: "a".repeat(40), blobHash: "b".repeat(64)
+    };
+    const getSource = vi.fn().mockResolvedValue({
+      ...citation, content: "export function add() {}"
+    });
+    const api = {
+      listFeedback: vi.fn().mockResolvedValue({ feedback: [{
+        id: "f1", releaseId: "r1", query: "add", reason: "Needs examples",
+        expected: "Example", status: "open", rebuildBuildId: null, citations: [citation],
+        createdAt: "2026-07-11T00:00:00Z", updatedAt: "2026-07-11T00:00:00Z"
+      }] }),
+      getSource
+    } as unknown as ApiClient;
+
+    renderPage(<FeedbackPage api={api} />);
+    await user.click(await screen.findByRole("button", { name: "add" }));
+    await user.click(screen.getByRole("button", { name: /src\/math.ts lines 16 to 18/i }));
+
+    expect(getSource).toHaveBeenCalledWith({
+      path: "src/math.ts", startLine: 16, endLine: 18, releaseId: "r1"
+    });
+    expect(await screen.findByText("export function add() {}" )).toBeVisible();
   });
 });
 
@@ -141,5 +313,36 @@ describe("MCP token disclosure", () => {
     await user.click(within(dialog).getByRole("button", { name: "I have copied it" }));
     expect(screen.queryByText(plaintext)).not.toBeInTheDocument();
     expect(screen.getByText("dkh_secret-t")).toBeVisible();
+  });
+});
+
+describe("model settings", () => {
+  test("loads sanitized config and preserves the key when the API key field is blank", async () => {
+    const user = userEvent.setup();
+    const updateModelConfig = vi.fn().mockResolvedValue({
+      config: { provider: "anthropic", model: "claude-sonnet-4-5", hasApiKey: true }
+    });
+    const api = {
+      getRepository: vi.fn().mockRejectedValue(Object.assign(new Error("none"), { status: 404 })),
+      getModelConfig: vi.fn().mockResolvedValue({
+        config: { provider: "openai", model: "gpt-5-mini", hasApiKey: true }
+      }),
+      updateModelConfig,
+      getMcpConnection: vi.fn().mockResolvedValue({ endpoint: "/mcp", transport: "streamable-http", authorization: "bearer", stdioCommand: "npm run mcp:stdio", tools: [] }),
+      listMcpTokens: vi.fn().mockResolvedValue({ tokens: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<SettingsPage api={api} />);
+    expect(await screen.findByDisplayValue("gpt-5-mini")).toBeEnabled();
+    await user.selectOptions(screen.getByLabelText("Provider"), "anthropic");
+    await user.clear(screen.getByLabelText("Model"));
+    await user.type(screen.getByLabelText("Model"), "claude-sonnet-4-5");
+    expect(screen.getByLabelText("API key")).toHaveValue("");
+    await user.click(screen.getByRole("button", { name: "Save model settings" }));
+
+    expect(updateModelConfig).toHaveBeenCalledWith({
+      provider: "anthropic", model: "claude-sonnet-4-5", apiKey: ""
+    });
+    expect(await screen.findByText("Model settings saved.")).toBeVisible();
   });
 });

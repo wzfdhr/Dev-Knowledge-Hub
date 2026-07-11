@@ -1,7 +1,8 @@
 import type {
   ApiErrorShape, Build, Feedback, McpConnection, McpToken, KnowledgePageRecord,
-  Release, Repository, SearchResult, Session, SnapshotSummary, SourceExcerpt
+  KnowledgeMetadata, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotSummary, SourceExcerpt
 } from "./types";
+import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
 
 export class ApiError extends Error {
@@ -32,6 +33,7 @@ export interface ApiClient {
   logout(): Promise<void>;
   connectRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string }): Promise<{ repository: Repository }>;
   getRepository(): Promise<{ repository: Repository }>;
+  getRepositoryStatus(): Promise<RepositoryStatus>;
   syncRepository(): Promise<SnapshotSummary>;
   listBuilds(): Promise<{ builds: Build[] }>;
   startBuild(snapshotId: string): Promise<{ build: Build; created: boolean }>;
@@ -44,6 +46,7 @@ export interface ApiClient {
   getKnowledgePage(id: string): Promise<{ page: KnowledgePageRecord }>;
   searchKnowledge(query: string, releaseId?: string): Promise<{ results: SearchResult[] }>;
   getSource(input: { path: string; startLine: number; endLine: number; releaseId?: string }): Promise<SourceExcerpt>;
+  getKnowledgeMetadata(releaseId: string): Promise<KnowledgeMetadata>;
   listFeedback(status?: AgentFeedbackStatus): Promise<{ feedback: Feedback[] }>;
   transitionFeedback(id: string, status: AgentFeedbackStatus): Promise<{ feedback: Feedback }>;
   rebuildFeedback(id: string): Promise<{ build: Build; created: boolean }>;
@@ -51,6 +54,8 @@ export interface ApiClient {
   listMcpTokens(): Promise<{ tokens: McpToken[] }>;
   createMcpToken(name: string): Promise<McpToken & { token: string }>;
   revokeMcpToken(id: string): Promise<{ token: McpToken }>;
+  getModelConfig(): Promise<{ config: ModelConfig | null }>;
+  updateModelConfig(input: { provider: ModelProvider; model: string; apiKey: string }): Promise<{ config: ModelConfig }>;
 }
 
 const json = (value: unknown) => JSON.stringify(value);
@@ -62,6 +67,7 @@ export const api: ApiClient = {
   logout: () => request("/api/session", { method: "DELETE" }),
   connectRepository: (input) => request("/api/repositories", { method: "POST", body: json(input) }),
   getRepository: () => request("/api/repositories/current"),
+  getRepositoryStatus: () => request("/api/repositories/current/status"),
   syncRepository: () => request("/api/repositories/current/sync", { method: "POST" }),
   listBuilds: () => request("/api/builds"),
   startBuild: (snapshotId) => request("/api/builds", { method: "POST", body: json({ snapshotId }) }),
@@ -82,13 +88,16 @@ export const api: ApiClient = {
     if (input.releaseId) params.set("releaseId", input.releaseId);
     return request(`/api/knowledge/source?${params}`);
   },
+  getKnowledgeMetadata: (releaseId) => request(`/api/knowledge/metadata?releaseId=${encodeURIComponent(releaseId)}`),
   listFeedback: (status) => request(`/api/feedback${status ? `?status=${status}` : ""}`),
   transitionFeedback: (id, status) => request(`/api/feedback/${id}`, { method: "PATCH", body: json({ status }) }),
   rebuildFeedback: (id) => request(`/api/feedback/${id}/rebuild`, { method: "POST" }),
   getMcpConnection: () => request("/api/mcp/connection"),
   listMcpTokens: () => request("/api/mcp/tokens"),
   createMcpToken: (name) => request("/api/mcp/tokens", { method: "POST", body: json({ name }) }),
-  revokeMcpToken: (id) => request(`/api/mcp/tokens/${id}/revoke`, { method: "POST" })
+  revokeMcpToken: (id) => request(`/api/mcp/tokens/${id}/revoke`, { method: "POST" }),
+  getModelConfig: () => request("/api/settings/model"),
+  updateModelConfig: (input) => request("/api/settings/model", { method: "PUT", body: json(input) })
 };
 
 export function errorMessage(error: unknown): string {

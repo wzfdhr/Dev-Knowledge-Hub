@@ -350,18 +350,26 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     async ({ query, reason, expected }) => {
     try {
       const selected = await published(context);
+      const matches = await selected.context.store.searchKnowledge(
+        selected.context.workspaceId,
+        selected.repository.id,
+        query,
+        selected.release.id
+      );
+      const citations = uniqueCitations(matches.flatMap((match) => match.citations)).slice(0, 8);
       const feedback = await selected.context.store.reportFeedbackWithAudit({
         workspaceId: selected.context.workspaceId,
         releaseId: selected.release.id,
         query,
         reason,
+        citations,
         ...(expected ? { expected } : {})
       });
       return successful(
         selected.release,
         selected.snapshot.commitSha,
         { feedback },
-        [],
+        citations,
         false
       );
     } catch (error) {

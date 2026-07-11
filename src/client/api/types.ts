@@ -35,6 +35,21 @@ export interface Release {
   version: string;
   createdAt: string;
   publishedAt: string | null;
+  commitSha?: string | null;
+}
+export interface RepositoryStatus {
+  repository: Repository;
+  latestSnapshot: null | {
+    id: string; commitSha: string; ref: string; commitTimestamp: string;
+  };
+}
+export interface KnowledgeMetadata {
+  symbols: Array<{
+    name: string; kind: string; path: string; startLine: number; endLine: number; exported: boolean;
+  }>;
+  dependencies: Array<{
+    source: string; target: string; kind: string; path: string; startLine: number; endLine: number;
+  }>;
 }
 export interface Citation {
   path: string;
@@ -74,6 +89,7 @@ export interface Feedback {
   query: string;
   reason: string;
   expected: string | null;
+  citations: Citation[];
   status: AgentFeedbackStatus;
   rebuildBuildId: string | null;
   createdAt: string;
@@ -93,5 +109,11 @@ export interface McpConnection {
   authorization: string;
   stdioCommand: string;
   tools: string[];
+}
+export type ModelProvider = "openai" | "anthropic";
+export interface ModelConfig {
+  provider: ModelProvider;
+  model: string;
+  hasApiKey: boolean;
 }
 export interface ApiErrorShape { error: { code: string; message: string; changedPaths?: string[] } }

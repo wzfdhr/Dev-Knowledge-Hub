@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type {
@@ -22,6 +22,7 @@ const SKIPPED_DIRECTORIES = new Set([
 const SOURCE_EXTENSIONS = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".md", ".json", ".yaml", ".yml"
 ]);
+const repositorySyncs = new Map<string, Promise<void>>();
 
 export class DirtyWorktreeError extends Error {
   readonly code = "DIRTY_WORKTREE";
@@ -112,7 +113,24 @@ export interface SnapshotSummary {
   unchanged: boolean;
 }
 
-export async function syncRepository({
+async function withRepositorySync<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  const previous = repositorySyncs.get(key) ?? Promise.resolve();
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = previous.then(() => gate);
+  repositorySyncs.set(key, queued);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (repositorySyncs.get(key) === queued) repositorySyncs.delete(key);
+  }
+}
+
+async function syncRepositoryUnlocked({
   repository,
   dataDir,
   store,
@@ -183,6 +201,12 @@ export async function syncRepository({
   const storagePath = path.join(dataDir, "snapshots", snapshotId);
   const files: SourceFileRecord[] = [];
   for (const filePath of tracked) {
+    const byteSize = Number((await runGit({
+      cwd: repositoryPath,
+      args: ["cat-file", "-s", `${commitSha}:${filePath}`]
+    })).toString("utf8").trim());
+    if (!Number.isSafeInteger(byteSize) || byteSize > MAX_FILE_BYTES) continue;
+
     const content = await runGit({ cwd: repositoryPath, args: ["show", `${commitSha}:${filePath}`] });
     if (content.length > MAX_FILE_BYTES || content.includes(0) || isGenerated(content)) continue;
 
@@ -210,6 +234,23 @@ export async function syncRepository({
     commitTimestamp,
     storagePath
   };
-  await store.createSnapshot({ snapshot, files });
+  const persisted = await store.createSnapshot({ snapshot, files });
+  if (persisted.id !== snapshot.id) {
+    await rm(storagePath, { recursive: true, force: true });
+    return {
+      snapshotId: persisted.id,
+      commitSha: persisted.commitSha,
+      ref: persisted.ref,
+      fileCount: await store.countSnapshotFiles(persisted.id),
+      unchanged: true
+    };
+  }
   return { snapshotId, commitSha, ref, fileCount: files.length, unchanged: false };
+}
+
+export function syncRepository(
+  options: Parameters<typeof syncRepositoryUnlocked>[0]
+): Promise<SnapshotSummary> {
+  const key = `${options.repository.workspaceId}:${options.repository.id}`;
+  return withRepositorySync(key, () => syncRepositoryUnlocked(options));
 }

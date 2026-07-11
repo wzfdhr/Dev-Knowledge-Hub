@@ -1,15 +1,21 @@
-import { afterEach, describe, expect, test } from "vitest";
+import { describe, expect, test } from "vitest";
 
 import { buildServer } from "./app";
+import { MemoryAppStore } from "./persistence/memory-store";
+
+function testServer() {
+  return buildServer({
+    store: new MemoryAppStore(),
+    masterKey: Buffer.alloc(32, 1).toString("base64"),
+    sessionSecret: "health-test-session-secret",
+    dataDir: "/tmp/devkh-health-test",
+    nodeEnv: "test"
+  });
+}
 
 describe("buildServer", () => {
-  afterEach(async () => {
-    const app = buildServer();
-    await app.close();
-  });
-
   test("GET /api/health returns service health payload", async () => {
-    const app = buildServer();
+    const app = testServer();
 
     const response = await app.inject({
       method: "GET",

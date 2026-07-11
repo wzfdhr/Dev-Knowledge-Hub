@@ -1,5 +1,3 @@
-import { randomBytes } from "node:crypto";
-
 import cookie from "@fastify/cookie";
 import Fastify, {
   type FastifyInstance,
@@ -9,7 +7,6 @@ import Fastify, {
 import { z } from "zod";
 
 import { SERVICE_NAME } from "../shared/contracts.js";
-import { MemoryAppStore } from "./persistence/memory-store.js";
 import type { AdminRecord, AppStore } from "./persistence/store.js";
 import type { RepositoryRecord } from "./persistence/store.js";
 import { decryptSecret, encryptSecret } from "./security/crypto.js";
@@ -54,16 +51,6 @@ interface AuthenticatedRequest extends FastifyRequest {
   sessionAdmin: AdminRecord;
 }
 
-function defaults(): ServerOptions {
-  return {
-    store: new MemoryAppStore(),
-    masterKey: randomBytes(32).toString("base64"),
-    sessionSecret: randomBytes(32).toString("base64url"),
-    dataDir: "./data",
-    nodeEnv: "test"
-  };
-}
-
 function sendError(reply: FastifyReply, statusCode: number, code: string, message: string) {
   return reply.code(statusCode).send({ error: { code, message } });
 }
@@ -82,8 +69,7 @@ function repositoryDto(repository: RepositoryRecord) {
   };
 }
 
-export function buildServer(provided: Partial<ServerOptions> = {}): FastifyInstance {
-  const options = { ...defaults(), ...provided };
+export function buildServer(options: ServerOptions): FastifyInstance {
   const server = Fastify({ logger: false });
   void server.register(cookie);
 

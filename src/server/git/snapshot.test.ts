@@ -127,7 +127,7 @@ describe("immutable repository snapshots", () => {
     await writeFile(path.join(repositoryPath, ".env.example"), "TOKEN=\n");
     await writeFile(path.join(repositoryPath, "generated.ts"), "// @generated\nexport {};\n");
     await writeFile(path.join(repositoryPath, "binary.js"), Buffer.from([0, 1, 2, 3]));
-    await writeFile(path.join(repositoryPath, "large.ts"), Buffer.alloc(1024 * 1024 + 1, 65));
+    await writeFile(path.join(repositoryPath, "large.ts"), Buffer.alloc(4 * 1024 * 1024 + 1, 65));
     await git(repositoryPath, "add", "-f", ".");
     await git(repositoryPath, "commit", "-m", "add filtering cases");
 
@@ -172,6 +172,23 @@ describe("immutable repository snapshots", () => {
     expect(second.commitSha).not.toBe(first.commitSha);
     expect(second.snapshotId).not.toBe(first.snapshotId);
     expect(store.sourceSnapshots).toHaveLength(2);
+  });
+
+  test("serializes concurrent syncs so one snapshot is created per repository SHA", async () => {
+    const repositoryPath = await fixtureRepository();
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-data-"));
+    tempDirectories.push(dataDir);
+    const store = new MemoryAppStore();
+    const repository = localRepository(repositoryPath);
+
+    const results = await Promise.all(Array.from({ length: 5 }, () =>
+      syncRepository({ repository, dataDir, store })
+    ));
+
+    expect(results.filter(({ unchanged }) => !unchanged)).toHaveLength(1);
+    expect(results.filter(({ unchanged }) => unchanged)).toHaveLength(4);
+    expect(new Set(results.map(({ snapshotId }) => snapshotId)).size).toBe(1);
+    expect(store.sourceSnapshots).toHaveLength(1);
   });
 
   test("sanitizes credentialized local remote URLs before persistence", async () => {

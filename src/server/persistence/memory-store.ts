@@ -104,9 +104,16 @@ export class MemoryAppStore implements AppStore {
     ) ?? null;
   }
 
-  async createSnapshot({ snapshot, files }: CreateSnapshotInput): Promise<void> {
+  async createSnapshot({ snapshot, files }: CreateSnapshotInput): Promise<SourceSnapshotRecord> {
+    const existing = await this.findSnapshotByCommit(
+      snapshot.workspaceId,
+      snapshot.repositoryId,
+      snapshot.commitSha
+    );
+    if (existing) return existing;
     this.sourceSnapshots.push(snapshot);
     this.sourceFiles.push(...files);
+    return snapshot;
   }
 
   async countSnapshotFiles(snapshotId: string): Promise<number> {

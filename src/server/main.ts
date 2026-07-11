@@ -1,33 +1,14 @@
-import { buildServer } from "./app.js";
-import { createDatabase } from "../db/client.js";
-import { runMigrations } from "../db/migrate.js";
-import { loadEnv, type EnvironmentMode } from "./env.js";
-import { PostgresAppStore } from "./persistence/postgres-store.js";
+import { bootstrapServer } from "./bootstrap.js";
+import type { EnvironmentMode } from "./env.js";
 
 const mode = (process.env.NODE_ENV ?? "development") as EnvironmentMode;
-const env = loadEnv({ mode, env: process.env });
-const persistenceValues = [env.databaseUrl, env.masterKey, env.sessionSecret];
-const configuredValues = persistenceValues.filter(Boolean).length;
-if (configuredValues > 0 && configuredValues < persistenceValues.length) {
-  throw new Error("DATABASE_URL, DEVKH_MASTER_KEY, and DEVKH_SESSION_SECRET must be configured together");
-}
-
-const database = env.databaseUrl ? createDatabase(env.databaseUrl) : null;
-if (database) await runMigrations(database.pool);
-const server = buildServer(database && env.masterKey && env.sessionSecret ? {
-  store: new PostgresAppStore(database.pool),
-  masterKey: env.masterKey,
-  sessionSecret: env.sessionSecret,
-  dataDir: env.dataDir,
-  nodeEnv: env.nodeEnv
-} : {
-  dataDir: env.dataDir,
-  nodeEnv: env.nodeEnv
-});
-if (database) server.addHook("onClose", () => database.pool.end());
+const server = await bootstrapServer(mode, process.env);
 
 try {
-  await server.listen({ host: env.host, port: env.port });
+  await server.listen({
+    host: process.env.HOST ?? "127.0.0.1",
+    port: Number(process.env.PORT ?? 3000)
+  });
 } catch (error) {
   server.log.error(error);
   process.exitCode = 1;

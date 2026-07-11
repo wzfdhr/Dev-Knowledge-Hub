@@ -97,7 +97,7 @@ export interface AppStore {
     repositoryId: string,
     commitSha: string
   ): Promise<SourceSnapshotRecord | null>;
-  createSnapshot(input: CreateSnapshotInput): Promise<void>;
+  createSnapshot(input: CreateSnapshotInput): Promise<SourceSnapshotRecord>;
   countSnapshotFiles(snapshotId: string): Promise<number>;
   repositoryCredential(workspaceId: string, repositoryId: string): Promise<string | null>;
 }

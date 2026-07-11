@@ -27,6 +27,17 @@ interface RepositoryRow extends QueryResultRow {
   has_credential: boolean;
 }
 
+interface SnapshotRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  repository_id: string;
+  commit_sha: string;
+  ref: string;
+  remote_url: string | null;
+  commit_timestamp: Date;
+  storage_path: string;
+}
+
 function repositoryRecord(row: RepositoryRow): RepositoryRecord {
   return {
     id: row.id,
@@ -37,6 +48,19 @@ function repositoryRecord(row: RepositoryRow): RepositoryRecord {
     cloneUrl: row.clone_url,
     defaultBranch: row.default_branch,
     hasCredential: row.has_credential
+  };
+}
+
+function snapshotRecord(row: SnapshotRow): SourceSnapshotRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    repositoryId: row.repository_id,
+    commitSha: row.commit_sha,
+    ref: row.ref,
+    remoteUrl: row.remote_url,
+    commitTimestamp: row.commit_timestamp,
+    storagePath: row.storage_path
   };
 }
 
@@ -212,43 +236,27 @@ export class PostgresAppStore implements AppStore {
     repositoryId: string,
     commitSha: string
   ): Promise<SourceSnapshotRecord | null> {
-    const { rows } = await this.pool.query<{
-      id: string;
-      workspace_id: string;
-      repository_id: string;
-      commit_sha: string;
-      ref: string;
-      remote_url: string | null;
-      commit_timestamp: Date;
-      storage_path: string;
-    }>(
+    const { rows } = await this.pool.query<SnapshotRow>(
       `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
               commit_timestamp, storage_path
        FROM source_snapshots
        WHERE workspace_id = $1 AND repository_id = $2 AND commit_sha = $3`,
       [workspaceId, repositoryId, commitSha]
     );
-    const row = rows[0];
-    return row ? {
-      id: row.id,
-      workspaceId: row.workspace_id,
-      repositoryId: row.repository_id,
-      commitSha: row.commit_sha,
-      ref: row.ref,
-      remoteUrl: row.remote_url,
-      commitTimestamp: row.commit_timestamp,
-      storagePath: row.storage_path
-    } : null;
+    return rows[0] ? snapshotRecord(rows[0]) : null;
   }
 
-  async createSnapshot({ snapshot, files }: CreateSnapshotInput): Promise<void> {
+  async createSnapshot({ snapshot, files }: CreateSnapshotInput): Promise<SourceSnapshotRecord> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      await client.query(
+      const inserted = await client.query<SnapshotRow>(
         `INSERT INTO source_snapshots
          (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (repository_id, commit_sha) DO NOTHING
+         RETURNING id, workspace_id, repository_id, commit_sha, ref, remote_url,
+                   commit_timestamp, storage_path`,
         [
           snapshot.id,
           snapshot.workspaceId,
@@ -260,6 +268,19 @@ export class PostgresAppStore implements AppStore {
           snapshot.storagePath
         ]
       );
+      const insertedSnapshot = inserted.rows[0];
+      if (!insertedSnapshot) {
+        const existing = await client.query<SnapshotRow>(
+          `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
+                  commit_timestamp, storage_path
+           FROM source_snapshots
+           WHERE workspace_id = $1 AND repository_id = $2 AND commit_sha = $3`,
+          [snapshot.workspaceId, snapshot.repositoryId, snapshot.commitSha]
+        );
+        if (!existing.rows[0]) throw new Error("Snapshot conflict winner was not found");
+        await client.query("COMMIT");
+        return snapshotRecord(existing.rows[0]);
+      }
       for (const file of files) {
         await client.query(
           `INSERT INTO source_files
@@ -277,6 +298,7 @@ export class PostgresAppStore implements AppStore {
         );
       }
       await client.query("COMMIT");
+      return snapshotRecord(insertedSnapshot);
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;

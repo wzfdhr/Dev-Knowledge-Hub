@@ -1,6 +1,7 @@
 import {
   foreignKey,
   index,
+  integer,
   jsonb,
   pgEnum,
   pgTable,
@@ -47,23 +48,32 @@ export const repositories = pgTable("repositories", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
-  cloneUrl: text("clone_url").notNull(),
+  kind: text("kind").notNull().default("git"),
+  localPath: text("local_path"),
+  cloneUrl: text("clone_url"),
   defaultBranch: text("default_branch").notNull().default("main"),
   ...timestamps
 }, (table) => [
   uniqueIndex("repositories_id_workspace_idx").on(table.id, table.workspaceId),
-  index("repositories_workspace_idx").on(table.workspaceId)
+  uniqueIndex("repositories_workspace_unique_idx").on(table.workspaceId)
 ]);
 
 export const encryptedCredentials = pgTable("encrypted_credentials", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  repositoryId: uuid("repository_id"),
   name: text("name").notNull(),
   ciphertext: text("ciphertext").notNull(),
   ...timestamps
 }, (table) => [
   uniqueIndex("encrypted_credentials_id_workspace_idx").on(table.id, table.workspaceId),
-  index("encrypted_credentials_workspace_idx").on(table.workspaceId)
+  uniqueIndex("encrypted_credentials_repo_name_idx").on(table.repositoryId, table.name),
+  index("encrypted_credentials_workspace_idx").on(table.workspaceId),
+  foreignKey({
+    columns: [table.repositoryId, table.workspaceId],
+    foreignColumns: [repositories.id, repositories.workspaceId],
+    name: "encrypted_credentials_repository_workspace_fk"
+  }).onDelete("cascade")
 ]);
 
 export const sourceSnapshots = pgTable("source_snapshots", {
@@ -72,10 +82,14 @@ export const sourceSnapshots = pgTable("source_snapshots", {
   repositoryId: uuid("repository_id").notNull(),
   commitSha: text("commit_sha").notNull(),
   ref: text("ref").notNull(),
+  remoteUrl: text("remote_url"),
+  commitTimestamp: timestamp("commit_timestamp", { withTimezone: true }).notNull(),
+  storagePath: text("storage_path").notNull(),
   ...timestamps
 }, (table) => [
   uniqueIndex("source_snapshots_id_workspace_idx").on(table.id, table.workspaceId),
   index("source_snapshots_workspace_repo_idx").on(table.workspaceId, table.repositoryId),
+  uniqueIndex("source_snapshots_repo_commit_idx").on(table.repositoryId, table.commitSha),
   foreignKey({
     columns: [table.repositoryId, table.workspaceId],
     foreignColumns: [repositories.id, repositories.workspaceId],
@@ -90,6 +104,7 @@ export const sourceFiles = pgTable("source_files", {
   path: text("path").notNull(),
   language: text("language"),
   contentHash: text("content_hash").notNull(),
+  byteSize: integer("byte_size").notNull(),
   ...timestamps
 }, (table) => [
   uniqueIndex("source_files_id_workspace_idx").on(table.id, table.workspaceId),

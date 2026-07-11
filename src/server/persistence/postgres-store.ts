@@ -2,11 +2,15 @@ import type { Pool, QueryResultRow } from "pg";
 
 import type {
   AdminRecord,
+  AgentFeedbackRecord,
+  AgentFeedbackStatus,
   AppStore,
   AuditEventInput,
+  CreateFeedbackInput,
   CreateSnapshotInput,
   KnowledgePageRecord,
   KnowledgeSearchResult,
+  McpTokenRecord,
   ReleaseRecord,
   RepositoryConnectionInput,
   RepositoryRecord,
@@ -73,6 +77,30 @@ interface ReleaseRow extends QueryResultRow {
   status?: BuildStatus;
 }
 
+interface McpTokenRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  name: string;
+  token_hash: string;
+  token_prefix: string;
+  created_at: Date;
+  last_used_at: Date | null;
+  revoked_at: Date | null;
+}
+
+interface FeedbackRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  release_id: string | null;
+  query: string;
+  reason: string;
+  expected: string | null;
+  status: AgentFeedbackStatus;
+  rebuild_build_id: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
 function repositoryRecord(row: RepositoryRow): RepositoryRecord {
   return {
     id: row.id,
@@ -124,6 +152,34 @@ function releaseRecord(row: ReleaseRow): ReleaseRecord {
     version: row.version,
     createdAt: row.created_at,
     publishedAt: row.published_at
+  };
+}
+
+function mcpTokenRecord(row: McpTokenRow): McpTokenRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    name: row.name,
+    tokenHash: row.token_hash,
+    tokenPrefix: row.token_prefix,
+    createdAt: row.created_at,
+    lastUsedAt: row.last_used_at,
+    revokedAt: row.revoked_at
+  };
+}
+
+function feedbackRecord(row: FeedbackRow): AgentFeedbackRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    releaseId: row.release_id,
+    query: row.query,
+    reason: row.reason,
+    expected: row.expected,
+    status: row.status,
+    rebuildBuildId: row.rebuild_build_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
   };
 }
 
@@ -235,6 +291,130 @@ export class PostgresAppStore implements AppStore {
         JSON.stringify(event.metadata ?? {})
       ]
     );
+  }
+
+  async createMcpToken(
+    input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">
+  ): Promise<McpTokenRecord> {
+    const { rows } = await this.pool.query<McpTokenRow>(
+      `INSERT INTO mcp_tokens (workspace_id, name, token_hash, token_prefix)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, workspace_id, name, token_hash, token_prefix,
+                 created_at, last_used_at, revoked_at`,
+      [input.workspaceId, input.name, input.tokenHash, input.tokenPrefix]
+    );
+    return mcpTokenRecord(rows[0]);
+  }
+
+  async listMcpTokens(workspaceId: string): Promise<McpTokenRecord[]> {
+    const { rows } = await this.pool.query<McpTokenRow>(
+      `SELECT id, workspace_id, name, token_hash, token_prefix,
+              created_at, last_used_at, revoked_at
+       FROM mcp_tokens WHERE workspace_id = $1 ORDER BY created_at DESC, id DESC`,
+      [workspaceId]
+    );
+    return rows.map(mcpTokenRecord);
+  }
+
+  async findActiveMcpToken(tokenHash: string): Promise<McpTokenRecord | null> {
+    const { rows } = await this.pool.query<McpTokenRow>(
+      `SELECT id, workspace_id, name, token_hash, token_prefix,
+              created_at, last_used_at, revoked_at
+       FROM mcp_tokens WHERE token_hash = $1 AND revoked_at IS NULL LIMIT 1`,
+      [tokenHash]
+    );
+    return rows[0] ? mcpTokenRecord(rows[0]) : null;
+  }
+
+  async touchMcpToken(tokenId: string): Promise<void> {
+    await this.pool.query(
+      "UPDATE mcp_tokens SET last_used_at = now(), updated_at = now() WHERE id = $1 AND revoked_at IS NULL",
+      [tokenId]
+    );
+  }
+
+  async revokeMcpToken(workspaceId: string, tokenId: string): Promise<McpTokenRecord | null> {
+    const { rows } = await this.pool.query<McpTokenRow>(
+      `UPDATE mcp_tokens SET revoked_at = COALESCE(revoked_at, now()), updated_at = now()
+       WHERE workspace_id = $1 AND id = $2
+       RETURNING id, workspace_id, name, token_hash, token_prefix,
+                 created_at, last_used_at, revoked_at`,
+      [workspaceId, tokenId]
+    );
+    return rows[0] ? mcpTokenRecord(rows[0]) : null;
+  }
+
+  async createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord> {
+    const { rows } = await this.pool.query<FeedbackRow>(
+      `INSERT INTO agent_feedback
+       (workspace_id, release_id, query, reason, expected)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, workspace_id, release_id, query, reason, expected, status,
+                 rebuild_build_id, created_at, updated_at`,
+      [
+        input.workspaceId,
+        input.releaseId ?? null,
+        input.query,
+        input.reason,
+        input.expected ?? null
+      ]
+    );
+    return feedbackRecord(rows[0]);
+  }
+
+  async listFeedback(
+    workspaceId: string,
+    status?: AgentFeedbackStatus
+  ): Promise<AgentFeedbackRecord[]> {
+    const { rows } = await this.pool.query<FeedbackRow>(
+      `SELECT id, workspace_id, release_id, query, reason, expected, status,
+              rebuild_build_id, created_at, updated_at
+       FROM agent_feedback
+       WHERE workspace_id = $1 AND ($2::agent_feedback_status IS NULL OR status = $2)
+       ORDER BY created_at DESC, id DESC`,
+      [workspaceId, status ?? null]
+    );
+    return rows.map(feedbackRecord);
+  }
+
+  async transitionFeedback(
+    workspaceId: string,
+    feedbackId: string,
+    status: AgentFeedbackStatus
+  ): Promise<AgentFeedbackRecord | null> {
+    const existing = (await this.listFeedback(workspaceId)).find((record) => record.id === feedbackId);
+    if (!existing) return null;
+    const allowed: Record<AgentFeedbackStatus, AgentFeedbackStatus[]> = {
+      open: ["acknowledged", "dismissed"],
+      acknowledged: ["fixed", "dismissed"],
+      fixed: [],
+      dismissed: []
+    };
+    if (!allowed[existing.status].includes(status)) throw new Error("Invalid feedback transition");
+    const { rows } = await this.pool.query<FeedbackRow>(
+      `UPDATE agent_feedback SET status = $3, updated_at = now()
+       WHERE workspace_id = $1 AND id = $2 AND status = $4
+       RETURNING id, workspace_id, release_id, query, reason, expected, status,
+                 rebuild_build_id, created_at, updated_at`,
+      [workspaceId, feedbackId, status, existing.status]
+    );
+    if (!rows[0]) throw new Error("Invalid feedback transition");
+    return feedbackRecord(rows[0]);
+  }
+
+  async markFeedbackRebuild(
+    workspaceId: string,
+    feedbackId: string,
+    buildId: string
+  ): Promise<AgentFeedbackRecord | null> {
+    const { rows } = await this.pool.query<FeedbackRow>(
+      `UPDATE agent_feedback SET rebuild_build_id = $3, updated_at = now()
+       WHERE workspace_id = $1 AND id = $2 AND status = 'acknowledged'
+       RETURNING id, workspace_id, release_id, query, reason, expected, status,
+                 rebuild_build_id, created_at, updated_at`,
+      [workspaceId, feedbackId, buildId]
+    );
+    return rows[0] ? feedbackRecord(rows[0]) : null;
   }
 
   async createRepository(

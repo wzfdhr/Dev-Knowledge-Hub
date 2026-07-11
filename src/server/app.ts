@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 
 import cookie from "@fastify/cookie";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -10,7 +11,7 @@ import Fastify, {
 } from "fastify";
 import { z } from "zod";
 
-import { SERVICE_NAME } from "../shared/contracts.js";
+import { AGENT_FEEDBACK_STATUSES, SERVICE_NAME } from "../shared/contracts.js";
 import type { AdminRecord, AppStore } from "./persistence/store.js";
 import type { RepositoryRecord } from "./persistence/store.js";
 import { decryptSecret, encryptSecret } from "./security/crypto.js";
@@ -18,6 +19,13 @@ import { DirtyWorktreeError, syncRepository } from "./git/snapshot.js";
 import { hashPassword, verifyPassword } from "./security/password.js";
 import { createSessionToken, verifySessionToken } from "./security/session.js";
 import type { BuildEvent, BuildService } from "./knowledge/build-service.js";
+import {
+  authenticateMcpToken,
+  generateMcpToken,
+  hashMcpToken,
+  sanitizedMcpToken
+} from "./mcp/auth.js";
+import { createRegisteredMcpServer, MCP_TOOL_NAMES } from "./mcp/tools.js";
 
 const SESSION_COOKIE = "devkh_session";
 const SESSION_MAX_AGE = 8 * 60 * 60;
@@ -182,6 +190,58 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     return { authenticated: true, admin: { id: admin.id, email: admin.email } };
   });
+
+  server.post("/api/mcp/tokens", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({ name: z.string().trim().min(1).max(100) }).safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MCP token");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const plaintext = generateMcpToken();
+    const token = await options.store.createMcpToken({
+      workspaceId: admin.workspaceId,
+      name: parsed.data.name,
+      tokenHash: hashMcpToken(plaintext),
+      tokenPrefix: plaintext.slice(0, 12)
+    });
+    await options.store.recordAudit({
+      workspaceId: admin.workspaceId,
+      actorId: admin.id,
+      action: "mcp_token.created",
+      resourceType: "mcp_token",
+      resourceId: token.id
+    });
+    return reply.code(201).send({ ...sanitizedMcpToken(token), token: plaintext });
+  });
+
+  server.get("/api/mcp/tokens", { preHandler: requireAdmin }, async (request) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    return {
+      tokens: (await options.store.listMcpTokens(admin.workspaceId)).map(sanitizedMcpToken)
+    };
+  });
+
+  server.post("/api/mcp/tokens/:id/revoke", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({ id: z.uuid() }).safeParse(request.params);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MCP token");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const token = await options.store.revokeMcpToken(admin.workspaceId, parsed.data.id);
+    if (!token) return sendError(reply, 404, "TOKEN_NOT_FOUND", "MCP token was not found");
+    await options.store.recordAudit({
+      workspaceId: admin.workspaceId,
+      actorId: admin.id,
+      action: "mcp_token.revoked",
+      resourceType: "mcp_token",
+      resourceId: token.id
+    });
+    return { token: sanitizedMcpToken(token) };
+  });
+
+  server.get("/api/mcp/connection", { preHandler: requireAdmin }, async () => ({
+    endpoint: "/mcp",
+    transport: "streamable-http",
+    authorization: "bearer",
+    stdioCommand: "npm run mcp:stdio",
+    tools: MCP_TOOL_NAMES
+  }));
 
   server.post("/api/repositories", { preHandler: requireAdmin }, async (request, reply) => {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
@@ -503,6 +563,98 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const repository = await options.store.currentRepository(admin.workspaceId);
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
     return { releases: await options.store.listReleases(admin.workspaceId, repository.id) };
+  });
+
+  server.get("/api/feedback", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({ status: z.enum(AGENT_FEEDBACK_STATUSES).optional() })
+      .safeParse(request.query);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid feedback filter");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    return { feedback: await options.store.listFeedback(admin.workspaceId, parsed.data.status) };
+  });
+
+  server.patch("/api/feedback/:id", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ id: z.uuid() }).safeParse(request.params);
+    const body = z.object({ status: z.enum(AGENT_FEEDBACK_STATUSES) }).safeParse(request.body);
+    if (!params.success || !body.success) {
+      return sendError(reply, 400, "INVALID_REQUEST", "Invalid feedback transition");
+    }
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    try {
+      const feedback = await options.store.transitionFeedback(
+        admin.workspaceId, params.data.id, body.data.status
+      );
+      if (!feedback) return sendError(reply, 404, "FEEDBACK_NOT_FOUND", "Feedback was not found");
+      await options.store.recordAudit({
+        workspaceId: admin.workspaceId,
+        actorId: admin.id,
+        action: "feedback.transitioned",
+        resourceType: "agent_feedback",
+        resourceId: feedback.id,
+        metadata: { status: feedback.status }
+      });
+      return { feedback };
+    } catch {
+      return sendError(reply, 409, "INVALID_FEEDBACK_TRANSITION", "Feedback transition is not allowed");
+    }
+  });
+
+  server.post("/api/feedback/:id/rebuild", { preHandler: requireAdmin }, async (request, reply) => {
+    if (!options.buildService) {
+      return sendError(reply, 503, "BUILD_SERVICE_UNAVAILABLE", "Build service is unavailable");
+    }
+    const params = z.object({ id: z.uuid() }).safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid feedback rebuild");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const feedback = (await options.store.listFeedback(admin.workspaceId))
+      .find((candidate) => candidate.id === params.data.id);
+    if (!feedback) return sendError(reply, 404, "FEEDBACK_NOT_FOUND", "Feedback was not found");
+    if (feedback.status !== "acknowledged") {
+      return sendError(reply, 409, "FEEDBACK_NOT_ACKNOWLEDGED", "Feedback must be acknowledged first");
+    }
+    const repository = await options.store.currentRepository(admin.workspaceId);
+    const release = repository
+      ? await options.store.currentRelease(admin.workspaceId, repository.id)
+      : null;
+    const snapshot = release
+      ? await options.store.findSnapshotById(admin.workspaceId, release.snapshotId)
+      : null;
+    if (!repository || !release || !snapshot) {
+      return sendError(reply, 409, "UNPUBLISHED", "No published release can be rebuilt");
+    }
+    const result = await options.buildService.startBuild({
+      workspaceId: admin.workspaceId,
+      repositoryId: repository.id,
+      snapshotId: snapshot.id,
+      snapshotPath: snapshot.storagePath,
+      commitSha: snapshot.commitSha
+    });
+    await options.store.markFeedbackRebuild(admin.workspaceId, feedback.id, result.build.id);
+    await options.store.recordAudit({
+      workspaceId: admin.workspaceId,
+      actorId: admin.id,
+      action: "feedback.rebuild_requested",
+      resourceType: "agent_feedback",
+      resourceId: feedback.id,
+      metadata: { buildId: result.build.id, releaseId: release.id }
+    });
+    return reply.code(result.created ? 202 : 200).send(result);
+  });
+
+  server.all("/mcp", async (request, reply) => {
+    const authorization = request.headers.authorization;
+    const match = /^Bearer (\S+)$/i.exec(authorization ?? "");
+    const token = match ? await authenticateMcpToken(options.store, match[1]) : null;
+    if (!token) return sendError(reply, 401, "UNAUTHORIZED", "Invalid or revoked MCP token");
+    const mcp = createRegisteredMcpServer({ store: options.store, workspaceId: token.workspaceId });
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true
+    });
+    await mcp.connect(transport);
+    reply.hijack();
+    reply.raw.once("finish", () => void mcp.close());
+    await transport.handleRequest(request.raw, reply.raw, request.body);
   });
 
   return server;

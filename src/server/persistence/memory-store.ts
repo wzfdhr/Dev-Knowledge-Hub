@@ -2,13 +2,17 @@ import { randomUUID } from "node:crypto";
 
 import type {
   AdminRecord,
+  AgentFeedbackRecord,
+  AgentFeedbackStatus,
   AppStore,
   AuditEventInput,
   AuditEventRecord,
   CreateSnapshotInput,
+  CreateFeedbackInput,
   EncryptedCredentialRecord,
   KnowledgePageRecord,
   KnowledgeSearchResult,
+  McpTokenRecord,
   ReleaseRecord,
   RepositoryConnectionInput,
   RepositoryRecord,
@@ -29,6 +33,8 @@ export class MemoryAppStore implements AppStore {
   private admin: AdminRecord | null = null;
   private repository: RepositoryRecord | null = null;
   readonly auditEvents: AuditEventRecord[] = [];
+  readonly mcpTokens: McpTokenRecord[] = [];
+  readonly feedback: AgentFeedbackRecord[] = [];
   readonly encryptedCredentials: EncryptedCredentialRecord[] = [];
   readonly sourceSnapshots: SourceSnapshotRecord[] = [];
   readonly sourceFiles: SourceFileRecord[] = [];
@@ -74,6 +80,104 @@ export class MemoryAppStore implements AppStore {
 
   async recordAudit(event: AuditEventInput): Promise<void> {
     this.auditEvents.push({ id: randomUUID(), metadata: {}, ...event });
+  }
+
+  async createMcpToken(
+    input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">
+  ): Promise<McpTokenRecord> {
+    const record: McpTokenRecord = {
+      ...input,
+      id: randomUUID(),
+      createdAt: new Date(),
+      lastUsedAt: null,
+      revokedAt: null
+    };
+    this.mcpTokens.push(record);
+    return record;
+  }
+
+  async listMcpTokens(workspaceId: string): Promise<McpTokenRecord[]> {
+    return this.mcpTokens.filter((token) => token.workspaceId === workspaceId);
+  }
+
+  async findActiveMcpToken(tokenHash: string): Promise<McpTokenRecord | null> {
+    return this.mcpTokens.find((token) => token.tokenHash === tokenHash && !token.revokedAt) ?? null;
+  }
+
+  async touchMcpToken(tokenId: string): Promise<void> {
+    const token = this.mcpTokens.find((candidate) => candidate.id === tokenId);
+    if (token) token.lastUsedAt = new Date();
+  }
+
+  async revokeMcpToken(workspaceId: string, tokenId: string): Promise<McpTokenRecord | null> {
+    const token = this.mcpTokens.find((candidate) =>
+      candidate.id === tokenId && candidate.workspaceId === workspaceId
+    );
+    if (!token) return null;
+    token.revokedAt ??= new Date();
+    return token;
+  }
+
+  async createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord> {
+    const now = new Date();
+    const record: AgentFeedbackRecord = {
+      id: randomUUID(),
+      workspaceId: input.workspaceId,
+      releaseId: input.releaseId ?? null,
+      query: input.query,
+      reason: input.reason,
+      expected: input.expected ?? null,
+      status: "open",
+      rebuildBuildId: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    this.feedback.push(record);
+    return record;
+  }
+
+  async listFeedback(
+    workspaceId: string,
+    status?: AgentFeedbackStatus
+  ): Promise<AgentFeedbackRecord[]> {
+    return this.feedback.filter((record) =>
+      record.workspaceId === workspaceId && (!status || record.status === status)
+    );
+  }
+
+  async transitionFeedback(
+    workspaceId: string,
+    feedbackId: string,
+    status: AgentFeedbackStatus
+  ): Promise<AgentFeedbackRecord | null> {
+    const record = this.feedback.find((candidate) =>
+      candidate.workspaceId === workspaceId && candidate.id === feedbackId
+    );
+    if (!record) return null;
+    const allowed: Record<AgentFeedbackStatus, AgentFeedbackStatus[]> = {
+      open: ["acknowledged", "dismissed"],
+      acknowledged: ["fixed", "dismissed"],
+      fixed: [],
+      dismissed: []
+    };
+    if (!allowed[record.status].includes(status)) throw new Error("Invalid feedback transition");
+    record.status = status;
+    record.updatedAt = new Date();
+    return record;
+  }
+
+  async markFeedbackRebuild(
+    workspaceId: string,
+    feedbackId: string,
+    buildId: string
+  ): Promise<AgentFeedbackRecord | null> {
+    const record = this.feedback.find((candidate) =>
+      candidate.workspaceId === workspaceId && candidate.id === feedbackId
+    );
+    if (!record) return null;
+    record.rebuildBuildId = buildId;
+    record.updatedAt = new Date();
+    return record;
   }
 
   async createRepository(

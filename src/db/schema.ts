@@ -318,10 +318,13 @@ export const mcpTokens = pgTable("mcp_tokens", {
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
   tokenHash: text("token_hash").notNull(),
+  tokenPrefix: text("token_prefix").notNull(),
   lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
   ...timestamps
 }, (table) => [
   uniqueIndex("mcp_tokens_id_workspace_idx").on(table.id, table.workspaceId),
+  uniqueIndex("mcp_tokens_hash_idx").on(table.tokenHash),
   index("mcp_tokens_workspace_idx").on(table.workspaceId)
 ]);
 
@@ -329,8 +332,12 @@ export const agentFeedback = pgTable("agent_feedback", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   pageId: uuid("page_id"),
+  releaseId: uuid("release_id"),
   status: agentFeedbackStatus("status").notNull().default("open"),
-  message: text("message").notNull(),
+  query: text("query").notNull(),
+  reason: text("reason").notNull(),
+  expected: text("expected"),
+  rebuildBuildId: uuid("rebuild_build_id"),
   ...timestamps
 }, (table) => [
   uniqueIndex("agent_feedback_id_workspace_idx").on(table.id, table.workspaceId),
@@ -339,6 +346,16 @@ export const agentFeedback = pgTable("agent_feedback", {
     columns: [table.pageId, table.workspaceId],
     foreignColumns: [knowledgePages.id, knowledgePages.workspaceId],
     name: "agent_feedback_page_workspace_fk"
+  }),
+  foreignKey({
+    columns: [table.releaseId, table.workspaceId],
+    foreignColumns: [releases.id, releases.workspaceId],
+    name: "agent_feedback_release_workspace_fk"
+  }),
+  foreignKey({
+    columns: [table.rebuildBuildId, table.workspaceId],
+    foreignColumns: [buildJobs.id, buildJobs.workspaceId],
+    name: "agent_feedback_rebuild_workspace_fk"
   })
 ]);
 

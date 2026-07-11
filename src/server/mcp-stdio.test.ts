@@ -11,7 +11,7 @@ afterEach(async () => {
 });
 
 describe("createMcpServer", () => {
-  test("initializes with an empty tool registration surface", async () => {
+  test("registers exactly the approved eight tools", async () => {
     const server = createMcpServer();
     const client = new Client({ name: "devkh-test-client", version: "0.0.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -20,6 +20,16 @@ describe("createMcpServer", () => {
     await server.connect(serverTransport);
     await client.connect(clientTransport);
 
-    await expect(client.listTools()).resolves.toEqual({ tools: [] });
+    const tools = await client.listTools();
+    expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
+      "dkh_get_architecture",
+      "dkh_get_change_context",
+      "dkh_get_module",
+      "dkh_get_release",
+      "dkh_get_source",
+      "dkh_get_symbol",
+      "dkh_report_gap",
+      "dkh_search"
+    ]);
   });
 });

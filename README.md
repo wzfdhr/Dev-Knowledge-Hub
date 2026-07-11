@@ -6,7 +6,7 @@ This package is private and `UNLICENSED`. No permission is granted to copy, redi
 
 ## Requirements
 
-- Node.js 22.9.0 or newer and npm 11 for local development
+- Node.js 22.13.0 or newer and npm 11 for local development
 - PostgreSQL 16 for production and integration tests
 - Docker Engine with Compose v2 for the container workflow
 - Git for local and remote repository snapshots
@@ -49,7 +49,7 @@ docker compose --profile test run --rm integration
 docker compose --profile test run --rm e2e
 ```
 
-Compose runs the non-root Node 22 app and PostgreSQL 16. The app waits for database health, uses a read-only root filesystem and a no-exec temporary `/tmp`, and persists PostgreSQL data, immutable snapshots, and Git mirrors in separate named volumes. The image installs its Git askpass helper as a static executable under `/app/scripts`; PATs are passed only in the Git child environment. Stop gracefully with `docker compose down`; do not add `--volumes` unless deleting all retained state is intentional.
+Compose runs the non-root Node 22.13 app and PostgreSQL 16. The app waits for database health, uses a read-only root filesystem and a no-exec temporary `/tmp`, and persists PostgreSQL data, immutable snapshots, and Git mirrors in separate named volumes. The image installs its Git askpass helper as a static executable under `/app/scripts`; PATs are passed only in the Git child environment. Stop gracefully with `docker compose down`; do not add `--volumes` unless deleting all retained state is intentional.
 
 PostgreSQL initialization creates `dev_knowledge_hub` for the app and a separate `devkh_test` used only by the Compose integration profile. Existing PostgreSQL volumes created before this isolation was added need the test database once before running integration tests:
 

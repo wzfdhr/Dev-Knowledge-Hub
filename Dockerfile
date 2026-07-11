@@ -1,4 +1,4 @@
-FROM node:22-bookworm-slim AS build
+FROM node:22.13-bookworm-slim AS build
 
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -17,13 +17,13 @@ RUN npm ci
 COPY . .
 CMD ["npm", "run", "test:e2e"]
 
-FROM node:22-bookworm-slim AS production-dependencies
+FROM node:22.13-bookworm-slim AS production-dependencies
 
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-FROM node:22-bookworm-slim AS runtime
+FROM node:22.13-bookworm-slim AS runtime
 
 ENV NODE_ENV=production
 ENV DEVKH_GIT_ASKPASS_PATH=/app/scripts/git-askpass.sh

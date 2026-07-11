@@ -39,7 +39,7 @@ const repository: RepositoryRecord = {
 describe("HTTPS Git authentication", () => {
   test("uses the static askpass helper when temporary files are non-executable", async () => {
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-remote-test-"));
-    const token = "github_pat_NEVER_IN_ARGUMENTS";
+    const token = "test-token-never-in-arguments";
     let askPassPath = "";
     const runner = vi.fn<GitRunner>(async ({ args, env }) => {
       expect(args.join(" ")).not.toContain(token);
@@ -76,7 +76,7 @@ describe("HTTPS Git authentication", () => {
     const homeDir = path.join(dataDir, "home");
     const markerPath = path.join(dataDir, "credential-helper-called");
     const helperPath = path.join(dataDir, "recording-helper.sh");
-    const token = "github_pat_MUST_ONLY_REACH_ASKPASS";
+    const token = "test-token-only-reaches-askpass";
 
     await mkdir(homeDir, { recursive: true });
     await writeFile(helperPath, `#!/bin/sh\nprintf '%s' "$DEVKH_GIT_TOKEN" > ${JSON.stringify(markerPath)}\n`);

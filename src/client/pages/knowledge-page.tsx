@@ -23,8 +23,26 @@ export function KnowledgePage({ api }: { api: ApiClient }) {
   });
   const releaseItems = releases.data?.pages.flatMap((page) => page.releases) ?? [];
   const requestedReleaseId = searchParams.get("releaseId");
-  const release = releaseItems.find((candidate) => candidate.id === requestedReleaseId)
-    ?? releaseItems[0];
+  const listedRequestedRelease = requestedReleaseId
+    ? releaseItems.find((candidate) => candidate.id === requestedReleaseId)
+    : undefined;
+  const needsExactRelease = Boolean(
+    requestedReleaseId && !listedRequestedRelease && !releases.isLoading
+  );
+  const exactRelease = useQuery({
+    queryKey: ["release", "exact", requestedReleaseId],
+    queryFn: () => api.getRelease(requestedReleaseId!),
+    enabled: needsExactRelease,
+    retry: false
+  });
+  const exactReleaseRecord = exactRelease.data?.release;
+  const release = requestedReleaseId
+    ? listedRequestedRelease ?? exactReleaseRecord
+    : releaseItems[0];
+  const selectableReleases = exactReleaseRecord
+    && !releaseItems.some((candidate) => candidate.id === exactReleaseRecord.id)
+    ? [exactReleaseRecord, ...releaseItems]
+    : releaseItems;
   const pages = useInfiniteQuery({
     queryKey: ["knowledge-pages", release?.id],
     initialPageParam: 0,
@@ -67,14 +85,16 @@ export function KnowledgePage({ api }: { api: ApiClient }) {
     release.commitSha ? release.commitSha !== latest.commitSha : release.snapshotId !== latest.id
   ));
   const releaseCommit = release?.commitSha ?? release?.snapshotId ?? "unknown";
-  const loading = repositoryStatus.isLoading || releases.isLoading;
-  const blockingError = repositoryStatus.error ?? releases.error;
+  const loading = repositoryStatus.isLoading || releases.isLoading
+    || (needsExactRelease && exactRelease.isLoading);
+  const blockingError = repositoryStatus.error ?? releases.error
+    ?? (needsExactRelease ? exactRelease.error : null);
 
   if (loading) return <div className="page knowledge-page"><Loading label="Loading release and repository state" /></div>;
   if (blockingError) return <div className="page knowledge-page"><header className="page-header"><div><p className="eyebrow">Repository intelligence</p><h1>Knowledge</h1><p>Release state could not be loaded.</p></div></header><ErrorState message={errorMessage(blockingError)} retry={() => { void repositoryStatus.refetch(); void releases.refetch(); }} /></div>;
 
   return <div className="page knowledge-page">
-    <header className="page-header"><div><p className="eyebrow">Repository intelligence</p><h1>Knowledge</h1><p>{release ? `Release ${release.version}` : "No release available"}</p></div>{release && <div className="page-header-actions"><label>Release<select aria-label="Knowledge release" value={release.id} onChange={(event) => setSearchParams({ releaseId: event.target.value })}>{releaseItems.map((item) => <option key={item.id} value={item.id}>{item.version}{item.publishedAt ? "" : " (draft)"}</option>)}</select></label>{releases.hasNextPage && <button className="button" onClick={() => void releases.fetchNextPage()} disabled={releases.isFetchingNextPage}>{releases.isFetchingNextPage ? "Loading releases..." : "Load more releases"}</button>}{!release.publishedAt && <span className="status status-open">Unpublished draft</span>}</div>}</header>
+    <header className="page-header"><div><p className="eyebrow">Repository intelligence</p><h1>Knowledge</h1><p>{release ? `Release ${release.version}` : "No release available"}</p></div>{release && <div className="page-header-actions"><label>Release<select aria-label="Knowledge release" value={release.id} onChange={(event) => setSearchParams({ releaseId: event.target.value })}>{selectableReleases.map((item) => <option key={item.id} value={item.id}>{item.version}{item.publishedAt ? "" : " (draft)"}</option>)}</select></label>{releases.hasNextPage && <button className="button" onClick={() => void releases.fetchNextPage()} disabled={releases.isFetchingNextPage}>{releases.isFetchingNextPage ? "Loading releases..." : "Load more releases"}</button>}{!release.publishedAt && <span className="status status-open">Unpublished draft</span>}</div>}</header>
     {!release ? <Empty>No knowledge release has been created. Review a ready build to create a draft.</Empty> : <>
       {stale && <div className="notice stale-notice" role="status"><GitCompare aria-hidden="true" /><span><strong>A newer repository snapshot is available.</strong><br /><span className="mono">{releaseCommit.slice(0, 12)} → {latest!.commitSha.slice(0, 12)}</span></span></div>}
       <div className="search-box"><Search aria-hidden="true" /><label className="sr-only" htmlFor="knowledge-search">Search knowledge</label><input ref={inputRef} id="knowledge-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search symbols, modules, paths..." /><kbd>⌘ K</kbd></div>

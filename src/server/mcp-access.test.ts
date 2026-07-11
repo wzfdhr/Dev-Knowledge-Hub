@@ -395,25 +395,49 @@ describe("MCP tool contract", () => {
     await app.close();
   });
 
-  test("uses at most eight deterministic store searches for change context", async () => {
+  test("uses all three accepted paths within eight deterministic change-context searches", async () => {
     const { store, workspaceId, app } = await publishedContext();
     const client = await connectMcp(store, workspaceId);
     const search = vi.spyOn(store, "searchKnowledge");
     const argumentsValue = {
       task: "change calculator add clamp operation range version module behavior",
       paths: [
-        "src/math.ts", "src/util.js", "src/index.ts", "src/calls.ts",
-        "src/call-targets.ts", "src/overloads.ts", "test/math.test.ts", "package.json"
+        "src/math.ts", "src/util.js", "src/index.ts"
       ]
     };
 
     await client.callTool({ name: "dkh_get_change_context", arguments: argumentsValue });
     const firstQueries = search.mock.calls.map((call) => call[2]);
     expect(firstQueries.length).toBeLessThanOrEqual(8);
+    expect(firstQueries).toEqual(expect.arrayContaining(argumentsValue.paths));
 
     search.mockClear();
     await client.callTool({ name: "dkh_get_change_context", arguments: argumentsValue });
     expect(search.mock.calls.map((call) => call[2])).toEqual(firstQueries);
+    await app.close();
+  });
+
+  test("rejects four change-context paths deterministically before searching", async () => {
+    const { store, workspaceId, app } = await publishedContext();
+    const client = await connectMcp(store, workspaceId);
+    const search = vi.spyOn(store, "searchKnowledge");
+    const request = {
+      name: "dkh_get_change_context",
+      arguments: {
+        task: "change calculator behavior",
+        paths: ["src/math.ts", "src/util.js", "src/index.ts", "src/calls.ts"]
+      }
+    };
+
+    const first = await client.callTool(request);
+    const second = await client.callTool(request);
+    const firstBody = JSON.parse(((first.content as Array<{ text: string }>)[0]).text);
+    const secondBody = JSON.parse(((second.content as Array<{ text: string }>)[0]).text);
+
+    expect(first.isError).toBe(true);
+    expect(firstBody.error.code).toBe("INVALID_INPUT");
+    expect(secondBody).toEqual(firstBody);
+    expect(search).not.toHaveBeenCalled();
     await app.close();
   });
 

@@ -2,7 +2,7 @@
 
 ## Runtime
 
-The React/Vite console and Fastify API are built into one Node.js 22 runtime. Production bootstrap validates environment, opens a PostgreSQL pool, applies ordered SQL migrations under an advisory lock, constructs the PostgreSQL store and pg-boss queue, recovers builds, and then starts HTTP. Memory persistence exists only in tests and the deterministic e2e entrypoint.
+The React/Vite console and Fastify API are built into one Node.js 22.13.0 runtime. Production bootstrap validates environment, opens a PostgreSQL pool, applies ordered SQL migrations under an advisory lock, constructs the PostgreSQL store and pg-boss queue, recovers builds, and then starts HTTP. Memory persistence exists only in tests and the deterministic e2e entrypoint.
 
 ```mermaid
 flowchart LR

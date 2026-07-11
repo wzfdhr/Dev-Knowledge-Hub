@@ -131,6 +131,55 @@ integration("PostgreSQL cited knowledge integration", () => {
       expect((await store.currentRelease(setup!.workspace.id, repository!.id))?.id)
         .toBe(firstRelease.id);
 
+      const oversizedCitations = Array.from({ length: 12 }, () => ({
+        path: "index.ts",
+        startLine: 1,
+        endLine: 1,
+        commitSha: snapshot!.commitSha,
+        blobHash: source!.contentHash
+      }));
+      await pool!.query(
+        `UPDATE knowledge_chunks chunk
+         SET heading = 'Chunk 00', content = 'content-00', citations = $3::jsonb
+         FROM knowledge_pages page
+         WHERE chunk.page_id = page.id
+           AND page.workspace_id = $1 AND page.build_job_id = $2
+           AND page.slug = 'architecture-overview' AND chunk.position = 0`,
+        [setup!.workspace.id, undispatched.build.id, JSON.stringify(oversizedCitations)]
+      );
+      await pool!.query(
+        `INSERT INTO knowledge_chunks
+         (workspace_id, page_id, position, heading, content, citations)
+         SELECT $1, page.id, generated.position,
+                'Chunk ' || lpad(generated.position::text, 2, '0'),
+                'content-' || lpad(generated.position::text, 2, '0'),
+                '[]'::jsonb
+         FROM knowledge_pages page
+         CROSS JOIN generate_series(1, 59) AS generated(position)
+         WHERE page.workspace_id = $1 AND page.build_job_id = $2
+           AND page.slug = 'architecture-overview'`,
+        [setup!.workspace.id, undispatched.build.id]
+      );
+
+      const architecture = await store.findKnowledgePageBySlug(
+        setup!.workspace.id,
+        firstRelease.id,
+        "architecture-overview"
+      );
+      expect(architecture?.chunks).toHaveLength(50);
+      expect(architecture?.chunks.map((chunk) => chunk.heading)).toEqual(
+        Array.from({ length: 50 }, (_, position) =>
+          `Chunk ${String(position).padStart(2, "0")}`)
+      );
+      const architectureSearch = await store.searchKnowledge(
+        setup!.workspace.id,
+        repository!.id,
+        "Architecture Overview",
+        firstRelease.id
+      );
+      expect(architectureSearch.find((result) => result.title === "Architecture Overview")?.citations)
+        .toHaveLength(8);
+
       const secondBuild = await service.startBuild({
         workspaceId: setup!.workspace.id,
         repositoryId: repository!.id,

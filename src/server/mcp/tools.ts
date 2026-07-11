@@ -61,7 +61,7 @@ const MAX_TASK_LENGTH = 2_000;
 const MAX_PATH_LENGTH = 500;
 const MAX_RESPONSE_CITATIONS = 50;
 const MAX_RESULTS = 20;
-const MAX_CHANGE_PATHS = 8;
+const MAX_CHANGE_PATHS = 3;
 const MAX_CHANGE_TERMS = 6;
 const MAX_CHANGE_SEARCHES = 8;
 
@@ -379,7 +379,7 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
         { length: Math.ceil(terms.length / 3) },
         (_, index) => terms.slice(index * 3, index * 3 + 3).join(" ")
       );
-      const queries = [...new Set([task, ...termBatches, ...(paths ?? []).slice(0, 3)])]
+      const queries = [...new Set([task, ...termBatches, ...(paths ?? [])])]
         .slice(0, MAX_CHANGE_SEARCHES - 2);
       const groups = await Promise.all(queries.map((query) => selected.context.store.searchKnowledge(
         selected.context.workspaceId, selected.repository.id, query, selected.release.id

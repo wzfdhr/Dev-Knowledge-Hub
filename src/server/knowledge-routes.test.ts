@@ -171,6 +171,21 @@ describe("knowledge API contracts", () => {
       method: "GET", url: "/api/releases/current", headers: { cookie }
     })).statusCode).toBe(404);
     const releaseId = draft.json().release.id as string;
+    const exactRelease = await app.inject({
+      method: "GET", url: `/api/releases/${releaseId}`, headers: { cookie }
+    });
+    expect(exactRelease.statusCode).toBe(200);
+    expect(exactRelease.json().release).toMatchObject({ id: releaseId, commitSha: index.commitSha });
+    const missingRelease = await app.inject({
+      method: "GET",
+      url: "/api/releases/99999999-9999-4999-8999-999999999999",
+      headers: { cookie }
+    });
+    expect(missingRelease.statusCode).toBe(404);
+    expect(missingRelease.json().error).toEqual({
+      code: "RELEASE_NOT_FOUND",
+      message: "Release was not found"
+    });
     expect((await app.inject({
       method: "POST", url: `/api/releases/${releaseId}/publish`, headers: { cookie }
     })).statusCode).toBe(200);

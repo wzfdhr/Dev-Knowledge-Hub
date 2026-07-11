@@ -51,6 +51,7 @@ export interface ApiClient {
   startBuild(snapshotId: string): Promise<{ build: Build; created: boolean }>;
   cancelBuild(id: string): Promise<{ build: Build }>;
   listReleases(pagination: PaginationParams): Promise<{ releases: Release[] } & PaginatedResponse>;
+  getRelease(id: string): Promise<{ release: Release }>;
   currentRelease(): Promise<{ release: Release }>;
   createRelease(buildId: string, version: string): Promise<{ release: Release }>;
   publishRelease(id: string): Promise<{ release: Release }>;
@@ -98,6 +99,7 @@ export const api: ApiClient = {
   startBuild: (snapshotId) => request("/api/builds", { method: "POST", body: json({ snapshotId }) }),
   cancelBuild: (id) => request(`/api/builds/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   listReleases: (pagination) => request(listPath("/api/releases", pagination)),
+  getRelease: (id) => request(`/api/releases/${encodeURIComponent(id)}`),
   currentRelease: () => request("/api/releases/current"),
   createRelease: (buildId, version) => request("/api/releases", { method: "POST", body: json({ buildId, version }) }),
   publishRelease: (id) => request(`/api/releases/${encodeURIComponent(id)}/publish`, { method: "POST" }),

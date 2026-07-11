@@ -6,6 +6,7 @@ import { describe, expect, test } from "vitest";
 import {
   buildJobs,
   encryptedCredentials,
+  knowledgeChunks,
   repositories,
   sourceFiles,
   sourceSnapshots
@@ -66,5 +67,22 @@ describe("Task 2 database contract", () => {
     expect(sql).toContain("ADD COLUMN purpose text");
     expect(sql).toContain("ADD COLUMN feedback_ids uuid[]");
     expect(sql).toContain("ADD COLUMN feedback_context jsonb");
+  });
+
+  test("final query migration persists a deterministic chunk position", async () => {
+    const chunkConfig = getTableConfig(knowledgeChunks);
+    const position = chunkConfig.columns.find((column) => column.name === "position");
+
+    expect(position?.notNull).toBe(true);
+    expect(uniqueIndex(knowledgeChunks, "knowledge_chunks_page_position_idx")).toBe(true);
+
+    const sql = await readFile(
+      new URL("../../drizzle/0008_bounded_knowledge_queries.sql", import.meta.url),
+      "utf8"
+    );
+    expect(sql).toContain("ADD COLUMN position integer");
+    expect(sql).toContain("row_number() OVER (PARTITION BY page_id ORDER BY created_at, id) - 1");
+    expect(sql).toContain("ALTER COLUMN position SET NOT NULL");
+    expect(sql).toContain("knowledge_chunks_page_position_idx");
   });
 });

@@ -78,4 +78,45 @@ describe("immutable releases", () => {
     )).rejects.toThrow(/ready/i);
     expect(await store.currentRelease(setup!.workspace.id, repository!.id)).toBeNull();
   });
+
+  test("keeps the intended first fifty chunks in generator order", async () => {
+    const store = new MemoryAppStore();
+    const setup = await store.createInitialSetup("admin@example.com", "hash");
+    const repository = await store.createRepository(setup!.workspace.id, {
+      kind: "local", name: "Fixture", path: fixtureRoot
+    });
+    const build = (await store.createBuild({
+      workspaceId: setup!.workspace.id,
+      repositoryId: repository!.id,
+      snapshotId: "snapshot-many-chunks",
+      snapshotPath: fixtureRoot,
+      commitSha: "9".repeat(40)
+    })).build;
+    const index = await analyzeSnapshot(fixtureRoot, build.commitSha);
+    const output = await generateKnowledge(index);
+    const architecture = output.pages.find((page) => page.slug === "architecture-overview")!;
+    architecture.chunks = Array.from({ length: 60 }, (_, position) => ({
+      id: `chunk-${position}`,
+      heading: `Chunk ${String(position).padStart(2, "0")}`,
+      content: `content-${position}`,
+      citations: [index.files[0]]
+    }));
+    output.pages = [architecture];
+    await store.saveKnowledge({ build, index, output });
+    await store.transitionBuild(build.id, "queued", "ready");
+    const release = await store.createReleaseDraft(
+      setup!.workspace.id, repository!.id, build.id, "1.0.0"
+    );
+
+    const loaded = await store.findKnowledgePageBySlug(
+      setup!.workspace.id,
+      release.id,
+      "architecture-overview"
+    );
+
+    expect(loaded?.chunks).toHaveLength(50);
+    expect(loaded?.chunks.map((chunk) => chunk.heading)).toEqual(
+      Array.from({ length: 50 }, (_, position) => `Chunk ${String(position).padStart(2, "0")}`)
+    );
+  });
 });

@@ -23,10 +23,12 @@ describe("delivery database isolation", () => {
     const packageJson = JSON.parse(await readFile("package.json", "utf8"));
     const packageLock = JSON.parse(await readFile("package-lock.json", "utf8"));
     const readme = await readFile("README.md", "utf8");
+    const architecture = await readFile("docs/architecture.md", "utf8");
 
-    expect(packageJson.engines.node).toBe(">=22.9.0");
-    expect(packageLock.packages[""].engines.node).toBe(">=22.9.0");
-    expect(readme).toContain("Node.js 22.9.0 or newer");
+    expect(packageJson.engines.node).toBe(">=22.13.0");
+    expect(packageLock.packages[""].engines.node).toBe(">=22.13.0");
+    expect(readme).toContain("Node.js 22.13.0 or newer");
+    expect(architecture).toContain("Node.js 22.13.0 runtime");
     expect(packageJson.scripts.dev).toBe("node scripts/dev.mjs");
     expect(packageJson.scripts["dev:api"]).toContain("--env-file-if-exists=.env");
     expect(packageJson.scripts["dev:web"]).toContain("--env-file-if-exists=.env");
@@ -36,6 +38,7 @@ describe("delivery database isolation", () => {
 
   test("builds the static askpass helper and runs a Compose image smoke job on both branches", async () => {
     const dockerfile = await readFile("Dockerfile", "utf8");
+    const deliveryCheck = await readFile("scripts/verify-delivery.mjs", "utf8");
     const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
     const smokeSteps = ci.jobs["container-smoke"].steps
       .map((step) => step.run)
@@ -43,6 +46,10 @@ describe("delivery database isolation", () => {
       .join("\n");
 
     expect(dockerfile).toContain("COPY --chown=node:node --chmod=755 scripts/git-askpass.sh");
+    expect(dockerfile.match(/^FROM node:22\.13-bookworm-slim/gm)).toHaveLength(3);
+    expect(deliveryCheck).toContain("node:22\\.13-bookworm-slim");
+    expect(String(ci.jobs.verify.steps.find((step) => step.uses === "actions/setup-node@v4")
+      ?.with?.["node-version"])).toBe("22.13.0");
     expect(ci.on.push.branches).toEqual(expect.arrayContaining(["main", "codex/mvp"]));
     expect(smokeSteps).toContain("docker build --target runtime");
     expect(smokeSteps).toContain("docker compose config --quiet");

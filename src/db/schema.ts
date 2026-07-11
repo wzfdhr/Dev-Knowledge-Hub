@@ -242,12 +242,14 @@ export const knowledgeChunks = pgTable("knowledge_chunks", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   pageId: uuid("page_id").notNull(),
+  position: integer("position").notNull(),
   heading: text("heading"),
   content: text("content").notNull(),
   citations: jsonb("citations").notNull().default([]),
   ...timestamps
 }, (table) => [
   uniqueIndex("knowledge_chunks_id_workspace_idx").on(table.id, table.workspaceId),
+  uniqueIndex("knowledge_chunks_page_position_idx").on(table.pageId, table.position),
   index("knowledge_chunks_workspace_page_idx").on(table.workspaceId, table.pageId),
   foreignKey({
     columns: [table.pageId, table.workspaceId],

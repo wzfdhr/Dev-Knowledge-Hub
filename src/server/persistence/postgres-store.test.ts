@@ -216,6 +216,23 @@ describe("PostgresAppStore knowledge releases", () => {
     expect(sql).toContain("ORDER BY score DESC, title ASC");
   });
 
+  test("bounds dependency-neighbor and text-search citations inside SQL laterals", async () => {
+    const query = vi.fn(async (_sql: string) => {
+      void _sql;
+      return { rows: [] };
+    });
+    const store = new PostgresAppStore({ query } as never);
+
+    await store.searchKnowledge("workspace-1", "repo-1", "add", "release-1");
+
+    const sql = String(query.mock.calls[0][0]);
+    expect(sql.match(/jsonb_path_query_array\(selected_chunk\.citations, '\$\[0 to 7\]'\)/g))
+      .toHaveLength(2);
+    expect(sql).not.toContain("SELECT citations FROM knowledge_chunks");
+    expect(sql.match(/ORDER BY selected_chunk\.position, selected_chunk\.id LIMIT 1/g))
+      .toHaveLength(2);
+  });
+
   test("bounds page payloads inside every SQL projection", async () => {
     const query = vi.fn(async (_sql: string) => {
       void _sql;
@@ -236,7 +253,45 @@ describe("PostgresAppStore knowledge releases", () => {
       expect(sql).toContain("jsonb_path_query_array(c.citations, '$[0 to 7]')");
       expect(sql).not.toContain("'content', c.content");
       expect(sql).not.toContain("'citations', c.citations");
+      expect(sql).toContain("ORDER BY c.position, c.id");
+      expect(sql).toContain("ORDER BY selected_chunk.position, selected_chunk.id LIMIT 50");
     }
+  });
+
+  test("persists generator chunk indexes as database positions", async () => {
+    const query = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
+      return sql.includes("INSERT INTO knowledge_pages")
+        ? { rows: [{ id: "page-1" }] }
+        : { rows: [] };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+
+    await store.saveKnowledge({
+      build: { id: "build-1", workspaceId: "workspace-1", repositoryId: "repo-1" },
+      index: { symbols: [], edges: [] },
+      output: {
+        pages: [{
+          slug: "architecture-overview",
+          title: "Architecture Overview",
+          body: "body",
+          chunks: [
+            { heading: "first", content: "one", citations: [] },
+            { heading: "second", content: "two", citations: [] }
+          ]
+        }]
+      }
+    } as never);
+
+    const chunkCalls = query.mock.calls.filter(([sql]) =>
+      String(sql).includes("INSERT INTO knowledge_chunks")
+    );
+    expect(chunkCalls).toHaveLength(2);
+    expect(String(chunkCalls[0][0])).toContain(
+      "(workspace_id, page_id, position, heading, content, citations)"
+    );
+    expect(chunkCalls.map(([, values]) => values?.[2])).toEqual([0, 1]);
   });
 
   test("uses bounded targeted SQL for release page, module, symbol, and list reads", async () => {

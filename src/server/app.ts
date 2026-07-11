@@ -690,6 +690,16 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return { release: { ...release, commitSha: snapshot?.commitSha ?? null } };
   });
 
+  server.get("/api/releases/:id", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({ id: z.string().min(1).max(100) }).safeParse(request.params);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid release");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const release = await options.store.getRelease(admin.workspaceId, parsed.data.id);
+    if (!release) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
+    const snapshot = await options.store.findSnapshotById(admin.workspaceId, release.snapshotId);
+    return { release: { ...release, commitSha: snapshot?.commitSha ?? null } };
+  });
+
   server.get("/api/releases", { preHandler: requireAdmin }, async (request, reply) => {
     const parsed = z.object(paginationQuerySchema).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid pagination");

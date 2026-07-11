@@ -7,7 +7,7 @@ const compose = parse(await readFile("docker-compose.yml", "utf8"));
 const failures = [];
 const requireValue = (condition, message) => { if (!condition) failures.push(message); };
 
-requireValue((dockerfile.match(/^FROM node:22-bookworm-slim/gm) ?? []).length >= 3, "Node 22 multi-stage image");
+requireValue((dockerfile.match(/^FROM node:22\.13-bookworm-slim/gm) ?? []).length >= 3, "Node 22.13 multi-stage image");
 requireValue(dockerfile.includes("USER node"), "non-root runtime user");
 requireValue(dockerfile.includes("HEALTHCHECK"), "image health check");
 requireValue(compose.services?.postgres?.image === "postgres:16-bookworm", "PostgreSQL 16 image");

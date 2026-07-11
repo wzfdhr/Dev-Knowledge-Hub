@@ -32,6 +32,7 @@ The administration API uses JSON under `/api`. Except health, setup status, setu
 | GET | `/api/knowledge/source` | `path,startLine,endLine,releaseId?` hash-verified excerpt |
 | GET/POST | `/api/releases` | List or draft `{buildId,version}` |
 | GET | `/api/releases/current` | Current published release plus commit |
+| GET | `/api/releases/:id` | Exact workspace-scoped release plus commit; stable `RELEASE_NOT_FOUND` |
 | POST | `/api/releases/:id/publish` | Explicit publication |
 | GET | `/api/feedback` | Optional `status` filter |
 | PATCH | `/api/feedback/:id` | `{status}` constrained transition |
@@ -50,7 +51,7 @@ Both HTTP and stdio expose exactly these tools:
 | `dkh_get_architecture` | `{}` | Architecture overview |
 | `dkh_get_module` | `{moduleId}` | Module page by title/slug |
 | `dkh_get_symbol` | `{name,path?}` | Symbol page, optionally path-scoped |
-| `dkh_get_change_context` | `{task,paths?}` (max 20 optional hints) | Discovers affected modules, relationships, tests, and conventions from task terms; paths only refine context |
+| `dkh_get_change_context` | `{task,paths?}` (max 3 optional hints) | Discovers affected modules, relationships, tests, and conventions from task terms; every accepted path refines context |
 | `dkh_get_source` | `{path,startLine?,endLine?}` | Hash-verified excerpt, maximum 500 lines |
 | `dkh_get_release` | `{}` | Current published release metadata plus page/chunk/citation counts |
 | `dkh_report_gap` | `{query,reason,expected?}` | Only mutating tool; create feedback with at least one validated current-release citation |

@@ -1288,11 +1288,12 @@ export class PostgresAppStore implements AppStore {
            VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
           [build.workspaceId, build.repositoryId, build.id, draft.slug, draft.title, draft.body]
         );
-        for (const chunk of draft.chunks) {
+        for (const [position, chunk] of draft.chunks.entries()) {
           await client.query(
-            `INSERT INTO knowledge_chunks (workspace_id, page_id, heading, content, citations)
-             VALUES ($1, $2, $3, $4, $5::jsonb)`,
-            [build.workspaceId, pageResult.rows[0].id, chunk.heading, chunk.content,
+            `INSERT INTO knowledge_chunks
+             (workspace_id, page_id, position, heading, content, citations)
+             VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
+            [build.workspaceId, pageResult.rows[0].id, position, chunk.heading, chunk.content,
               JSON.stringify(chunk.citations)]
           );
         }
@@ -1441,13 +1442,13 @@ export class PostgresAppStore implements AppStore {
               COALESCE(jsonb_agg(jsonb_build_object(
                 'id', c.id, 'heading', c.heading, 'content', left(c.content, 8000),
                 'citations', jsonb_path_query_array(c.citations, '$[0 to 7]')
-              ) ORDER BY c.created_at) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
+              ) ORDER BY c.position, c.id) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
        FROM knowledge_pages p
        JOIN releases r ON r.build_job_id = p.build_job_id
        LEFT JOIN LATERAL (
          SELECT * FROM knowledge_chunks selected_chunk
          WHERE selected_chunk.page_id = p.id
-         ORDER BY selected_chunk.created_at, selected_chunk.id LIMIT 50
+         ORDER BY selected_chunk.position, selected_chunk.id LIMIT 50
        ) c ON true
        LEFT JOIN release_channels rc ON rc.release_id = r.id AND rc.name = 'current'
        WHERE p.workspace_id = $1 AND (($2::uuid IS NOT NULL AND r.id = $2) OR ($2::uuid IS NULL AND rc.id IS NOT NULL))
@@ -1478,11 +1479,11 @@ export class PostgresAppStore implements AppStore {
               COALESCE(jsonb_agg(jsonb_build_object(
                 'id', c.id, 'heading', c.heading, 'content', left(c.content, 8000),
                 'citations', jsonb_path_query_array(c.citations, '$[0 to 7]')
-              ) ORDER BY c.created_at) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
+              ) ORDER BY c.position, c.id) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
        FROM knowledge_pages p LEFT JOIN LATERAL (
          SELECT * FROM knowledge_chunks selected_chunk
          WHERE selected_chunk.page_id = p.id
-         ORDER BY selected_chunk.created_at, selected_chunk.id LIMIT 50
+         ORDER BY selected_chunk.position, selected_chunk.id LIMIT 50
        ) c ON true
        WHERE p.workspace_id = $1 AND p.id = $2 GROUP BY p.id`,
       [workspaceId, pageId]
@@ -1505,11 +1506,11 @@ export class PostgresAppStore implements AppStore {
               COALESCE(jsonb_agg(jsonb_build_object(
                 'id', c.id, 'heading', c.heading, 'content', left(c.content, 8000),
                 'citations', jsonb_path_query_array(c.citations, '$[0 to 7]')
-              ) ORDER BY c.created_at, c.id) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
+              ) ORDER BY c.position, c.id) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
        FROM releases r JOIN knowledge_pages p ON p.build_job_id = r.build_job_id
        LEFT JOIN LATERAL (
          SELECT * FROM knowledge_chunks selected_chunk WHERE selected_chunk.page_id = p.id
-         ORDER BY selected_chunk.created_at, selected_chunk.id LIMIT 50
+         ORDER BY selected_chunk.position, selected_chunk.id LIMIT 50
        ) c ON true
        WHERE r.workspace_id = $1 AND r.id = $2 AND p.slug = $3
        GROUP BY p.id ORDER BY p.id LIMIT 1`,
@@ -1524,11 +1525,11 @@ export class PostgresAppStore implements AppStore {
               COALESCE(jsonb_agg(jsonb_build_object(
                 'id', c.id, 'heading', c.heading, 'content', left(c.content, 8000),
                 'citations', jsonb_path_query_array(c.citations, '$[0 to 7]')
-              ) ORDER BY c.created_at, c.id) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
+              ) ORDER BY c.position, c.id) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
        FROM releases r JOIN knowledge_pages p ON p.build_job_id = r.build_job_id
        LEFT JOIN LATERAL (
          SELECT * FROM knowledge_chunks selected_chunk WHERE selected_chunk.page_id = p.id
-         ORDER BY selected_chunk.created_at, selected_chunk.id LIMIT 50
+         ORDER BY selected_chunk.position, selected_chunk.id LIMIT 50
        ) c ON true
        WHERE r.workspace_id = $1 AND r.id = $2
          AND (p.title = 'Module: ' || $3 OR p.slug = $3)
@@ -1549,11 +1550,11 @@ export class PostgresAppStore implements AppStore {
               COALESCE(jsonb_agg(jsonb_build_object(
                 'id', c.id, 'heading', c.heading, 'content', left(c.content, 8000),
                 'citations', jsonb_path_query_array(c.citations, '$[0 to 7]')
-              ) ORDER BY c.created_at, c.id) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
+              ) ORDER BY c.position, c.id) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
        FROM releases r JOIN knowledge_pages p ON p.build_job_id = r.build_job_id
        LEFT JOIN LATERAL (
          SELECT * FROM knowledge_chunks selected_chunk WHERE selected_chunk.page_id = p.id
-         ORDER BY selected_chunk.created_at, selected_chunk.id LIMIT 50
+         ORDER BY selected_chunk.position, selected_chunk.id LIMIT 50
        ) c ON true
        WHERE r.workspace_id = $1 AND r.id = $2 AND p.title = $3
          AND ($4::text IS NULL OR EXISTS (
@@ -1663,7 +1664,12 @@ export class PostgresAppStore implements AppStore {
            )
            ORDER BY p.slug LIMIT 1
          ) kp ON true
-         JOIN LATERAL (SELECT citations FROM knowledge_chunks WHERE page_id = kp.id LIMIT 1) kc ON true
+         JOIN LATERAL (
+           SELECT jsonb_path_query_array(selected_chunk.citations, '$[0 to 7]') AS citations
+           FROM knowledge_chunks selected_chunk
+           WHERE selected_chunk.page_id = kp.id
+           ORDER BY selected_chunk.position, selected_chunk.id LIMIT 1
+         ) kc ON true
          WHERE lower(ce.source_name) = lower($3) OR lower(ce.target_name) = lower($3)
        ), neighbor_matches AS (
          SELECT *, ROW_NUMBER() OVER (ORDER BY score DESC, title, page_id) AS neighbor_rank
@@ -1675,7 +1681,12 @@ export class PostgresAppStore implements AppStore {
                     + similarity(lower(kp.title), lower($3)))::real AS score,
                 kp.id AS page_id, sr.id AS release_id, kc.citations
          FROM selected_release sr JOIN knowledge_pages kp ON kp.build_job_id = sr.build_job_id
-         JOIN LATERAL (SELECT citations FROM knowledge_chunks WHERE page_id = kp.id LIMIT 1) kc ON true
+         JOIN LATERAL (
+           SELECT jsonb_path_query_array(selected_chunk.citations, '$[0 to 7]') AS citations
+           FROM knowledge_chunks selected_chunk
+           WHERE selected_chunk.page_id = kp.id
+           ORDER BY selected_chunk.position, selected_chunk.id LIMIT 1
+         ) kc ON true
          WHERE to_tsvector('english', kp.title || ' ' || kp.body) @@ plainto_tsquery('english', $3)
             OR similarity(lower(kp.title), lower($3)) > 0.2
        ), text_matches AS (

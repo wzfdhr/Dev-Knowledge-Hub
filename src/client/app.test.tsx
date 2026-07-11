@@ -272,6 +272,52 @@ describe("knowledge citations", () => {
     expect(screen.queryByText("Release 2.0.0")).not.toBeInTheDocument();
   });
 
+  test("retries a transient exact requested release error", async () => {
+    const user = userEvent.setup();
+    const getRelease = vi.fn()
+      .mockRejectedValueOnce(new Error("Exact release temporarily unavailable"))
+      .mockResolvedValueOnce({ release: {
+        id: "release-old", buildId: "build-old", snapshotId: "snapshot-old",
+        commitSha: "a".repeat(40), version: "0.1.0", createdAt: "2026-01-01",
+        publishedAt: "2026-01-01"
+      } });
+    const listKnowledgePages = vi.fn().mockResolvedValue({
+      pages: [], total: 0, nextOffset: null
+    });
+    const api = {
+      getRepositoryStatus: vi.fn().mockResolvedValue({ repository: { id: "repo" }, latestSnapshot: null }),
+      listReleases: vi.fn().mockResolvedValue({
+        releases: [{
+          id: "release-new", buildId: "build-new", snapshotId: "snapshot-new",
+          commitSha: "b".repeat(40), version: "2.0.0", createdAt: "2026-07-11",
+          publishedAt: "2026-07-11"
+        }],
+        total: 101,
+        nextOffset: 100
+      }),
+      getRelease,
+      listKnowledgePages,
+      getKnowledgeMetadata: vi.fn().mockResolvedValue({ symbols: [], dependencies: [] })
+    } as unknown as ApiClient;
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
+    });
+    render(<QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={["/knowledge?releaseId=release-old"]}>
+        <KnowledgePage api={api} />
+      </MemoryRouter>
+    </QueryClientProvider>);
+
+    const error = await screen.findByRole("alert");
+    expect(error).toHaveTextContent("Exact release temporarily unavailable");
+    await user.click(within(error).getByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByText("Release 0.1.0")).toBeVisible();
+    expect(getRelease).toHaveBeenCalledTimes(2);
+    expect(listKnowledgePages).toHaveBeenCalledWith("release-old", { limit: 100, offset: 0 });
+  });
+
   test("opens the exact cited source range and identifiers", async () => {
     const user = userEvent.setup();
     const api = {

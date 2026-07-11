@@ -247,6 +247,52 @@ integration("PostgreSQL cited knowledge integration", () => {
       await service.stop();
     }
   }, 30_000);
+
+  test(databaseUrl
+    ? "rejects malformed release IDs before PostgreSQL UUID casts"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const app = buildServer({
+      store: new PostgresAppStore(pool),
+      masterKey: Buffer.alloc(32, 6).toString("base64"),
+      sessionSecret: "postgres-release-route-session-secret",
+      dataDir: "/tmp/devkh-postgres-release-route",
+      nodeEnv: "test"
+    });
+
+    try {
+      const setup = await app.inject({
+        method: "POST",
+        url: "/api/setup",
+        payload: { email: "admin@example.com", password: "correct horse battery staple" }
+      });
+      expect(setup.statusCode).toBe(201);
+      const login = await app.inject({
+        method: "POST",
+        url: "/api/session",
+        payload: { email: "admin@example.com", password: "correct horse battery staple" }
+      });
+      expect(login.statusCode).toBe(200);
+      const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/releases/not-a-uuid",
+        headers: { cookie }
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error).toEqual({
+        code: "INVALID_INPUT",
+        message: "Invalid release ID"
+      });
+    } finally {
+      await app.close();
+    }
+  }, 30_000);
 });
 
 afterAll(async () => {

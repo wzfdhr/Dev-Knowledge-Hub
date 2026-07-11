@@ -91,7 +91,11 @@ export function KnowledgePage({ api }: { api: ApiClient }) {
     ?? (needsExactRelease ? exactRelease.error : null);
 
   if (loading) return <div className="page knowledge-page"><Loading label="Loading release and repository state" /></div>;
-  if (blockingError) return <div className="page knowledge-page"><header className="page-header"><div><p className="eyebrow">Repository intelligence</p><h1>Knowledge</h1><p>Release state could not be loaded.</p></div></header><ErrorState message={errorMessage(blockingError)} retry={() => { void repositoryStatus.refetch(); void releases.refetch(); }} /></div>;
+  if (blockingError) return <div className="page knowledge-page"><header className="page-header"><div><p className="eyebrow">Repository intelligence</p><h1>Knowledge</h1><p>Release state could not be loaded.</p></div></header><ErrorState message={errorMessage(blockingError)} retry={() => {
+    void repositoryStatus.refetch();
+    void releases.refetch();
+    if (needsExactRelease) void exactRelease.refetch();
+  }} /></div>;
 
   return <div className="page knowledge-page">
     <header className="page-header"><div><p className="eyebrow">Repository intelligence</p><h1>Knowledge</h1><p>{release ? `Release ${release.version}` : "No release available"}</p></div>{release && <div className="page-header-actions"><label>Release<select aria-label="Knowledge release" value={release.id} onChange={(event) => setSearchParams({ releaseId: event.target.value })}>{selectableReleases.map((item) => <option key={item.id} value={item.id}>{item.version}{item.publishedAt ? "" : " (draft)"}</option>)}</select></label>{releases.hasNextPage && <button className="button" onClick={() => void releases.fetchNextPage()} disabled={releases.isFetchingNextPage}>{releases.isFetchingNextPage ? "Loading releases..." : "Load more releases"}</button>}{!release.publishedAt && <span className="status status-open">Unpublished draft</span>}</div>}</header>

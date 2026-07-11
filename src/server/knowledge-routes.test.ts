@@ -1,7 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { buildServer } from "./app";
 import { BuildService, type BuildJobQueue } from "./knowledge/build-service";
@@ -227,6 +227,25 @@ describe("knowledge API contracts", () => {
       expect.objectContaining({ name: "add", kind: "function", path: "src/math.ts" })
     ]));
     expect(metadata.json().dependencies).toEqual(expect.any(Array));
+    await app.close();
+  });
+
+  test("rejects a malformed exact release ID before querying the store", async () => {
+    const { app, store, cookie } = await authenticatedApp();
+    const getRelease = vi.spyOn(store, "getRelease");
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/releases/not-a-uuid",
+      headers: { cookie }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toEqual({
+      code: "INVALID_INPUT",
+      message: "Invalid release ID"
+    });
+    expect(getRelease).not.toHaveBeenCalled();
     await app.close();
   });
 

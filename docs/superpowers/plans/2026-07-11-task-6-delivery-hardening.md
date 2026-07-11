@@ -57,7 +57,7 @@
 
 **Files:**
 - Create: `acceptance/fixture-repo/**`
-- Create: `scripts/acceptance.mjs`
+- Create: `acceptance/real-query.acceptance.test.ts`
 - Modify: `.env.example`
 - Modify: `README.md`
 - Create: `docs/architecture.md`

@@ -46,6 +46,14 @@ docker compose --profile test run --rm e2e
 
 Compose runs the non-root Node 22 app and PostgreSQL 16. The app waits for database health, uses a read-only root filesystem and a temporary `/tmp`, and persists PostgreSQL data, immutable snapshots, and Git mirrors in separate named volumes. Stop gracefully with `docker compose down`; do not add `--volumes` unless deleting all retained state is intentional.
 
+PostgreSQL initialization creates `dev_knowledge_hub` for the app and a separate `devkh_test` used only by the Compose integration profile. Existing PostgreSQL volumes created before this isolation was added need the test database once before running integration tests:
+
+```bash
+docker compose exec postgres createdb -U devkh devkh_test
+```
+
+Integration cleanup must target only `TEST_DATABASE_URL`; never point it at `dev_knowledge_hub`.
+
 ## Operating workflow
 
 1. Open the console and complete one-time admin setup.

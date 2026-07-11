@@ -1,5 +1,4 @@
 import { execFileSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -8,7 +7,7 @@ const patterns = [
   ["github-token", /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b/],
   ["openai-token", /\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}\b/],
   ["anthropic-token", /\bsk-ant-[A-Za-z0-9_-]{32,}\b/],
-  ["remote-credentials", /\bhttps?:\/\/[^\s/:@]+:[^\s/@]+@[^\s/]+\//]
+  ["remote-credentials", /\bhttps?:\/\/[^\s/@]+@[^\s/]+\//]
 ];
 
 function isCommittedEnvironmentFile(file) {
@@ -30,12 +29,18 @@ export function scanFileEntries(entries) {
 }
 
 export async function scanTrackedFiles(root = process.cwd()) {
-  const output = execFileSync("git", ["-C", root, "ls-files", "-z"], { encoding: "utf8" });
-  const files = output.split("\0").filter(Boolean);
-  const entries = await Promise.all(files.map(async (file) => [
-    file,
-    await readFile(path.join(root, file), "utf8")
-  ]));
+  const output = execFileSync("git", ["-C", root, "ls-files", "--stage", "-z"], {
+    encoding: "utf8"
+  });
+  const entries = output.split("\0").filter(Boolean).flatMap((record) => {
+    const match = /^(\d+) ([0-9a-f]+) (\d+)\t([\s\S]+)$/.exec(record);
+    if (!match || match[3] !== "0" || match[1] === "160000" || /^0+$/.test(match[2])) return [];
+    const contents = execFileSync("git", ["-C", root, "cat-file", "blob", match[2]], {
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024
+    });
+    return [[match[4], contents]];
+  });
   return scanFileEntries(entries);
 }
 

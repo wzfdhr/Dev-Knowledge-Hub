@@ -11,7 +11,7 @@ Dev Knowledge Hub is a private, single-deployment MVP intended for a trusted ope
 - MCP tokens contain 256 random bits, are persisted only as SHA-256 hashes/prefixes, are disclosed once, and are revocable.
 - PostgreSQL queries and composite tenant keys enforce workspace ownership. Sensitive mutations and audit records share transactions.
 - Published source reads are path-contained, release/snapshot-scoped, hash-verified, and limited to 500 lines.
-- Request bodies are capped at 1 MiB. Fixed-window per-IP limits cover setup, login, all MCP requests, and feedback writes. Default one-minute limits are 5, 10, 120, and 30 respectively.
+- Request bodies are capped at 1 MiB. Fixed-window per-IP limits cover setup, login, all MCP requests, and feedback writes. Default one-minute limits are 5, 10, 120, and 30 respectively. Limiter state sweeps expired buckets every minute and is capped at 10,000 deterministic least-recently-used entries per process.
 - Responses set CSP, frame denial, MIME sniff prevention, opener isolation, and no-referrer policy. Production logs redact authorization, cookies, passwords, tokens, API keys, secrets, and credential fields.
 - The container runs as the image `node` user with a read-only root filesystem, no-new-privileges, bounded temporary storage, health checks, and persistent writable data mounts only.
 - CI scans every Git-tracked file for committed env files, private key blocks, GitHub/OpenAI/Anthropic token forms, and credentialized HTTP remotes. Dependency license expressions must match the checked-in allowlist.

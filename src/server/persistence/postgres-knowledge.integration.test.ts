@@ -2,8 +2,11 @@ import { Pool } from "pg";
 import { afterAll, describe, expect, test } from "vitest";
 
 import { runMigrations } from "../../db/migrate";
+import { requireIsolatedTestDatabase } from "../../test/integration-database";
 
-const databaseUrl = process.env.TEST_DATABASE_URL;
+const databaseUrl = process.env.TEST_DATABASE_URL
+  ? requireIsolatedTestDatabase(process.env.TEST_DATABASE_URL)
+  : undefined;
 const integration = databaseUrl ? describe : describe.skip;
 let pool: Pool | null = null;
 

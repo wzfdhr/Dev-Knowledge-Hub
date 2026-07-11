@@ -79,7 +79,7 @@ function requiredPages(index: CodeIndex): KnowledgePageDraft[] {
   const dependencies = index.edges.filter((edge) =>
     edge.kind === "package-dependency" || edge.kind === "module-dependency"
   );
-  const configCitations = index.configs.length ? index.configs : [fallback];
+  const conventionCitations = [...index.configs, ...index.documents];
   return [
     page(
       "architecture-overview",
@@ -91,8 +91,8 @@ function requiredPages(index: CodeIndex): KnowledgePageDraft[] {
     page(
       "conventions",
       "Conventions",
-      `# Conventions\n\nConfiguration is defined in ${index.configs.map((config) => config.path).join(", ") || fallback.path}.`,
-      configCitations,
+      `# Conventions\n\nConfiguration and contributor guidance are defined in ${conventionCitations.map((citation) => citation.path).join(", ") || fallback.path}.`,
+      conventionCitations.length ? conventionCitations : [fallback],
       "required"
     ),
     page(

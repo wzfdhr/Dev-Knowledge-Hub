@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 
 import { buildServer, type ServerOptions } from "../app";
 import { MemoryAppStore } from "../persistence/memory-store";
-import { redactSensitive } from "./http";
+import { RateLimitState, redactSensitive } from "./http";
 
 function options(overrides: Partial<ServerOptions> = {}): ServerOptions {
   return {
@@ -11,12 +11,46 @@ function options(overrides: Partial<ServerOptions> = {}): ServerOptions {
     sessionSecret: "http-security-test-session-secret",
     dataDir: "/tmp/devkh-http-security",
     nodeEnv: "test",
-    rateLimits: { setup: 1, login: 1, mcp: 1, feedback: 1, windowMs: 60_000 },
+    rateLimits: {
+      setup: 1,
+      login: 1,
+      mcp: 1,
+      feedback: 1,
+      windowMs: 60_000,
+      maxEntries: 100,
+      sweepIntervalMs: 60_000
+    },
     ...overrides
   };
 }
 
 describe("HTTP security policy", () => {
+  test("periodically removes expired rate-limit buckets", () => {
+    const state = new RateLimitState({ maxEntries: 10, sweepIntervalMs: 100 });
+    state.consume("setup:one", 1, 0, 50);
+    state.consume("setup:two", 1, 10, 50);
+
+    state.consume("setup:three", 1, 100, 50);
+
+    expect(state.size).toBe(1);
+    expect(state.has("setup:three")).toBe(true);
+  });
+
+  test("evicts the deterministic oldest bucket and remains hard bounded", () => {
+    const state = new RateLimitState({ maxEntries: 3, sweepIntervalMs: 10_000 });
+    state.consume("setup:b", 1, 0, 60_000);
+    state.consume("setup:a", 1, 0, 60_000);
+    state.consume("setup:c", 1, 1, 60_000);
+    state.consume("setup:d", 1, 2, 60_000);
+    expect(state.has("setup:b")).toBe(false);
+    expect(state.has("setup:a")).toBe(true);
+    for (let index = 0; index < 100; index += 1) {
+      state.consume(`login:${index}`, 1, index + 3, 60_000);
+    }
+
+    expect(state.size).toBe(3);
+  });
+
   test("sets defensive headers and rejects JSON bodies over 1 MiB", async () => {
     const app = buildServer(options());
 

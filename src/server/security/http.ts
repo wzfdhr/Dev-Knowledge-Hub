@@ -8,6 +8,8 @@ export interface RateLimitPolicy {
   mcp: number;
   feedback: number;
   windowMs: number;
+  maxEntries: number;
+  sweepIntervalMs: number;
 }
 
 export const DEFAULT_RATE_LIMITS: RateLimitPolicy = {
@@ -15,7 +17,9 @@ export const DEFAULT_RATE_LIMITS: RateLimitPolicy = {
   login: 10,
   mcp: 120,
   feedback: 30,
-  windowMs: 60_000
+  windowMs: 60_000,
+  maxEntries: 10_000,
+  sweepIntervalMs: 60_000
 };
 
 const sensitiveKey = /(?:authorization|cookie|password|token|api.?key|secret|credential)/i;
@@ -29,7 +33,65 @@ export function redactSensitive(value: unknown): unknown {
   ]));
 }
 
-type BucketName = Exclude<keyof RateLimitPolicy, "windowMs">;
+type BucketName = "setup" | "login" | "mcp" | "feedback";
+
+interface RateLimitEntry {
+  count: number;
+  resetAt: number;
+}
+
+interface RateLimitDecision extends RateLimitEntry {
+  limited: boolean;
+}
+
+export class RateLimitState {
+  private readonly entries = new Map<string, RateLimitEntry>();
+  private nextSweepAt = 0;
+  private readonly maxEntries: number;
+  private readonly sweepIntervalMs: number;
+
+  constructor({ maxEntries, sweepIntervalMs }: { maxEntries: number; sweepIntervalMs: number }) {
+    this.maxEntries = Math.max(1, maxEntries);
+    this.sweepIntervalMs = Math.max(1, sweepIntervalMs);
+  }
+
+  get size(): number {
+    return this.entries.size;
+  }
+
+  has(key: string): boolean {
+    return this.entries.has(key);
+  }
+
+  private removeExpired(timestamp: number): void {
+    for (const [key, entry] of this.entries) {
+      if (entry.resetAt <= timestamp) this.entries.delete(key);
+    }
+  }
+
+  private evictOldest(): void {
+    const oldestKey = this.entries.keys().next().value;
+    if (oldestKey !== undefined) this.entries.delete(oldestKey);
+  }
+
+  consume(key: string, limit: number, timestamp: number, windowMs: number): RateLimitDecision {
+    if (timestamp >= this.nextSweepAt) {
+      this.removeExpired(timestamp);
+      this.nextSweepAt = timestamp + this.sweepIntervalMs;
+    }
+    const current = this.entries.get(key);
+    if (!current && this.entries.size >= this.maxEntries) {
+      this.removeExpired(timestamp);
+      if (this.entries.size >= this.maxEntries) this.evictOldest();
+    }
+    const entry = !current || current.resetAt <= timestamp
+      ? { count: 1, resetAt: timestamp + windowMs }
+      : { ...current, count: current.count + 1 };
+    this.entries.delete(key);
+    this.entries.set(key, entry);
+    return { ...entry, limited: entry.count > limit };
+  }
+}
 
 function bucketFor(request: FastifyRequest): BucketName | undefined {
   const pathname = request.url.split("?", 1)[0];
@@ -47,7 +109,10 @@ export function registerHttpSecurity(
   policy: RateLimitPolicy = DEFAULT_RATE_LIMITS,
   now: () => number = Date.now
 ): void {
-  const counters = new Map<string, { count: number; resetAt: number }>();
+  const counters = new RateLimitState({
+    maxEntries: policy.maxEntries,
+    sweepIntervalMs: policy.sweepIntervalMs
+  });
 
   server.addHook("onRequest", async (request, reply) => {
     const headers = {
@@ -63,12 +128,8 @@ export function registerHttpSecurity(
     if (!bucket) return;
     const key = `${bucket}:${request.ip}`;
     const timestamp = now();
-    const current = counters.get(key);
-    const entry = !current || current.resetAt <= timestamp
-      ? { count: 1, resetAt: timestamp + policy.windowMs }
-      : { ...current, count: current.count + 1 };
-    counters.set(key, entry);
-    if (entry.count <= policy[bucket]) return;
+    const entry = counters.consume(key, policy[bucket], timestamp, policy.windowMs);
+    if (!entry.limited) return;
 
     const retryAfter = Math.max(1, Math.ceil((entry.resetAt - timestamp) / 1000));
     reply.header("retry-after", retryAfter).code(429).send({

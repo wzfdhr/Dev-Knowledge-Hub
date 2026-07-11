@@ -4,10 +4,11 @@ import { fileURLToPath } from "node:url";
 
 import { Pool, type PoolClient } from "pg";
 
-const migrationDirectory = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "../../drizzle"
-);
+export function resolveMigrationDirectory(applicationRoot = process.cwd()): string {
+  return path.resolve(applicationRoot, "drizzle");
+}
+
+const migrationDirectory = resolveMigrationDirectory();
 
 async function appliedMigrations(client: PoolClient): Promise<Set<string>> {
   await client.query(`

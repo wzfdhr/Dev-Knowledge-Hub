@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
+import path from "node:path";
 
 import { bootstrapProductionServer, type BootstrapDependencies } from "./bootstrap";
 
@@ -33,7 +34,7 @@ describe("production bootstrap", () => {
     const server = await bootstrapProductionServer({
       DATABASE_URL: "postgres://localhost/devkh",
       DEVKH_MASTER_KEY: masterKey,
-      DEVKH_SESSION_SECRET: "production-session-secret",
+      DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars",
       DATA_DIR: "/var/lib/devkh"
     }, deps);
 
@@ -51,7 +52,7 @@ describe("production bootstrap", () => {
       store,
       buildService,
       masterKey,
-      sessionSecret: "production-session-secret",
+      sessionSecret: "production-session-secret-at-least-32-chars",
       dataDir: "/var/lib/devkh",
       nodeEnv: "production",
       clientDir: path.resolve("dist/client")
@@ -59,5 +60,26 @@ describe("production bootstrap", () => {
     expect(server.addHook).toHaveBeenCalledWith("onClose", expect.any(Function));
     expect(server).toBe(vi.mocked(deps.buildServer).mock.results[0].value);
   });
+
+  test("stops the build queue before closing the database", async () => {
+    const order: string[] = [];
+    const deps = dependencies();
+    vi.mocked(deps.createBuildService).mockImplementation(() => ({
+      start: vi.fn(async () => {}),
+      stop: vi.fn(async () => { order.push("queue"); })
+    } as never));
+    vi.mocked(deps.createDatabase).mockReturnValue({
+      pool: { end: vi.fn(async () => { order.push("database"); }) }
+    } as never);
+    const server = await bootstrapProductionServer({
+      DATABASE_URL: "postgres://localhost/devkh",
+      DEVKH_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
+      DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars"
+    }, deps);
+    const onClose = vi.mocked(server.addHook).mock.calls.find(([name]) => name === "onClose")?.[1];
+
+    await (onClose as () => Promise<void>)();
+
+    expect(order).toEqual(["queue", "database"]);
+  });
 });
-import path from "node:path";

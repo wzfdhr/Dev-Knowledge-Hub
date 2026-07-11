@@ -32,6 +32,12 @@ import {
   sanitizedMcpToken
 } from "./mcp/auth.js";
 import { createRegisteredMcpServer, MCP_TOOL_NAMES } from "./mcp/tools.js";
+import {
+  DEFAULT_RATE_LIMITS,
+  MAX_REQUEST_BODY_BYTES,
+  registerHttpSecurity,
+  type RateLimitPolicy
+} from "./security/http.js";
 
 const SESSION_COOKIE = "devkh_session";
 const SESSION_MAX_AGE = 8 * 60 * 60;
@@ -66,6 +72,7 @@ export interface ServerOptions {
   dataDir: string;
   nodeEnv: "development" | "production" | "test";
   clientDir?: string;
+  rateLimits?: RateLimitPolicy;
 }
 
 function sseEvent(event: BuildEvent): string {
@@ -95,7 +102,34 @@ function repositoryDto(repository: RepositoryRecord) {
 }
 
 export function buildServer(options: ServerOptions): FastifyInstance {
-  const server = Fastify({ logger: false });
+  const server = Fastify({
+    bodyLimit: MAX_REQUEST_BODY_BYTES,
+    logger: options.nodeEnv === "test" || process.env.NODE_ENV === "test" ? false : {
+      redact: {
+        paths: [
+          "req.headers.authorization",
+          "req.headers.cookie",
+          "req.body.password",
+          "req.body.token",
+          "req.body.apiKey",
+          "req.body.providerApiKey"
+        ],
+        censor: "[REDACTED]"
+      }
+    }
+  });
+  registerHttpSecurity(server, options.rateLimits ?? DEFAULT_RATE_LIMITS);
+  server.setErrorHandler((error, request, reply) => {
+    const statusCode = typeof error === "object" && error && "statusCode" in error
+      && typeof error.statusCode === "number"
+      ? error.statusCode
+      : 500;
+    if (statusCode === 413) {
+      return sendError(reply, 413, "BODY_TOO_LARGE", "Request body exceeds 1 MiB");
+    }
+    request.log.error({ err: error }, "Request failed");
+    return sendError(reply, statusCode, "REQUEST_FAILED", "Request failed");
+  });
   void server.register(cookie);
   if (options.clientDir) {
     void server.register(fastifyStatic, { root: options.clientDir });
@@ -712,19 +746,29 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
 
+  const activeMcpServers = new Set<ReturnType<typeof createRegisteredMcpServer>>();
+  server.addHook("onClose", async () => {
+    await Promise.all([...activeMcpServers].map((mcp) => mcp.close()));
+    activeMcpServers.clear();
+  });
+
   server.all("/mcp", async (request, reply) => {
     const authorization = request.headers.authorization;
     const match = /^Bearer (\S+)$/i.exec(authorization ?? "");
     const token = match ? await authenticateMcpToken(options.store, match[1]) : null;
     if (!token) return sendError(reply, 401, "UNAUTHORIZED", "Invalid or revoked MCP token");
     const mcp = createRegisteredMcpServer({ store: options.store, workspaceId: token.workspaceId });
+    activeMcpServers.add(mcp);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true
     });
     await mcp.connect(transport);
     reply.hijack();
-    reply.raw.once("finish", () => void mcp.close());
+    reply.raw.once("finish", () => {
+      activeMcpServers.delete(mcp);
+      void mcp.close();
+    });
     await transport.handleRequest(request.raw, reply.raw, request.body);
   });
 

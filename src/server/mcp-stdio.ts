@@ -8,6 +8,7 @@ import { runMigrations } from "../db/migrate.js";
 import { authenticateMcpToken } from "./mcp/auth.js";
 import { createRegisteredMcpServer, type McpToolContext } from "./mcp/tools.js";
 import { PostgresAppStore } from "./persistence/postgres-store.js";
+import { installSignalShutdown } from "./lifecycle.js";
 
 export function createMcpServer(context?: McpToolContext): McpServer {
   return createRegisteredMcpServer(context);
@@ -34,8 +35,18 @@ export async function runMcpStdio(context?: McpToolContext): Promise<void> {
     closeDatabase = () => database.pool.end();
   }
   const server = createMcpServer(selected);
-  await server.connect(new StdioServerTransport());
-  if (closeDatabase) process.once("beforeExit", closeDatabase);
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  let closing: Promise<void> | undefined;
+  const close = async () => {
+    closing ??= (async () => {
+      await server.close();
+      if (closeDatabase) await closeDatabase();
+    })();
+    await closing;
+  };
+  installSignalShutdown({ close });
+  process.once("beforeExit", close);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

@@ -155,7 +155,9 @@ describe("MCP bearer tokens", () => {
       },
       body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/list", params: {} })
     });
-    expect((await mcpRequest(plaintext, 1)).status).not.toBe(401);
+    const authorizedMcp = await mcpRequest(plaintext, 1);
+    expect(authorizedMcp.status).not.toBe(401);
+    expect(authorizedMcp.headers.get("x-content-type-options")).toBe("nosniff");
 
     const tokenId = created.json().id as string;
     expect((await app.inject({

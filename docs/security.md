@@ -1,0 +1,51 @@
+# Security Model
+
+## Trust model
+
+Dev Knowledge Hub is a private, single-deployment MVP intended for a trusted operator network. It is not yet suitable for untrusted public signup, arbitrary tenant hosting, or internet exposure without an authenticated reverse proxy and the future-public gates below.
+
+## Controls
+
+- Admin passwords use Argon2id. Sessions are signed, expire after eight hours, and use `HttpOnly`, `SameSite=Lax`, production `Secure` cookies.
+- Provider API keys and remote Git PATs are encrypted with AES-256-GCM under `DEVKH_MASTER_KEY`. Plaintext PATs use a temporary askpass environment and are not stored in Git URLs.
+- MCP tokens contain 256 random bits, are persisted only as SHA-256 hashes/prefixes, are disclosed once, and are revocable.
+- PostgreSQL queries and composite tenant keys enforce workspace ownership. Sensitive mutations and audit records share transactions.
+- Published source reads are path-contained, release/snapshot-scoped, hash-verified, and limited to 500 lines.
+- Request bodies are capped at 1 MiB. Fixed-window per-IP limits cover setup, login, all MCP requests, and feedback writes. Default one-minute limits are 5, 10, 120, and 30 respectively.
+- Responses set CSP, frame denial, MIME sniff prevention, opener isolation, and no-referrer policy. Production logs redact authorization, cookies, passwords, tokens, API keys, secrets, and credential fields.
+- The container runs as the image `node` user with a read-only root filesystem, no-new-privileges, bounded temporary storage, health checks, and persistent writable data mounts only.
+- CI scans every Git-tracked file for committed env files, private key blocks, GitHub/OpenAI/Anthropic token forms, and credentialized HTTP remotes. Dependency license expressions must match the checked-in allowlist.
+
+## Secret handling
+
+Never commit `.env` files. `.env.example` contains non-secret placeholders only. Generate each production secret independently, limit environment access, rotate session/MCP/provider/repository credentials after suspected exposure, and retain the master key separately from encrypted database backups.
+
+Changing `DEVKH_MASTER_KEY` without re-encrypting stored credentials makes those credentials unreadable. There is no automated key rotation in this MVP.
+
+## Known limits
+
+- Rate limits are in-process and per replica; a shared limiter is required before horizontal scaling.
+- Admin access has one role and no MFA, SSO, account recovery, or session revocation list.
+- The app does not terminate TLS. Use a trusted HTTPS reverse proxy for any non-loopback deployment.
+- Remote repository host allowlisting, egress controls, malware scanning, and webhook signature ingestion are not implemented.
+- Security headers are application defaults, not a substitute for proxy/network controls.
+
+## Incident response
+
+1. Stop external access and preserve logs/audit data.
+2. Revoke MCP tokens and rotate session, provider, repository, and database credentials.
+3. If the master key may be exposed, export/re-enter provider and repository credentials under a new key.
+4. Inspect tracked-file scan output, audit events, published release/snapshot hashes, and deployment changes.
+5. Restore the database and both file volumes from one verified backup set if integrity is uncertain.
+
+Report vulnerabilities privately to the repository owner. Do not open public issues containing exploit details or credentials.
+
+## Future-public checklist
+
+- Independent threat model, penetration test, dependency/SBOM and image vulnerability scanning
+- TLS/HSTS at a hardened reverse proxy, trusted proxy configuration, CSRF review, shared distributed rate limiting
+- MFA/SSO, RBAC, tenant lifecycle/deletion/export, session revocation, recovery, and abuse controls
+- Managed secret service, envelope encryption/key rotation, scoped provider credentials, repository host/egress allowlists
+- Backup retention policy, automated restore drills, disaster recovery objectives, monitoring/alerting, audit export
+- Privacy policy, terms, DPA/subprocessor inventory, data residency and retention controls
+- License/copyright review and an explicit replacement for `UNLICENSED` before any source distribution

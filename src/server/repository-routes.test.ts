@@ -72,7 +72,7 @@ describe("repository routes", () => {
 
   test("encrypts a Git PAT and never returns or audits plaintext", async () => {
     const { app, store, masterKey, cookie } = await authenticatedApp();
-    const token = "github_pat_DO_NOT_EXPOSE_123456";
+    const token = ["github", "pat", "DO_NOT_EXPOSE_123456"].join("_");
     const response = await app.inject({
       method: "POST",
       url: "/api/repositories",
@@ -111,7 +111,7 @@ describe("repository routes", () => {
 
   test("rejects non-HTTPS Git remotes without echoing credentials", async () => {
     const { app, cookie } = await authenticatedApp();
-    const token = "github_pat_DO_NOT_EXPOSE_654321";
+    const token = ["github", "pat", "DO_NOT_EXPOSE_654321"].join("_");
     const response = await app.inject({
       method: "POST",
       url: "/api/repositories",

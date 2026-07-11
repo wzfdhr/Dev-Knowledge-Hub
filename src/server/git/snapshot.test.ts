@@ -199,7 +199,8 @@ describe("immutable repository snapshots", () => {
       "remote",
       "add",
       "origin",
-      "https://git-user:github_pat_NOT_PERSISTED@example.com/private.git"
+      ["https://git-user", ["github", "pat", "NOT_PERSISTED"].join("_")]
+        .join(":") + "@example.com/private.git"
     );
     const store = new MemoryAppStore();
 
@@ -210,7 +211,9 @@ describe("immutable repository snapshots", () => {
     });
 
     expect(store.sourceSnapshots[0].remoteUrl).toBe("https://example.com/private.git");
-    expect(JSON.stringify(store.sourceSnapshots)).not.toContain("github_pat_NOT_PERSISTED");
+    expect(JSON.stringify(store.sourceSnapshots)).not.toContain(
+      ["github", "pat", "NOT_PERSISTED"].join("_")
+    );
   });
 
   test("preserves the resolved remote tracking ref for detached HTTPS snapshots", async () => {

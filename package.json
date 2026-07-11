@@ -20,7 +20,11 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "mcp:stdio": "tsx src/server/mcp-stdio.ts",
     "test:e2e": "playwright test",
+    "test:integration": "vitest run src/server/persistence/postgres-knowledge.integration.test.ts",
+    "acceptance": "node scripts/acceptance.mjs",
+    "delivery:verify": "node scripts/verify-delivery.mjs",
     "licenses:check": "node scripts/licenses-check.mjs",
+    "licenses:report": "node scripts/licenses-check.mjs --report",
     "secrets:scan": "node scripts/secrets-scan.mjs"
   },
   "dependencies": {

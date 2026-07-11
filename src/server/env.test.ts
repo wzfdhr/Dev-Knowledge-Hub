@@ -37,8 +37,19 @@ describe("loadEnv", () => {
       env: {
         DATABASE_URL: "postgres://localhost/devkh",
         DEVKH_MASTER_KEY: Buffer.from("short").toString("base64"),
-        DEVKH_SESSION_SECRET: "production-session-secret"
+        DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars"
       }
     })).toThrow(/32 bytes/);
+  });
+
+  test("production mode rejects a short session secret", () => {
+    expect(() => loadEnv({
+      mode: "production",
+      env: {
+        DATABASE_URL: "postgres://localhost/devkh",
+        DEVKH_MASTER_KEY: Buffer.alloc(32).toString("base64"),
+        DEVKH_SESSION_SECRET: "short"
+      }
+    })).toThrow(/32 characters/);
   });
 });

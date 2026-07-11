@@ -17,7 +17,7 @@ const sharedEnvSchema = z.object({
 const productionEnvSchema = sharedEnvSchema.extend({
   DATABASE_URL: z.string().min(1),
   DEVKH_MASTER_KEY: masterKeySchema,
-  DEVKH_SESSION_SECRET: z.string().min(1)
+  DEVKH_SESSION_SECRET: z.string().min(32, "Session secret must be at least 32 characters")
 });
 
 export type EnvironmentMode = "development" | "production" | "test";

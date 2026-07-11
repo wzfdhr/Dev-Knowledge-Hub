@@ -87,3 +87,77 @@ describe("PostgresAppStore repository reads", () => {
       .toBe(false);
   });
 });
+
+describe("PostgresAppStore knowledge releases", () => {
+  test("publishes a ready release and channel pointer in one transaction", async () => {
+    const releaseRow = {
+      id: "release-1",
+      workspace_id: "workspace-1",
+      repository_id: "repo-1",
+      build_job_id: "build-1",
+      snapshot_id: "snapshot-1",
+      version: "1.0.0",
+      created_at: new Date("2026-07-11T00:00:00Z"),
+      published_at: new Date("2026-07-11T00:01:00Z"),
+      status: "ready"
+    };
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FOR UPDATE")) return { rows: [releaseRow] };
+      if (sql.includes("UPDATE releases")) return { rows: [releaseRow] };
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+
+    await store.publishRelease("workspace-1", "release-1");
+
+    expect(query.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/)[0])).toEqual([
+      "BEGIN", "SELECT", "INSERT", "UPDATE", "UPDATE", "COMMIT"
+    ]);
+    expect(query.mock.calls[2][0]).toContain("ON CONFLICT (repository_id, name)");
+    expect(query.mock.calls[2][0]).toContain("release_id = EXCLUDED.release_id");
+  });
+
+  test("rolls back publication when the channel update fails", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FOR UPDATE")) return { rows: [{
+        id: "release-1",
+        workspace_id: "workspace-1",
+        repository_id: "repo-1",
+        build_job_id: "build-1",
+        snapshot_id: "snapshot-1",
+        version: "1.0.0",
+        created_at: new Date(),
+        published_at: null,
+        status: "ready"
+      }] };
+      if (sql.includes("INSERT INTO release_channels")) throw new Error("database unavailable");
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+
+    await expect(store.publishRelease("workspace-1", "release-1"))
+      .rejects.toThrow("database unavailable");
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("UPDATE releases"))).toBe(false);
+  });
+
+  test("uses explicit symbol, path, neighbor, full-text, and trigram ranking tiers", async () => {
+    const query = vi.fn(async (sql: string) => {
+      expect(sql).toContain("WITH selected_release");
+      return { rows: [] };
+    });
+    const store = new PostgresAppStore({ query } as never);
+
+    await store.searchKnowledge("workspace-1", "repo-1", "add", "release-1");
+
+    const sql = String(query.mock.calls[0][0]);
+    expect(sql).toContain("WHEN lower(cs.name) = lower($3) THEN 100");
+    expect(sql).toContain("WHEN lower(sf.path) = lower($3) THEN 90");
+    expect(sql).toContain("dependency-neighbor");
+    expect(sql).toContain("ts_rank_cd");
+    expect(sql).toContain("similarity");
+    expect(sql).toContain("ORDER BY score DESC, title ASC");
+  });
+});

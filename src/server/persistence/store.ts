@@ -1,3 +1,10 @@
+import type {
+  BuildPersistence,
+  BuildRecord,
+  PersistedKnowledge
+} from "../knowledge/build-service.js";
+import type { Citation } from "../knowledge/intelligence.js";
+
 export interface WorkspaceRecord {
   id: string;
   name: string;
@@ -80,7 +87,73 @@ export interface SetupResult {
   admin: AdminRecord;
 }
 
-export interface AppStore {
+export interface KnowledgeChunkRecord {
+  id: string;
+  heading: string | null;
+  content: string;
+  citations: Citation[];
+}
+
+export interface KnowledgePageRecord {
+  id: string;
+  workspaceId: string;
+  repositoryId: string;
+  buildId: string;
+  slug: string;
+  title: string;
+  body: string;
+  chunks: KnowledgeChunkRecord[];
+}
+
+export interface ReleaseRecord {
+  id: string;
+  workspaceId: string;
+  repositoryId: string;
+  buildId: string;
+  snapshotId: string;
+  version: string;
+  createdAt: Date;
+  publishedAt: Date | null;
+}
+
+export type SearchResultKind = "symbol" | "module" | "path" | "dependency-neighbor" | "page";
+
+export interface KnowledgeSearchResult {
+  kind: SearchResultKind;
+  title: string;
+  excerpt: string;
+  score: number;
+  pageId: string;
+  releaseId: string;
+  citations: Citation[];
+}
+
+export interface KnowledgeStore {
+  saveKnowledge(value: PersistedKnowledge): Promise<void>;
+  listKnowledgePages(workspaceId: string, releaseId?: string): Promise<KnowledgePageRecord[]>;
+  getKnowledgePage(workspaceId: string, pageId: string): Promise<KnowledgePageRecord | null>;
+  searchKnowledge(
+    workspaceId: string,
+    repositoryId: string,
+    query: string,
+    releaseId?: string
+  ): Promise<KnowledgeSearchResult[]>;
+  createReleaseDraft(
+    workspaceId: string,
+    repositoryId: string,
+    buildId: string,
+    version: string
+  ): Promise<ReleaseRecord>;
+  publishRelease(workspaceId: string, releaseId: string, channel?: string): Promise<ReleaseRecord>;
+  currentRelease(
+    workspaceId: string,
+    repositoryId: string,
+    channel?: string
+  ): Promise<ReleaseRecord | null>;
+  listReleases(workspaceId: string, repositoryId: string): Promise<ReleaseRecord[]>;
+}
+
+export interface AppStore extends BuildPersistence, KnowledgeStore {
   isSetupComplete(): Promise<boolean>;
   createInitialSetup(email: string, passwordHash: string): Promise<SetupResult | null>;
   findAdminByEmail(email: string): Promise<AdminRecord | null>;
@@ -97,7 +170,15 @@ export interface AppStore {
     repositoryId: string,
     commitSha: string
   ): Promise<SourceSnapshotRecord | null>;
+  findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null>;
+  findSourceFile(
+    workspaceId: string,
+    snapshotId: string,
+    path: string
+  ): Promise<SourceFileRecord | null>;
   createSnapshot(input: CreateSnapshotInput): Promise<SourceSnapshotRecord>;
   countSnapshotFiles(snapshotId: string): Promise<number>;
   repositoryCredential(workspaceId: string, repositoryId: string): Promise<string | null>;
 }
+
+export type { BuildRecord };

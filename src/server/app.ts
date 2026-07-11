@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+
 import cookie from "@fastify/cookie";
 import Fastify, {
   type FastifyInstance,
@@ -13,6 +17,7 @@ import { decryptSecret, encryptSecret } from "./security/crypto.js";
 import { DirtyWorktreeError, syncRepository } from "./git/snapshot.js";
 import { hashPassword, verifyPassword } from "./security/password.js";
 import { createSessionToken, verifySessionToken } from "./security/session.js";
+import type { BuildEvent, BuildService } from "./knowledge/build-service.js";
 
 const SESSION_COOKIE = "devkh_session";
 const SESSION_MAX_AGE = 8 * 60 * 60;
@@ -41,10 +46,15 @@ const repositorySchema = z.discriminatedUnion("kind", [
 
 export interface ServerOptions {
   store: AppStore;
+  buildService?: BuildService;
   masterKey: string;
   sessionSecret: string;
   dataDir: string;
   nodeEnv: "development" | "production" | "test";
+}
+
+function sseEvent(event: BuildEvent): string {
+  return `event: build\ndata: ${JSON.stringify(event)}\n\n`;
 }
 
 interface AuthenticatedRequest extends FastifyRequest {
@@ -261,6 +271,208 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       }
     }
   );
+
+  server.post("/api/builds", { preHandler: requireAdmin }, async (request, reply) => {
+    if (!options.buildService) {
+      return sendError(reply, 503, "BUILD_SERVICE_UNAVAILABLE", "Build service is unavailable");
+    }
+    const parsed = z.object({ snapshotId: z.uuid() }).safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid build request");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repository = await options.store.currentRepository(admin.workspaceId);
+    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    const snapshot = await options.store.findSnapshotById(admin.workspaceId, parsed.data.snapshotId);
+    if (!snapshot || snapshot.repositoryId !== repository.id) {
+      return sendError(reply, 404, "SNAPSHOT_NOT_FOUND", "Snapshot was not found");
+    }
+    const result = await options.buildService.startBuild({
+      workspaceId: admin.workspaceId,
+      repositoryId: repository.id,
+      snapshotId: snapshot.id,
+      snapshotPath: snapshot.storagePath,
+      commitSha: snapshot.commitSha
+    });
+    return reply.code(result.created ? 202 : 200).send(result);
+  });
+
+  server.get("/api/builds", { preHandler: requireAdmin }, async (request, reply) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repository = await options.store.currentRepository(admin.workspaceId);
+    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    return { builds: await options.store.listBuilds(admin.workspaceId, repository.id) };
+  });
+
+  server.get("/api/builds/:id", { preHandler: requireAdmin }, async (request, reply) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const parsed = z.object({ id: z.string().min(1) }).safeParse(request.params);
+    const build = parsed.success
+      ? await options.store.getBuild(admin.workspaceId, parsed.data.id)
+      : null;
+    if (!build) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    return { build };
+  });
+
+  server.post("/api/builds/:id/cancel", { preHandler: requireAdmin }, async (request, reply) => {
+    if (!options.buildService) {
+      return sendError(reply, 503, "BUILD_SERVICE_UNAVAILABLE", "Build service is unavailable");
+    }
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const parsed = z.object({ id: z.string().min(1) }).safeParse(request.params);
+    const build = parsed.success
+      ? await options.buildService.cancelBuild(admin.workspaceId, parsed.data.id)
+      : null;
+    if (!build) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    return { build };
+  });
+
+  server.get("/api/builds/:id/events", { preHandler: requireAdmin }, async (request, reply) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const params = z.object({ id: z.string().min(1) }).safeParse(request.params);
+    const query = z.object({ once: z.string().optional() }).safeParse(request.query);
+    if (!params.success || !query.success) {
+      return sendError(reply, 400, "INVALID_REQUEST", "Invalid build event request");
+    }
+    const build = await options.store.getBuild(admin.workspaceId, params.data.id);
+    if (!build) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    const history = await options.store.listBuildEvents(admin.workspaceId, build.id);
+    reply.header("content-type", "text/event-stream; charset=utf-8");
+    reply.header("cache-control", "no-cache");
+    if (query.data.once === "true" || !options.buildService) {
+      return reply.send(history.map(sseEvent).join(""));
+    }
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache",
+      connection: "keep-alive"
+    });
+    for (const event of history) reply.raw.write(sseEvent(event));
+    const unsubscribe = options.buildService.subscribe(build.id, (event) => {
+      reply.raw.write(sseEvent(event));
+      if (["ready", "published", "failed"].includes(event.status)) reply.raw.end();
+    });
+    request.raw.on("close", unsubscribe);
+  });
+
+  server.get("/api/knowledge/search", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({ q: z.string().trim().min(1), releaseId: z.string().optional() })
+      .safeParse(request.query);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid search query");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repository = await options.store.currentRepository(admin.workspaceId);
+    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    return {
+      results: await options.store.searchKnowledge(
+        admin.workspaceId, repository.id, parsed.data.q, parsed.data.releaseId
+      )
+    };
+  });
+
+  server.get("/api/knowledge/pages", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({ releaseId: z.string().optional() }).safeParse(request.query);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid page query");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    return { pages: await options.store.listKnowledgePages(admin.workspaceId, parsed.data.releaseId) };
+  });
+
+  server.get("/api/knowledge/pages/:id", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({ id: z.string().min(1) }).safeParse(request.params);
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const page = parsed.success
+      ? await options.store.getKnowledgePage(admin.workspaceId, parsed.data.id)
+      : null;
+    if (!page) return sendError(reply, 404, "PAGE_NOT_FOUND", "Knowledge page was not found");
+    return { page };
+  });
+
+  server.get("/api/knowledge/source", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({
+      path: z.string().min(1),
+      startLine: z.coerce.number().int().positive(),
+      endLine: z.coerce.number().int().positive(),
+      releaseId: z.string().optional()
+    }).refine((value) => value.endLine >= value.startLine && value.endLine - value.startLine <= 500)
+      .safeParse(request.query);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid source range");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repository = await options.store.currentRepository(admin.workspaceId);
+    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    const release = parsed.data.releaseId
+      ? (await options.store.listReleases(admin.workspaceId, repository.id))
+        .find((candidate) => candidate.id === parsed.data.releaseId) ?? null
+      : await options.store.currentRelease(admin.workspaceId, repository.id);
+    if (!release) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
+    const snapshot = await options.store.findSnapshotById(admin.workspaceId, release.snapshotId);
+    const sourceFile = await options.store.findSourceFile(
+      admin.workspaceId, release.snapshotId, parsed.data.path
+    );
+    if (!snapshot || !sourceFile) return sendError(reply, 404, "SOURCE_NOT_FOUND", "Source file was not found");
+    const root = await fs.realpath(snapshot.storagePath);
+    const candidate = await fs.realpath(path.resolve(root, parsed.data.path)).catch(() => null);
+    if (!candidate || (!candidate.startsWith(`${root}${path.sep}`) && candidate !== root)) {
+      return sendError(reply, 400, "INVALID_SOURCE_PATH", "Source path is outside the snapshot");
+    }
+    const content = await fs.readFile(candidate, "utf8");
+    if (createHash("sha256").update(content).digest("hex") !== sourceFile.contentHash) {
+      return sendError(reply, 409, "SOURCE_CHANGED", "Snapshot source no longer matches its citation");
+    }
+    const lines = content.split(/\r?\n/);
+    if (parsed.data.endLine > lines.length) {
+      return sendError(reply, 400, "INVALID_SOURCE_RANGE", "Source range exceeds the file");
+    }
+    return {
+      path: parsed.data.path,
+      startLine: parsed.data.startLine,
+      endLine: parsed.data.endLine,
+      commitSha: snapshot.commitSha,
+      blobHash: sourceFile.contentHash,
+      content: lines.slice(parsed.data.startLine - 1, parsed.data.endLine).join("\n")
+    };
+  });
+
+  server.post("/api/releases", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({ buildId: z.string().min(1), version: z.string().trim().min(1) })
+      .safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid release draft");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repository = await options.store.currentRepository(admin.workspaceId);
+    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    try {
+      const release = await options.store.createReleaseDraft(
+        admin.workspaceId, repository.id, parsed.data.buildId, parsed.data.version
+      );
+      return reply.code(201).send({ release });
+    } catch (error) {
+      return sendError(reply, 409, "RELEASE_NOT_READY", error instanceof Error ? error.message : "Release failed");
+    }
+  });
+
+  server.post("/api/releases/:id/publish", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({ id: z.string().min(1) }).safeParse(request.params);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid release");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    try {
+      return { release: await options.store.publishRelease(admin.workspaceId, parsed.data.id) };
+    } catch (error) {
+      return sendError(reply, 409, "PUBLISH_FAILED", error instanceof Error ? error.message : "Publish failed");
+    }
+  });
+
+  server.get("/api/releases/current", { preHandler: requireAdmin }, async (request, reply) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repository = await options.store.currentRepository(admin.workspaceId);
+    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    const release = await options.store.currentRelease(admin.workspaceId, repository.id);
+    if (!release) return sendError(reply, 404, "RELEASE_NOT_FOUND", "No release is published");
+    return { release };
+  });
+
+  server.get("/api/releases", { preHandler: requireAdmin }, async (request, reply) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repository = await options.store.currentRepository(admin.workspaceId);
+    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    return { releases: await options.store.listReleases(admin.workspaceId, repository.id) };
+  });
 
   return server;
 }

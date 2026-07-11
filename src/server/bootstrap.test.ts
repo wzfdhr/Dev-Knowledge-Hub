@@ -5,11 +5,15 @@ import { bootstrapProductionServer, type BootstrapDependencies } from "./bootstr
 function dependencies(): BootstrapDependencies {
   const pool = { durable: true };
   const store = { durable: true };
+  const queue = { durable: true };
+  const buildService = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
   const server = { durable: true, addHook: vi.fn() };
   return {
     createDatabase: vi.fn(() => ({ pool } as never)),
     runMigrations: vi.fn(async () => []),
     createStore: vi.fn(() => store as never),
+    createBuildQueue: vi.fn(() => queue as never),
+    createBuildService: vi.fn(() => buildService as never),
     buildServer: vi.fn(() => server as never)
   };
 }
@@ -35,16 +39,23 @@ describe("production bootstrap", () => {
 
     const database = vi.mocked(deps.createDatabase).mock.results[0].value;
     const store = vi.mocked(deps.createStore).mock.results[0].value;
+    const queue = vi.mocked(deps.createBuildQueue).mock.results[0].value;
+    const buildService = vi.mocked(deps.createBuildService).mock.results[0].value;
     expect(deps.createDatabase).toHaveBeenCalledWith("postgres://localhost/devkh");
     expect(deps.runMigrations).toHaveBeenCalledWith(database.pool);
     expect(deps.createStore).toHaveBeenCalledWith(database.pool);
+    expect(deps.createBuildQueue).toHaveBeenCalledWith("postgres://localhost/devkh");
+    expect(deps.createBuildService).toHaveBeenCalledWith(store, queue);
+    expect(buildService.start).toHaveBeenCalledOnce();
     expect(deps.buildServer).toHaveBeenCalledWith({
       store,
+      buildService,
       masterKey,
       sessionSecret: "production-session-secret",
       dataDir: "/var/lib/devkh",
       nodeEnv: "production"
     });
+    expect(server.addHook).toHaveBeenCalledWith("onClose", expect.any(Function));
     expect(server).toBe(vi.mocked(deps.buildServer).mock.results[0].value);
   });
 });

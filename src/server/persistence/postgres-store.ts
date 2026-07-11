@@ -5,12 +5,22 @@ import type {
   AppStore,
   AuditEventInput,
   CreateSnapshotInput,
+  KnowledgePageRecord,
+  KnowledgeSearchResult,
+  ReleaseRecord,
   RepositoryConnectionInput,
   RepositoryRecord,
   SetupResult,
   SourceSnapshotRecord,
   WorkspaceRecord
 } from "./store.js";
+import type {
+  BuildEvent,
+  BuildRecord,
+  BuildStatus,
+  PersistedKnowledge
+} from "../knowledge/build-service.js";
+import type { Citation } from "../knowledge/intelligence.js";
 
 interface Queryable {
   query<T extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]): Promise<{ rows: T[] }>;
@@ -38,6 +48,31 @@ interface SnapshotRow extends QueryResultRow {
   storage_path: string;
 }
 
+interface BuildRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  repository_id: string;
+  snapshot_id: string;
+  snapshot_path: string;
+  commit_sha: string;
+  status: BuildStatus;
+  warnings: BuildRecord["warnings"];
+  cancel_requested: boolean;
+  error_message: string | null;
+}
+
+interface ReleaseRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  repository_id: string;
+  build_job_id: string;
+  snapshot_id: string;
+  version: string;
+  created_at: Date;
+  published_at: Date | null;
+  status?: BuildStatus;
+}
+
 function repositoryRecord(row: RepositoryRow): RepositoryRecord {
   return {
     id: row.id,
@@ -61,6 +96,34 @@ function snapshotRecord(row: SnapshotRow): SourceSnapshotRecord {
     remoteUrl: row.remote_url,
     commitTimestamp: row.commit_timestamp,
     storagePath: row.storage_path
+  };
+}
+
+function buildRecord(row: BuildRow): BuildRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    repositoryId: row.repository_id,
+    snapshotId: row.snapshot_id,
+    snapshotPath: row.snapshot_path,
+    commitSha: row.commit_sha,
+    status: row.status,
+    warnings: row.warnings ?? [],
+    cancelRequested: row.cancel_requested,
+    ...(row.error_message ? { errorMessage: row.error_message } : {})
+  };
+}
+
+function releaseRecord(row: ReleaseRow): ReleaseRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    repositoryId: row.repository_id,
+    buildId: row.build_job_id,
+    snapshotId: row.snapshot_id,
+    version: row.version,
+    createdAt: row.created_at,
+    publishedAt: row.published_at
   };
 }
 
@@ -246,6 +309,32 @@ export class PostgresAppStore implements AppStore {
     return rows[0] ? snapshotRecord(rows[0]) : null;
   }
 
+  async findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null> {
+    const { rows } = await this.pool.query<SnapshotRow>(
+      `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
+              commit_timestamp, storage_path
+       FROM source_snapshots WHERE workspace_id = $1 AND id = $2`,
+      [workspaceId, snapshotId]
+    );
+    return rows[0] ? snapshotRecord(rows[0]) : null;
+  }
+
+  async findSourceFile(workspaceId: string, snapshotId: string, filePath: string) {
+    const { rows } = await this.pool.query<{
+      id: string; workspace_id: string; snapshot_id: string; path: string;
+      byte_size: number; content_hash: string; language: string | null;
+    }>(
+      `SELECT id, workspace_id, snapshot_id, path, byte_size, content_hash, language
+       FROM source_files WHERE workspace_id = $1 AND snapshot_id = $2 AND path = $3`,
+      [workspaceId, snapshotId, filePath]
+    );
+    const row = rows[0];
+    return row ? {
+      id: row.id, workspaceId: row.workspace_id, snapshotId: row.snapshot_id,
+      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language
+    } : null;
+  }
+
   async createSnapshot({ snapshot, files }: CreateSnapshotInput): Promise<SourceSnapshotRecord> {
     const client = await this.pool.connect();
     try {
@@ -322,5 +411,425 @@ export class PostgresAppStore implements AppStore {
       [workspaceId, repositoryId]
     );
     return rows[0]?.ciphertext ?? null;
+  }
+
+  async createBuild(
+    input: Omit<BuildRecord, "id" | "status" | "warnings" | "cancelRequested">
+  ): Promise<{ build: BuildRecord; created: boolean }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [input.repositoryId]);
+      const active = await client.query<BuildRow>(
+        `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
+                status, warnings, cancel_requested, error_message
+         FROM build_jobs
+         WHERE workspace_id = $1 AND repository_id = $2
+           AND status NOT IN ('ready', 'published', 'failed')
+         ORDER BY created_at DESC LIMIT 1`,
+        [input.workspaceId, input.repositoryId]
+      );
+      if (active.rows[0]) {
+        await client.query("COMMIT");
+        return { build: buildRecord(active.rows[0]), created: false };
+      }
+      const inserted = await client.query<BuildRow>(
+        `INSERT INTO build_jobs
+         (workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha, status)
+         VALUES ($1, $2, $3, $4, $5, 'queued')
+         RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
+                   status, warnings, cancel_requested, error_message`,
+        [input.workspaceId, input.repositoryId, input.snapshotId, input.snapshotPath, input.commitSha]
+      );
+      const build = buildRecord(inserted.rows[0]);
+      await client.query(
+        `INSERT INTO build_events (workspace_id, build_job_id, status)
+         VALUES ($1, $2, 'queued')`,
+        [build.workspaceId, build.id]
+      );
+      await client.query("COMMIT");
+      return { build, created: true };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getBuild(workspaceId: string, buildId: string): Promise<BuildRecord | null> {
+    const { rows } = await this.pool.query<BuildRow>(
+      `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
+              status, warnings, cancel_requested, error_message
+       FROM build_jobs WHERE workspace_id = $1 AND id = $2`,
+      [workspaceId, buildId]
+    );
+    return rows[0] ? buildRecord(rows[0]) : null;
+  }
+
+  async transitionBuild(
+    buildId: string,
+    status: BuildStatus,
+    details?: { errorMessage?: string; warnings?: BuildRecord["warnings"] }
+  ): Promise<BuildRecord> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const updated = await client.query<BuildRow>(
+        `UPDATE build_jobs
+         SET status = $2, error_message = COALESCE($3, error_message),
+             warnings = COALESCE($4::jsonb, warnings), updated_at = now()
+         WHERE id = $1
+         RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
+                   status, warnings, cancel_requested, error_message`,
+        [buildId, status, details?.errorMessage ?? null,
+          details?.warnings ? JSON.stringify(details.warnings) : null]
+      );
+      if (!updated.rows[0]) throw new Error("Build not found");
+      await client.query(
+        `INSERT INTO build_events (workspace_id, build_job_id, status, payload)
+         VALUES ($1, $2, $3, $4::jsonb)`,
+        [updated.rows[0].workspace_id, buildId, status, JSON.stringify({
+          ...(details?.errorMessage ? { errorMessage: details.errorMessage } : {}),
+          ...(details?.warnings ? { warnings: details.warnings } : {})
+        })]
+      );
+      await client.query("COMMIT");
+      return buildRecord(updated.rows[0]);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async requestBuildCancellation(workspaceId: string, buildId: string): Promise<BuildRecord | null> {
+    const { rows } = await this.pool.query<BuildRow>(
+      `UPDATE build_jobs SET cancel_requested = true, updated_at = now()
+       WHERE workspace_id = $1 AND id = $2
+         AND status NOT IN ('ready', 'published', 'failed')
+       RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
+                 status, warnings, cancel_requested, error_message`,
+      [workspaceId, buildId]
+    );
+    return rows[0] ? buildRecord(rows[0]) : this.getBuild(workspaceId, buildId);
+  }
+
+  async listUnfinishedBuilds(): Promise<BuildRecord[]> {
+    const { rows } = await this.pool.query<BuildRow>(
+      `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
+              status, warnings, cancel_requested, error_message
+       FROM build_jobs WHERE status NOT IN ('ready', 'published', 'failed')
+       ORDER BY created_at ASC`
+    );
+    return rows.map(buildRecord);
+  }
+
+  async listBuilds(workspaceId: string, repositoryId: string): Promise<BuildRecord[]> {
+    const { rows } = await this.pool.query<BuildRow>(
+      `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
+              status, warnings, cancel_requested, error_message
+       FROM build_jobs WHERE workspace_id = $1 AND repository_id = $2
+       ORDER BY created_at DESC`,
+      [workspaceId, repositoryId]
+    );
+    return rows.map(buildRecord);
+  }
+
+  async listBuildEvents(workspaceId: string, buildId: string): Promise<BuildEvent[]> {
+    const { rows } = await this.pool.query<{
+      build_job_id: string; status: BuildStatus; created_at: Date; payload: { errorMessage?: string };
+    }>(
+      `SELECT e.build_job_id, e.status, e.created_at, e.payload
+       FROM build_events e JOIN build_jobs b ON b.id = e.build_job_id
+       WHERE e.workspace_id = $1 AND e.build_job_id = $2
+       ORDER BY e.created_at, e.id`,
+      [workspaceId, buildId]
+    );
+    return rows.map((row) => ({
+      buildId: row.build_job_id,
+      status: row.status,
+      occurredAt: row.created_at.toISOString(),
+      ...(row.payload.errorMessage ? { errorMessage: row.payload.errorMessage } : {})
+    }));
+  }
+
+  async saveKnowledge({ build, index, output }: PersistedKnowledge): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query(
+        "SELECT 1 FROM knowledge_pages WHERE build_job_id = $1 LIMIT 1",
+        [build.id]
+      );
+      if (existing.rows[0]) throw new Error("Knowledge for this build is immutable");
+      for (const symbol of index.symbols) {
+        await client.query(
+          `INSERT INTO code_symbols
+           (workspace_id, source_file_id, name, kind, signature, start_line, end_line, exported)
+           SELECT $1, sf.id, $4, $5, $6, $7, $8, $9
+           FROM source_files sf
+           WHERE sf.workspace_id = $1 AND sf.snapshot_id = $2 AND sf.path = $3
+           ON CONFLICT (source_file_id, kind, name, start_line, end_line) DO NOTHING`,
+          [build.workspaceId, build.snapshotId, symbol.path, symbol.name, symbol.kind,
+            symbol.signature ?? null, symbol.startLine, symbol.endLine, symbol.exported]
+        );
+      }
+      for (const edge of index.edges) {
+        await client.query(
+          `INSERT INTO code_edges
+           (workspace_id, snapshot_id, kind, source_name, target_name, source_path, start_line, end_line)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (snapshot_id, kind, source_name, target_name, source_path, start_line, end_line)
+           DO NOTHING`,
+          [build.workspaceId, build.snapshotId, edge.kind, edge.source, edge.target, edge.citation.path,
+            edge.citation.startLine, edge.citation.endLine]
+        );
+      }
+      for (const draft of output.pages) {
+        const pageResult = await client.query<{ id: string }>(
+          `INSERT INTO knowledge_pages
+           (workspace_id, repository_id, build_job_id, slug, title, body)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+          [build.workspaceId, build.repositoryId, build.id, draft.slug, draft.title, draft.body]
+        );
+        for (const chunk of draft.chunks) {
+          await client.query(
+            `INSERT INTO knowledge_chunks (workspace_id, page_id, heading, content, citations)
+             VALUES ($1, $2, $3, $4, $5::jsonb)`,
+            [build.workspaceId, pageResult.rows[0].id, chunk.heading, chunk.content,
+              JSON.stringify(chunk.citations)]
+          );
+        }
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async createReleaseDraft(
+    workspaceId: string,
+    repositoryId: string,
+    buildId: string,
+    version: string
+  ): Promise<ReleaseRecord> {
+    const { rows } = await this.pool.query<ReleaseRow>(
+      `INSERT INTO releases (workspace_id, repository_id, build_job_id, snapshot_id, version)
+       SELECT $1, $2, b.id, b.snapshot_id, $4
+       FROM build_jobs b
+       WHERE b.id = $3 AND b.workspace_id = $1 AND b.repository_id = $2 AND b.status = 'ready'
+       RETURNING id, workspace_id, repository_id, build_job_id, snapshot_id, version,
+                 created_at, published_at`,
+      [workspaceId, repositoryId, buildId, version]
+    );
+    if (!rows[0]) throw new Error("Only a ready build can create a release draft");
+    return releaseRecord(rows[0]);
+  }
+
+  async publishRelease(
+    workspaceId: string,
+    releaseId: string,
+    channel = "current"
+  ): Promise<ReleaseRecord> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const selected = await client.query<ReleaseRow>(
+        `SELECT r.id, r.workspace_id, r.repository_id, r.build_job_id, r.snapshot_id,
+                r.version, r.created_at, r.published_at, b.status
+         FROM releases r JOIN build_jobs b ON b.id = r.build_job_id
+         WHERE r.workspace_id = $1 AND r.id = $2 FOR UPDATE`,
+        [workspaceId, releaseId]
+      );
+      const release = selected.rows[0];
+      if (!release) throw new Error("Release not found");
+      if (release.status !== "ready") throw new Error("Release build is not ready");
+      await client.query(
+        `INSERT INTO release_channels (workspace_id, repository_id, release_id, name)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (repository_id, name) DO UPDATE
+         SET release_id = EXCLUDED.release_id, updated_at = now()`,
+        [workspaceId, release.repository_id, release.id, channel]
+      );
+      const published = await client.query<ReleaseRow>(
+        `UPDATE releases SET published_at = COALESCE(published_at, now()), updated_at = now()
+         WHERE id = $1
+         RETURNING id, workspace_id, repository_id, build_job_id, snapshot_id, version,
+                   created_at, published_at`,
+        [release.id]
+      );
+      await client.query(
+        "UPDATE build_jobs SET status = 'published', updated_at = now() WHERE id = $1",
+        [release.build_job_id]
+      );
+      await client.query("COMMIT");
+      return releaseRecord(published.rows[0]);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async currentRelease(
+    workspaceId: string,
+    repositoryId: string,
+    channel = "current"
+  ): Promise<ReleaseRecord | null> {
+    const { rows } = await this.pool.query<ReleaseRow>(
+      `SELECT r.id, r.workspace_id, r.repository_id, r.build_job_id, r.snapshot_id,
+              r.version, r.created_at, r.published_at
+       FROM release_channels c JOIN releases r ON r.id = c.release_id
+       WHERE c.workspace_id = $1 AND c.repository_id = $2 AND c.name = $3`,
+      [workspaceId, repositoryId, channel]
+    );
+    return rows[0] ? releaseRecord(rows[0]) : null;
+  }
+
+  async listReleases(workspaceId: string, repositoryId: string): Promise<ReleaseRecord[]> {
+    const { rows } = await this.pool.query<ReleaseRow>(
+      `SELECT id, workspace_id, repository_id, build_job_id, snapshot_id, version,
+              created_at, published_at
+       FROM releases WHERE workspace_id = $1 AND repository_id = $2
+       ORDER BY created_at DESC, id DESC`,
+      [workspaceId, repositoryId]
+    );
+    return rows.map(releaseRecord);
+  }
+
+  async listKnowledgePages(workspaceId: string, releaseId?: string): Promise<KnowledgePageRecord[]> {
+    const { rows } = await this.pool.query<{
+      id: string; workspace_id: string; repository_id: string; build_job_id: string;
+      slug: string; title: string; body: string; chunks: KnowledgePageRecord["chunks"];
+    }>(
+      `SELECT p.id, p.workspace_id, p.repository_id, p.build_job_id, p.slug, p.title, p.body,
+              COALESCE(jsonb_agg(jsonb_build_object(
+                'id', c.id, 'heading', c.heading, 'content', c.content, 'citations', c.citations
+              ) ORDER BY c.created_at) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
+       FROM knowledge_pages p
+       JOIN releases r ON r.build_job_id = p.build_job_id
+       LEFT JOIN knowledge_chunks c ON c.page_id = p.id
+       LEFT JOIN release_channels rc ON rc.release_id = r.id AND rc.name = 'current'
+       WHERE p.workspace_id = $1 AND (($2::uuid IS NOT NULL AND r.id = $2) OR ($2::uuid IS NULL AND rc.id IS NOT NULL))
+       GROUP BY p.id ORDER BY p.slug`,
+      [workspaceId, releaseId ?? null]
+    );
+    return rows.map((row) => ({
+      id: row.id,
+      workspaceId: row.workspace_id,
+      repositoryId: row.repository_id,
+      buildId: row.build_job_id,
+      slug: row.slug,
+      title: row.title,
+      body: row.body,
+      chunks: row.chunks
+    }));
+  }
+
+  async getKnowledgePage(workspaceId: string, pageId: string): Promise<KnowledgePageRecord | null> {
+    const { rows } = await this.pool.query<{
+      id: string; workspace_id: string; repository_id: string; build_job_id: string;
+      slug: string; title: string; body: string; chunks: KnowledgePageRecord["chunks"];
+    }>(
+      `SELECT p.id, p.workspace_id, p.repository_id, p.build_job_id, p.slug, p.title, p.body,
+              COALESCE(jsonb_agg(jsonb_build_object(
+                'id', c.id, 'heading', c.heading, 'content', c.content, 'citations', c.citations
+              ) ORDER BY c.created_at) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
+       FROM knowledge_pages p LEFT JOIN knowledge_chunks c ON c.page_id = p.id
+       WHERE p.workspace_id = $1 AND p.id = $2 GROUP BY p.id`,
+      [workspaceId, pageId]
+    );
+    const row = rows[0];
+    return row ? {
+      id: row.id, workspaceId: row.workspace_id, repositoryId: row.repository_id,
+      buildId: row.build_job_id, slug: row.slug, title: row.title, body: row.body,
+      chunks: row.chunks
+    } : null;
+  }
+
+  async searchKnowledge(
+    workspaceId: string,
+    repositoryId: string,
+    query: string,
+    releaseId?: string
+  ): Promise<KnowledgeSearchResult[]> {
+    const { rows } = await this.pool.query<{
+      kind: KnowledgeSearchResult["kind"]; title: string; excerpt: string; score: number;
+      page_id: string; release_id: string; citations: Citation[];
+    }>(
+      `WITH selected_release AS (
+         SELECT r.* FROM releases r
+         LEFT JOIN release_channels rc ON rc.release_id = r.id AND rc.name = 'current'
+         WHERE r.workspace_id = $1 AND r.repository_id = $2
+           AND (($4::uuid IS NOT NULL AND r.id = $4) OR ($4::uuid IS NULL AND rc.id IS NOT NULL))
+         LIMIT 1
+       ), symbol_matches AS (
+         SELECT CASE WHEN cs.kind = 'module' THEN 'module' ELSE 'symbol' END AS kind,
+                CASE WHEN cs.kind = 'module' THEN sf.path ELSE cs.name END AS title,
+                left(kp.body, 240) AS excerpt,
+                CASE
+                  WHEN lower(cs.name) = lower($3) THEN 100
+                  WHEN lower(sf.path) = lower($3) THEN 90
+                  WHEN lower(cs.name) LIKE lower($3) || '%' THEN 80
+                  WHEN lower(sf.path) LIKE lower($3) || '%' THEN 70
+                  ELSE 30 + similarity(lower(cs.name), lower($3)) * 10
+                END AS score,
+                kp.id AS page_id, sr.id AS release_id,
+                jsonb_build_array(jsonb_build_object(
+                  'path', sf.path, 'startLine', cs.start_line, 'endLine', cs.end_line,
+                  'commitSha', b.commit_sha, 'blobHash', sf.content_hash
+                )) AS citations
+         FROM selected_release sr
+         JOIN build_jobs b ON b.id = sr.build_job_id
+         JOIN source_files sf ON sf.snapshot_id = sr.snapshot_id
+         JOIN code_symbols cs ON cs.source_file_id = sf.id
+         JOIN LATERAL (
+           SELECT p.* FROM knowledge_pages p WHERE p.build_job_id = sr.build_job_id
+           ORDER BY CASE WHEN p.title = cs.name OR p.title = 'Module: ' || sf.path THEN 0 ELSE 1 END, p.slug LIMIT 1
+         ) kp ON true
+         WHERE lower(cs.name) LIKE lower($3) || '%' OR lower(sf.path) LIKE lower($3) || '%'
+            OR similarity(lower(cs.name), lower($3)) > 0.2
+       ), neighbor_matches AS (
+         SELECT 'dependency-neighbor' AS kind,
+                CASE WHEN lower(ce.target_name) = lower($3) THEN ce.source_name ELSE ce.target_name END AS title,
+                left(kp.body, 240) AS excerpt, 60::real AS score,
+                kp.id AS page_id, sr.id AS release_id, kc.citations
+         FROM selected_release sr
+         JOIN code_edges ce ON ce.workspace_id = sr.workspace_id
+                            AND ce.snapshot_id = sr.snapshot_id
+         JOIN knowledge_pages kp ON kp.build_job_id = sr.build_job_id
+         JOIN LATERAL (SELECT citations FROM knowledge_chunks WHERE page_id = kp.id LIMIT 1) kc ON true
+         WHERE lower(ce.source_name) = lower($3) OR lower(ce.target_name) = lower($3)
+       ), text_matches AS (
+         SELECT 'page' AS kind, kp.title, left(kp.body, 240) AS excerpt,
+                (20 + ts_rank_cd(to_tsvector('english', kp.title || ' ' || kp.body),
+                                 plainto_tsquery('english', $3)) * 10
+                    + similarity(lower(kp.title), lower($3)))::real AS score,
+                kp.id AS page_id, sr.id AS release_id, kc.citations
+         FROM selected_release sr JOIN knowledge_pages kp ON kp.build_job_id = sr.build_job_id
+         JOIN LATERAL (SELECT citations FROM knowledge_chunks WHERE page_id = kp.id LIMIT 1) kc ON true
+         WHERE to_tsvector('english', kp.title || ' ' || kp.body) @@ plainto_tsquery('english', $3)
+            OR similarity(lower(kp.title), lower($3)) > 0.2
+       )
+       SELECT * FROM (
+         SELECT * FROM symbol_matches UNION ALL SELECT * FROM neighbor_matches UNION ALL SELECT * FROM text_matches
+       ) ranked ORDER BY score DESC, title ASC, page_id ASC LIMIT 50`,
+      [workspaceId, repositoryId, query, releaseId ?? null]
+    );
+    return rows.map((row) => ({
+      kind: row.kind,
+      title: row.title,
+      excerpt: row.excerpt,
+      score: Number(row.score),
+      pageId: row.page_id,
+      releaseId: row.release_id,
+      citations: row.citations
+    }));
   }
 }

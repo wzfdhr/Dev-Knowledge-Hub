@@ -6,11 +6,15 @@ import { buildServer } from "./app.js";
 import { loadEnv, type EnvironmentMode } from "./env.js";
 import { PostgresAppStore } from "./persistence/postgres-store.js";
 import type { AppStore } from "./persistence/store.js";
+import { BuildService, type BuildJobQueue } from "./knowledge/build-service.js";
+import { PgBossBuildJobQueue } from "./knowledge/job-queue.js";
 
 export interface BootstrapDependencies {
   createDatabase: typeof createDatabase;
   runMigrations: typeof runMigrations;
   createStore: (pool: Pool) => AppStore;
+  createBuildQueue: (connectionString: string) => BuildJobQueue;
+  createBuildService: (store: AppStore, queue: BuildJobQueue) => BuildService;
   buildServer: typeof buildServer;
 }
 
@@ -18,6 +22,8 @@ const defaultDependencies: BootstrapDependencies = {
   createDatabase,
   runMigrations,
   createStore: (pool) => new PostgresAppStore(pool),
+  createBuildQueue: (connectionString) => new PgBossBuildJobQueue(connectionString),
+  createBuildService: (store, queue) => new BuildService(store, queue),
   buildServer
 };
 
@@ -35,14 +41,22 @@ export async function bootstrapServer(
 
   const database = dependencies.createDatabase(env.databaseUrl);
   await dependencies.runMigrations(database.pool);
+  const store = dependencies.createStore(database.pool);
+  const queue = dependencies.createBuildQueue(env.databaseUrl);
+  const buildService = dependencies.createBuildService(store, queue);
+  await buildService.start();
   const server = dependencies.buildServer({
-    store: dependencies.createStore(database.pool),
+    store,
+    buildService,
     masterKey: env.masterKey,
     sessionSecret: env.sessionSecret,
     dataDir: env.dataDir,
     nodeEnv: env.nodeEnv
   });
-  server.addHook("onClose", () => database.pool.end());
+  server.addHook("onClose", async () => {
+    await buildService.stop();
+    await database.pool.end();
+  });
   return server;
 }
 

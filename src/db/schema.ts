@@ -1,4 +1,5 @@
 import {
+  boolean,
   foreignKey,
   index,
   integer,
@@ -123,9 +124,15 @@ export const codeSymbols = pgTable("code_symbols", {
   name: text("name").notNull(),
   kind: text("kind").notNull(),
   signature: text("signature"),
+  startLine: integer("start_line").notNull().default(1),
+  endLine: integer("end_line").notNull().default(1),
+  exported: boolean("exported").notNull().default(false),
   ...timestamps
 }, (table) => [
   uniqueIndex("code_symbols_id_workspace_idx").on(table.id, table.workspaceId),
+  uniqueIndex("code_symbols_source_identity_idx").on(
+    table.sourceFileId, table.kind, table.name, table.startLine, table.endLine
+  ),
   index("code_symbols_workspace_file_idx").on(table.workspaceId, table.sourceFileId),
   foreignKey({
     columns: [table.sourceFileId, table.workspaceId],
@@ -137,9 +144,15 @@ export const codeSymbols = pgTable("code_symbols", {
 export const codeEdges = pgTable("code_edges", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  sourceSymbolId: uuid("source_symbol_id").notNull(),
-  targetSymbolId: uuid("target_symbol_id").notNull(),
+  sourceSymbolId: uuid("source_symbol_id"),
+  targetSymbolId: uuid("target_symbol_id"),
   kind: text("kind").notNull(),
+  sourceName: text("source_name").notNull().default(""),
+  targetName: text("target_name").notNull().default(""),
+  sourcePath: text("source_path").notNull().default(""),
+  snapshotId: uuid("snapshot_id"),
+  startLine: integer("start_line").notNull().default(1),
+  endLine: integer("end_line").notNull().default(1),
   ...timestamps
 }, (table) => [
   uniqueIndex("code_edges_id_workspace_idx").on(table.id, table.workspaceId),
@@ -153,6 +166,11 @@ export const codeEdges = pgTable("code_edges", {
     columns: [table.targetSymbolId, table.workspaceId],
     foreignColumns: [codeSymbols.id, codeSymbols.workspaceId],
     name: "code_edges_target_symbol_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.snapshotId, table.workspaceId],
+    foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId],
+    name: "code_edges_snapshot_workspace_fk"
   }).onDelete("cascade")
 ]);
 
@@ -161,8 +179,12 @@ export const buildJobs = pgTable("build_jobs", {
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   repositoryId: uuid("repository_id").notNull(),
   snapshotId: uuid("snapshot_id"),
+  snapshotPath: text("snapshot_path").notNull().default(""),
+  commitSha: text("commit_sha").notNull().default(""),
   status: buildJobStatus("status").notNull().default("queued"),
   errorMessage: text("error_message"),
+  warnings: jsonb("warnings").notNull().default([]),
+  cancelRequested: boolean("cancel_requested").notNull().default(false),
   ...timestamps
 }, (table) => [
   uniqueIndex("build_jobs_id_workspace_idx").on(table.id, table.workspaceId),
@@ -190,7 +212,7 @@ export const knowledgePages = pgTable("knowledge_pages", {
   ...timestamps
 }, (table) => [
   uniqueIndex("knowledge_pages_id_workspace_idx").on(table.id, table.workspaceId),
-  uniqueIndex("knowledge_pages_repository_slug_idx").on(table.repositoryId, table.slug),
+  uniqueIndex("knowledge_pages_build_slug_idx").on(table.buildJobId, table.slug),
   foreignKey({
     columns: [table.repositoryId, table.workspaceId],
     foreignColumns: [repositories.id, repositories.workspaceId],
@@ -209,6 +231,7 @@ export const knowledgeChunks = pgTable("knowledge_chunks", {
   pageId: uuid("page_id").notNull(),
   heading: text("heading"),
   content: text("content").notNull(),
+  citations: jsonb("citations").notNull().default([]),
   ...timestamps
 }, (table) => [
   uniqueIndex("knowledge_chunks_id_workspace_idx").on(table.id, table.workspaceId),
@@ -225,7 +248,9 @@ export const releases = pgTable("releases", {
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   repositoryId: uuid("repository_id").notNull(),
   buildJobId: uuid("build_job_id").notNull(),
+  snapshotId: uuid("snapshot_id").notNull(),
   version: text("version").notNull(),
+  publishedAt: timestamp("published_at", { withTimezone: true }),
   ...timestamps
 }, (table) => [
   uniqueIndex("releases_id_workspace_idx").on(table.id, table.workspaceId),
@@ -239,7 +264,28 @@ export const releases = pgTable("releases", {
     columns: [table.buildJobId, table.workspaceId],
     foreignColumns: [buildJobs.id, buildJobs.workspaceId],
     name: "releases_build_job_workspace_fk"
+  }).onDelete("restrict"),
+  foreignKey({
+    columns: [table.snapshotId, table.workspaceId],
+    foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId],
+    name: "releases_snapshot_workspace_fk"
   }).onDelete("restrict")
+]);
+
+export const buildEvents = pgTable("build_events", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  buildJobId: uuid("build_job_id").notNull(),
+  status: buildJobStatus("status").notNull(),
+  payload: jsonb("payload").notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+}, (table) => [
+  index("build_events_build_created_idx").on(table.buildJobId, table.createdAt),
+  foreignKey({
+    columns: [table.buildJobId, table.workspaceId],
+    foreignColumns: [buildJobs.id, buildJobs.workspaceId],
+    name: "build_events_build_workspace_fk"
+  }).onDelete("cascade")
 ]);
 
 export const releaseChannels = pgTable("release_channels", {

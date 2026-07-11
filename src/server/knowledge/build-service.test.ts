@@ -103,10 +103,28 @@ class FakeBuildPersistence implements BuildPersistence {
 class FakeQueue implements BuildJobQueue {
   readonly sent: string[] = [];
   handler: ((buildId: string) => Promise<void>) | null = null;
+  startCalls = 0;
 
   async send(buildId: string) { this.sent.push(buildId); }
-  async start(handler: (buildId: string) => Promise<void>) { this.handler = handler; }
+  async start(handler: (buildId: string) => Promise<void>) {
+    this.startCalls += 1;
+    this.handler = handler;
+  }
   async stop() { this.handler = null; }
+}
+
+class ClaimOnStartQueue extends FakeQueue {
+  active: Promise<void> | null = null;
+
+  constructor(private readonly existingBuildId: string) {
+    super();
+  }
+
+  override async start(handler: (buildId: string) => Promise<void>) {
+    await super.start(handler);
+    this.active = handler(this.existingBuildId);
+    await Promise.resolve();
+  }
 }
 
 function input(repositoryId = "repo-1") {
@@ -182,16 +200,17 @@ describe("BuildService", () => {
     expect(persistence.currentReleaseId).toBe("release-current");
   });
 
-  test("re-enqueues recoverable unfinished builds and fails missing snapshots", async () => {
+  test("classifies recoverable unfinished builds and fails missing snapshots", async () => {
     const persistence = new FakeBuildPersistence();
     const queue = new FakeQueue();
     const service = new BuildService(persistence, queue);
     const recoverable = (await persistence.createBuild(input())).build;
     const missing = (await persistence.createBuild({ ...input("repo-2"), snapshotPath: "/missing" })).build;
 
-    await service.recover();
+    const recovered = await service.recover();
 
-    expect(queue.sent).toContain(recoverable.id);
+    expect(recovered).toContain(recoverable.id);
+    expect(queue.sent).toHaveLength(0);
     expect(missing.status).toBe("failed");
     expect(missing.errorMessage).toMatch(/snapshot/i);
   });
@@ -240,5 +259,32 @@ describe("BuildService", () => {
     expect(build.status).toBe("ready");
     expect(build.errorMessage).toBeUndefined();
     expect(persistence.transitions.at(-1)).not.toBe("failed");
+  });
+
+  test("classifies recovery before workers can claim an existing queued job", async () => {
+    const persistence = new FakeBuildPersistence();
+    const existing = (await persistence.createBuild(input())).build;
+    const queue = new ClaimOnStartQueue(existing.id);
+    const service = new BuildService(persistence, queue);
+
+    await service.start();
+    await queue.active;
+
+    expect(existing.status).toBe("ready");
+    expect(existing.errorMessage).toBeUndefined();
+    expect(persistence.transitions).not.toContain("failed");
+    expect(queue.startCalls).toBe(1);
+  });
+
+  test("coalesces concurrent lifecycle starts into one recovery and subscription", async () => {
+    const persistence = new FakeBuildPersistence();
+    const queue = new FakeQueue();
+    const service = new BuildService(persistence, queue);
+    const recoveryReads = vi.spyOn(persistence, "listUnfinishedBuilds");
+
+    await Promise.all([service.start(), service.start(), service.start()]);
+
+    expect(recoveryReads).toHaveBeenCalledOnce();
+    expect(queue.startCalls).toBe(1);
   });
 });

@@ -74,6 +74,7 @@ export class BuildService {
   private readonly synthesize: typeof generateKnowledge;
   private readonly validate: typeof validateKnowledge;
   private readonly enhancer?: KnowledgeEnhancer;
+  private startPromise: Promise<void> | null = null;
 
   constructor(
     private readonly persistence: BuildPersistence,
@@ -101,13 +102,25 @@ export class BuildService {
     if (event) this.events.emit(build.id, event);
   }
 
-  async start(): Promise<void> {
-    await this.queue.start((buildId) => this.process(buildId));
-    await this.recover();
+  start(): Promise<void> {
+    if (!this.startPromise) {
+      this.startPromise = this.startOnce().catch((error: unknown) => {
+        this.startPromise = null;
+        throw error;
+      });
+    }
+    return this.startPromise;
   }
 
-  stop(): Promise<void> {
-    return this.queue.stop();
+  private async startOnce(): Promise<void> {
+    const recoveredBuildIds = await this.recover();
+    await this.queue.start((buildId) => this.process(buildId));
+    for (const buildId of recoveredBuildIds) await this.queue.send(buildId);
+  }
+
+  async stop(): Promise<void> {
+    await this.queue.stop();
+    this.startPromise = null;
   }
 
   async startBuild(
@@ -184,7 +197,8 @@ export class BuildService {
     }
   }
 
-  async recover(): Promise<void> {
+  async recover(): Promise<string[]> {
+    const queuedBuildIds: string[] = [];
     for (const build of await this.persistence.listUnfinishedBuilds()) {
       if (build.status !== "queued") {
         await this.transition(
@@ -197,7 +211,7 @@ export class BuildService {
       }
       try {
         await fs.access(build.snapshotPath);
-        await this.queue.send(build.id);
+        queuedBuildIds.push(build.id);
       } catch {
         await this.transition(
           build.id,
@@ -207,5 +221,6 @@ export class BuildService {
         );
       }
     }
+    return queuedBuildIds;
   }
 }

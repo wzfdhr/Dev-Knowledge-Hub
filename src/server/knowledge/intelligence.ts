@@ -150,11 +150,14 @@ function enclosingCallSource(node: ts.CallExpression): string {
 function resolvedCallTarget(
   node: ts.CallExpression,
   checker: ts.TypeChecker,
-  rootPath: string
+  rootPath: string,
+  indexedSourcePaths: ReadonlySet<string>
 ): { name: string; path: string } | null {
   const declaration = checker.getResolvedSignature(node)?.declaration;
   if (!declaration) return null;
   const absolutePath = path.resolve(declaration.getSourceFile().fileName);
+  const canonicalPath = ts.sys.useCaseSensitiveFileNames ? absolutePath : absolutePath.toLowerCase();
+  if (!indexedSourcePaths.has(canonicalPath)) return null;
   const relativePath = path.relative(rootPath, absolutePath);
   if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return null;
 
@@ -182,7 +185,8 @@ function codeSymbolsAndEdges(
   knownPaths: Set<string>,
   source: ts.SourceFile,
   checker: ts.TypeChecker,
-  rootPath: string
+  rootPath: string,
+  indexedSourcePaths: ReadonlySet<string>
 ): { symbols: CodeSymbol[]; edges: CodeEdge[]; configKeys: string[] } {
   const baseCitation = citationFor(relativePath, content, commitSha);
   const symbols: CodeSymbol[] = [{
@@ -241,7 +245,7 @@ function codeSymbolsAndEdges(
     } else if (ts.isExportAssignment(node)) {
       addSymbol(node, "default", "export", true);
     } else if (ts.isCallExpression(node)) {
-      const target = resolvedCallTarget(node, checker, rootPath);
+      const target = resolvedCallTarget(node, checker, rootPath, indexedSourcePaths);
       if (target) edges.push({
         kind: "calls",
         source: enclosingCallSource(node),
@@ -324,23 +328,57 @@ function packageScriptSymbols(
   return { symbols, edges };
 }
 
+function defaultCompilerOptions(): ts.CompilerOptions {
+  return {
+    allowJs: true,
+    checkJs: false,
+    jsx: ts.JsxEmit.ReactJSX,
+    module: ts.ModuleKind.NodeNext,
+    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    noEmit: true,
+    skipLibCheck: true,
+    target: ts.ScriptTarget.ES2022
+  };
+}
+
+function repositoryCompilerOptions(rootPath: string): ts.CompilerOptions {
+  const defaults = defaultCompilerOptions();
+  const configPath = path.join(rootPath, "tsconfig.json");
+  if (!ts.sys.fileExists(configPath)) return defaults;
+  const read = ts.readConfigFile(configPath, ts.sys.readFile);
+  if (read.error) return defaults;
+  const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, rootPath, undefined, configPath);
+  if (parsed.errors.length) return defaults;
+  return {
+    ...defaults,
+    ...parsed.options,
+    allowJs: true,
+    checkJs: false,
+    noEmit: true,
+    skipLibCheck: true
+  };
+}
+
+function structuredConfig(content: string, kind: ConfigInfo["kind"]): unknown | null {
+  try {
+    return kind === "yaml" ? parseYaml(content) : JSON.parse(content) as unknown;
+  } catch {
+    return null;
+  }
+}
+
 export async function analyzeSnapshot(rootPath: string, commitSha: string): Promise<CodeIndex> {
   const relativePaths = await walk(rootPath);
   const knownPaths = new Set(relativePaths);
+  const rootNames = relativePaths
+    .filter((relativePath) => codeExtensions.has(path.extname(relativePath)))
+    .map((relativePath) => path.resolve(rootPath, relativePath));
+  const indexedSourcePaths = new Set(rootNames.map((absolutePath) =>
+    ts.sys.useCaseSensitiveFileNames ? absolutePath : absolutePath.toLowerCase()
+  ));
   const program = ts.createProgram({
-    rootNames: relativePaths
-      .filter((relativePath) => codeExtensions.has(path.extname(relativePath)))
-      .map((relativePath) => path.join(rootPath, relativePath)),
-    options: {
-      allowJs: true,
-      checkJs: false,
-      jsx: ts.JsxEmit.ReactJSX,
-      module: ts.ModuleKind.NodeNext,
-      moduleResolution: ts.ModuleResolutionKind.NodeNext,
-      noEmit: true,
-      skipLibCheck: true,
-      target: ts.ScriptTarget.ES2022
-    }
+    rootNames,
+    options: repositoryCompilerOptions(rootPath)
   });
   const checker = program.getTypeChecker();
   const files: Citation[] = [];
@@ -363,7 +401,8 @@ export async function analyzeSnapshot(rootPath: string, commitSha: string): Prom
         knownPaths,
         source,
         checker,
-        rootPath
+        rootPath,
+        indexedSourcePaths
       );
       symbols.push(...extracted.symbols);
       edges.push(...extracted.edges);
@@ -379,9 +418,9 @@ export async function analyzeSnapshot(rootPath: string, commitSha: string): Prom
     }
     const kind = configKind(relativePath);
     if (kind && !codeExtensions.has(path.extname(relativePath))) {
-      const parsed = kind === "yaml" ? parseYaml(content) : JSON.parse(content) as unknown;
-      configs.push({ ...citation, kind, keys: flattenKeys(parsed) });
-      if (kind === "package") {
+      const parsed = structuredConfig(content, kind);
+      configs.push({ ...citation, kind, keys: parsed === null ? [] : flattenKeys(parsed) });
+      if (kind === "package" && parsed !== null) {
         const packageData = packageScriptSymbols(relativePath, content, commitSha);
         symbols.push(...packageData.symbols);
         edges.push(...packageData.edges);

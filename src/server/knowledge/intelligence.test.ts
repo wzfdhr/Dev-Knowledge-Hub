@@ -9,6 +9,11 @@ const fixtureRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../test/fixtures/code-intelligence"
 );
+const fixtureBase = path.dirname(fixtureRoot);
+const resolutionFixtureRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../test-fixtures/tsconfig-resolution"
+);
 const commitSha = "a".repeat(40);
 
 describe("analyzeSnapshot", () => {
@@ -81,7 +86,36 @@ describe("analyzeSnapshot", () => {
       "exercise->run@src/call-targets.ts"
     ]);
     expect(calls.map((edge) => edge.target)).not.toEqual(expect.arrayContaining([
-      "max", "stringify", "value"
+      "generatedCall", "max", "packageCall", "stringify", "value"
+    ]));
+  });
+
+  test("loads path aliases but rejects resolved declarations outside the indexed file set", async () => {
+    const index = await analyzeSnapshot(resolutionFixtureRoot, commitSha);
+    const calls = index.edges.filter((edge) => edge.kind === "calls");
+
+    expect(calls.map((edge) => `${edge.target}@${edge.targetPath}`)).toEqual([
+      "aliasedCall@src/target.ts"
+    ]);
+    expect(calls.map((edge) => edge.target)).not.toEqual(expect.arrayContaining([
+      "generatedCall", "packageCall"
+    ]));
+    expect(index.files.map((file) => file.path)).not.toEqual(expect.arrayContaining([
+      "dist/generated.d.ts", "node_modules/internal-pkg/index.d.ts"
+    ]));
+  });
+
+  test("uses safe compiler defaults when repository tsconfig is absent or invalid", async () => {
+    const [absent, invalid] = await Promise.all([
+      analyzeSnapshot(path.join(fixtureBase, "no-tsconfig"), commitSha),
+      analyzeSnapshot(path.join(fixtureBase, "invalid-tsconfig"), commitSha)
+    ]);
+
+    expect(absent.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "calls", target: "defaultCall", targetPath: "src/main.ts" })
+    ]));
+    expect(invalid.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "calls", target: "localCall", targetPath: "src/main.ts" })
     ]));
   });
 });

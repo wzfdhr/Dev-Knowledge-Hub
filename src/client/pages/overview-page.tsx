@@ -13,20 +13,20 @@ interface OverviewState { repository: Repository | null; builds: Build[]; releas
 
 export function derivePrimaryAction(state: OverviewState): { kind: PrimaryKind; label: string } {
   if (!state.repository) return { kind: "connect", label: "Connect repository" };
-  const active = state.builds.find((build) => !["ready", "published", "failed"].includes(build.status));
-  if (active) return { kind: "none", label: "Build in progress" };
-  const ready = state.builds.find((build) => build.status === "ready");
-  if (ready) {
-    const draft = state.releases.find((release) => release.buildId === ready.id && !release.publishedAt);
+  const latestBuild = state.builds[0];
+  if (latestBuild && !["ready", "published", "failed"].includes(latestBuild.status)) {
+    return { kind: "none", label: "Build in progress" };
+  }
+  if (latestBuild?.status === "ready") {
+    const draft = state.releases.find((release) => release.buildId === latestBuild.id && !release.publishedAt);
     return draft ? { kind: "publish", label: "Publish release" } : { kind: "review", label: "Review ready build" };
   }
-  const failed = state.builds.find((build) => build.status === "failed");
-  if (failed && (state.snapshotId ?? failed.snapshotId)) {
+  if (latestBuild?.status === "failed" && (state.snapshotId ?? latestBuild.snapshotId)) {
     return { kind: "retry-build", label: "Retry knowledge build" };
   }
-  if (state.snapshotId && state.builds.some((build) =>
-    build.snapshotId === state.snapshotId && build.status === "published"
-  )) return { kind: "sync", label: "Sync repository" };
+  if (state.snapshotId && latestBuild?.snapshotId === state.snapshotId && latestBuild.status === "published") {
+    return { kind: "sync", label: "Sync repository" };
+  }
   if (state.snapshotId) return { kind: "start-build", label: "Start knowledge build" };
   return { kind: "sync", label: "Sync repository" };
 }
@@ -53,8 +53,9 @@ export function OverviewPage({ api }: { api: ApiClient }) {
 
   const builds = buildsQuery.data?.builds ?? [];
   const releases = releasesQuery.data?.releases ?? [];
-  const activeBuild = builds.find((build) => !terminal.has(build.status));
-  const failedBuild = builds.find((build) => build.status === "failed");
+  const latestBuild = builds[0];
+  const activeBuild = latestBuild && !terminal.has(latestBuild.status) ? latestBuild : undefined;
+  const failedBuild = latestBuild?.status === "failed" ? latestBuild : undefined;
   const effectiveSnapshotId = snapshot?.snapshotId ?? failedBuild?.snapshotId;
   const requiredLoading = Boolean(repository) && (buildsQuery.isLoading || releasesQuery.isLoading);
   const blockingError = repositoryQuery.error && !repositoryMissing
@@ -106,14 +107,13 @@ export function OverviewPage({ api }: { api: ApiClient }) {
     if (action.kind === "connect") navigate("/settings?connect=1");
     if (action.kind === "sync") sync.mutate();
     if (["start-build", "retry-build"].includes(action.kind) && effectiveSnapshotId) start.mutate(effectiveSnapshotId);
-    if (action.kind === "review") setReviewBuild(builds.find((build) => build.status === "ready") ?? null);
+    if (action.kind === "review") setReviewBuild(latestBuild?.status === "ready" ? latestBuild : null);
     if (action.kind === "publish") {
-      const ready = builds.find((build) => build.status === "ready");
-      const draft = releases.find((release) => release.buildId === ready?.id && !release.publishedAt);
+      const draft = releases.find((release) => release.buildId === latestBuild?.id && !release.publishedAt);
       if (draft) publish.mutate(draft.id);
     }
   };
-  const commit = snapshot?.commitSha ?? builds[0]?.commitSha;
+  const commit = snapshot?.commitSha ?? latestBuild?.commitSha;
   const progress = useMemo(() => ({ queued: 8, syncing: 20, parsing: 42, synthesizing: 66, validating: 86, ready: 100, published: 100, failed: 100 }[activeBuild?.status ?? "queued"]), [activeBuild]);
   const retryOverview = () => void Promise.all([
     repositoryQuery.refetch(),
@@ -132,7 +132,7 @@ export function OverviewPage({ api }: { api: ApiClient }) {
     {!blockingError && operationError && <ErrorState message={errorMessage(operationError)} />}
     {!blockingError && !requiredLoading && <>
       <section className="repo-strip" aria-label="Repository state"><div><span>Repository</span><strong>{repository?.name ?? "Not connected"}</strong></div><div><span>Branch</span><strong><GitBranch aria-hidden="true" />{snapshot?.ref ?? repository?.defaultBranch ?? "-"}</strong></div><div><span>Commit</span><strong className="mono">{commit?.slice(0, 12) ?? "No snapshot"}</strong></div><div><span>Pending sync</span><strong>{snapshot ? (snapshot.unchanged ? "No changes" : `${snapshot.fileCount} files captured`) : repository ? "Required" : "-"}</strong></div></section>
-      <section className="metric-grid" aria-label="Workspace summary"><article><span>Current release</span><strong>{releases.find((release) => release.publishedAt)?.version ?? "Unpublished"}</strong></article><article><span>Human exceptions</span><strong>{feedbackQuery.data?.feedback.filter((item) => ["open", "acknowledged"].includes(item.status)).length ?? 0}</strong></article><article><span>Builds</span><strong>{builds.length}</strong></article><article><span>Knowledge state</span><strong>{activeBuild ? activeBuild.status : builds[0]?.status ?? "Not built"}</strong></article></section>
+      <section className="metric-grid" aria-label="Workspace summary"><article><span>Current release</span><strong>{releases.find((release) => release.publishedAt)?.version ?? "Unpublished"}</strong></article><article><span>Human exceptions</span><strong>{feedbackQuery.data?.feedback.filter((item) => ["open", "acknowledged"].includes(item.status)).length ?? 0}</strong></article><article><span>Builds</span><strong>{builds.length}</strong></article><article><span>Knowledge state</span><strong>{latestBuild?.status ?? "Not built"}</strong></article></section>
       {feedbackQuery.error && <ErrorState message={`Feedback count unavailable: ${errorMessage(feedbackQuery.error)}`} retry={() => void feedbackQuery.refetch()} />}
       {activeBuild && <section className="panel active-build"><div className="section-heading"><div><p className="eyebrow">Active build</p><h2>{activeBuild.status}</h2></div><Status value={activeBuild.status} /></div><div className="progress"><span style={{ width: `${progress}%` }} /></div><p className="muted">Commit <span className="mono">{activeBuild.commitSha.slice(0, 12)}</span>. {eventState === "reconnecting" ? "Reconnecting to build updates" : eventState === "connected" ? "Live updates connected" : "Connecting to live updates"}</p><button className="button danger" onClick={() => cancel.mutate(activeBuild.id)} disabled={activeBuild.cancelRequested}><Square aria-hidden="true" />{activeBuild.cancelRequested ? "Cancellation requested" : "Cancel build"}</button></section>}
       {failedBuild && <section className="panel failed-build" role="alert"><div className="section-heading"><div><p className="eyebrow">Build failed</p><h2>{failedBuild.errorMessage ?? "Knowledge build failed"}</h2></div><Status value="failed" /></div><p className="muted">Retry this snapshot after correcting the reported failure.</p></section>}

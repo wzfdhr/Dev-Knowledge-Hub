@@ -128,10 +128,16 @@ describe("overview primary command", () => {
         id: "repo", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main"
       } }),
       listBuilds: vi.fn().mockResolvedValue({ builds: [{
-        id: "build", status: "failed", snapshotId: "snap", commitSha: "a".repeat(40),
+        id: "failed-build", status: "failed", snapshotId: "new-snap", commitSha: "b".repeat(40),
         warnings: [], cancelRequested: false, errorMessage: "Provider rejected the request"
+      }, {
+        id: "published-build", status: "published", snapshotId: "old-snap", commitSha: "a".repeat(40),
+        warnings: [], cancelRequested: false
       }] }),
-      listReleases: vi.fn().mockResolvedValue({ releases: [] }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [{
+        id: "release", buildId: "published-build", snapshotId: "old-snap", version: "1.0.0",
+        createdAt: "2026-07-11", publishedAt: "2026-07-11"
+      }] }),
       listFeedback: vi.fn().mockResolvedValue({ feedback: [] })
     } as unknown as ApiClient;
 
@@ -139,6 +145,42 @@ describe("overview primary command", () => {
 
     expect(await screen.findByText("Provider rejected the request")).toBeVisible();
     expect(screen.getByRole("button", { name: "Retry knowledge build" })).toBeVisible();
+  });
+
+  test("ignores an older failure after the latest build is published", async () => {
+    sessionStorage.setItem("devkh:last-snapshot", JSON.stringify({
+      snapshotId: "current-snap", commitSha: "b".repeat(40), ref: "main", fileCount: 4, unchanged: true
+    }));
+    const repository = {
+      id: "repo", kind: "local" as const, name: "Fixture", path: "/fixture", defaultBranch: "main"
+    };
+    const builds = [{
+      id: "published-build", status: "published" as const, snapshotId: "current-snap",
+      commitSha: "b".repeat(40), warnings: [], cancelRequested: false
+    }, {
+      id: "failed-build", status: "failed" as const, snapshotId: "old-snap",
+      commitSha: "a".repeat(40), warnings: [], cancelRequested: false,
+      errorMessage: "Obsolete provider failure"
+    }];
+    const releases = [{
+      id: "release", buildId: "published-build", snapshotId: "current-snap", version: "1.0.0",
+      createdAt: "2026-07-11", publishedAt: "2026-07-11"
+    }];
+    expect(derivePrimaryAction({ repository, builds, releases, snapshotId: "current-snap" })).toEqual({
+      kind: "sync", label: "Sync repository"
+    });
+    const api = {
+      getRepository: vi.fn().mockResolvedValue({ repository }),
+      listBuilds: vi.fn().mockResolvedValue({ builds }),
+      listReleases: vi.fn().mockResolvedValue({ releases }),
+      listFeedback: vi.fn().mockResolvedValue({ feedback: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<OverviewPage api={api} />);
+
+    expect(await screen.findByRole("button", { name: "Sync repository" })).toBeVisible();
+    expect(screen.queryByText("Obsolete provider failure")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry knowledge build" })).not.toBeInTheDocument();
   });
 });
 
@@ -289,6 +331,56 @@ describe("feedback workflow", () => {
       path: "src/math.ts", startLine: 16, endLine: 18, releaseId: "r1"
     });
     expect(await screen.findByText("export function add() {}" )).toBeVisible();
+  });
+
+  test("closes citations across feedback and filter changes without mixing releases", async () => {
+    const user = userEvent.setup();
+    const firstCitation = {
+      path: "src/first.ts", startLine: 2, endLine: 4,
+      commitSha: "a".repeat(40), blobHash: "b".repeat(64)
+    };
+    const secondCitation = {
+      path: "src/second.ts", startLine: 8, endLine: 9,
+      commitSha: "c".repeat(40), blobHash: "d".repeat(64)
+    };
+    const feedback = [{
+      id: "f1", releaseId: "r1", query: "First gap", reason: "First reason",
+      expected: null, status: "open" as const, rebuildBuildId: null, citations: [firstCitation],
+      createdAt: "2026-07-11T00:00:00Z", updatedAt: "2026-07-11T00:00:00Z"
+    }, {
+      id: "f2", releaseId: "r2", query: "Second gap", reason: "Second reason",
+      expected: null, status: "acknowledged" as const, rebuildBuildId: null, citations: [secondCitation],
+      createdAt: "2026-07-11T00:00:00Z", updatedAt: "2026-07-11T00:00:00Z"
+    }];
+    const getSource = vi.fn(async ({ releaseId, path }: { releaseId?: string; path: string }) => ({
+      ...(path === firstCitation.path ? firstCitation : secondCitation),
+      content: `${releaseId}:${path}`
+    }));
+    const api = {
+      listFeedback: vi.fn(async (status?: string) => ({
+        feedback: status ? feedback.filter((item) => item.status === status) : feedback
+      })),
+      getSource
+    } as unknown as ApiClient;
+
+    renderPage(<FeedbackPage api={api} />);
+    await user.click(await screen.findByRole("button", { name: "First gap" }));
+    await user.click(screen.getByRole("button", { name: /src\/first.ts lines 2 to 4/i }));
+    expect(await screen.findByText("r1:src/first.ts")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Second gap" }));
+    expect(screen.queryByRole("complementary", { name: "Feedback source excerpt" })).not.toBeInTheDocument();
+    expect(getSource).not.toHaveBeenCalledWith(expect.objectContaining({
+      releaseId: "r2", path: "src/first.ts"
+    }));
+
+    await user.click(screen.getByRole("button", { name: /src\/second.ts lines 8 to 9/i }));
+    expect(await screen.findByText("r2:src/second.ts")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Open" }));
+    expect(screen.queryByRole("complementary", { name: "Feedback source excerpt" })).not.toBeInTheDocument();
+    expect(getSource).not.toHaveBeenCalledWith(expect.objectContaining({
+      releaseId: "r1", path: "src/second.ts"
+    }));
   });
 });
 

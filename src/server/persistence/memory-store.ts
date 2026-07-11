@@ -535,7 +535,7 @@ export class MemoryAppStore implements AppStore {
   async listBuilds(workspaceId: string, repositoryId: string): Promise<BuildRecord[]> {
     return this.builds.filter((build) =>
       build.workspaceId === workspaceId && build.repositoryId === repositoryId
-    );
+    ).reverse();
   }
 
   async listBuildEvents(workspaceId: string, buildId: string): Promise<BuildEvent[]> {

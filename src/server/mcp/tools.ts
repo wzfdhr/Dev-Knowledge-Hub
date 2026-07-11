@@ -21,6 +21,12 @@ import type {
   KnowledgeSearchResult,
   ReleaseRecord
 } from "../persistence/store.js";
+import {
+  MAX_KNOWLEDGE_CHUNK_CITATIONS,
+  MAX_KNOWLEDGE_CHUNK_CONTENT_CHARACTERS,
+  MAX_KNOWLEDGE_PAGE_BODY_CHARACTERS,
+  MAX_KNOWLEDGE_PAGE_CHUNKS
+} from "../persistence/store.js";
 
 export const MCP_TOOL_NAMES = [
   "dkh_search",
@@ -53,10 +59,11 @@ class McpToolError extends Error {
 const MAX_QUERY_LENGTH = 500;
 const MAX_TASK_LENGTH = 2_000;
 const MAX_PATH_LENGTH = 500;
-const MAX_PAGE_CHUNKS = 50;
-const MAX_CHUNK_CITATIONS = 8;
 const MAX_RESPONSE_CITATIONS = 50;
 const MAX_RESULTS = 20;
+const MAX_CHANGE_PATHS = 8;
+const MAX_CHANGE_TERMS = 6;
+const MAX_CHANGE_SEARCHES = 8;
 
 function uniqueCitations(citations: Citation[]): Citation[] {
   return [...new Map(citations.map((citation) => [
@@ -72,9 +79,11 @@ function pageCitations(page: KnowledgePageRecord): Citation[] {
 function boundedPage(page: KnowledgePageRecord): KnowledgePageRecord {
   return {
     ...page,
-    chunks: page.chunks.slice(0, MAX_PAGE_CHUNKS).map((chunk) => ({
+    body: page.body.slice(0, MAX_KNOWLEDGE_PAGE_BODY_CHARACTERS),
+    chunks: page.chunks.slice(0, MAX_KNOWLEDGE_PAGE_CHUNKS).map((chunk) => ({
       ...chunk,
-      citations: uniqueCitations(chunk.citations).slice(0, MAX_CHUNK_CITATIONS)
+      content: chunk.content.slice(0, MAX_KNOWLEDGE_CHUNK_CONTENT_CHARACTERS),
+      citations: uniqueCitations(chunk.citations).slice(0, MAX_KNOWLEDGE_CHUNK_CITATIONS)
     }))
   };
 }
@@ -82,7 +91,7 @@ function boundedPage(page: KnowledgePageRecord): KnowledgePageRecord {
 function boundedResults(results: KnowledgeSearchResult[]): KnowledgeSearchResult[] {
   return results.slice(0, MAX_RESULTS).map((result) => ({
     ...result,
-    citations: uniqueCitations(result.citations).slice(0, MAX_CHUNK_CITATIONS)
+    citations: uniqueCitations(result.citations).slice(0, MAX_KNOWLEDGE_CHUNK_CITATIONS)
   }));
 }
 
@@ -142,7 +151,8 @@ const taskStopWords = new Set([
 function taskTerms(task: string): string[] {
   return [...new Set(task.toLowerCase().match(/[a-z0-9_.-]+/g) ?? [])]
     .filter((term) => term.length >= 3 && !taskStopWords.has(term))
-    .slice(0, 12);
+    .map((term) => term.slice(0, MAX_QUERY_LENGTH))
+    .slice(0, MAX_CHANGE_TERMS);
 }
 
 function mergeSearchResults(results: KnowledgeSearchResult[]): KnowledgeSearchResult[] {
@@ -217,7 +227,7 @@ async function validCurrentCitations(
 ): Promise<Citation[]> {
   const valid: Citation[] = [];
   for (const citation of uniqueCitations(candidates)) {
-    if (valid.length >= MAX_CHUNK_CITATIONS || citation.commitSha !== commitSha
+    if (valid.length >= MAX_KNOWLEDGE_CHUNK_CITATIONS || citation.commitSha !== commitSha
       || citation.startLine < 1 || citation.endLine < citation.startLine) continue;
     const source = await context.store.findSourceFile(
       context.workspaceId,
@@ -358,14 +368,19 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     "Get cited context for a proposed code change",
     z.strictObject({
       task: z.string().trim().min(1).max(MAX_TASK_LENGTH),
-      paths: z.array(z.string().trim().min(1).max(MAX_PATH_LENGTH)).max(20).optional()
+      paths: z.array(z.string().trim().min(1).max(MAX_PATH_LENGTH)).max(MAX_CHANGE_PATHS).optional()
     }),
     readOnly,
     async ({ task, paths }) => {
     try {
       const selected = await published(context);
       const terms = taskTerms(task);
-      const queries = [...new Set([task, ...terms, ...(paths ?? [])])];
+      const termBatches = Array.from(
+        { length: Math.ceil(terms.length / 3) },
+        (_, index) => terms.slice(index * 3, index * 3 + 3).join(" ")
+      );
+      const queries = [...new Set([task, ...termBatches, ...(paths ?? []).slice(0, 3)])]
+        .slice(0, MAX_CHANGE_SEARCHES - 2);
       const groups = await Promise.all(queries.map((query) => selected.context.store.searchKnowledge(
         selected.context.workspaceId, selected.repository.id, query, selected.release.id
       )));
@@ -375,15 +390,24 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
       const metadata = await selected.context.store.knowledgeMetadata(
         selected.context.workspaceId, selected.release.id
       );
-      const relatedQueries = metadata.dependencies.flatMap((dependency) => {
+      const relatedQueries: string[] = [];
+      const remainingSearches = MAX_CHANGE_SEARCHES - queries.length;
+      for (const dependency of metadata.dependencies) {
         const values = [dependency.source, dependency.target, dependency.path];
         const related = values.some((value) => {
           const normalized = value.toLowerCase();
           return discoveredPaths.has(normalized) || terms.some((term) => normalized.includes(term));
         });
-        return related ? values : [];
-      }).slice(0, 20);
-      const relatedGroups = await Promise.all([...new Set(relatedQueries)].map((query) =>
+        if (related) {
+          for (const value of values) {
+            const bounded = value.slice(0, MAX_QUERY_LENGTH);
+            if (!relatedQueries.includes(bounded)) relatedQueries.push(bounded);
+            if (relatedQueries.length >= remainingSearches) break;
+          }
+        }
+        if (relatedQueries.length >= remainingSearches) break;
+      }
+      const relatedGroups = await Promise.all(relatedQueries.map((query) =>
         selected.context.store.searchKnowledge(
           selected.context.workspaceId, selected.repository.id, query, selected.release.id
         )));

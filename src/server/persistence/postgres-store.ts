@@ -1,6 +1,7 @@
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 
 import {
+  boundedKnowledgePage,
   FeedbackNotAcknowledgedError,
   InvalidFeedbackTransitionError,
   normalizePagination
@@ -179,7 +180,7 @@ function buildRecord(row: BuildRow): BuildRecord {
 }
 
 function knowledgePageRecord(row: KnowledgePageRow): KnowledgePageRecord {
-  return {
+  return boundedKnowledgePage({
     id: row.id,
     workspaceId: row.workspace_id,
     repositoryId: row.repository_id,
@@ -188,7 +189,7 @@ function knowledgePageRecord(row: KnowledgePageRow): KnowledgePageRecord {
     title: row.title,
     body: row.body,
     chunks: row.chunks ?? []
-  };
+  });
 }
 
 function releaseRecord(row: ReleaseRow): ReleaseRecord {
@@ -418,6 +419,14 @@ export class PostgresAppStore implements AppStore {
     return rows.map(mcpTokenRecord);
   }
 
+  async countMcpTokens(workspaceId: string): Promise<number> {
+    const { rows } = await this.pool.query<{ total: string }>(
+      "SELECT count(*)::text AS total FROM mcp_tokens WHERE workspace_id = $1",
+      [workspaceId]
+    );
+    return Number(rows[0]?.total ?? 0);
+  }
+
   async findActiveMcpToken(tokenHash: string): Promise<McpTokenRecord | null> {
     const { rows } = await this.pool.query<McpTokenRow>(
       `SELECT id, workspace_id, name, token_hash, token_prefix,
@@ -535,6 +544,15 @@ export class PostgresAppStore implements AppStore {
       [workspaceId, status ?? null, limit, offset]
     );
     return rows.map(feedbackRecord);
+  }
+
+  async countFeedback(workspaceId: string, status?: AgentFeedbackStatus): Promise<number> {
+    const { rows } = await this.pool.query<{ total: string }>(
+      `SELECT count(*)::text AS total FROM agent_feedback
+       WHERE workspace_id = $1 AND ($2::agent_feedback_status IS NULL OR status = $2)`,
+      [workspaceId, status ?? null]
+    );
+    return Number(rows[0]?.total ?? 0);
   }
 
   async getFeedback(workspaceId: string, feedbackId: string): Promise<AgentFeedbackRecord | null> {
@@ -1072,22 +1090,46 @@ export class PostgresAppStore implements AppStore {
   }
 
   async claimBuild(buildId: string): Promise<BuildRecord | null> {
-    const { rows } = await this.pool.query<BuildRow>(
-      `WITH claimed AS (
-         UPDATE build_jobs
-         SET status = 'syncing', updated_at = now()
+    return this.transaction(async (client) => {
+      const candidate = await client.query<Pick<BuildRow, "workspace_id" | "repository_id">>(
+        `SELECT workspace_id, repository_id
+         FROM build_jobs
          WHERE id = $1 AND status = 'queued'
-         RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
-                   status, warnings, cancel_requested, error_message,
-                   purpose, feedback_ids, feedback_context
-       ), event AS (
-         INSERT INTO build_events (workspace_id, build_job_id, status)
-         SELECT workspace_id, id, status FROM claimed RETURNING id
-       )
-       SELECT * FROM claimed`,
-      [buildId]
-    );
-    return rows[0] ? buildRecord(rows[0]) : null;
+         FOR UPDATE`,
+        [buildId]
+      );
+      if (!candidate.rows[0]) return null;
+      const { workspace_id: workspaceId, repository_id: repositoryId } = candidate.rows[0];
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtext($1))",
+        [`${workspaceId}:${repositoryId}`]
+      );
+      const { rows } = await client.query<BuildRow>(
+        `UPDATE build_jobs AS candidate
+         SET status = 'syncing', updated_at = now()
+         WHERE candidate.id = $1 AND candidate.status = 'queued'
+           AND NOT EXISTS (
+             SELECT 1 FROM build_jobs AS active
+             WHERE active.workspace_id = candidate.workspace_id
+               AND active.repository_id = candidate.repository_id
+               AND active.id <> candidate.id
+               AND active.status IN ('syncing', 'parsing', 'synthesizing', 'validating')
+           )
+         RETURNING candidate.id, candidate.workspace_id, candidate.repository_id,
+                   candidate.snapshot_id, candidate.snapshot_path, candidate.commit_sha,
+                   candidate.status, candidate.warnings, candidate.cancel_requested,
+                   candidate.error_message, candidate.purpose, candidate.feedback_ids,
+                   candidate.feedback_context`,
+        [buildId]
+      );
+      if (!rows[0]) return null;
+      await client.query(
+        `INSERT INTO build_events (workspace_id, build_job_id, status)
+         VALUES ($1, $2, 'syncing')`,
+        [rows[0].workspace_id, rows[0].id]
+      );
+      return buildRecord(rows[0]);
+    });
   }
 
   async transitionBuild(
@@ -1169,6 +1211,15 @@ export class PostgresAppStore implements AppStore {
       [workspaceId, repositoryId, limit, offset]
     );
     return rows.map(buildRecord);
+  }
+
+  async countBuilds(workspaceId: string, repositoryId: string): Promise<number> {
+    const { rows } = await this.pool.query<{ total: string }>(
+      `SELECT count(*)::text AS total FROM build_jobs
+       WHERE workspace_id = $1 AND repository_id = $2`,
+      [workspaceId, repositoryId]
+    );
+    return Number(rows[0]?.total ?? 0);
   }
 
   async listBuildEvents(
@@ -1369,6 +1420,15 @@ export class PostgresAppStore implements AppStore {
     return rows.map(releaseRecord);
   }
 
+  async countReleases(workspaceId: string, repositoryId: string): Promise<number> {
+    const { rows } = await this.pool.query<{ total: string }>(
+      `SELECT count(*)::text AS total FROM releases
+       WHERE workspace_id = $1 AND repository_id = $2`,
+      [workspaceId, repositoryId]
+    );
+    return Number(rows[0]?.total ?? 0);
+  }
+
   async listKnowledgePages(
     workspaceId: string,
     releaseId?: string,
@@ -1376,9 +1436,11 @@ export class PostgresAppStore implements AppStore {
   ): Promise<KnowledgePageRecord[]> {
     const { limit, offset } = normalizePagination(pagination);
     const { rows } = await this.pool.query<KnowledgePageRow>(
-      `SELECT p.id, p.workspace_id, p.repository_id, p.build_job_id, p.slug, p.title, p.body,
+      `SELECT p.id, p.workspace_id, p.repository_id, p.build_job_id, p.slug, p.title,
+              left(p.body, 20000) AS body,
               COALESCE(jsonb_agg(jsonb_build_object(
-                'id', c.id, 'heading', c.heading, 'content', c.content, 'citations', c.citations
+                'id', c.id, 'heading', c.heading, 'content', left(c.content, 8000),
+                'citations', jsonb_path_query_array(c.citations, '$[0 to 7]')
               ) ORDER BY c.created_at) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
        FROM knowledge_pages p
        JOIN releases r ON r.build_job_id = p.build_job_id
@@ -1395,11 +1457,27 @@ export class PostgresAppStore implements AppStore {
     return rows.map(knowledgePageRecord);
   }
 
+  async countKnowledgePages(workspaceId: string, releaseId?: string): Promise<number> {
+    const { rows } = await this.pool.query<{ total: string }>(
+      `SELECT count(DISTINCT p.id)::text AS total
+       FROM knowledge_pages p
+       JOIN releases r ON r.build_job_id = p.build_job_id
+       LEFT JOIN release_channels rc ON rc.release_id = r.id AND rc.name = 'current'
+       WHERE p.workspace_id = $1
+         AND (($2::uuid IS NOT NULL AND r.id = $2)
+           OR ($2::uuid IS NULL AND rc.id IS NOT NULL))`,
+      [workspaceId, releaseId ?? null]
+    );
+    return Number(rows[0]?.total ?? 0);
+  }
+
   async getKnowledgePage(workspaceId: string, pageId: string): Promise<KnowledgePageRecord | null> {
     const { rows } = await this.pool.query<KnowledgePageRow>(
-      `SELECT p.id, p.workspace_id, p.repository_id, p.build_job_id, p.slug, p.title, p.body,
+      `SELECT p.id, p.workspace_id, p.repository_id, p.build_job_id, p.slug, p.title,
+              left(p.body, 20000) AS body,
               COALESCE(jsonb_agg(jsonb_build_object(
-                'id', c.id, 'heading', c.heading, 'content', c.content, 'citations', c.citations
+                'id', c.id, 'heading', c.heading, 'content', left(c.content, 8000),
+                'citations', jsonb_path_query_array(c.citations, '$[0 to 7]')
               ) ORDER BY c.created_at) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
        FROM knowledge_pages p LEFT JOIN LATERAL (
          SELECT * FROM knowledge_chunks selected_chunk
@@ -1422,9 +1500,11 @@ export class PostgresAppStore implements AppStore {
 
   async findKnowledgePageBySlug(workspaceId: string, releaseId: string, slug: string) {
     return this.targetedKnowledgePage(
-      `SELECT p.id, p.workspace_id, p.repository_id, p.build_job_id, p.slug, p.title, p.body,
+      `SELECT p.id, p.workspace_id, p.repository_id, p.build_job_id, p.slug, p.title,
+              left(p.body, 20000) AS body,
               COALESCE(jsonb_agg(jsonb_build_object(
-                'id', c.id, 'heading', c.heading, 'content', c.content, 'citations', c.citations
+                'id', c.id, 'heading', c.heading, 'content', left(c.content, 8000),
+                'citations', jsonb_path_query_array(c.citations, '$[0 to 7]')
               ) ORDER BY c.created_at, c.id) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
        FROM releases r JOIN knowledge_pages p ON p.build_job_id = r.build_job_id
        LEFT JOIN LATERAL (
@@ -1439,9 +1519,11 @@ export class PostgresAppStore implements AppStore {
 
   async findKnowledgePageByModule(workspaceId: string, releaseId: string, moduleId: string) {
     return this.targetedKnowledgePage(
-      `SELECT p.id, p.workspace_id, p.repository_id, p.build_job_id, p.slug, p.title, p.body,
+      `SELECT p.id, p.workspace_id, p.repository_id, p.build_job_id, p.slug, p.title,
+              left(p.body, 20000) AS body,
               COALESCE(jsonb_agg(jsonb_build_object(
-                'id', c.id, 'heading', c.heading, 'content', c.content, 'citations', c.citations
+                'id', c.id, 'heading', c.heading, 'content', left(c.content, 8000),
+                'citations', jsonb_path_query_array(c.citations, '$[0 to 7]')
               ) ORDER BY c.created_at, c.id) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
        FROM releases r JOIN knowledge_pages p ON p.build_job_id = r.build_job_id
        LEFT JOIN LATERAL (
@@ -1462,9 +1544,11 @@ export class PostgresAppStore implements AppStore {
     sourcePath?: string
   ) {
     return this.targetedKnowledgePage(
-      `SELECT p.id, p.workspace_id, p.repository_id, p.build_job_id, p.slug, p.title, p.body,
+      `SELECT p.id, p.workspace_id, p.repository_id, p.build_job_id, p.slug, p.title,
+              left(p.body, 20000) AS body,
               COALESCE(jsonb_agg(jsonb_build_object(
-                'id', c.id, 'heading', c.heading, 'content', c.content, 'citations', c.citations
+                'id', c.id, 'heading', c.heading, 'content', left(c.content, 8000),
+                'citations', jsonb_path_query_array(c.citations, '$[0 to 7]')
               ) ORDER BY c.created_at, c.id) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
        FROM releases r JOIN knowledge_pages p ON p.build_job_id = r.build_job_id
        LEFT JOIN LATERAL (

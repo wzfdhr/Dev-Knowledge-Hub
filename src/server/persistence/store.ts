@@ -176,6 +176,23 @@ export interface KnowledgePageRecord {
   chunks: KnowledgeChunkRecord[];
 }
 
+export const MAX_KNOWLEDGE_PAGE_BODY_CHARACTERS = 20_000;
+export const MAX_KNOWLEDGE_CHUNK_CONTENT_CHARACTERS = 8_000;
+export const MAX_KNOWLEDGE_PAGE_CHUNKS = 50;
+export const MAX_KNOWLEDGE_CHUNK_CITATIONS = 8;
+
+export function boundedKnowledgePage(page: KnowledgePageRecord): KnowledgePageRecord {
+  return {
+    ...page,
+    body: page.body.slice(0, MAX_KNOWLEDGE_PAGE_BODY_CHARACTERS),
+    chunks: page.chunks.slice(0, MAX_KNOWLEDGE_PAGE_CHUNKS).map((chunk) => ({
+      ...chunk,
+      content: chunk.content.slice(0, MAX_KNOWLEDGE_CHUNK_CONTENT_CHARACTERS),
+      citations: chunk.citations.slice(0, MAX_KNOWLEDGE_CHUNK_CITATIONS)
+    }))
+  };
+}
+
 export interface ReleaseRecord {
   id: string;
   workspaceId: string;
@@ -298,6 +315,7 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
     actorId: string
   ): Promise<McpTokenRecord>;
   listMcpTokens(workspaceId: string, pagination?: Pagination): Promise<McpTokenRecord[]>;
+  countMcpTokens(workspaceId: string): Promise<number>;
   findActiveMcpToken(tokenHash: string): Promise<McpTokenRecord | null>;
   touchMcpToken(tokenId: string): Promise<void>;
   revokeMcpToken(workspaceId: string, tokenId: string): Promise<McpTokenRecord | null>;
@@ -313,6 +331,7 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
     status?: AgentFeedbackStatus,
     pagination?: Pagination
   ): Promise<AgentFeedbackRecord[]>;
+  countFeedback(workspaceId: string, status?: AgentFeedbackStatus): Promise<number>;
   getFeedback(workspaceId: string, feedbackId: string): Promise<AgentFeedbackRecord | null>;
   transitionFeedback(
     workspaceId: string,
@@ -365,6 +384,9 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
     input: { provider: ModelProvider; model: string; encryptedApiKey?: string },
     actorId: string
   ): Promise<ModelConfigRecord>;
+  countBuilds(workspaceId: string, repositoryId: string): Promise<number>;
+  countReleases(workspaceId: string, repositoryId: string): Promise<number>;
+  countKnowledgePages(workspaceId: string, releaseId?: string): Promise<number>;
 }
 
 export type { BuildPurpose, BuildRecord };

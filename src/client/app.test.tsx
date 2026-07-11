@@ -3,7 +3,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { KnowledgePage } from "./pages/knowledge-page";
@@ -324,6 +324,42 @@ describe("knowledge citations", () => {
 });
 
 describe("feedback workflow", () => {
+  test("reuses the paginated feedback cache when navigating from Overview", async () => {
+    const user = userEvent.setup();
+    const feedback = [{
+      id: "f1", releaseId: "r1", query: "Cached gap", reason: "Missing context",
+      expected: null, status: "open" as const, rebuildBuildId: null, citations: [],
+      createdAt: "2026-07-11T00:00:00Z", updatedAt: "2026-07-11T00:00:00Z"
+    }];
+    const api = {
+      getRepository: vi.fn().mockResolvedValue({ repository: {
+        id: "repo", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main"
+      } }),
+      listBuilds: vi.fn().mockResolvedValue({ builds: [], total: 0, nextOffset: null }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [], total: 0, nextOffset: null }),
+      listFeedback: vi.fn().mockResolvedValue({ feedback, total: 1, nextOffset: null })
+    } as unknown as ApiClient;
+    function NavigateToFeedback() {
+      const navigate = useNavigate();
+      return <button onClick={() => navigate("/feedback")}>Open feedback route</button>;
+    }
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
+    });
+    render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={["/"]}>
+      <NavigateToFeedback />
+      <Routes>
+        <Route path="/" element={<OverviewPage api={api} />} />
+        <Route path="/feedback" element={<FeedbackPage api={api} />} />
+      </Routes>
+    </MemoryRouter></QueryClientProvider>);
+
+    await screen.findByText("Human exceptions");
+    await user.click(screen.getByRole("button", { name: "Open feedback route" }));
+
+    expect(await screen.findByRole("button", { name: "Cached gap" })).toBeVisible();
+  });
+
   test("exposes only valid transitions and refreshes after acknowledgement", async () => {
     const user = userEvent.setup();
     const listFeedback = vi.fn()
@@ -452,6 +488,44 @@ describe("MCP token disclosure", () => {
     await user.click(within(dialog).getByRole("button", { name: "I have copied it" }));
     expect(screen.queryByText(plaintext)).not.toBeInTheDocument();
     expect(screen.getByText("dkh_secret-t")).toBeVisible();
+  });
+
+  test("loads token records after the first one hundred", async () => {
+    const user = userEvent.setup();
+    const firstPage = Array.from({ length: 100 }, (_, index) => ({
+      id: `token-${index}`,
+      name: `Agent ${index}`,
+      tokenPrefix: `dkh_${String(index).padStart(8, "0")}`,
+      createdAt: "2026-07-11",
+      lastUsedAt: null,
+      revokedAt: null
+    }));
+    const listMcpTokens = vi.fn()
+      .mockResolvedValueOnce({ tokens: firstPage, total: 101, nextOffset: 100 })
+      .mockResolvedValueOnce({
+        tokens: [{
+          id: "token-100", name: "Agent after 100", tokenPrefix: "dkh_00000100",
+          createdAt: "2026-07-11", lastUsedAt: null, revokedAt: null
+        }],
+        total: 101,
+        nextOffset: null
+      });
+    const api = {
+      getRepository: vi.fn().mockRejectedValue(Object.assign(new Error("none"), { status: 404 })),
+      getModelConfig: vi.fn().mockResolvedValue({ config: null }),
+      getMcpConnection: vi.fn().mockResolvedValue({
+        endpoint: "/mcp", transport: "streamable-http", authorization: "bearer",
+        stdioCommand: "npm run mcp:stdio", tools: []
+      }),
+      listMcpTokens
+    } as unknown as ApiClient;
+
+    renderPage(<SettingsPage api={api} />);
+    await user.click(await screen.findByRole("button", { name: "Load more tokens" }));
+
+    expect(await screen.findByText("Agent after 100")).toBeVisible();
+    expect(listMcpTokens).toHaveBeenNthCalledWith(1, { limit: 100, offset: 0 });
+    expect(listMcpTokens).toHaveBeenNthCalledWith(2, { limit: 100, offset: 100 });
   });
 });
 

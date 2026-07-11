@@ -21,7 +21,12 @@ describe("delivery database isolation", () => {
 
   test("boots both development surfaces, forces production start, and loads dotenv explicitly", async () => {
     const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+    const packageLock = JSON.parse(await readFile("package-lock.json", "utf8"));
+    const readme = await readFile("README.md", "utf8");
 
+    expect(packageJson.engines.node).toBe(">=22.9.0");
+    expect(packageLock.packages[""].engines.node).toBe(">=22.9.0");
+    expect(readme).toContain("Node.js 22.9.0 or newer");
     expect(packageJson.scripts.dev).toBe("node scripts/dev.mjs");
     expect(packageJson.scripts["dev:api"]).toContain("--env-file-if-exists=.env");
     expect(packageJson.scripts["dev:web"]).toContain("--env-file-if-exists=.env");

@@ -121,3 +121,37 @@ describe("login auditing", () => {
     await app.close();
   });
 });
+
+describe("repository build claims", () => {
+  test("serializes different feedback builds until the active build is terminal", async () => {
+    const store = new MemoryAppStore();
+    const base = {
+      workspaceId: "workspace-1",
+      repositoryId: "repository-1",
+      snapshotId: "snapshot-1",
+      snapshotPath: "/tmp/snapshot-1",
+      commitSha: "a".repeat(40)
+    };
+    const first = (await store.createBuild({
+      ...base,
+      purpose: { kind: "feedback", feedbackIds: ["feedback-1"], feedbackContext: [] }
+    })).build;
+    const second = (await store.createBuild({
+      ...base,
+      purpose: { kind: "feedback", feedbackIds: ["feedback-2"], feedbackContext: [] }
+    })).build;
+
+    const claims = await Promise.all([store.claimBuild(first.id), store.claimBuild(second.id)]);
+
+    expect(claims.filter(Boolean)).toHaveLength(1);
+    const active = claims.find(Boolean)!;
+    const queued = active.id === first.id ? second : first;
+    expect(queued.status).toBe("queued");
+
+    await store.transitionBuild(active.id, "syncing", "failed");
+    await expect(store.claimBuild(queued.id)).resolves.toMatchObject({
+      id: queued.id,
+      status: "syncing"
+    });
+  });
+});

@@ -1,12 +1,12 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowRight, GitBranch, Play, RefreshCw, Send, Square, TriangleAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { ApiError, errorMessage, type ApiClient } from "../api/client";
+import { ApiError, errorMessage, LIST_PAGE_SIZE, type ApiClient } from "../api/client";
 import type { Build, Release, Repository, SnapshotSummary } from "../api/types";
 import { Empty, ErrorState, Loading, Status } from "../components/ui";
-import { keys, useRepository } from "../hooks/use-domain";
+import { keys, useFeedback, useRepository } from "../hooks/use-domain";
 import "../progress.css";
 
 type PrimaryKind = "connect" | "sync" | "start-build" | "retry-build" | "review" | "publish" | "none";
@@ -41,9 +41,16 @@ export function OverviewPage({ api }: { api: ApiClient }) {
   const repositoryQuery = useRepository(api);
   const repositoryMissing = repositoryQuery.error instanceof ApiError && repositoryQuery.error.status === 404;
   const repository = repositoryMissing ? null : repositoryQuery.data?.repository ?? null;
-  const buildsQuery = useQuery({ queryKey: keys.builds, queryFn: api.listBuilds, enabled: Boolean(repository), refetchInterval: 3000 });
-  const releasesQuery = useQuery({ queryKey: keys.releases, queryFn: api.listReleases, enabled: Boolean(repository), retry: false });
-  const feedbackQuery = useQuery({ queryKey: keys.feedback(), queryFn: () => api.listFeedback(), enabled: Boolean(repository) });
+  const buildsQuery = useInfiniteQuery({
+    queryKey: keys.builds,
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) => api.listBuilds({ limit: LIST_PAGE_SIZE, offset: pageParam }),
+    getNextPageParam: (lastPage) => lastPage.nextOffset ?? undefined,
+    enabled: Boolean(repository),
+    refetchInterval: 3000
+  });
+  const releasesQuery = useQuery({ queryKey: keys.releases, queryFn: () => api.listReleases({ limit: LIST_PAGE_SIZE, offset: 0 }), enabled: Boolean(repository), retry: false });
+  const feedbackQuery = useFeedback(api, undefined, Boolean(repository));
   const [snapshot, setSnapshot] = useState<SnapshotSummary | null>(() => {
     const raw = sessionStorage.getItem(snapshotKey);
     return raw ? JSON.parse(raw) as SnapshotSummary : null;
@@ -52,7 +59,7 @@ export function OverviewPage({ api }: { api: ApiClient }) {
   const [version, setVersion] = useState("1.0.0");
   const [eventState, setEventState] = useState<"idle" | "connecting" | "connected" | "reconnecting">("idle");
 
-  const builds = buildsQuery.data?.builds ?? [];
+  const builds = buildsQuery.data?.pages.flatMap((page) => page.builds) ?? [];
   const releases = releasesQuery.data?.releases ?? [];
   const latestBuild = builds[0];
   const activeBuild = latestBuild && !terminal.has(latestBuild.status) ? latestBuild : undefined;
@@ -156,12 +163,12 @@ export function OverviewPage({ api }: { api: ApiClient }) {
     {!blockingError && operationError && <ErrorState message={errorMessage(operationError)} />}
     {!blockingError && !requiredLoading && <>
       <section className="repo-strip" aria-label="Repository state"><div><span>Repository</span><strong>{repository?.name ?? "Not connected"}</strong></div><div><span>Branch</span><strong><GitBranch aria-hidden="true" />{snapshot?.ref ?? repository?.defaultBranch ?? "-"}</strong></div><div><span>Commit</span><strong className="mono">{commit?.slice(0, 12) ?? "No snapshot"}</strong></div><div><span>Pending sync</span><strong>{snapshot ? (snapshot.unchanged ? "No changes" : `${snapshot.fileCount} files captured`) : repository ? "Required" : "-"}</strong></div></section>
-      <section className="metric-grid" aria-label="Workspace summary"><article><span>Current release</span><strong>{releases.find((release) => release.publishedAt)?.version ?? "Unpublished"}</strong></article><article><span>Human exceptions</span><strong>{feedbackQuery.data?.feedback.filter((item) => ["open", "acknowledged"].includes(item.status)).length ?? 0}</strong></article><article><span>Builds</span><strong>{builds.length}</strong></article><article><span>Knowledge state</span><strong>{latestBuild?.status ?? "Not built"}</strong></article></section>
+      <section className="metric-grid" aria-label="Workspace summary"><article><span>Current release</span><strong>{releases.find((release) => release.publishedAt)?.version ?? "Unpublished"}</strong></article><article><span>Human exceptions</span><strong>{feedbackQuery.data?.pages.flatMap((page) => page.feedback).filter((item) => ["open", "acknowledged"].includes(item.status)).length ?? 0}</strong></article><article><span>Builds</span><strong>{builds.length}</strong></article><article><span>Knowledge state</span><strong>{latestBuild?.status ?? "Not built"}</strong></article></section>
       {feedbackQuery.error && <ErrorState message={`Feedback count unavailable: ${errorMessage(feedbackQuery.error)}`} retry={() => void feedbackQuery.refetch()} />}
       {activeBuild && <section className="panel active-build"><div className="section-heading"><div><p className="eyebrow">Active build</p><h2>{activeBuild.status}</h2></div><Status value={activeBuild.status} /></div><progress className="progress" aria-label="Build progress" max={100} value={progress} /><p className="muted">Commit <span className="mono">{activeBuild.commitSha.slice(0, 12)}</span>. {eventState === "reconnecting" ? "Reconnecting to build updates" : eventState === "connected" ? "Live updates connected" : "Connecting to live updates"}</p><button className="button danger" onClick={() => cancel.mutate(activeBuild.id)} disabled={activeBuild.cancelRequested}><Square aria-hidden="true" />{activeBuild.cancelRequested ? "Cancellation requested" : "Cancel build"}</button></section>}
       {failedBuild && <section className="panel failed-build" role="alert"><div className="section-heading"><div><p className="eyebrow">Build failed</p><h2>{failedBuild.errorMessage ?? "Knowledge build failed"}</h2></div><Status value="failed" /></div><p className="muted">Retry this snapshot after correcting the reported failure.</p></section>}
       {reviewBuild && <section className="panel review-panel" aria-label="Release review"><div><p className="eyebrow">Ready for review</p><h2>Build {reviewBuild.id.slice(0, 8)}</h2><p>Choose the draft version, then inspect the generated knowledge.</p></div><div className="review-actions"><button className="button" onClick={inspectKnowledge} disabled={createRelease.isPending}>Inspect knowledge</button><label>Version<input value={version} onChange={(event) => setVersion(event.target.value)} /></label></div></section>}
-      <section className="section"><div className="section-heading"><div><p className="eyebrow">History</p><h2>Recent builds</h2></div></div>{builds.length === 0 ? <Empty>No builds yet. Sync the repository to begin.</Empty> : <div className="table-wrap"><table><thead><tr><th>Status</th><th>Commit</th><th>Warnings</th><th>Build</th></tr></thead><tbody>{builds.map((build) => <tr key={build.id}><td><Status value={build.status} /></td><td className="mono">{build.commitSha.slice(0, 12)}</td><td>{build.warnings.length}</td><td className="mono">{build.id.slice(0, 8)}</td></tr>)}</tbody></table></div>}</section>
+      <section className="section"><div className="section-heading"><div><p className="eyebrow">History</p><h2>Recent builds</h2></div></div>{builds.length === 0 ? <Empty>No builds yet. Sync the repository to begin.</Empty> : <><div className="table-wrap"><table><thead><tr><th>Status</th><th>Commit</th><th>Warnings</th><th>Build</th></tr></thead><tbody>{builds.map((build) => <tr key={build.id}><td><Status value={build.status} /></td><td className="mono">{build.commitSha.slice(0, 12)}</td><td>{build.warnings.length}</td><td className="mono">{build.id.slice(0, 8)}</td></tr>)}</tbody></table></div>{buildsQuery.hasNextPage && <button className="button continuation" onClick={() => void buildsQuery.fetchNextPage()} disabled={buildsQuery.isFetchingNextPage}>{buildsQuery.isFetchingNextPage ? "Loading builds..." : "Load more builds"}</button>}</>}</section>
     </>}
   </div>;
 }

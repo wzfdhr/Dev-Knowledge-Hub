@@ -70,6 +70,14 @@ const paginationQuerySchema = {
   offset: z.coerce.number().int().min(0).optional()
 };
 
+function paginationMetadata(total: number, offset: number, itemCount: number) {
+  const consumed = offset + itemCount;
+  return {
+    total,
+    nextOffset: consumed < total ? consumed : null
+  };
+}
+
 export interface ServerOptions {
   store: AppStore;
   buildService?: BuildService;
@@ -291,9 +299,13 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const parsed = z.object(paginationQuerySchema).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid pagination");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const [tokens, total] = await Promise.all([
+      options.store.listMcpTokens(admin.workspaceId, parsed.data),
+      options.store.countMcpTokens(admin.workspaceId)
+    ]);
     return {
-      tokens: (await options.store.listMcpTokens(admin.workspaceId, parsed.data))
-        .map(sanitizedMcpToken)
+      tokens: tokens.map(sanitizedMcpToken),
+      ...paginationMetadata(total, parsed.data.offset ?? 0, tokens.length)
     };
   });
 
@@ -443,8 +455,13 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const repository = await options.store.currentRepository(admin.workspaceId);
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    const [builds, total] = await Promise.all([
+      options.store.listBuilds(admin.workspaceId, repository.id, parsed.data),
+      options.store.countBuilds(admin.workspaceId, repository.id)
+    ]);
     return {
-      builds: await options.store.listBuilds(admin.workspaceId, repository.id, parsed.data)
+      builds,
+      ...paginationMetadata(total, parsed.data.offset ?? 0, builds.length)
     };
   });
 
@@ -563,12 +580,13 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid page query");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const [pages, total] = await Promise.all([
+      options.store.listKnowledgePages(admin.workspaceId, parsed.data.releaseId, parsed.data),
+      options.store.countKnowledgePages(admin.workspaceId, parsed.data.releaseId)
+    ]);
     return {
-      pages: await options.store.listKnowledgePages(
-        admin.workspaceId,
-        parsed.data.releaseId,
-        parsed.data
-      )
+      pages,
+      ...paginationMetadata(total, parsed.data.offset ?? 0, pages.length)
     };
   });
 
@@ -678,15 +696,17 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const repository = await options.store.currentRepository(admin.workspaceId);
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
-    const releases = await options.store.listReleases(
-      admin.workspaceId,
-      repository.id,
-      parsed.data
-    );
-    return { releases: await Promise.all(releases.map(async (release) => ({
-      ...release,
-      commitSha: (await options.store.findSnapshotById(admin.workspaceId, release.snapshotId))?.commitSha ?? null
-    }))) };
+    const [releases, total] = await Promise.all([
+      options.store.listReleases(admin.workspaceId, repository.id, parsed.data),
+      options.store.countReleases(admin.workspaceId, repository.id)
+    ]);
+    return {
+      releases: await Promise.all(releases.map(async (release) => ({
+        ...release,
+        commitSha: (await options.store.findSnapshotById(admin.workspaceId, release.snapshotId))?.commitSha ?? null
+      }))),
+      ...paginationMetadata(total, parsed.data.offset ?? 0, releases.length)
+    };
   });
 
   server.get("/api/feedback", { preHandler: requireAdmin }, async (request, reply) => {
@@ -697,12 +717,13 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       .safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid feedback filter");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const [feedback, total] = await Promise.all([
+      options.store.listFeedback(admin.workspaceId, parsed.data.status, parsed.data),
+      options.store.countFeedback(admin.workspaceId, parsed.data.status)
+    ]);
     return {
-      feedback: await options.store.listFeedback(
-        admin.workspaceId,
-        parsed.data.status,
-        parsed.data
-      )
+      feedback,
+      ...paginationMetadata(total, parsed.data.offset ?? 0, feedback.length)
     };
   });
 

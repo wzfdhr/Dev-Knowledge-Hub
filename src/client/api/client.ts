@@ -12,6 +12,18 @@ export class ApiError extends Error {
   }
 }
 
+export interface PaginationParams {
+  limit: number;
+  offset: number;
+}
+
+export interface PaginatedResponse {
+  total: number;
+  nextOffset: number | null;
+}
+
+export const LIST_PAGE_SIZE = 100;
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     credentials: "same-origin",
@@ -35,23 +47,25 @@ export interface ApiClient {
   getRepository(): Promise<{ repository: Repository }>;
   getRepositoryStatus(): Promise<RepositoryStatus>;
   syncRepository(): Promise<SnapshotSummary>;
-  listBuilds(): Promise<{ builds: Build[] }>;
+  listBuilds(pagination: PaginationParams): Promise<{ builds: Build[] } & PaginatedResponse>;
   startBuild(snapshotId: string): Promise<{ build: Build; created: boolean }>;
   cancelBuild(id: string): Promise<{ build: Build }>;
-  listReleases(): Promise<{ releases: Release[] }>;
+  listReleases(pagination: PaginationParams): Promise<{ releases: Release[] } & PaginatedResponse>;
   currentRelease(): Promise<{ release: Release }>;
   createRelease(buildId: string, version: string): Promise<{ release: Release }>;
   publishRelease(id: string): Promise<{ release: Release }>;
-  listKnowledgePages(releaseId?: string): Promise<{ pages: KnowledgePageRecord[] }>;
+  listKnowledgePages(releaseId: string | undefined, pagination: PaginationParams):
+    Promise<{ pages: KnowledgePageRecord[] } & PaginatedResponse>;
   getKnowledgePage(id: string): Promise<{ page: KnowledgePageRecord }>;
   searchKnowledge(query: string, releaseId?: string): Promise<{ results: SearchResult[] }>;
   getSource(input: { path: string; startLine: number; endLine: number; releaseId?: string }): Promise<SourceExcerpt>;
   getKnowledgeMetadata(releaseId: string): Promise<KnowledgeMetadata>;
-  listFeedback(status?: AgentFeedbackStatus): Promise<{ feedback: Feedback[] }>;
+  listFeedback(status: AgentFeedbackStatus | undefined, pagination: PaginationParams):
+    Promise<{ feedback: Feedback[] } & PaginatedResponse>;
   transitionFeedback(id: string, status: AgentFeedbackStatus): Promise<{ feedback: Feedback }>;
   rebuildFeedback(id: string): Promise<{ build: Build; created: boolean }>;
   getMcpConnection(): Promise<McpConnection>;
-  listMcpTokens(): Promise<{ tokens: McpToken[] }>;
+  listMcpTokens(pagination: PaginationParams): Promise<{ tokens: McpToken[] } & PaginatedResponse>;
   createMcpToken(name: string): Promise<McpToken & { token: string }>;
   revokeMcpToken(id: string): Promise<{ token: McpToken }>;
   getModelConfig(): Promise<{ config: ModelConfig | null }>;
@@ -59,6 +73,17 @@ export interface ApiClient {
 }
 
 const json = (value: unknown) => JSON.stringify(value);
+function listPath(path: string, pagination: PaginationParams, values: Record<string, string | undefined> = {}) {
+  const params = new URLSearchParams({
+    limit: String(pagination.limit),
+    offset: String(pagination.offset)
+  });
+  for (const [key, value] of Object.entries(values)) {
+    if (value !== undefined) params.set(key, value);
+  }
+  return `${path}?${params}`;
+}
+
 export const api: ApiClient = {
   setupStatus: () => request("/api/setup/status"),
   setup: (input) => request("/api/setup", { method: "POST", body: json(input) }),
@@ -69,14 +94,18 @@ export const api: ApiClient = {
   getRepository: () => request("/api/repositories/current"),
   getRepositoryStatus: () => request("/api/repositories/current/status"),
   syncRepository: () => request("/api/repositories/current/sync", { method: "POST" }),
-  listBuilds: () => request("/api/builds"),
+  listBuilds: (pagination) => request(listPath("/api/builds", pagination)),
   startBuild: (snapshotId) => request("/api/builds", { method: "POST", body: json({ snapshotId }) }),
   cancelBuild: (id) => request(`/api/builds/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
-  listReleases: () => request("/api/releases"),
+  listReleases: (pagination) => request(listPath("/api/releases", pagination)),
   currentRelease: () => request("/api/releases/current"),
   createRelease: (buildId, version) => request("/api/releases", { method: "POST", body: json({ buildId, version }) }),
   publishRelease: (id) => request(`/api/releases/${encodeURIComponent(id)}/publish`, { method: "POST" }),
-  listKnowledgePages: (releaseId) => request(`/api/knowledge/pages${releaseId ? `?releaseId=${encodeURIComponent(releaseId)}` : ""}`),
+  listKnowledgePages: (releaseId, pagination) => request(listPath(
+    "/api/knowledge/pages",
+    pagination,
+    { releaseId }
+  )),
   getKnowledgePage: (id) => request(`/api/knowledge/pages/${encodeURIComponent(id)}`),
   searchKnowledge: (query, releaseId) => {
     const params = new URLSearchParams({ q: query });
@@ -89,11 +118,11 @@ export const api: ApiClient = {
     return request(`/api/knowledge/source?${params}`);
   },
   getKnowledgeMetadata: (releaseId) => request(`/api/knowledge/metadata?releaseId=${encodeURIComponent(releaseId)}`),
-  listFeedback: (status) => request(`/api/feedback${status ? `?status=${status}` : ""}`),
+  listFeedback: (status, pagination) => request(listPath("/api/feedback", pagination, { status })),
   transitionFeedback: (id, status) => request(`/api/feedback/${id}`, { method: "PATCH", body: json({ status }) }),
   rebuildFeedback: (id) => request(`/api/feedback/${id}/rebuild`, { method: "POST" }),
   getMcpConnection: () => request("/api/mcp/connection"),
-  listMcpTokens: () => request("/api/mcp/tokens"),
+  listMcpTokens: (pagination) => request(listPath("/api/mcp/tokens", pagination)),
   createMcpToken: (name) => request("/api/mcp/tokens", { method: "POST", body: json({ name }) }),
   revokeMcpToken: (id) => request(`/api/mcp/tokens/${id}/revoke`, { method: "POST" }),
   getModelConfig: () => request("/api/settings/model"),

@@ -61,6 +61,14 @@ class FakeBuildPersistence implements BuildPersistence {
   }
 
   async claimBuild(buildId: string) {
+    const candidate = this.builds.find((build) => build.id === buildId);
+    if (!candidate || candidate.status !== "queued") return null;
+    if (this.builds.some((build) =>
+      build.id !== buildId
+      && build.workspaceId === candidate.workspaceId
+      && build.repositoryId === candidate.repositoryId
+      && ["syncing", "parsing", "synthesizing", "validating"].includes(build.status)
+    )) return null;
     return this.transitionBuild(buildId, "queued", "syncing");
   }
 
@@ -108,7 +116,14 @@ class FakeBuildPersistence implements BuildPersistence {
   async listBuildEvents(_workspaceId: string, buildId: string) {
     return this.buildEvents.filter((event) => event.buildId === buildId);
   }
-  async sourceFileHashes() { return new Map<string, string>(); }
+  async sourceFileHashes(workspaceId: string, snapshotId: string) {
+    const build = this.builds.find((candidate) =>
+      candidate.workspaceId === workspaceId && candidate.snapshotId === snapshotId
+    );
+    if (!build) return new Map<string, string>();
+    const index = await analyzeSnapshot(build.snapshotPath, build.commitSha);
+    return new Map(index.files.map((file) => [file.path, file.blobHash]));
+  }
 }
 
 class FakeQueue implements BuildJobQueue {
@@ -145,6 +160,27 @@ class ClaimOnStartQueue extends FakeQueue {
     await super.start(handler);
     this.active = handler(this.existingBuildId);
     await Promise.resolve();
+  }
+}
+
+class FlakyReconciliationPersistence extends FakeBuildPersistence {
+  listCalls = 0;
+  activeLists = 0;
+  maxActiveLists = 0;
+
+  override async listUnfinishedBuilds() {
+    this.listCalls += 1;
+    this.activeLists += 1;
+    this.maxActiveLists = Math.max(this.maxActiveLists, this.activeLists);
+    try {
+      if (this.listCalls === 2) throw new Error("temporary reconciliation failure");
+      if (this.listCalls === 3) {
+        await new Promise((resolve) => setTimeout(resolve, 35));
+      }
+      return await super.listUnfinishedBuilds();
+    } finally {
+      this.activeLists -= 1;
+    }
   }
 }
 
@@ -276,6 +312,28 @@ describe("BuildService", () => {
 
     expect(result.created).toBe(true);
     await vi.waitFor(() => expect(queue.sent).toContain(result.build.id), { timeout: 500 });
+    await service.stop();
+  });
+
+  test("catches a failed reconciliation tick, avoids overlap, and succeeds next tick", async () => {
+    const persistence = new FlakyReconciliationPersistence();
+    const queue = new FakeQueue();
+    const onReconciliationError = vi.fn();
+    const service = new BuildService(persistence, queue, {
+      reconcileIntervalMs: 5,
+      onReconciliationError
+    } as never);
+    await service.start();
+    const queued = (await persistence.createBuild(input())).build;
+
+    await vi.waitFor(() => {
+      expect(onReconciliationError).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "temporary reconciliation failure" })
+      );
+      expect(queue.sent).toContain(queued.id);
+    }, { timeout: 500 });
+
+    expect(persistence.maxActiveLists).toBe(1);
     await service.stop();
   });
 

@@ -48,7 +48,8 @@ describe("PostgresAppStore repository reads", () => {
       commit_timestamp: new Date("2026-07-11T00:00:00.000Z"),
       storage_path: "/data/snapshots/snapshot-winner"
     };
-    const query = vi.fn(async (sql: string) => {
+    const query = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
       if (sql.includes("INSERT INTO source_snapshots")) return { rows: [] };
       if (sql.includes("FROM source_snapshots")) return { rows: [winner] };
       return { rows: [] };
@@ -98,20 +99,36 @@ describe("PostgresAppStore knowledge releases", () => {
     expect(String(query.mock.calls[0][0])).toContain("ORDER BY e.sequence");
   });
   test("claims only queued jobs and guards every transition by expected status", async () => {
-    const query = vi.fn()
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] });
-    const store = new PostgresAppStore({ query } as never);
+    const query = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
+      if (sql.includes("FROM build_jobs") && sql.includes("FOR UPDATE")) {
+        return { rows: [{ workspace_id: "workspace-1", repository_id: "repo-1" }] };
+      }
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({
+      connect: vi.fn(async () => client),
+      query
+    } as never);
 
     await expect(store.claimBuild("build-1")).resolves.toBeNull();
     await expect(store.transitionBuild("build-1", "parsing", "synthesizing"))
       .resolves.toBeNull();
 
-    expect(String(query.mock.calls[0][0])).toContain("status = 'queued'");
-    expect(String(query.mock.calls[0][0])).toContain("RETURNING");
-    expect(String(query.mock.calls[1][0])).toContain("status = $2");
-    expect(String(query.mock.calls[1][0])).toContain("cancel_requested = false");
-    expect(query.mock.calls[1][1]).toEqual([
+    const claimSql = query.mock.calls.map(([sql]) => String(sql))
+      .find((sql) => sql.includes("UPDATE build_jobs"))!;
+    expect(claimSql).toContain("status = 'queued'");
+    expect(claimSql).toContain("NOT EXISTS");
+    expect(claimSql).toContain("'syncing', 'parsing', 'synthesizing', 'validating'");
+    expect(claimSql).toContain("RETURNING");
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("pg_advisory_xact_lock")))
+      .toBe(true);
+
+    const transitionCall = query.mock.calls.at(-1)!;
+    expect(String(transitionCall[0])).toContain("status = $2");
+    expect(String(transitionCall[0])).toContain("cancel_requested = false");
+    expect(transitionCall[1]).toEqual([
       "build-1", "parsing", "synthesizing", null, null, "{}", false
     ]);
   });
@@ -197,6 +214,29 @@ describe("PostgresAppStore knowledge releases", () => {
     expect(sql).toContain("ts_rank_cd");
     expect(sql).toContain("similarity");
     expect(sql).toContain("ORDER BY score DESC, title ASC");
+  });
+
+  test("bounds page payloads inside every SQL projection", async () => {
+    const query = vi.fn(async (_sql: string) => {
+      void _sql;
+      return { rows: [] };
+    });
+    const store = new PostgresAppStore({ query } as never);
+
+    await store.listKnowledgePages("workspace-1", "release-1");
+    await store.getKnowledgePage("workspace-1", "page-1");
+    await store.findKnowledgePageBySlug("workspace-1", "release-1", "architecture-overview");
+    await store.findKnowledgePageByModule("workspace-1", "release-1", "src/index.ts");
+    await store.findKnowledgePageBySymbol("workspace-1", "release-1", "run", "src/index.ts");
+
+    for (const [sqlValue] of query.mock.calls) {
+      const sql = String(sqlValue);
+      expect(sql).toContain("left(p.body, 20000) AS body");
+      expect(sql).toContain("'content', left(c.content, 8000)");
+      expect(sql).toContain("jsonb_path_query_array(c.citations, '$[0 to 7]')");
+      expect(sql).not.toContain("'content', c.content");
+      expect(sql).not.toContain("'citations', c.citations");
+    }
   });
 
   test("uses bounded targeted SQL for release page, module, symbol, and list reads", async () => {

@@ -127,7 +127,9 @@ export class BuildService {
   private readonly enhancer?: KnowledgeEnhancer;
   private readonly enhancerForWorkspace?: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>;
   private readonly reconcileIntervalMs: number;
+  private readonly onReconciliationError: (error: unknown) => void;
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
+  private reconciliationPromise: Promise<void> | null = null;
   private startPromise: Promise<void> | null = null;
 
   constructor(
@@ -140,6 +142,7 @@ export class BuildService {
       enhancer?: KnowledgeEnhancer;
       enhancerForWorkspace?: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>;
       reconcileIntervalMs?: number;
+      onReconciliationError?: (error: unknown) => void;
     } = {}
   ) {
     this.analyze = dependencies.analyze ?? analyzeSnapshot;
@@ -148,6 +151,8 @@ export class BuildService {
     this.enhancer = dependencies.enhancer;
     this.enhancerForWorkspace = dependencies.enhancerForWorkspace;
     this.reconcileIntervalMs = dependencies.reconcileIntervalMs ?? 5_000;
+    this.onReconciliationError = dependencies.onReconciliationError
+      ?? ((error) => console.error("Build reconciliation failed", error));
   }
 
   subscribe(buildId: string, listener: (event: BuildEvent) => void): () => void {
@@ -175,7 +180,7 @@ export class BuildService {
     await this.queue.start((buildId) => this.process(buildId));
     for (const buildId of recoveredBuildIds) await this.dispatch(buildId);
     this.reconcileTimer = setInterval(() => {
-      void this.reconcileQueuedBuilds();
+      this.runReconciliation();
     }, this.reconcileIntervalMs);
     this.reconcileTimer.unref?.();
   }
@@ -183,6 +188,7 @@ export class BuildService {
   async stop(): Promise<void> {
     if (this.reconcileTimer) clearInterval(this.reconcileTimer);
     this.reconcileTimer = null;
+    await this.reconciliationPromise;
     await this.queue.stop();
     this.startPromise = null;
   }
@@ -216,6 +222,22 @@ export class BuildService {
     for (const build of await this.persistence.listUnfinishedBuilds()) {
       if (build.status === "queued") await this.dispatch(build.id);
     }
+  }
+
+  private runReconciliation(): void {
+    if (this.reconciliationPromise) return;
+    const reconciliation = this.reconcileQueuedBuilds()
+      .catch((error: unknown) => {
+        try {
+          this.onReconciliationError(error);
+        } catch (loggingError) {
+          console.error("Build reconciliation error handler failed", loggingError);
+        }
+      })
+      .finally(() => {
+        if (this.reconciliationPromise === reconciliation) this.reconciliationPromise = null;
+      });
+    this.reconciliationPromise = reconciliation;
   }
 
   async cancelBuild(workspaceId: string, buildId: string): Promise<BuildRecord | null> {

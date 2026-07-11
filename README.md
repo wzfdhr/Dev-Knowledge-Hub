@@ -6,7 +6,7 @@ This package is private and `UNLICENSED`. No permission is granted to copy, redi
 
 ## Requirements
 
-- Node.js 22 or newer and npm 11 for local development
+- Node.js 22.9.0 or newer and npm 11 for local development
 - PostgreSQL 16 for production and integration tests
 - Docker Engine with Compose v2 for the container workflow
 - Git for local and remote repository snapshots

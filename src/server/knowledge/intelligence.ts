@@ -65,6 +65,15 @@ export interface CodeIndex {
   configs: ConfigInfo[];
 }
 
+export class SnapshotIntegrityError extends Error {
+  readonly code = "SNAPSHOT_INTEGRITY_FAILED";
+
+  constructor(detail: string) {
+    super(`Snapshot integrity failed: ${detail}`);
+    this.name = "SnapshotIntegrityError";
+  }
+}
+
 const codeExtensions = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"]);
 
 function hash(content: Buffer): string {
@@ -89,13 +98,15 @@ function citationFor(
   return { path: relativePath, startLine, endLine, commitSha, blobHash };
 }
 
-async function walk(root: string, current = root): Promise<string[]> {
+async function walk(root: string, current = root, skipIgnored = true): Promise<string[]> {
   const entries = await fs.readdir(current, { withFileTypes: true });
   const files: string[] = [];
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
-    if (entry.name === ".git" || entry.name === "node_modules" || entry.name === "dist") continue;
+    if (skipIgnored && (entry.name === ".git" || entry.name === "node_modules" || entry.name === "dist")) {
+      continue;
+    }
     const absolute = path.join(current, entry.name);
-    if (entry.isDirectory()) files.push(...await walk(root, absolute));
+    if (entry.isDirectory()) files.push(...await walk(root, absolute, skipIgnored));
     else if (entry.isFile()) files.push(path.relative(root, absolute).split(path.sep).join("/"));
   }
   return files;
@@ -373,21 +384,38 @@ function structuredConfig(content: string, kind: ConfigInfo["kind"]): unknown | 
 export async function analyzeSnapshot(
   rootPath: string,
   commitSha: string,
-  persistedHashes: ReadonlyMap<string, string> = new Map()
+  persistedHashes?: ReadonlyMap<string, string>
 ): Promise<CodeIndex> {
-  const discoveredPaths = (await walk(rootPath)).filter((relativePath) =>
-    persistedHashes.size === 0 || persistedHashes.has(relativePath)
-  );
+  const strictIntegrity = persistedHashes !== undefined;
+  if (strictIntegrity && persistedHashes.size === 0) {
+    throw new SnapshotIntegrityError("persisted file metadata is missing");
+  }
+  const discoveredPaths = await walk(rootPath, rootPath, !strictIntegrity);
+  if (strictIntegrity) {
+    discoveredPaths.sort();
+    const persistedPaths = [...persistedHashes.keys()].sort();
+    if (discoveredPaths.length !== persistedPaths.length
+      || discoveredPaths.some((relativePath, index) => relativePath !== persistedPaths[index])) {
+      throw new SnapshotIntegrityError("file set mismatch");
+    }
+  }
   const decoded = new Map<string, { content: string; blobHash: string }>();
   const decoder = new TextDecoder("utf-8", { fatal: true });
   for (const relativePath of discoveredPaths) {
     const bytes = await fs.readFile(path.join(rootPath, relativePath));
+    const actualHash = hash(bytes);
+    if (strictIntegrity && persistedHashes.get(relativePath) !== actualHash) {
+      throw new SnapshotIntegrityError(`hash mismatch for ${relativePath}`);
+    }
     try {
       decoded.set(relativePath, {
         content: decoder.decode(bytes),
-        blobHash: persistedHashes.get(relativePath) ?? hash(bytes)
+        blobHash: actualHash
       });
     } catch {
+      if (strictIntegrity) {
+        throw new SnapshotIntegrityError(`invalid UTF-8 for ${relativePath}`);
+      }
       // Invalid UTF-8 is not text knowledge and is excluded from the index.
     }
   }

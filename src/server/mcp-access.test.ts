@@ -13,6 +13,11 @@ import { generateKnowledge } from "./knowledge/generator";
 import { analyzeSnapshot } from "./knowledge/intelligence";
 import { createMcpServer } from "./mcp-stdio";
 import { MemoryAppStore } from "./persistence/memory-store";
+import {
+  MAX_KNOWLEDGE_CHUNK_CITATIONS,
+  MAX_KNOWLEDGE_CHUNK_CONTENT_CHARACTERS,
+  MAX_KNOWLEDGE_PAGE_BODY_CHARACTERS
+} from "./persistence/store";
 
 const fixtureRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -166,6 +171,31 @@ describe("MCP bearer tokens", () => {
       method: "POST", url: `/api/mcp/tokens/${tokenId}/revoke`, headers: { cookie }
     })).statusCode).toBe(200);
     expect((await mcpRequest(plaintext, 2)).status).toBe(401);
+    await app.close();
+  });
+
+  test("paginates beyond one hundred tokens with totals and a continuation offset", async () => {
+    const { app, store, cookie, workspaceId } = await adminContext();
+    for (let index = 0; index < 125; index += 1) {
+      await store.createMcpToken({
+        workspaceId,
+        name: `Agent ${String(index).padStart(3, "0")}`,
+        tokenHash: String(index).padStart(64, "0"),
+        tokenPrefix: `dkh_${String(index).padStart(8, "0")}`
+      });
+    }
+
+    const first = await app.inject({
+      method: "GET", url: "/api/mcp/tokens?limit=100&offset=0", headers: { cookie }
+    });
+    const second = await app.inject({
+      method: "GET", url: "/api/mcp/tokens?limit=100&offset=100", headers: { cookie }
+    });
+
+    expect(first.json()).toMatchObject({ total: 125, nextOffset: 100 });
+    expect(first.json().tokens).toHaveLength(100);
+    expect(second.json()).toMatchObject({ total: 125, nextOffset: null });
+    expect(second.json().tokens).toHaveLength(25);
     await app.close();
   });
 });
@@ -340,6 +370,50 @@ describe("MCP tool contract", () => {
       citationCount: expect.any(Number)
     }));
     expect(releaseEnvelope.result).not.toHaveProperty("pages");
+    await app.close();
+  });
+
+  test("bounds page bodies, chunk content, and citations in the store before MCP materialization", async () => {
+    const { store, workspaceId, release, index, app } = await publishedContext();
+    const architecture = store.knowledgePages.find((page) => page.slug === "architecture-overview")!;
+    architecture.body = "b".repeat(MAX_KNOWLEDGE_PAGE_BODY_CHARACTERS + 100);
+    architecture.chunks[0].content = "c".repeat(MAX_KNOWLEDGE_CHUNK_CONTENT_CHARACTERS + 100);
+    architecture.chunks[0].citations = Array.from(
+      { length: MAX_KNOWLEDGE_CHUNK_CITATIONS + 5 },
+      (_, indexPosition) => ({ ...index.files[0], startLine: indexPosition + 1, endLine: indexPosition + 1 })
+    );
+
+    const loaded = await store.findKnowledgePageBySlug(
+      workspaceId,
+      release.id,
+      "architecture-overview"
+    );
+
+    expect(loaded?.body).toHaveLength(MAX_KNOWLEDGE_PAGE_BODY_CHARACTERS);
+    expect(loaded?.chunks[0].content).toHaveLength(MAX_KNOWLEDGE_CHUNK_CONTENT_CHARACTERS);
+    expect(loaded?.chunks[0].citations).toHaveLength(MAX_KNOWLEDGE_CHUNK_CITATIONS);
+    await app.close();
+  });
+
+  test("uses at most eight deterministic store searches for change context", async () => {
+    const { store, workspaceId, app } = await publishedContext();
+    const client = await connectMcp(store, workspaceId);
+    const search = vi.spyOn(store, "searchKnowledge");
+    const argumentsValue = {
+      task: "change calculator add clamp operation range version module behavior",
+      paths: [
+        "src/math.ts", "src/util.js", "src/index.ts", "src/calls.ts",
+        "src/call-targets.ts", "src/overloads.ts", "test/math.test.ts", "package.json"
+      ]
+    };
+
+    await client.callTool({ name: "dkh_get_change_context", arguments: argumentsValue });
+    const firstQueries = search.mock.calls.map((call) => call[2]);
+    expect(firstQueries.length).toBeLessThanOrEqual(8);
+
+    search.mockClear();
+    await client.callTool({ name: "dkh_get_change_context", arguments: argumentsValue });
+    expect(search.mock.calls.map((call) => call[2])).toEqual(firstQueries);
     await app.close();
   });
 

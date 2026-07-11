@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  boundedKnowledgePage,
   FeedbackNotAcknowledgedError,
   InvalidFeedbackTransitionError,
   normalizePagination
@@ -157,6 +158,10 @@ export class MemoryAppStore implements AppStore {
       .slice(offset, offset + limit);
   }
 
+  async countMcpTokens(workspaceId: string): Promise<number> {
+    return this.mcpTokens.filter((token) => token.workspaceId === workspaceId).length;
+  }
+
   async findActiveMcpToken(tokenHash: string): Promise<McpTokenRecord | null> {
     return this.mcpTokens.find((token) => token.tokenHash === tokenHash && !token.revokedAt) ?? null;
   }
@@ -252,6 +257,12 @@ export class MemoryAppStore implements AppStore {
       record.workspaceId === workspaceId && (!status || record.status === status)
     ).sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()
       || right.id.localeCompare(left.id)).slice(offset, offset + limit);
+  }
+
+  async countFeedback(workspaceId: string, status?: AgentFeedbackStatus): Promise<number> {
+    return this.feedback.filter((record) =>
+      record.workspaceId === workspaceId && (!status || record.status === status)
+    ).length;
   }
 
   async getFeedback(workspaceId: string, feedbackId: string): Promise<AgentFeedbackRecord | null> {
@@ -610,6 +621,15 @@ export class MemoryAppStore implements AppStore {
   }
 
   async claimBuild(buildId: string): Promise<BuildRecord | null> {
+    const candidate = this.builds.find((build) => build.id === buildId);
+    if (!candidate) throw new Error("Build not found");
+    if (candidate.status !== "queued") return null;
+    if (this.builds.some((build) =>
+      build.id !== candidate.id
+      && build.workspaceId === candidate.workspaceId
+      && build.repositoryId === candidate.repositoryId
+      && ["syncing", "parsing", "synthesizing", "validating"].includes(build.status)
+    )) return null;
     return this.transitionBuild(buildId, "queued", "syncing");
   }
 
@@ -660,6 +680,12 @@ export class MemoryAppStore implements AppStore {
     return this.builds.filter((build) =>
       build.workspaceId === workspaceId && build.repositoryId === repositoryId
     ).reverse().slice(offset, offset + limit);
+  }
+
+  async countBuilds(workspaceId: string, repositoryId: string): Promise<number> {
+    return this.builds.filter((build) =>
+      build.workspaceId === workspaceId && build.repositoryId === repositoryId
+    ).length;
   }
 
   async listBuildEvents(
@@ -765,6 +791,12 @@ export class MemoryAppStore implements AppStore {
       || right.id.localeCompare(left.id)).slice(offset, offset + limit);
   }
 
+  async countReleases(workspaceId: string, repositoryId: string): Promise<number> {
+    return this.releases.filter((release) =>
+      release.workspaceId === workspaceId && release.repositoryId === repositoryId
+    ).length;
+  }
+
   private releaseById(workspaceId: string, releaseId: string): ReleaseRecord | null {
     return this.releases.find((release) =>
       release.workspaceId === workspaceId && release.id === releaseId
@@ -786,13 +818,25 @@ export class MemoryAppStore implements AppStore {
     return this.knowledgePages.filter((page) =>
       page.workspaceId === workspaceId && page.buildId === release.buildId
     ).sort((left, right) => left.slug.localeCompare(right.slug) || left.id.localeCompare(right.id))
-      .slice(offset, offset + limit);
+      .slice(offset, offset + limit).map(boundedKnowledgePage);
+  }
+
+  async countKnowledgePages(workspaceId: string, releaseId?: string): Promise<number> {
+    let release = releaseId ? this.releaseById(workspaceId, releaseId) : null;
+    if (!release && !releaseId) {
+      const repository = this.repository?.workspaceId === workspaceId ? this.repository : null;
+      if (repository) release = await this.currentRelease(workspaceId, repository.id);
+    }
+    return release ? this.knowledgePages.filter((page) =>
+      page.workspaceId === workspaceId && page.buildId === release.buildId
+    ).length : 0;
   }
 
   async getKnowledgePage(workspaceId: string, pageId: string): Promise<KnowledgePageRecord | null> {
-    return this.knowledgePages.find((page) =>
+    const page = this.knowledgePages.find((page) =>
       page.workspaceId === workspaceId && page.id === pageId
-    ) ?? null;
+    );
+    return page ? boundedKnowledgePage(page) : null;
   }
 
   async findKnowledgePageBySlug(
@@ -801,9 +845,10 @@ export class MemoryAppStore implements AppStore {
     slug: string
   ): Promise<KnowledgePageRecord | null> {
     const release = this.releaseById(workspaceId, releaseId);
-    return release ? this.knowledgePages.find((page) =>
+    const page = release ? this.knowledgePages.find((page) =>
       page.workspaceId === workspaceId && page.buildId === release.buildId && page.slug === slug
     ) ?? null : null;
+    return page ? boundedKnowledgePage(page) : null;
   }
 
   async findKnowledgePageByModule(
@@ -812,10 +857,11 @@ export class MemoryAppStore implements AppStore {
     moduleId: string
   ): Promise<KnowledgePageRecord | null> {
     const release = this.releaseById(workspaceId, releaseId);
-    return release ? this.knowledgePages.find((page) =>
+    const page = release ? this.knowledgePages.find((page) =>
       page.workspaceId === workspaceId && page.buildId === release.buildId
       && (page.title === `Module: ${moduleId}` || page.slug === moduleId)
     ) ?? null : null;
+    return page ? boundedKnowledgePage(page) : null;
   }
 
   async findKnowledgePageBySymbol(
@@ -825,13 +871,14 @@ export class MemoryAppStore implements AppStore {
     sourcePath?: string
   ): Promise<KnowledgePageRecord | null> {
     const release = this.releaseById(workspaceId, releaseId);
-    return release ? this.knowledgePages.find((page) =>
+    const page = release ? this.knowledgePages.find((page) =>
       page.workspaceId === workspaceId && page.buildId === release.buildId
       && page.title === name
       && (!sourcePath || page.chunks.some((chunk) =>
         chunk.citations.some((citation) => citation.path === sourcePath)
       ))
     ) ?? null : null;
+    return page ? boundedKnowledgePage(page) : null;
   }
 
   async knowledgeReleaseSummary(workspaceId: string, releaseId: string) {

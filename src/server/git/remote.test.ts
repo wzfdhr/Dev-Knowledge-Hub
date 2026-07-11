@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -10,6 +10,20 @@ import type { RepositoryRecord } from "../persistence/store";
 import { prepareRemoteRepository, type GitRunner } from "./remote";
 
 const execute = promisify(execFile);
+
+function executeWithInput(
+  file: string,
+  args: string[],
+  options: { env?: NodeJS.ProcessEnv; input: string }
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(file, args, { env: options.env }, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+    child.stdin?.end(options.input);
+  });
+}
 
 const repository: RepositoryRecord = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -54,6 +68,74 @@ describe("HTTPS Git authentication", () => {
       expect(await readFile(askPassPath, "utf8")).not.toContain(token);
     } finally {
       await rm(dataDir, { recursive: true });
+    }
+  });
+
+  test("isolates Git from inherited credential helpers", async () => {
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-remote-helper-test-"));
+    const homeDir = path.join(dataDir, "home");
+    const markerPath = path.join(dataDir, "credential-helper-called");
+    const helperPath = path.join(dataDir, "recording-helper.sh");
+    const token = "github_pat_MUST_ONLY_REACH_ASKPASS";
+
+    await mkdir(homeDir, { recursive: true });
+    await writeFile(helperPath, `#!/bin/sh\nprintf '%s' "$DEVKH_GIT_TOKEN" > ${JSON.stringify(markerPath)}\n`);
+    await chmod(helperPath, 0o700);
+    await writeFile(path.join(homeDir, ".gitconfig"), [
+      "[credential]",
+      `\thelper = ${helperPath}`,
+      ""
+    ].join("\n"));
+
+    const runner = vi.fn<GitRunner>(async ({ args, env }) => {
+      expect(args.slice(0, 2)).toEqual(["-c", "credential.helper="]);
+      expect(env).toMatchObject({
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_SYSTEM: "/dev/null",
+        GIT_CONFIG_NOSYSTEM: "1",
+        HOME: homeDir,
+        DEVKH_GIT_TOKEN: token
+      });
+      expect(env?.GIT_CONFIG).toBeUndefined();
+      expect(env?.GIT_CONFIG_COUNT).toBeUndefined();
+      expect(env?.GIT_CONFIG_KEY_0).toBeUndefined();
+      expect(env?.GIT_CONFIG_VALUE_0).toBeUndefined();
+      expect(env?.GIT_CONFIG_PARAMETERS).toBeUndefined();
+
+      await executeWithInput("git", [
+        ...args.slice(0, 2),
+        "credential",
+        "fill"
+      ], {
+        env,
+        input: "protocol=https\nhost=github.com\n\n"
+      });
+
+      const target = args.at(-1);
+      if (target) await mkdir(path.join(target, ".git"), { recursive: true });
+      return Buffer.alloc(0);
+    });
+
+    try {
+      await prepareRemoteRepository({
+        repository,
+        dataDir,
+        token,
+        runner,
+        environment: {
+          ...process.env,
+          HOME: homeDir,
+          GIT_CONFIG: path.join(homeDir, ".gitconfig"),
+          GIT_CONFIG_COUNT: "1",
+          GIT_CONFIG_KEY_0: "credential.helper",
+          GIT_CONFIG_VALUE_0: helperPath,
+          GIT_CONFIG_PARAMETERS: `'credential.helper=${helperPath}'`
+        }
+      });
+
+      await expect(access(markerPath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
     }
   });
 });

@@ -1,11 +1,12 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, test } from "vitest";
 
-import { analyzeSnapshot } from "./intelligence";
+import { analyzeSnapshot, SnapshotIntegrityError } from "./intelligence";
 
 const fixtureRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -121,24 +122,75 @@ describe("analyzeSnapshot", () => {
     ]));
   });
 
-  test("uses persisted snapshot hashes without rehashing decoded text", async () => {
-    const expectedHash = "f".repeat(64);
-    const analyzeWithHashes = analyzeSnapshot as unknown as (
-      root: string,
-      sha: string,
-      hashes: ReadonlyMap<string, string>
-    ) => ReturnType<typeof analyzeSnapshot>;
+  test("accepts only an exact persisted file set with matching raw-byte hashes", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-integrity-valid-"));
+    const content = Buffer.from("export const answer = 42;\n");
+    const blobHash = createHash("sha256").update(content).digest("hex");
+    try {
+      await mkdir(path.join(root, "src"));
+      await writeFile(path.join(root, "src", "answer.ts"), content);
 
-    const index = await analyzeWithHashes(
-      fixtureRoot,
-      commitSha,
-      new Map([["src/math.ts", expectedHash]])
-    );
+      const index = await analyzeSnapshot(
+        root,
+        commitSha,
+        new Map([["src/answer.ts", blobHash]])
+      );
 
-    expect(index.files.find((file) => file.path === "src/math.ts")?.blobHash).toBe(expectedHash);
-    expect(index.files.map((file) => file.path)).toEqual(["src/math.ts"]);
-    expect(index.symbols.filter((symbol) => symbol.path === "src/math.ts"))
-      .toEqual(expect.arrayContaining([expect.objectContaining({ blobHash: expectedHash })]));
+      expect(index.files).toEqual([
+        expect.objectContaining({ path: "src/answer.ts", blobHash })
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    {
+      name: "missing persisted metadata",
+      files: [["src/present.ts", Buffer.from("export {};\n")]] as const,
+      hashes: new Map<string, string>(),
+      detail: "persisted file metadata is missing"
+    },
+    {
+      name: "a missing disk file",
+      files: [] as const,
+      hashes: new Map([["src/missing.ts", "f".repeat(64)]]),
+      detail: "file set mismatch"
+    },
+    {
+      name: "an extra disk file",
+      files: [["src/extra.ts", Buffer.from("export {};\n")]] as const,
+      hashes: new Map([["src/known.ts", "f".repeat(64)]]),
+      detail: "file set mismatch"
+    },
+    {
+      name: "tampered bytes",
+      files: [["src/tampered.ts", Buffer.from("export const value = 2;\n")]] as const,
+      hashes: new Map([["src/tampered.ts", createHash("sha256").update("export const value = 1;\n").digest("hex")]]),
+      detail: "hash mismatch for src/tampered.ts"
+    },
+    {
+      name: "invalid UTF-8",
+      files: [["src/invalid.ts", Buffer.from([0xc3, 0x28, 0x0a])]] as const,
+      hashes: new Map([["src/invalid.ts", createHash("sha256").update(Buffer.from([0xc3, 0x28, 0x0a])).digest("hex")]]),
+      detail: "invalid UTF-8 for src/invalid.ts"
+    }
+  ])("rejects $name with the stable integrity error", async ({ files, hashes, detail }) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-integrity-invalid-"));
+    try {
+      for (const [relativePath, content] of files) {
+        await mkdir(path.dirname(path.join(root, relativePath)), { recursive: true });
+        await writeFile(path.join(root, relativePath), content);
+      }
+
+      await expect(analyzeSnapshot(root, commitSha, hashes)).rejects.toMatchObject({
+        name: SnapshotIntegrityError.name,
+        code: "SNAPSHOT_INTEGRITY_FAILED",
+        message: `Snapshot integrity failed: ${detail}`
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("skips invalid UTF-8 text even when it contains no NUL byte", async () => {

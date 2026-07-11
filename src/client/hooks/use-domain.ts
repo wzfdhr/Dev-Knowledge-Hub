@@ -1,6 +1,6 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import type { ApiClient } from "../api/client";
+import { LIST_PAGE_SIZE, type ApiClient } from "../api/client";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
 
 export const keys = {
@@ -15,10 +15,20 @@ export function useRepository(api: ApiClient) {
   return useQuery({ queryKey: keys.repository, queryFn: api.getRepository, retry: false });
 }
 
-export function useFeedback(api: ApiClient, status?: AgentFeedbackStatus) {
-  return useQuery({
+export function useFeedback(
+  api: ApiClient,
+  status?: AgentFeedbackStatus,
+  enabled = true
+) {
+  return useInfiniteQuery({
     queryKey: keys.feedback(status),
-    queryFn: () => api.listFeedback(status),
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) => api.listFeedback(status, {
+      limit: LIST_PAGE_SIZE,
+      offset: pageParam
+    }),
+    getNextPageParam: (lastPage) => lastPage.nextOffset ?? undefined,
+    enabled,
     refetchOnMount: "always"
   });
 }

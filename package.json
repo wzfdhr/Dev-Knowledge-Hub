@@ -23,6 +23,7 @@
     "secrets:scan": "node scripts/secrets-scan.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@tanstack/react-query": "^5.101.2",
     "drizzle-orm": "^0.45.2",
     "fastify": "^5.10.0",

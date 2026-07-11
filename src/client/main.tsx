@@ -5,13 +5,15 @@ import { createRoot } from "react-dom/client";
 
 import "./styles.css";
 
+import { APP_NAME } from "../shared/contracts";
+
 const queryClient = new QueryClient();
 
 function App() {
   return (
     <main>
       <BookOpen aria-hidden="true" size={28} />
-      <h1>Dev Knowledge Hub</h1>
+      <h1>{APP_NAME}</h1>
       <p>The clean-room application foundation is ready for MVP development.</p>
     </main>
   );

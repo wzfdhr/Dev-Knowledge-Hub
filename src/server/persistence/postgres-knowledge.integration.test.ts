@@ -174,11 +174,26 @@ integration("PostgreSQL cited knowledge integration", () => {
       const architectureSearch = await store.searchKnowledge(
         setup!.workspace.id,
         repository!.id,
-        "Architecture Overview",
+        "架构概览",
         firstRelease.id
       );
-      expect(architectureSearch.find((result) => result.title === "Architecture Overview")?.citations)
+      expect(architectureSearch.find((result) => result.title === "架构概览")?.citations)
         .toHaveLength(8);
+
+      for (const [query, title] of [
+        ["快照", "架构概览"],
+        ["配置", "开发约定"]
+      ]) {
+        const matches = await store.searchKnowledge(
+          setup!.workspace.id,
+          repository!.id,
+          query,
+          firstRelease.id
+        );
+        expect(matches).toEqual(expect.arrayContaining([
+          expect.objectContaining({ title })
+        ]));
+      }
 
       const secondBuild = await service.startBuild({
         workspaceId: setup!.workspace.id,

@@ -1689,6 +1689,7 @@ export class PostgresAppStore implements AppStore {
            ORDER BY selected_chunk.position, selected_chunk.id LIMIT 1
          ) kc ON true
          WHERE to_tsvector('english', kp.title || ' ' || kp.body) @@ plainto_tsquery('english', $3)
+            OR lower(kp.title || ' ' || kp.body) LIKE '%' || lower($3) || '%'
             OR similarity(lower(kp.title), lower($3)) > 0.2
        ), text_matches AS (
          SELECT *, ROW_NUMBER() OVER (ORDER BY score DESC, title, page_id) AS text_rank

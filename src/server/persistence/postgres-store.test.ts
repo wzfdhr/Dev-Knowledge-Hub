@@ -258,6 +258,22 @@ describe("PostgresAppStore knowledge releases", () => {
     }
   });
 
+  test("combines English full-text search with case-insensitive page substring search", async () => {
+    const query = vi.fn(async (_sql: string) => {
+      void _sql;
+      return { rows: [] };
+    });
+    const store = new PostgresAppStore({ query } as never);
+
+    await store.searchKnowledge("workspace-1", "repo-1", "架构概览", "release-1");
+
+    const sql = String(query.mock.calls[0][0]);
+    expect(sql).toContain("to_tsvector('english', kp.title || ' ' || kp.body)");
+    expect(sql).toContain("lower(kp.title || ' ' || kp.body) LIKE '%' || lower($3) || '%'");
+    expect(sql).toContain("text_rank <= 20");
+    expect(sql).toContain("LIMIT 50");
+  });
+
   test("persists generator chunk indexes as database positions", async () => {
     const query = vi.fn(async (sql: string, _values?: unknown[]) => {
       void _values;
@@ -274,7 +290,7 @@ describe("PostgresAppStore knowledge releases", () => {
       output: {
         pages: [{
           slug: "architecture-overview",
-          title: "Architecture Overview",
+          title: "架构概览",
           body: "body",
           chunks: [
             { heading: "first", content: "one", citations: [] },

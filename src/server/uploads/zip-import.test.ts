@@ -175,6 +175,17 @@ describe("ZIP snapshot import", () => {
     expect(first.summary.sourceVersion).toMatch(/^[a-f0-9]{40}$/);
     expect(second.summary.sourceVersion).toBe(first.summary.sourceVersion);
     expect(first.summary.fileCount).toBe(3);
+    expect(first.summary.ignored).toEqual({
+      total: 6,
+      reasons: {
+        binary: 1,
+        excluded_directory: 1,
+        generated: 1,
+        sensitive_file: 1,
+        unsupported_extension: 1,
+        file_too_large: 1
+      }
+    });
     expect(first.store.sourceFiles.map((file) => file.path).sort()).toEqual([
       ".env.example",
       "package-lock.json",

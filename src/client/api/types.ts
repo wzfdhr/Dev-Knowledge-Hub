@@ -23,6 +23,7 @@ export interface UploadSnapshotSummary {
   sourceVersion: string;
   fileCount: number;
   unchanged: boolean;
+  ignored: { total: number; reasons: Record<string, number> };
 }
 export interface SnapshotSummary {
   snapshotId: string;

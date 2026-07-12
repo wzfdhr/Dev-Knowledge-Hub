@@ -727,7 +727,8 @@ describe("repository replacement", () => {
         id: "upload", kind: "upload", name: "Uploaded project", defaultBranch: "upload"
       } }),
       uploadZip: vi.fn().mockResolvedValue({
-        snapshotId: "snapshot", sourceVersion: "a".repeat(40), fileCount: 2, unchanged: false
+        snapshotId: "snapshot", sourceVersion: "a".repeat(40), fileCount: 2, unchanged: false,
+        ignored: { total: 2, reasons: { binary: 1, generated: 1 } }
       }),
       getModelConfig: vi.fn().mockResolvedValue({ config: null }),
       getMcpConnection: vi.fn().mockResolvedValue({ endpoint: "/mcp", transport: "streamable-http", authorization: "bearer", tools: [] }),
@@ -752,6 +753,7 @@ describe("repository replacement", () => {
 
     await waitFor(() => expect(api.uploadZip).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(sessionStorage.getItem("devkh:last-snapshot")).toContain("snapshot"));
+    expect(await screen.findByText("已忽略 2 个文件")).toBeVisible();
   });
 });
 

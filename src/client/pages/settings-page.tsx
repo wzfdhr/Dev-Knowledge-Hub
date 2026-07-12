@@ -13,6 +13,22 @@ type RepositoryInput =
   | { kind: "git"; name: string; url: string; token?: string }
   | { kind: "upload"; name: string };
 
+const ignoredReasonLabel: Record<string, string> = {
+  binary: "二进制文件",
+  excluded_directory: "忽略目录",
+  file_too_large: "超过大小限制",
+  generated: "生成文件",
+  sensitive_file: "敏感文件",
+  unsupported_extension: "不支持的文件类型"
+};
+
+function UploadSummary({ upload }: { upload: UploadSnapshotSummary }) {
+  const reasons = Object.entries(upload.ignored.reasons)
+    .map(([reason, count]) => `${ignoredReasonLabel[reason] ?? reason} ${count}`)
+    .join("、");
+  return <p className="success-message">已采集 {upload.fileCount} 个文件；<strong>已忽略 {upload.ignored.total} 个文件</strong>{reasons ? `（${reasons}）` : ""}。</p>;
+}
+
 function ConnectionForm({ api, onConnected, mode = "connect" }: {
   api: ApiClient;
   onConnected: (upload?: UploadSnapshotSummary) => void;
@@ -106,6 +122,7 @@ export function SettingsPage({ api }: { api: ApiClient }) {
   const [plaintext, setPlaintext] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [replaceOpen, setReplaceOpen] = useState(false);
+  const [lastUpload, setLastUpload] = useState<UploadSnapshotSummary | null>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const create = useMutation({ mutationFn: api.createMcpToken, onSuccess: async (value) => { setPlaintext(value.token); setTokenName(""); await queryClient.invalidateQueries({ queryKey: keys.tokens }); } });
   const revoke = useMutation({ mutationFn: api.revokeMcpToken, onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.tokens }) });
@@ -113,6 +130,7 @@ export function SettingsPage({ api }: { api: ApiClient }) {
   const listedTokens: McpToken[] = tokens.data?.pages.flatMap((page) => page.tokens) ?? [];
   const refreshRepository = (upload?: UploadSnapshotSummary) => {
     if (upload) {
+      setLastUpload(upload);
       sessionStorage.setItem("devkh:last-snapshot", JSON.stringify({
         snapshotId: upload.snapshotId,
         commitSha: upload.sourceVersion,
@@ -133,7 +151,7 @@ export function SettingsPage({ api }: { api: ApiClient }) {
   return <div className="page settings-page">
     <header className="page-header"><div><p className="eyebrow">工作区管理</p><h1>设置</h1><p>管理仓库、模型运行时和 Agent 访问。</p></div></header>
     <div className="settings-stack">
-      <section className="settings-section" id="repository"><div className="settings-intro"><Link2 aria-hidden="true" /><div><h2>仓库</h2><p>保存后会脱敏来源连接信息。</p></div></div>{repository.isLoading ? <Loading /> : missingRepository ? <ConnectionForm api={api} onConnected={refreshRepository} /> : repository.error ? <ErrorState message={errorMessage(repository.error)} /> : repository.data && <div><dl className="detail-list horizontal"><div><dt>名称</dt><dd>{repository.data.repository.name}</dd></div><div><dt>类型</dt><dd>{repository.data.repository.kind === "local" ? "本地路径" : repository.data.repository.kind === "upload" ? "上传 ZIP" : "Git HTTPS"}</dd></div>{repository.data.repository.kind !== "upload" && <div><dt>位置</dt><dd className="mono break">{repository.data.repository.path ?? repository.data.repository.url}</dd></div>}{repository.data.repository.kind === "git" && <div><dt>凭据</dt><dd><ShieldCheck aria-hidden="true" />{repository.data.repository.hasCredential ? "已加密存储" : "未配置"}</dd></div>}</dl>{repository.data.repository.kind === "upload" && <UploadForm api={api} onUploaded={refreshRepository} />}<button className="button" onClick={() => setReplaceOpen(true)}><FileArchive aria-hidden="true" />更换仓库</button>{archived.data?.repositories.length ? <div className="archive-list"><h3>已归档仓库</h3>{archived.data.repositories.map((item) => <p key={item.id}><strong>{item.name}</strong><span>{item.kind === "upload" ? "上传 ZIP" : item.kind === "local" ? "本地路径" : "Git HTTPS"} · {new Date(item.archivedAt).toLocaleString()}</span></p>)}</div> : null}</div>}{params.get("connect") && !missingRepository && <p className="success-message">仓库已连接。</p>}</section>
+      <section className="settings-section" id="repository"><div className="settings-intro"><Link2 aria-hidden="true" /><div><h2>仓库</h2><p>保存后会脱敏来源连接信息。</p></div></div>{lastUpload && <UploadSummary upload={lastUpload} />}{repository.isLoading ? <Loading /> : missingRepository ? <ConnectionForm api={api} onConnected={refreshRepository} /> : repository.error ? <ErrorState message={errorMessage(repository.error)} /> : repository.data && <div><dl className="detail-list horizontal"><div><dt>名称</dt><dd>{repository.data.repository.name}</dd></div><div><dt>类型</dt><dd>{repository.data.repository.kind === "local" ? "本地路径" : repository.data.repository.kind === "upload" ? "上传 ZIP" : "Git HTTPS"}</dd></div>{repository.data.repository.kind !== "upload" && <div><dt>位置</dt><dd className="mono break">{repository.data.repository.path ?? repository.data.repository.url}</dd></div>}{repository.data.repository.kind === "git" && <div><dt>凭据</dt><dd><ShieldCheck aria-hidden="true" />{repository.data.repository.hasCredential ? "已加密存储" : "未配置"}</dd></div>}</dl>{repository.data.repository.kind === "upload" && <UploadForm api={api} onUploaded={refreshRepository} />}<button className="button" onClick={() => setReplaceOpen(true)}><FileArchive aria-hidden="true" />更换仓库</button>{archived.data?.repositories.length ? <div className="archive-list"><h3>已归档仓库</h3>{archived.data.repositories.map((item) => <p key={item.id}><strong>{item.name}</strong><span>{item.kind === "upload" ? "上传 ZIP" : item.kind === "local" ? "本地路径" : "Git HTTPS"} · {new Date(item.archivedAt).toLocaleString()}</span></p>)}</div> : null}</div>}{params.get("connect") && !missingRepository && <p className="success-message">仓库已连接。</p>}</section>
       <section className="settings-section"><div className="settings-intro"><LockKeyhole aria-hidden="true" /><div><h2>模型服务商</h2><p>可选的加密服务商配置，用于增强知识内容。</p></div></div><ModelForm api={api} firstRun={params.get("connect") === "1" && missingRepository} /></section>
       <section className="settings-section"><div className="settings-intro"><PlugZap aria-hidden="true" /><div><h2>MCP 连接</h2><p>供编码 Agent 使用的连接元数据。</p></div></div>{connection.isLoading ? <Loading /> : connection.error ? <ErrorState message={errorMessage(connection.error)} /> : connection.data && <dl className="detail-list horizontal"><div><dt>端点</dt><dd className="mono">{connection.data.endpoint}</dd></div><div><dt>传输方式</dt><dd>{connection.data.transport}</dd></div><div><dt>授权方式</dt><dd>{connection.data.authorization}</dd></div><div><dt>工具</dt><dd>{connection.data.tools.length} 个可用</dd></div></dl>}</section>
       <section className="settings-section"><div className="settings-intro"><KeyRound aria-hidden="true" /><div><h2>访问 Token</h2><p>Token 明文仅在创建时展示一次。</p></div></div><form className="token-form" onSubmit={(event) => { event.preventDefault(); create.mutate(tokenName); }}><label>Token 名称<input required value={tokenName} onChange={(event) => setTokenName(event.target.value)} placeholder="本地 Agent" /></label><button className="button primary" disabled={create.isPending}>创建 Token</button></form>{create.error && <ErrorState message={errorMessage(create.error)} />}{tokens.isLoading ? <Loading /> : tokens.error ? <ErrorState message={errorMessage(tokens.error)} /> : listedTokens.length === 0 ? <Empty>尚未创建 MCP Token。</Empty> : <div><div className="token-list">{listedTokens.map((item) => <div key={item.id}><KeyRound aria-hidden="true" /><span><strong>{item.name}</strong><small className="mono">{item.tokenPrefix}</small></span><Status value={item.revokedAt ? "revoked" : "active"} />{!item.revokedAt && <button className="icon-button danger-text" aria-label={`撤销 ${item.name}`} onClick={() => revoke.mutate(item.id)}><Trash2 aria-hidden="true" /></button>}</div>)}</div>{tokens.hasNextPage && <button className="button continuation" onClick={() => void tokens.fetchNextPage()} disabled={tokens.isFetchingNextPage}>{tokens.isFetchingNextPage ? "正在加载 Token..." : "加载更多 Token"}</button>}</div>}</section>

@@ -76,6 +76,7 @@ export interface UploadSnapshotSummary {
   fileCount: number;
   unchanged: boolean;
   storagePath: string;
+  ignored: { total: number; reasons: Record<string, number> };
 }
 
 function archivePath(entry: Entry): string {
@@ -113,6 +114,10 @@ function isCandidate(filePath: string): boolean {
     return true;
   }
   return SOURCE_EXTENSIONS.has(path.posix.extname(filePath).toLowerCase());
+}
+
+function recordIgnored(reasons: Record<string, number>, reason: string): void {
+  reasons[reason] = (reasons[reason] ?? 0) + 1;
 }
 
 function isGenerated(content: Buffer): boolean {
@@ -288,16 +293,32 @@ export async function importZipArchive({
     }
     reader = new ZipReader(new BlobReader(await openAsBlob(sourceArchivePath)));
     const entries = validatedEntries(await readBoundedEntries(reader, limits), limits);
-    const candidates = entries
-      .filter((value): value is { entry: FileEntry; filePath: string } =>
-        !value.entry.directory
-        && value.entry.uncompressedSize <= limits.maxSourceFileBytes
-        && isCandidate(value.filePath)
-      )
-      .sort((left, right) => Buffer.compare(
+    const ignoredReasons: Record<string, number> = {};
+    const candidates: Array<{ entry: FileEntry; filePath: string }> = [];
+    for (const value of entries) {
+      if (value.entry.directory) continue;
+      if (value.entry.uncompressedSize > limits.maxSourceFileBytes) {
+        recordIgnored(ignoredReasons, "file_too_large");
+        continue;
+      }
+      if (value.filePath.split("/").some((segment) => SKIPPED_DIRECTORIES.has(segment))) {
+        recordIgnored(ignoredReasons, "excluded_directory");
+        continue;
+      }
+      if (value.filePath === ".env") {
+        recordIgnored(ignoredReasons, "sensitive_file");
+        continue;
+      }
+      if (!isCandidate(value.filePath)) {
+        recordIgnored(ignoredReasons, "unsupported_extension");
+        continue;
+      }
+      candidates.push(value as { entry: FileEntry; filePath: string });
+    }
+    candidates.sort((left, right) => Buffer.compare(
         Buffer.from(left.filePath, "utf8"),
         Buffer.from(right.filePath, "utf8")
-      ));
+    ));
     const versionHash = createHash("sha1");
     const accepted: Array<{
       filePath: string;
@@ -308,7 +329,14 @@ export async function importZipArchive({
 
     for (const { entry, filePath } of candidates) {
       const content = await extractBounded(entry, limits.maxSourceFileBytes);
-      if (content.includes(0) || !isUtf8(content) || isGenerated(content)) continue;
+      if (content.includes(0) || !isUtf8(content)) {
+        recordIgnored(ignoredReasons, "binary");
+        continue;
+      }
+      if (isGenerated(content)) {
+        recordIgnored(ignoredReasons, "generated");
+        continue;
+      }
       const pathBytes = Buffer.from(filePath, "utf8");
       versionHash.update(`${pathBytes.length}:`);
       versionHash.update(pathBytes);
@@ -333,7 +361,8 @@ export async function importZipArchive({
         sourceVersion,
         fileCount: await store.countSnapshotFiles(existing.id),
         unchanged: true,
-        storagePath: existing.storagePath
+        storagePath: existing.storagePath,
+        ignored: { total: Object.values(ignoredReasons).reduce((sum, value) => sum + value, 0), reasons: ignoredReasons }
       };
     }
 
@@ -374,7 +403,8 @@ export async function importZipArchive({
         sourceVersion: persisted.commitSha,
         fileCount: await store.countSnapshotFiles(persisted.id),
         unchanged: true,
-        storagePath: persisted.storagePath
+        storagePath: persisted.storagePath,
+        ignored: { total: Object.values(ignoredReasons).reduce((sum, value) => sum + value, 0), reasons: ignoredReasons }
       };
     }
     promotedSnapshotDirectory = null;
@@ -383,7 +413,8 @@ export async function importZipArchive({
       sourceVersion,
       fileCount: files.length,
       unchanged: false,
-      storagePath
+      storagePath,
+      ignored: { total: Object.values(ignoredReasons).reduce((sum, value) => sum + value, 0), reasons: ignoredReasons }
     };
   } finally {
     await reader?.close().catch(() => undefined);

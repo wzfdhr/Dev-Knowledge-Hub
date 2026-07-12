@@ -512,7 +512,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           snapshotId: summary.snapshotId,
           sourceVersion: summary.sourceVersion,
           fileCount: summary.fileCount,
-          unchanged: summary.unchanged
+          unchanged: summary.unchanged,
+          ignored: summary.ignored
         };
         await cleanup();
         return reply.code(summary.unchanged ? 200 : 201).send(response);
@@ -607,7 +608,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           snapshotId: summary.snapshotId,
           sourceVersion: summary.sourceVersion,
           fileCount: summary.fileCount,
-          unchanged: summary.unchanged
+          unchanged: summary.unchanged,
+          ignored: summary.ignored
         });
       } catch (error) {
         const code = typeof error === "object" && error && "code" in error ? String(error.code) : "";

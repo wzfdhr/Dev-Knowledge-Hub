@@ -164,7 +164,8 @@ describe("POST /api/repositories/current/uploads", () => {
       snapshotId: expect.any(String),
       sourceVersion: expect.stringMatching(/^[a-f0-9]{40}$/),
       fileCount: 1,
-      unchanged: false
+      unchanged: false,
+      ignored: { total: 0, reasons: {} }
     });
     expect(store.sourceSnapshots).toHaveLength(1);
     expect(await readdir(path.join(context.dataDir, "uploads"))).toEqual([]);

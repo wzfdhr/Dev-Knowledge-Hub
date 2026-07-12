@@ -11,6 +11,8 @@ import { FeedbackPage } from "./pages/feedback-page";
 import { SettingsPage } from "./pages/settings-page";
 import { derivePrimaryAction, OverviewPage } from "./pages/overview-page";
 import type { ApiClient } from "./api/client";
+import { App } from "./app";
+import { ErrorState } from "./components/ui";
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 beforeEach(() => sessionStorage.clear());
@@ -25,6 +27,28 @@ function renderPage(node: React.ReactNode) {
     </QueryClientProvider>
   );
 }
+
+describe("shared console copy", () => {
+  test("renders Chinese console navigation", async () => {
+    const api = {
+      setupStatus: vi.fn().mockResolvedValue({ setupRequired: false }),
+      session: vi.fn().mockResolvedValue({ admin: { email: "admin@example.com" } }),
+      logout: vi.fn().mockResolvedValue(undefined),
+      getRepository: vi.fn().mockRejectedValue(new Error("Repository unavailable")),
+      listBuilds: vi.fn().mockResolvedValue({ builds: [], total: 0, nextOffset: null }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [], total: 0, nextOffset: null }),
+      listFeedback: vi.fn().mockResolvedValue({ feedback: [], total: 0, nextOffset: null })
+    } as unknown as ApiClient;
+
+    renderPage(<><App api={api} /><ErrorState message="Retry fixture" retry={() => {}} /></>);
+
+    expect(await screen.findByRole("link", { name: "总览" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "知识库" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "反馈" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "设置" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "重试" })).toBeVisible();
+  });
+});
 
 describe("overview primary command", () => {
   test("chooses the single next operation from repository and build state", () => {
@@ -311,7 +335,7 @@ describe("knowledge citations", () => {
 
     const error = await screen.findByRole("alert");
     expect(error).toHaveTextContent("Exact release temporarily unavailable");
-    await user.click(within(error).getByRole("button", { name: "Try again" }));
+    await user.click(within(error).getByRole("button", { name: "重试" }));
 
     expect(await screen.findByText("Release 0.1.0")).toBeVisible();
     expect(getRelease).toHaveBeenCalledTimes(2);

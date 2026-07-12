@@ -33,6 +33,7 @@ const repository: RepositoryRecord = {
   localPath: null,
   cloneUrl: "https://github.com/example/private.git",
   defaultBranch: "main",
+  archivedAt: null,
   hasCredential: true
 };
 

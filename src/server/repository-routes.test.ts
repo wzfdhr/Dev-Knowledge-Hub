@@ -122,4 +122,96 @@ describe("repository routes", () => {
     expect(response.statusCode).toBe(400);
     expect(JSON.stringify(response.json())).not.toContain(token);
   });
+
+  test("replaces the current repository and exposes only sanitized archived history", async () => {
+    const { app, cookie } = await authenticatedApp();
+    await app.inject({
+      method: "POST",
+      url: "/api/repositories",
+      headers: { cookie },
+      payload: { kind: "local", path: "/tmp/original", name: "Original" }
+    });
+
+    const replacement = await app.inject({
+      method: "POST",
+      url: "/api/repositories/current/replace",
+      headers: { cookie },
+      payload: { kind: "git", url: "https://github.com/example/replacement.git", name: "Replacement" }
+    });
+
+    expect(replacement.statusCode).toBe(201);
+    expect(replacement.json()).toMatchObject({ repository: { name: "Replacement", kind: "git" } });
+    const archived = await app.inject({
+      method: "GET",
+      url: "/api/repositories/archived",
+      headers: { cookie }
+    });
+    expect(archived.statusCode).toBe(200);
+    expect(archived.json()).toMatchObject({ repositories: [{ name: "Original", kind: "local" }] });
+    expect(JSON.stringify(archived.json())).not.toContain("/tmp/original");
+  });
+
+  test("prepares an uploaded replacement without changing the current repository", async () => {
+    const { app, cookie } = await authenticatedApp();
+    await app.inject({
+      method: "POST",
+      url: "/api/repositories",
+      headers: { cookie },
+      payload: { kind: "local", path: "/tmp/original", name: "Original" }
+    });
+
+    const replacement = await app.inject({
+      method: "POST",
+      url: "/api/repositories/current/replace",
+      headers: { cookie },
+      payload: { kind: "upload", name: "Uploaded replacement" }
+    });
+
+    expect(replacement.statusCode).toBe(202);
+    expect(replacement.json()).toMatchObject({
+      repository: { kind: "upload", name: "Uploaded replacement" },
+      pendingUpload: true
+    });
+    const current = await app.inject({
+      method: "GET",
+      url: "/api/repositories/current",
+      headers: { cookie }
+    });
+    expect(current.json()).toMatchObject({ repository: { name: "Original", kind: "local" } });
+  });
+
+  test("creates an upload repository without a filesystem path or credential", async () => {
+    const { app, cookie } = await authenticatedApp();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/repositories",
+      headers: { cookie },
+      payload: { kind: "upload", name: "Uploaded project" }
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toEqual({
+      repository: expect.objectContaining({ kind: "upload", name: "Uploaded project", defaultBranch: "upload" })
+    });
+  });
+
+  test("asks upload repositories to import a ZIP instead of attempting a Git synchronization", async () => {
+    const { app, cookie } = await authenticatedApp();
+    await app.inject({
+      method: "POST",
+      url: "/api/repositories",
+      headers: { cookie },
+      payload: { kind: "upload", name: "Uploaded project" }
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/repositories/current/sync",
+      headers: { cookie }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ error: { code: "UPLOAD_IMPORT_REQUIRED" } });
+  });
 });

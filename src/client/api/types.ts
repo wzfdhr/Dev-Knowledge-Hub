@@ -5,12 +5,24 @@ export interface Admin { id: string; email: string }
 export interface Session { authenticated: true; admin: Admin }
 export interface Repository {
   id: string;
-  kind: "local" | "git";
+  kind: "local" | "git" | "upload";
   name: string;
   path?: string | null;
   url?: string | null;
   hasCredential?: boolean;
   defaultBranch: string;
+}
+export interface ArchivedRepository {
+  id: string;
+  name: string;
+  kind: Repository["kind"];
+  archivedAt: string;
+}
+export interface UploadSnapshotSummary {
+  snapshotId: string;
+  sourceVersion: string;
+  fileCount: number;
+  unchanged: boolean;
 }
 export interface SnapshotSummary {
   snapshotId: string;
@@ -40,7 +52,7 @@ export interface Release {
 export interface RepositoryStatus {
   repository: Repository;
   latestSnapshot: null | {
-    id: string; commitSha: string; ref: string; commitTimestamp: string;
+    id: string; commitSha: string; ref: string; commitTimestamp: string; fileCount?: number;
   };
 }
 export interface KnowledgeMetadata {

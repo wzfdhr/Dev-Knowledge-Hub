@@ -42,6 +42,7 @@ function localRepository(localPath: string): RepositoryRecord {
     localPath,
     cloneUrl: null,
     defaultBranch: "main",
+    archivedAt: null,
     hasCredential: false
   };
 }

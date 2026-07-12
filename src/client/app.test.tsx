@@ -10,7 +10,7 @@ import { KnowledgePage } from "./pages/knowledge-page";
 import { FeedbackPage } from "./pages/feedback-page";
 import { SettingsPage } from "./pages/settings-page";
 import { derivePrimaryAction, OverviewPage } from "./pages/overview-page";
-import type { ApiClient } from "./api/client";
+import { ApiError, type ApiClient } from "./api/client";
 import { App } from "./app";
 import { ErrorState } from "./components/ui";
 
@@ -167,6 +167,28 @@ describe("overview primary command", () => {
       releases: [{ id: "release", buildId: "build", snapshotId: "snap", version: "1.0.0", createdAt: "2026-07-11", publishedAt: "2026-07-11" }],
       snapshotId: "snap"
     }).kind).toBe("sync");
+  });
+
+  test("restores an uploaded content version after refresh so it can be built", async () => {
+    const contentVersion = "c".repeat(40);
+    const api = {
+      getRepository: vi.fn().mockResolvedValue({ repository: {
+        id: "upload", kind: "upload", name: "Uploaded project", defaultBranch: "upload"
+      } }),
+      getRepositoryStatus: vi.fn().mockResolvedValue({
+        repository: { id: "upload", kind: "upload", name: "Uploaded project", defaultBranch: "upload" },
+        latestSnapshot: { id: "snapshot", commitSha: contentVersion, ref: "upload", commitTimestamp: "2026-07-12" }
+      }),
+      listBuilds: vi.fn().mockResolvedValue({ builds: [], total: 0, nextOffset: null }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [], total: 0, nextOffset: null }),
+      listFeedback: vi.fn().mockResolvedValue({ feedback: [], total: 0, nextOffset: null })
+    } as unknown as ApiClient;
+
+    renderPage(<OverviewPage api={api} />);
+
+    expect(await screen.findByRole("button", { name: "开始构建知识" })).toBeVisible();
+    expect(screen.getByText("内容版本")).toBeVisible();
+    expect(screen.getByText(contentVersion.slice(0, 12))).toBeVisible();
   });
 
   test("blocks state-derived commands when build state fails to load", async () => {
@@ -667,6 +689,69 @@ describe("feedback workflow", () => {
     expect(getSource).not.toHaveBeenCalledWith(expect.objectContaining({
       releaseId: "r1", path: "src/second.ts"
     }));
+  });
+});
+
+describe("repository replacement", () => {
+  test("offers a connected administrator a deliberate repository replacement", async () => {
+    const user = userEvent.setup();
+    const replaceRepository = vi.fn().mockResolvedValue({ repository: {
+      id: "replacement", kind: "upload", name: "Uploaded project", defaultBranch: "upload"
+    } });
+    const api = {
+      getRepository: vi.fn().mockResolvedValue({ repository: {
+        id: "repo", kind: "git", name: "Current repository",
+        url: "https://github.com/example/current.git", hasCredential: false, defaultBranch: "main"
+      } }),
+      getModelConfig: vi.fn().mockResolvedValue({ config: null }),
+      getMcpConnection: vi.fn().mockResolvedValue({
+        endpoint: "/mcp", transport: "streamable-http", authorization: "bearer", tools: []
+      }),
+      listMcpTokens: vi.fn().mockResolvedValue({ tokens: [] }),
+      listArchivedRepositories: vi.fn().mockResolvedValue({ repositories: [] }),
+      replaceRepository
+    } as unknown as ApiClient;
+
+    renderPage(<SettingsPage api={api} />);
+
+    await user.click(await screen.findByRole("button", { name: "更换仓库" }));
+    expect(screen.getByRole("dialog", { name: "更换仓库" })).toHaveTextContent("Current repository");
+    expect(screen.getByRole("button", { name: "确认更换" })).toBeVisible();
+  });
+
+  test("records an uploaded snapshot so Overview can start a build", async () => {
+    const user = userEvent.setup();
+    const api = {
+      getRepository: vi.fn().mockRejectedValue(new ApiError(404, "REPOSITORY_NOT_FOUND", "missing")),
+      connectRepository: vi.fn().mockResolvedValue({ repository: {
+        id: "upload", kind: "upload", name: "Uploaded project", defaultBranch: "upload"
+      } }),
+      uploadZip: vi.fn().mockResolvedValue({
+        snapshotId: "snapshot", sourceVersion: "a".repeat(40), fileCount: 2, unchanged: false
+      }),
+      getModelConfig: vi.fn().mockResolvedValue({ config: null }),
+      getMcpConnection: vi.fn().mockResolvedValue({ endpoint: "/mcp", transport: "streamable-http", authorization: "bearer", tools: [] }),
+      listMcpTokens: vi.fn().mockResolvedValue({ tokens: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<SettingsPage api={api} />);
+    await user.click(await screen.findByRole("button", { name: "上传 ZIP" }));
+    await user.type(screen.getByLabelText("仓库名称"), "Uploaded project");
+    const zip = new File(["zip"], "project.zip", { type: "application/zip" });
+    const uploadInput = screen.getByLabelText("ZIP 项目包") as HTMLInputElement;
+    await user.upload(uploadInput, zip);
+    expect(uploadInput.files?.[0]).toBe(zip);
+    expect({
+      valid: uploadInput.checkValidity(),
+      valueMissing: uploadInput.validity.valueMissing,
+      typeMismatch: uploadInput.validity.typeMismatch,
+      customError: uploadInput.validity.customError
+    }).toEqual({ valid: true, valueMissing: false, typeMismatch: false, customError: false });
+    expect(uploadInput.closest("form")?.checkValidity()).toBe(true);
+    await user.click(screen.getByRole("button", { name: "连接仓库" }));
+
+    await waitFor(() => expect(api.uploadZip).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(sessionStorage.getItem("devkh:last-snapshot")).toContain("snapshot"));
   });
 });
 

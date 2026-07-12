@@ -170,6 +170,69 @@ describe("POST /api/repositories/current/uploads", () => {
     expect(await readdir(path.join(context.dataDir, "uploads"))).toEqual([]);
   });
 
+  test("promotes an uploaded replacement only after its ZIP import succeeds", async () => {
+    const context = await authenticatedApp();
+    await context.app.inject({
+      method: "POST",
+      url: "/api/repositories",
+      headers: { cookie: context.cookie },
+      payload: { kind: "local", name: "Current project", path: "/tmp/current-project" }
+    });
+    const prepared = await context.app.inject({
+      method: "POST",
+      url: "/api/repositories/current/replace",
+      headers: { cookie: context.cookie },
+      payload: { kind: "upload", name: "Uploaded replacement" }
+    });
+    const candidateId = prepared.json().repository.id as string;
+    const body = multipart(await archive());
+
+    const imported = await context.app.inject({
+      method: "POST",
+      url: `/api/repositories/${candidateId}/uploads`,
+      headers: { cookie: context.cookie, ...body.headers },
+      payload: body.payload
+    });
+
+    expect(imported.statusCode).toBe(201);
+    const current = await context.app.inject({
+      method: "GET",
+      url: "/api/repositories/current",
+      headers: { cookie: context.cookie }
+    });
+    expect(current.json()).toMatchObject({ repository: { id: candidateId, kind: "upload" } });
+  });
+
+  test("discards a failed uploaded replacement while preserving the current repository", async () => {
+    const context = await authenticatedApp();
+    await context.app.inject({
+      method: "POST",
+      url: "/api/repositories",
+      headers: { cookie: context.cookie },
+      payload: { kind: "local", name: "Current project", path: "/tmp/current-project" }
+    });
+    const prepared = await context.app.inject({
+      method: "POST",
+      url: "/api/repositories/current/replace",
+      headers: { cookie: context.cookie },
+      payload: { kind: "upload", name: "Broken replacement" }
+    });
+    const body = multipart(Buffer.from("not a zip"));
+
+    const imported = await context.app.inject({
+      method: "POST",
+      url: `/api/repositories/${prepared.json().repository.id}/uploads`,
+      headers: { cookie: context.cookie, ...body.headers },
+      payload: body.payload
+    });
+
+    expect(imported.statusCode).toBe(400);
+    const current = await context.app.inject({ method: "GET", url: "/api/repositories/current", headers: { cookie: context.cookie } });
+    expect(current.json()).toMatchObject({ repository: { name: "Current project", kind: "local" } });
+    const archived = await context.app.inject({ method: "GET", url: "/api/repositories/archived", headers: { cookie: context.cookie } });
+    expect(archived.json()).toEqual({ repositories: [] });
+  });
+
   test("requires exactly one ZIP multipart file", async () => {
     const store = new UploadRepositoryStore();
     const { app, cookie, workspaceId, dataDir } = await authenticatedApp(store);

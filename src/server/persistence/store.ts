@@ -92,7 +92,7 @@ export interface FeedbackRebuildInput {
   build: BuildInput;
 }
 
-export type RepositoryKind = "local" | "git";
+export type RepositoryKind = "local" | "git" | "upload";
 
 export interface RepositoryRecord {
   id: string;
@@ -126,7 +126,8 @@ export interface ModelConfigRecord {
 
 export type RepositoryConnectionInput =
   | { kind: "local"; name: string; path: string }
-  | { kind: "git"; name: string; url: string; encryptedToken?: string };
+  | { kind: "git"; name: string; url: string; encryptedToken?: string }
+  | { kind: "upload"; name: string };
 
 export interface SourceSnapshotRecord {
   id: string;
@@ -369,6 +370,17 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
     input: RepositoryConnectionInput,
     actorId: string
   ): Promise<RepositoryRecord | null>;
+  prepareUploadReplacementWithAudit(
+    workspaceId: string,
+    name: string,
+    actorId: string
+  ): Promise<RepositoryRecord | null>;
+  activateUploadReplacementWithAudit(
+    workspaceId: string,
+    repositoryId: string,
+    actorId: string
+  ): Promise<RepositoryRecord | null>;
+  discardPendingUploadReplacement(workspaceId: string, repositoryId: string): Promise<void>;
   findSnapshotByCommit(
     workspaceId: string,
     repositoryId: string,

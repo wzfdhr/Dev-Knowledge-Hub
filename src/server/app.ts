@@ -69,6 +69,10 @@ const repositorySchema = z.discriminatedUnion("kind", [
     }),
     name: z.string().trim().min(1),
     token: z.string().min(1).optional()
+  }),
+  z.object({
+    kind: z.literal("upload"),
+    name: z.string().trim().min(1)
   })
 ]);
 
@@ -124,6 +128,28 @@ function repositoryDto(repository: RepositoryRecord) {
   };
 }
 
+function repositoryInput(
+  input: z.infer<typeof repositorySchema>,
+  masterKey: string
+) {
+  if (input.kind === "local" || input.kind === "upload") return input;
+  return {
+    kind: input.kind,
+    name: input.name,
+    url: input.url,
+    ...(input.token ? { encryptedToken: encryptSecret(input.token, masterKey) } : {})
+  };
+}
+
+function archivedRepositoryDto(repository: RepositoryRecord) {
+  return {
+    id: repository.id,
+    name: repository.name,
+    kind: repository.kind,
+    archivedAt: repository.archivedAt
+  };
+}
+
 export function buildServer(options: ServerOptions): FastifyInstance {
   const server = Fastify({
     bodyLimit: MAX_REQUEST_BODY_BYTES,
@@ -148,7 +174,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       ? error.statusCode
       : 500;
     if (statusCode === 413) {
-      if (request.url.split("?", 1)[0] === "/api/repositories/current/uploads") {
+      if (/^\/api\/repositories\/(?:current|[^/]+)\/uploads$/.test(request.url.split("?", 1)[0])) {
         return sendError(reply, 413, "ZIP_TOO_LARGE", "ZIP exceeds the 100 MiB compressed limit");
       }
       return sendError(reply, 413, "BODY_TOO_LARGE", "Request body exceeds 1 MiB");
@@ -358,16 +384,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!parsed.success) {
       return sendError(reply, 400, "INVALID_REQUEST", "Invalid repository connection");
     }
-    const input = parsed.data.kind === "local"
-      ? parsed.data
-      : {
-          kind: parsed.data.kind,
-          name: parsed.data.name,
-          url: parsed.data.url,
-          ...(parsed.data.token
-            ? { encryptedToken: encryptSecret(parsed.data.token, options.masterKey) }
-            : {})
-        };
+    const input = repositoryInput(parsed.data, options.masterKey);
     const repository = await options.store.createRepositoryWithAudit(
       admin.workspaceId,
       input,
@@ -377,6 +394,34 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       return sendError(reply, 409, "REPOSITORY_EXISTS", "A repository is already connected");
     }
     return reply.code(201).send(repositoryDto(repository));
+  });
+
+  server.post("/api/repositories/current/replace", { preHandler: requireAdmin }, async (request, reply) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const parsed = repositorySchema.safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid repository connection");
+    if (parsed.data.kind === "upload") {
+      const candidate = await options.store.prepareUploadReplacementWithAudit(
+        admin.workspaceId,
+        parsed.data.name,
+        admin.id
+      );
+      if (!candidate) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+      return reply.code(202).send({ ...repositoryDto(candidate), pendingUpload: true });
+    }
+    const repository = await options.store.switchRepositoryWithAudit(
+      admin.workspaceId,
+      repositoryInput(parsed.data, options.masterKey),
+      admin.id
+    );
+    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    return reply.code(201).send(repositoryDto(repository));
+  });
+
+  server.get("/api/repositories/archived", { preHandler: requireAdmin }, async (request) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repositories = await options.store.listArchivedRepositories(admin.workspaceId);
+    return { repositories: repositories.map(archivedRepositoryDto) };
   });
 
   server.get("/api/repositories/current", { preHandler: requireAdmin }, async (request, reply) => {
@@ -397,7 +442,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         id: latest.id,
         commitSha: latest.commitSha,
         ref: latest.ref,
-        commitTimestamp: latest.commitTimestamp
+        commitTimestamp: latest.commitTimestamp,
+        fileCount: await options.store.countSnapshotFiles(latest.id)
       } : null
     };
   });
@@ -499,6 +545,92 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   );
 
   server.post(
+    "/api/repositories/:repositoryId/uploads",
+    {
+      preHandler: requireAdmin,
+      bodyLimit: MAX_UPLOAD_COMPRESSED_BYTES + 1024 * 1024
+    },
+    async (request, reply) => {
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      const parsed = z.object({ repositoryId: z.uuid() }).safeParse(request.params);
+      if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid upload replacement");
+      const candidates = await options.store.listArchivedRepositories(admin.workspaceId);
+      const repository = candidates.find((candidate) =>
+        candidate.id === parsed.data.repositoryId && candidate.kind === "upload"
+      );
+      if (!repository || await options.store.latestSnapshot(admin.workspaceId, repository.id)) {
+        return sendError(reply, 404, "UPLOAD_REPLACEMENT_NOT_FOUND", "Upload replacement was not found");
+      }
+
+      const requestDirectory = path.join(options.dataDir, "uploads", randomUUID());
+      const archivePath = path.join(requestDirectory, "archive.zip");
+      let replacementActivated = false;
+      const cleanup = () => fs.rm(requestDirectory, { recursive: true, force: true });
+      const uploadError = async (statusCode: number, code: string, message: string) => {
+        await cleanup();
+        return sendError(reply, statusCode, code, message);
+      };
+      await fs.mkdir(requestDirectory, { recursive: true, mode: 0o700 });
+      try {
+        let fileCount = 0;
+        for await (const part of request.parts()) {
+          if (part.type !== "file" || part.fieldname !== "file") {
+            return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file field named file");
+          }
+          fileCount += 1;
+          if (fileCount > 1) return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file");
+          await pipeline(part.file, createWriteStream(archivePath, { flags: "wx", mode: 0o600 }));
+          if (part.file.truncated) {
+            return uploadError(413, "ZIP_TOO_LARGE", "ZIP exceeds the 100 MiB compressed limit");
+          }
+        }
+        if (fileCount !== 1) return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file");
+        const summary = await importZipArchive({
+          archivePath,
+          dataDir: options.dataDir,
+          workspaceId: admin.workspaceId,
+          repositoryId: repository.id,
+          actorId: admin.id,
+          store: options.store
+        });
+        const activated = await options.store.activateUploadReplacementWithAudit(
+          admin.workspaceId,
+          repository.id,
+          admin.id
+        );
+        if (!activated) {
+          return uploadError(409, "UPLOAD_REPLACEMENT_NOT_FOUND", "Upload replacement was not found");
+        }
+        replacementActivated = true;
+        await cleanup();
+        return reply.code(summary.unchanged ? 200 : 201).send({
+          snapshotId: summary.snapshotId,
+          sourceVersion: summary.sourceVersion,
+          fileCount: summary.fileCount,
+          unchanged: summary.unchanged
+        });
+      } catch (error) {
+        const code = typeof error === "object" && error && "code" in error ? String(error.code) : "";
+        if (code === "FST_REQ_FILE_TOO_LARGE" || code === "COMPRESSED_SIZE_LIMIT") {
+          return uploadError(413, "ZIP_TOO_LARGE", "ZIP exceeds the 100 MiB compressed limit");
+        }
+        if (code === "FST_FILES_LIMIT" || code === "FST_PARTS_LIMIT" || code === "FST_FIELDS_LIMIT") {
+          return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file");
+        }
+        if (error instanceof UploadArchiveError) return uploadError(400, error.code, error.message);
+        request.log.error({ err: error }, "ZIP replacement upload failed");
+        return uploadError(500, "UPLOAD_FAILED", "ZIP upload failed");
+      } finally {
+        await cleanup();
+        if (!replacementActivated) {
+          await options.store.discardPendingUploadReplacement(admin.workspaceId, repository.id)
+            .catch(() => undefined);
+        }
+      }
+    }
+  );
+
+  server.post(
     "/api/repositories/current/sync",
     { preHandler: requireAdmin },
     async (request, reply) => {
@@ -506,6 +638,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       const repository = await options.store.currentRepository(admin.workspaceId);
       if (!repository) {
         return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+      }
+      if (repository.kind === "upload") {
+        return sendError(
+          reply,
+          409,
+          "UPLOAD_IMPORT_REQUIRED",
+          "Upload repositories receive new versions through ZIP import"
+        );
       }
       try {
         const encryptedCredential = await options.store.repositoryCredential(

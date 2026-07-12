@@ -47,7 +47,7 @@ interface Queryable {
 interface RepositoryRow extends QueryResultRow {
   id: string;
   workspace_id: string;
-  kind: "local" | "git";
+  kind: "local" | "git" | "upload";
   name: string;
   local_path: string | null;
   clone_url: string | null;
@@ -868,6 +868,95 @@ export class PostgresAppStore implements AppStore {
       });
       return { ...replacement, archivedAt: null };
     });
+  }
+
+  async prepareUploadReplacementWithAudit(
+    workspaceId: string,
+    name: string,
+    actorId: string
+  ): Promise<RepositoryRecord | null> {
+    return this.transaction(async (client) => {
+      const current = await client.query<{ id: string }>(
+        `SELECT id FROM repositories
+         WHERE workspace_id = $1 AND archived_at IS NULL FOR UPDATE`,
+        [workspaceId]
+      );
+      if (!current.rows[0]) return null;
+      const candidate = await this.insertRepository(
+        client,
+        workspaceId,
+        { kind: "upload", name },
+        new Date()
+      );
+      if (!candidate) return null;
+      await this.insertAudit(client, {
+        workspaceId,
+        actorId,
+        action: "repository.upload_replacement_prepared",
+        resourceType: "repository",
+        resourceId: candidate.id,
+        metadata: { kind: "upload" }
+      });
+      return candidate;
+    });
+  }
+
+  async activateUploadReplacementWithAudit(
+    workspaceId: string,
+    repositoryId: string,
+    actorId: string
+  ): Promise<RepositoryRecord | null> {
+    return this.transaction(async (client) => {
+      const current = await client.query<RepositoryRow>(
+        `SELECT r.id, r.workspace_id, r.kind, r.name, r.local_path, r.clone_url,
+                r.default_branch, r.archived_at, false AS has_credential
+         FROM repositories r
+         WHERE r.workspace_id = $1 AND r.archived_at IS NULL FOR UPDATE`,
+        [workspaceId]
+      );
+      const candidate = await client.query<RepositoryRow>(
+        `SELECT r.id, r.workspace_id, r.kind, r.name, r.local_path, r.clone_url,
+                r.default_branch, r.archived_at, false AS has_credential
+         FROM repositories r
+         WHERE r.workspace_id = $1 AND r.id = $2 AND r.kind = 'upload'
+           AND r.archived_at IS NOT NULL FOR UPDATE`,
+        [workspaceId, repositoryId]
+      );
+      if (!current.rows[0] || !candidate.rows[0]) return null;
+      await client.query(
+        `UPDATE repositories SET archived_at = now(), updated_at = now()
+         WHERE id = $1 AND workspace_id = $2 AND archived_at IS NULL`,
+        [current.rows[0].id, workspaceId]
+      );
+      const promoted = await client.query<RepositoryRow>(
+        `UPDATE repositories SET archived_at = NULL, updated_at = now()
+         WHERE id = $1 AND workspace_id = $2 AND archived_at IS NOT NULL
+         RETURNING id, workspace_id, kind, name, local_path, clone_url,
+                   default_branch, archived_at`,
+        [repositoryId, workspaceId]
+      );
+      const replacement = promoted.rows[0];
+      if (!replacement) throw new Error("Upload replacement promotion failed");
+      await this.insertAudit(client, {
+        workspaceId,
+        actorId,
+        action: "repository.switched",
+        resourceType: "repository",
+        resourceId: repositoryId,
+        metadata: { oldRepositoryId: current.rows[0].id, newRepositoryId: repositoryId }
+      });
+      return repositoryRecord({ ...replacement, has_credential: false });
+    });
+  }
+
+  async discardPendingUploadReplacement(workspaceId: string, repositoryId: string): Promise<void> {
+    await this.pool.query(
+      `DELETE FROM repositories r
+       WHERE r.workspace_id = $1 AND r.id = $2 AND r.kind = 'upload'
+         AND r.archived_at IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM source_snapshots s WHERE s.repository_id = r.id)`,
+      [workspaceId, repositoryId]
+    );
   }
 
   async findSnapshotByCommit(

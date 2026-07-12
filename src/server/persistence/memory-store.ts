@@ -418,7 +418,7 @@ export class MemoryAppStore implements AppStore {
       name: input.name,
       localPath: input.kind === "local" ? input.path : null,
       cloneUrl: input.kind === "git" ? input.url : null,
-      defaultBranch: "main",
+      defaultBranch: input.kind === "upload" ? "upload" : "main",
       archivedAt,
       hasCredential: input.kind === "git" && Boolean(input.encryptedToken)
     };
@@ -513,6 +513,85 @@ export class MemoryAppStore implements AppStore {
       this.auditEvents.splice(auditLength);
       throw error;
     }
+  }
+
+  async prepareUploadReplacementWithAudit(
+    workspaceId: string,
+    name: string,
+    actorId: string
+  ): Promise<RepositoryRecord | null> {
+    const repositoryLength = this.repositories.length;
+    const auditLength = this.auditEvents.length;
+    try {
+      if (!await this.currentRepository(workspaceId)) return null;
+      const candidate = await this.insertRepository(
+        workspaceId,
+        { kind: "upload", name },
+        new Date(),
+        false
+      );
+      if (!candidate) return null;
+      await this.recordAudit({
+        workspaceId,
+        actorId,
+        action: "repository.upload_replacement_prepared",
+        resourceType: "repository",
+        resourceId: candidate.id,
+        metadata: { kind: "upload" }
+      });
+      return candidate;
+    } catch (error) {
+      this.repositories.splice(repositoryLength);
+      this.auditEvents.splice(auditLength);
+      throw error;
+    }
+  }
+
+  async activateUploadReplacementWithAudit(
+    workspaceId: string,
+    repositoryId: string,
+    actorId: string
+  ): Promise<RepositoryRecord | null> {
+    const repositorySnapshot = this.repositories.map((repository) => ({ ...repository }));
+    const auditLength = this.auditEvents.length;
+    try {
+      const current = await this.currentRepository(workspaceId);
+      const candidate = this.repositories.find((repository) =>
+        repository.workspaceId === workspaceId
+        && repository.id === repositoryId
+        && repository.kind === "upload"
+        && repository.archivedAt !== null
+      );
+      if (!current || !candidate) return null;
+      const archivedCurrent = { ...current, archivedAt: new Date() };
+      const activated = { ...candidate, archivedAt: null };
+      this.repositories[this.repositories.indexOf(current)] = archivedCurrent;
+      this.repositories[this.repositories.indexOf(candidate)] = activated;
+      await this.recordAudit({
+        workspaceId,
+        actorId,
+        action: "repository.switched",
+        resourceType: "repository",
+        resourceId: activated.id,
+        metadata: { oldRepositoryId: archivedCurrent.id, newRepositoryId: activated.id }
+      });
+      return activated;
+    } catch (error) {
+      this.repositories.splice(0, this.repositories.length, ...repositorySnapshot);
+      this.auditEvents.splice(auditLength);
+      throw error;
+    }
+  }
+
+  async discardPendingUploadReplacement(workspaceId: string, repositoryId: string): Promise<void> {
+    const candidate = this.repositories.find((repository) =>
+      repository.workspaceId === workspaceId
+      && repository.id === repositoryId
+      && repository.kind === "upload"
+      && repository.archivedAt !== null
+    );
+    if (!candidate || this.sourceSnapshots.some((snapshot) => snapshot.repositoryId === repositoryId)) return;
+    this.repositories.splice(this.repositories.indexOf(candidate), 1);
   }
 
   async findSnapshotByCommit(

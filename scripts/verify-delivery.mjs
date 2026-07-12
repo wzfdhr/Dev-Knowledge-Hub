@@ -19,7 +19,11 @@ requireValue(compose.services?.integration?.environment?.TEST_DATABASE_URL?.ends
 requireValue(compose.services?.integration?.environment?.TEST_DATABASE_URL !== compose.services?.app?.environment?.DATABASE_URL, "test database differs from app database");
 requireValue(compose.services?.postgres?.volumes?.includes("./docker/postgres/init-test-db.sql:/docker-entrypoint-initdb.d/10-create-test-db.sql:ro"), "test database init script");
 requireValue(compose.services?.e2e?.build?.target === "e2e", "Compose e2e test target");
-requireValue(Object.keys(compose.volumes ?? {}).sort().join(",") === "postgres_data,repository_mirrors,snapshot_data", "persistent volumes");
+requireValue(
+  Object.keys(compose.volumes ?? {}).sort().join(",")
+    === "caddy_config,caddy_data,postgres_data,repository_mirrors,snapshot_data,upload_staging",
+  "persistent volumes"
+);
 
 if (failures.length) throw new Error(`Delivery configuration failed: ${failures.join(", ")}`);
 console.log("Dockerfile and Compose delivery contracts passed static verification.");

@@ -1,6 +1,7 @@
 import type {
   ApiErrorShape, Build, Feedback, McpConnection, McpToken, KnowledgePageRecord,
-  KnowledgeMetadata, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotSummary, SourceExcerpt
+  ArchivedRepository, KnowledgeMetadata, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotSummary, SourceExcerpt,
+  UploadSnapshotSummary
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
@@ -28,7 +29,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     credentials: "same-origin",
     ...init,
-    headers: init?.body ? { "content-type": "application/json", ...init.headers } : init?.headers
+    headers: init?.body && !(init.body instanceof FormData)
+      ? { "content-type": "application/json", ...init.headers }
+      : init?.headers
   });
   if (!response.ok) {
     const body = await response.json().catch(() => null) as ApiErrorShape | null;
@@ -43,7 +46,11 @@ export interface ApiClient {
   login(input: { email: string; password: string }): Promise<Session>;
   session(): Promise<Session>;
   logout(): Promise<void>;
-  connectRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string }): Promise<{ repository: Repository }>;
+  connectRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository }>;
+  replaceRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository; pendingUpload?: boolean }>;
+  listArchivedRepositories(): Promise<{ repositories: ArchivedRepository[] }>;
+  uploadZip(file: File): Promise<UploadSnapshotSummary>;
+  uploadReplacementZip(repositoryId: string, file: File): Promise<UploadSnapshotSummary>;
   getRepository(): Promise<{ repository: Repository }>;
   getRepositoryStatus(): Promise<RepositoryStatus>;
   syncRepository(): Promise<SnapshotSummary>;
@@ -92,6 +99,18 @@ export const api: ApiClient = {
   session: () => request("/api/session"),
   logout: () => request("/api/session", { method: "DELETE" }),
   connectRepository: (input) => request("/api/repositories", { method: "POST", body: json(input) }),
+  replaceRepository: (input) => request("/api/repositories/current/replace", { method: "POST", body: json(input) }),
+  listArchivedRepositories: () => request("/api/repositories/archived"),
+  uploadZip: (file) => {
+    const data = new FormData();
+    data.append("file", file, file.name);
+    return request("/api/repositories/current/uploads", { method: "POST", body: data });
+  },
+  uploadReplacementZip: (repositoryId, file) => {
+    const data = new FormData();
+    data.append("file", file, file.name);
+    return request(`/api/repositories/${encodeURIComponent(repositoryId)}/uploads`, { method: "POST", body: data });
+  },
   getRepository: () => request("/api/repositories/current"),
   getRepositoryStatus: () => request("/api/repositories/current/status"),
   syncRepository: () => request("/api/repositories/current/sync", { method: "POST" }),

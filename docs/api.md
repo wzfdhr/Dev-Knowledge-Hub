@@ -21,6 +21,7 @@ The administration API uses JSON under `/api`. Except health, setup status, setu
 | GET | `/api/repositories/current` | Current sanitized repository |
 | GET | `/api/repositories/current/status` | Repository and latest snapshot |
 | POST | `/api/repositories/current/sync` | Create/reuse immutable snapshot |
+| POST | `/api/repositories/current/uploads` | Multipart `file`: import one ZIP into the active upload repository |
 | GET/POST | `/api/builds` | List newest-first or start `{snapshotId}` |
 | GET | `/api/builds/:id` | Build details |
 | POST | `/api/builds/:id/cancel` | Request cancellation |
@@ -39,7 +40,13 @@ The administration API uses JSON under `/api`. Except health, setup status, setu
 | POST | `/api/feedback/:id/rebuild` | Rebuild acknowledged feedback against published snapshot |
 | * | `/mcp` | Bearer-authenticated Streamable HTTP MCP |
 
-Rate-limited write buckets are setup, login, MCP, and feedback transition/rebuild. A limit response is HTTP 429 with `Retry-After` and error code `RATE_LIMITED`.
+Rate-limited write buckets are setup, login, MCP, ZIP upload, and feedback transition/rebuild. A limit response is HTTP 429 with `Retry-After` and error code `RATE_LIMITED`.
+
+## ZIP uploads
+
+`POST /api/repositories/current/uploads` requires an authenticated session and exactly one `multipart/form-data` file part named `file`. The compressed ZIP limit is 100 MiB. Archives are rejected when they exceed 10,000 entries or 500 MiB expanded, are encrypted, contain symbolic links, or contain absolute, traversal, backslash, duplicate, or conflicting file/directory paths. Accepted snapshots apply the Git snapshot source filters, including exclusion of `.env`, binary, generated, and text files over 1 MiB. A successful response is `{snapshotId,sourceVersion,fileCount,unchanged}`, where `sourceVersion` is a deterministic 40-character hash of sorted accepted paths and contents. New snapshots return HTTP 201 and identical content returns HTTP 200. Raw ZIP bytes and upload staging are removed after every attempt.
+
+The endpoint returns HTTP 409 `UPLOAD_REPOSITORY_REQUIRED` when no active repository exists or the active repository is not kind `upload`; it never creates, switches, or archives repositories. Repository persistence currently types `RepositoryKind` as `local | git`, so repository-owned follow-up must add `upload` to `RepositoryKind`, add an upload case to `RepositoryConnectionInput`, and teach the memory/Postgres create and switching implementations to persist and activate that kind. The route already integrates with `currentRepository`, `findSnapshotByCommit`, and `createSnapshotWithAudit` once an upload repository can be returned.
 
 ## MCP tools
 

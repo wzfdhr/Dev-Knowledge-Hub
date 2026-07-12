@@ -16,6 +16,7 @@ function options(overrides: Partial<ServerOptions> = {}): ServerOptions {
       login: 1,
       mcp: 1,
       feedback: 1,
+      upload: 1,
       windowMs: 60_000,
       maxEntries: 100,
       sweepIntervalMs: 60_000
@@ -76,6 +77,7 @@ describe("HTTP security policy", () => {
     ["setup", "/api/setup", { email: "invalid", password: "invalid" }],
     ["login", "/api/session", { email: "invalid", password: "invalid" }],
     ["mcp", "/mcp", {}],
+    ["upload", "/api/repositories/current/uploads", {}],
     ["feedback", "/api/feedback/00000000-0000-4000-8000-000000000000/rebuild", {}]
   ])("rate limits %s writes independently", async (_name, url, payload) => {
     const app = buildServer(options());

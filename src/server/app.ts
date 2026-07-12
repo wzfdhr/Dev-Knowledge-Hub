@@ -1,8 +1,10 @@
-import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { createWriteStream, promises as fs } from "node:fs";
 import path from "node:path";
+import { pipeline } from "node:stream/promises";
 
 import cookie from "@fastify/cookie";
+import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import Fastify, {
@@ -39,6 +41,11 @@ import {
   registerHttpSecurity,
   type RateLimitPolicy
 } from "./security/http.js";
+import {
+  importZipArchive,
+  MAX_UPLOAD_COMPRESSED_BYTES,
+  UploadArchiveError
+} from "./uploads/zip-import.js";
 
 const SESSION_COOKIE = "devkh_session";
 const SESSION_MAX_AGE = 8 * 60 * 60;
@@ -102,14 +109,16 @@ function sendError(reply: FastifyReply, statusCode: number, code: string, messag
 }
 
 function repositoryDto(repository: RepositoryRecord) {
+  const kind = (repository as { kind: string }).kind;
   return {
     repository: {
       id: repository.id,
       kind: repository.kind,
       name: repository.name,
-      ...(repository.kind === "local"
-        ? { path: repository.localPath }
-        : { url: repository.cloneUrl, hasCredential: repository.hasCredential }),
+      ...(kind === "local" ? { path: repository.localPath } : {}),
+      ...(kind === "git"
+        ? { url: repository.cloneUrl, hasCredential: repository.hasCredential }
+        : {}),
       defaultBranch: repository.defaultBranch
     }
   };
@@ -139,12 +148,23 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       ? error.statusCode
       : 500;
     if (statusCode === 413) {
+      if (request.url.split("?", 1)[0] === "/api/repositories/current/uploads") {
+        return sendError(reply, 413, "ZIP_TOO_LARGE", "ZIP exceeds the 100 MiB compressed limit");
+      }
       return sendError(reply, 413, "BODY_TOO_LARGE", "Request body exceeds 1 MiB");
     }
     request.log.error({ err: error }, "Request failed");
     return sendError(reply, statusCode, "REQUEST_FAILED", "Request failed");
   });
   void server.register(cookie);
+  void server.register(multipart, {
+    limits: {
+      files: 1,
+      fields: 0,
+      parts: 1,
+      fileSize: MAX_UPLOAD_COMPRESSED_BYTES
+    }
+  });
   if (options.clientDir) {
     void server.register(fastifyStatic, { root: options.clientDir });
     server.setNotFoundHandler((request, reply) => {
@@ -381,6 +401,102 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       } : null
     };
   });
+
+  server.post(
+    "/api/repositories/current/uploads",
+    {
+      preHandler: requireAdmin,
+      bodyLimit: MAX_UPLOAD_COMPRESSED_BYTES + 1024 * 1024
+    },
+    async (request, reply) => {
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      const repository = await options.store.currentRepository(admin.workspaceId);
+      if (!repository || (repository as { kind: string }).kind !== "upload") {
+        return sendError(
+          reply,
+          409,
+          "UPLOAD_REPOSITORY_REQUIRED",
+          "Connect and activate an upload repository before importing a ZIP snapshot"
+        );
+      }
+
+      const requestDirectory = path.join(options.dataDir, "uploads", randomUUID());
+      const archivePath = path.join(requestDirectory, "archive.zip");
+      const cleanup = () => fs.rm(requestDirectory, { recursive: true, force: true });
+      const uploadError = async (statusCode: number, code: string, message: string) => {
+        await cleanup();
+        return sendError(reply, statusCode, code, message);
+      };
+      await fs.mkdir(requestDirectory, { recursive: true, mode: 0o700 });
+      try {
+        let fileCount = 0;
+        for await (const part of request.parts()) {
+          if (part.type !== "file" || part.fieldname !== "file") {
+            return uploadError(
+              400,
+              "INVALID_UPLOAD",
+              "Provide exactly one ZIP file field named file"
+            );
+          }
+          fileCount += 1;
+          if (fileCount > 1) {
+            return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file");
+          }
+          await pipeline(part.file, createWriteStream(archivePath, { flags: "wx", mode: 0o600 }));
+          if (part.file.truncated) {
+            return uploadError(
+              413,
+              "ZIP_TOO_LARGE",
+              "ZIP exceeds the 100 MiB compressed limit"
+            );
+          }
+        }
+        if (fileCount !== 1) {
+          return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file");
+        }
+        const summary = await importZipArchive({
+          archivePath,
+          dataDir: options.dataDir,
+          workspaceId: admin.workspaceId,
+          repositoryId: repository.id,
+          actorId: admin.id,
+          store: options.store
+        });
+        const response = {
+          snapshotId: summary.snapshotId,
+          sourceVersion: summary.sourceVersion,
+          fileCount: summary.fileCount,
+          unchanged: summary.unchanged
+        };
+        await cleanup();
+        return reply.code(summary.unchanged ? 200 : 201).send(response);
+      } catch (error) {
+        const code = typeof error === "object" && error && "code" in error
+          ? String(error.code)
+          : "";
+        if (code === "FST_REQ_FILE_TOO_LARGE") {
+          return uploadError(413, "ZIP_TOO_LARGE", "ZIP exceeds the 100 MiB compressed limit");
+        }
+        if (code === "FST_FILES_LIMIT" || code === "FST_PARTS_LIMIT" || code === "FST_FIELDS_LIMIT") {
+          return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file");
+        }
+        if (error instanceof UploadArchiveError) {
+          if (error.code === "COMPRESSED_SIZE_LIMIT") {
+            return uploadError(
+              413,
+              "ZIP_TOO_LARGE",
+              "ZIP exceeds the 100 MiB compressed limit"
+            );
+          }
+          return uploadError(400, error.code, error.message);
+        }
+        request.log.error({ err: error }, "ZIP upload failed");
+        return uploadError(500, "UPLOAD_FAILED", "ZIP upload failed");
+      } finally {
+        await cleanup();
+      }
+    }
+  );
 
   server.post(
     "/api/repositories/current/sync",

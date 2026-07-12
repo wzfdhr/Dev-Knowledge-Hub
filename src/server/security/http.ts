@@ -7,6 +7,7 @@ export interface RateLimitPolicy {
   login: number;
   mcp: number;
   feedback: number;
+  upload?: number;
   windowMs: number;
   maxEntries: number;
   sweepIntervalMs: number;
@@ -17,6 +18,7 @@ export const DEFAULT_RATE_LIMITS: RateLimitPolicy = {
   login: 10,
   mcp: 120,
   feedback: 30,
+  upload: 5,
   windowMs: 60_000,
   maxEntries: 10_000,
   sweepIntervalMs: 60_000
@@ -33,7 +35,7 @@ export function redactSensitive(value: unknown): unknown {
   ]));
 }
 
-type BucketName = "setup" | "login" | "mcp" | "feedback";
+type BucketName = "setup" | "login" | "mcp" | "feedback" | "upload";
 
 interface RateLimitEntry {
   count: number;
@@ -98,6 +100,9 @@ function bucketFor(request: FastifyRequest): BucketName | undefined {
   if (request.method === "POST" && pathname === "/api/setup") return "setup";
   if (request.method === "POST" && pathname === "/api/session") return "login";
   if (pathname === "/mcp") return "mcp";
+  if (request.method === "POST" && pathname === "/api/repositories/current/uploads") {
+    return "upload";
+  }
   if ((request.method === "POST" || request.method === "PATCH") && pathname.startsWith("/api/feedback/")) {
     return "feedback";
   }
@@ -128,7 +133,10 @@ export function registerHttpSecurity(
     if (!bucket) return;
     const key = `${bucket}:${request.ip}`;
     const timestamp = now();
-    const entry = counters.consume(key, policy[bucket], timestamp, policy.windowMs);
+    const limit = bucket === "upload"
+      ? policy.upload ?? DEFAULT_RATE_LIMITS.upload ?? 5
+      : policy[bucket];
+    const entry = counters.consume(key, limit, timestamp, policy.windowMs);
     if (!entry.limited) return;
 
     const retryAfter = Math.max(1, Math.ceil((entry.resetAt - timestamp) / 1000));

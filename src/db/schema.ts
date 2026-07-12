@@ -57,10 +57,13 @@ export const repositories = pgTable("repositories", {
   localPath: text("local_path"),
   cloneUrl: text("clone_url"),
   defaultBranch: text("default_branch").notNull().default("main"),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
   ...timestamps
 }, (table) => [
   uniqueIndex("repositories_id_workspace_idx").on(table.id, table.workspaceId),
-  uniqueIndex("repositories_workspace_unique_idx").on(table.workspaceId)
+  uniqueIndex("repositories_workspace_current_unique_idx")
+    .on(table.workspaceId)
+    .where(sql`${table.archivedAt} IS NULL`)
 ]);
 
 export const encryptedCredentials = pgTable("encrypted_credentials", {

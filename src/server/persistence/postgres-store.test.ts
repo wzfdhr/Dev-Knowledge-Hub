@@ -14,6 +14,7 @@ describe("PostgresAppStore repository reads", () => {
           local_path: null,
           clone_url: "https://example.com/private.git",
           default_branch: "main",
+          archived_at: null,
           has_credential: true
         }]
       })
@@ -29,12 +30,126 @@ describe("PostgresAppStore repository reads", () => {
       localPath: null,
       cloneUrl: "https://example.com/private.git",
       defaultBranch: "main",
+      archivedAt: null,
       hasCredential: true
     });
     expect(JSON.stringify(repository)).not.toContain("encrypted-only");
 
     await expect(store.repositoryCredential("workspace-1", "repo-1")).resolves.toBe("encrypted-only");
     expect(query).toHaveBeenCalledTimes(2);
+    expect(String(query.mock.calls[0][0])).toContain("r.archived_at IS NULL");
+  });
+
+  test("creates a credentialed archived candidate before atomically switching current repositories", async () => {
+    const original = {
+      id: "repo-original",
+      workspace_id: "workspace-1",
+      kind: "local",
+      name: "Original",
+      local_path: "/original",
+      clone_url: null,
+      default_branch: "main",
+      archived_at: null,
+      has_credential: false
+    };
+    const replacement = {
+      id: "repo-replacement",
+      workspace_id: "workspace-1",
+      kind: "git",
+      name: "Replacement",
+      local_path: null,
+      clone_url: "https://example.com/replacement.git",
+      default_branch: "main",
+      archived_at: new Date("2026-07-12T00:00:00.000Z"),
+      has_credential: false
+    };
+    const query = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
+      if (sql.includes("FROM repositories r") && sql.includes("FOR UPDATE")) {
+        return { rows: [original] };
+      }
+      if (sql.includes("INSERT INTO repositories")) return { rows: [replacement] };
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+
+    const switched = await store.switchRepositoryWithAudit("workspace-1", {
+      kind: "git",
+      name: "Replacement",
+      url: "https://example.com/replacement.git",
+      encryptedToken: "encrypted-token"
+    }, "admin-1");
+
+    expect(switched).toEqual({
+      id: "repo-replacement",
+      workspaceId: "workspace-1",
+      kind: "git",
+      name: "Replacement",
+      localPath: null,
+      cloneUrl: "https://example.com/replacement.git",
+      defaultBranch: "main",
+      archivedAt: null,
+      hasCredential: true
+    });
+    expect(query.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/)[0])).toEqual([
+      "BEGIN", "SELECT", "INSERT", "INSERT", "UPDATE", "UPDATE", "INSERT", "COMMIT"
+    ]);
+    expect(String(query.mock.calls[2][0])).toContain("archived_at");
+    expect(String(query.mock.calls[4][0])).toContain("SET archived_at = now()");
+    expect(String(query.mock.calls[5][0])).toContain("SET archived_at = NULL");
+    expect(query.mock.calls[6][1]).toEqual(expect.arrayContaining([
+      expect.stringContaining("oldRepositoryId"),
+      expect.stringContaining("newRepositoryId")
+    ]));
+  });
+
+  test("rolls back before archiving the current repository when credential creation fails", async () => {
+    const original = {
+      id: "repo-original",
+      workspace_id: "workspace-1",
+      kind: "local",
+      name: "Original",
+      local_path: "/original",
+      clone_url: null,
+      default_branch: "main",
+      archived_at: null,
+      has_credential: false
+    };
+    const replacement = {
+      ...original,
+      id: "repo-replacement",
+      kind: "git" as const,
+      name: "Replacement",
+      local_path: null,
+      clone_url: "https://example.com/replacement.git",
+      archived_at: new Date("2026-07-12T00:00:00.000Z")
+    };
+    const query = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
+      if (sql.includes("FROM repositories r") && sql.includes("FOR UPDATE")) {
+        return { rows: [original] };
+      }
+      if (sql.includes("INSERT INTO repositories")) return { rows: [replacement] };
+      if (sql.includes("INSERT INTO encrypted_credentials")) {
+        throw new Error("credential unavailable");
+      }
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+
+    await expect(store.switchRepositoryWithAudit("workspace-1", {
+      kind: "git",
+      name: "Replacement",
+      url: "https://example.com/replacement.git",
+      encryptedToken: "encrypted-token"
+    }, "admin-1")).rejects.toThrow("credential unavailable");
+
+    expect(query.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/)[0])).toEqual([
+      "BEGIN", "SELECT", "INSERT", "INSERT", "ROLLBACK"
+    ]);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("UPDATE repositories"))).toBe(false);
   });
 
   test("returns the winning snapshot on commit conflict without inserting loser files", async () => {
@@ -382,6 +497,7 @@ describe("PostgresAppStore audited mutations", () => {
     local_path: "/fixture",
     clone_url: null,
     default_branch: "main",
+    archived_at: null,
     has_credential: false
   };
   const snapshotRow = {

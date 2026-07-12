@@ -45,7 +45,7 @@ import type { CodeIndex } from "../knowledge/intelligence.js";
 export class MemoryAppStore implements AppStore {
   private workspace: WorkspaceRecord | null = null;
   private admin: AdminRecord | null = null;
-  private repository: RepositoryRecord | null = null;
+  private readonly repositories: RepositoryRecord[] = [];
   readonly auditEvents: AuditEventRecord[] = [];
   readonly mcpTokens: McpTokenRecord[] = [];
   readonly feedback: AgentFeedbackRecord[] = [];
@@ -393,29 +393,51 @@ export class MemoryAppStore implements AppStore {
     workspaceId: string,
     input: RepositoryConnectionInput
   ): Promise<RepositoryRecord | null> {
-    if (this.repository?.workspaceId === workspaceId) return null;
-    const repositoryId = randomUUID();
-    this.repository = {
-      id: repositoryId,
+    const repositoryLength = this.repositories.length;
+    const credentialLength = this.encryptedCredentials.length;
+    try {
+      return await this.insertRepository(workspaceId, input, null, true);
+    } catch (error) {
+      this.repositories.splice(repositoryLength);
+      this.encryptedCredentials.splice(credentialLength);
+      throw error;
+    }
+  }
+
+  private async insertRepository(
+    workspaceId: string,
+    input: RepositoryConnectionInput,
+    archivedAt: Date | null,
+    requiresNoCurrentRepository: boolean
+  ): Promise<RepositoryRecord | null> {
+    if (requiresNoCurrentRepository && await this.currentRepository(workspaceId)) return null;
+    const repository: RepositoryRecord = {
+      id: randomUUID(),
       workspaceId,
       kind: input.kind,
       name: input.name,
       localPath: input.kind === "local" ? input.path : null,
       cloneUrl: input.kind === "git" ? input.url : null,
       defaultBranch: "main",
+      archivedAt,
       hasCredential: input.kind === "git" && Boolean(input.encryptedToken)
     };
+    this.repositories.push(repository);
     if (input.kind === "git" && input.encryptedToken) {
-      this.encryptedCredentials.push({
+      await this.createRepositoryCredential({
         id: randomUUID(),
         workspaceId,
-        repositoryId,
+        repositoryId: repository.id,
         name: "repository-pat",
         ciphertext: input.encryptedToken,
         metadata: {}
       });
     }
-    return this.repository;
+    return repository;
+  }
+
+  protected async createRepositoryCredential(credential: EncryptedCredentialRecord): Promise<void> {
+    this.encryptedCredentials.push(credential);
   }
 
   async createRepositoryWithAudit(
@@ -423,7 +445,7 @@ export class MemoryAppStore implements AppStore {
     input: RepositoryConnectionInput,
     actorId: string
   ): Promise<RepositoryRecord | null> {
-    const previousRepository = this.repository;
+    const repositoryLength = this.repositories.length;
     const credentialLength = this.encryptedCredentials.length;
     const auditLength = this.auditEvents.length;
     try {
@@ -439,7 +461,7 @@ export class MemoryAppStore implements AppStore {
       });
       return repository;
     } catch (error) {
-      this.repository = previousRepository;
+      this.repositories.splice(repositoryLength);
       this.encryptedCredentials.splice(credentialLength);
       this.auditEvents.splice(auditLength);
       throw error;
@@ -447,7 +469,50 @@ export class MemoryAppStore implements AppStore {
   }
 
   async currentRepository(workspaceId: string): Promise<RepositoryRecord | null> {
-    return this.repository?.workspaceId === workspaceId ? this.repository : null;
+    return this.repositories.find((repository) =>
+      repository.workspaceId === workspaceId && repository.archivedAt === null
+    ) ?? null;
+  }
+
+  async listArchivedRepositories(workspaceId: string): Promise<RepositoryRecord[]> {
+    return this.repositories.filter((repository) =>
+      repository.workspaceId === workspaceId && repository.archivedAt !== null
+    ).sort((left, right) => right.archivedAt!.getTime() - left.archivedAt!.getTime()
+      || right.id.localeCompare(left.id));
+  }
+
+  async switchRepositoryWithAudit(
+    workspaceId: string,
+    input: RepositoryConnectionInput,
+    actorId: string
+  ): Promise<RepositoryRecord | null> {
+    const repositorySnapshot = this.repositories.map((repository) => ({ ...repository }));
+    const credentialLength = this.encryptedCredentials.length;
+    const auditLength = this.auditEvents.length;
+    try {
+      const current = await this.currentRepository(workspaceId);
+      if (!current) return null;
+      const replacement = await this.insertRepository(workspaceId, input, new Date(), false);
+      if (!replacement) return null;
+      const archivedCurrent = { ...current, archivedAt: new Date() };
+      const promotedReplacement = { ...replacement, archivedAt: null };
+      this.repositories[this.repositories.indexOf(current)] = archivedCurrent;
+      this.repositories[this.repositories.indexOf(replacement)] = promotedReplacement;
+      await this.recordAudit({
+        workspaceId,
+        actorId,
+        action: "repository.switched",
+        resourceType: "repository",
+        resourceId: promotedReplacement.id,
+        metadata: { oldRepositoryId: archivedCurrent.id, newRepositoryId: promotedReplacement.id }
+      });
+      return promotedReplacement;
+    } catch (error) {
+      this.repositories.splice(0, this.repositories.length, ...repositorySnapshot);
+      this.encryptedCredentials.splice(credentialLength);
+      this.auditEvents.splice(auditLength);
+      throw error;
+    }
   }
 
   async findSnapshotByCommit(
@@ -810,7 +875,7 @@ export class MemoryAppStore implements AppStore {
   ): Promise<KnowledgePageRecord[]> {
     let release = releaseId ? this.releaseById(workspaceId, releaseId) : null;
     if (!release && !releaseId) {
-      const repository = this.repository?.workspaceId === workspaceId ? this.repository : null;
+      const repository = await this.currentRepository(workspaceId);
       if (repository) release = await this.currentRelease(workspaceId, repository.id);
     }
     if (!release) return [];
@@ -824,7 +889,7 @@ export class MemoryAppStore implements AppStore {
   async countKnowledgePages(workspaceId: string, releaseId?: string): Promise<number> {
     let release = releaseId ? this.releaseById(workspaceId, releaseId) : null;
     if (!release && !releaseId) {
-      const repository = this.repository?.workspaceId === workspaceId ? this.repository : null;
+      const repository = await this.currentRepository(workspaceId);
       if (repository) release = await this.currentRelease(workspaceId, repository.id);
     }
     return release ? this.knowledgePages.filter((page) =>

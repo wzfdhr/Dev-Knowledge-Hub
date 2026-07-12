@@ -52,6 +52,7 @@ interface RepositoryRow extends QueryResultRow {
   local_path: string | null;
   clone_url: string | null;
   default_branch: string;
+  archived_at: Date | null;
   has_credential: boolean;
 }
 
@@ -139,6 +140,7 @@ function repositoryRecord(row: RepositoryRow): RepositoryRecord {
     localPath: row.local_path,
     cloneUrl: row.clone_url,
     defaultBranch: row.default_branch,
+    archivedAt: row.archived_at,
     hasCredential: row.has_credential
   };
 }
@@ -743,19 +745,21 @@ export class PostgresAppStore implements AppStore {
   private async insertRepository(
     client: Queryable,
     workspaceId: string,
-    input: RepositoryConnectionInput
+    input: RepositoryConnectionInput,
+    archivedAt: Date | null = null
   ): Promise<RepositoryRecord | null> {
     const result = await client.query<RepositoryRow>(
-        `INSERT INTO repositories (workspace_id, kind, name, local_path, clone_url)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (workspace_id) DO NOTHING
-         RETURNING id, workspace_id, kind, name, local_path, clone_url, default_branch`,
+        `INSERT INTO repositories (workspace_id, kind, name, local_path, clone_url, archived_at)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (workspace_id) WHERE archived_at IS NULL DO NOTHING
+         RETURNING id, workspace_id, kind, name, local_path, clone_url, default_branch, archived_at`,
         [
           workspaceId,
           input.kind,
           input.name,
           input.kind === "local" ? input.path : null,
-          input.kind === "git" ? input.url : null
+          input.kind === "git" ? input.url : null,
+          archivedAt
         ]
       );
     const row = result.rows[0];
@@ -794,15 +798,76 @@ export class PostgresAppStore implements AppStore {
   async currentRepository(workspaceId: string): Promise<RepositoryRecord | null> {
     const { rows } = await this.pool.query<RepositoryRow>(
       `SELECT r.id, r.workspace_id, r.kind, r.name, r.local_path, r.clone_url,
-              r.default_branch,
+              r.default_branch, r.archived_at,
               EXISTS (
                 SELECT 1 FROM encrypted_credentials c
                 WHERE c.workspace_id = r.workspace_id AND c.repository_id = r.id
               ) AS has_credential
-       FROM repositories r WHERE r.workspace_id = $1 LIMIT 1`,
+       FROM repositories r WHERE r.workspace_id = $1 AND r.archived_at IS NULL LIMIT 1`,
       [workspaceId]
     );
     return rows[0] ? repositoryRecord(rows[0]) : null;
+  }
+
+  async listArchivedRepositories(workspaceId: string): Promise<RepositoryRecord[]> {
+    const { rows } = await this.pool.query<RepositoryRow>(
+      `SELECT r.id, r.workspace_id, r.kind, r.name, r.local_path, r.clone_url,
+              r.default_branch, r.archived_at,
+              EXISTS (
+                SELECT 1 FROM encrypted_credentials c
+                WHERE c.workspace_id = r.workspace_id AND c.repository_id = r.id
+              ) AS has_credential
+       FROM repositories r
+       WHERE r.workspace_id = $1 AND r.archived_at IS NOT NULL
+       ORDER BY r.archived_at DESC, r.id DESC`,
+      [workspaceId]
+    );
+    return rows.map(repositoryRecord);
+  }
+
+  async switchRepositoryWithAudit(
+    workspaceId: string,
+    input: RepositoryConnectionInput,
+    actorId: string
+  ): Promise<RepositoryRecord | null> {
+    return this.transaction(async (client) => {
+      const selected = await client.query<RepositoryRow>(
+        `SELECT r.id, r.workspace_id, r.kind, r.name, r.local_path, r.clone_url,
+                r.default_branch, r.archived_at,
+                EXISTS (
+                  SELECT 1 FROM encrypted_credentials c
+                  WHERE c.workspace_id = r.workspace_id AND c.repository_id = r.id
+                ) AS has_credential
+         FROM repositories r
+         WHERE r.workspace_id = $1 AND r.archived_at IS NULL
+         FOR UPDATE`,
+        [workspaceId]
+      );
+      const currentRow = selected.rows[0];
+      if (!currentRow) return null;
+      const current = repositoryRecord(currentRow);
+      const replacement = await this.insertRepository(client, workspaceId, input, new Date());
+      if (!replacement) return null;
+      await client.query(
+        `UPDATE repositories SET archived_at = now(), updated_at = now()
+         WHERE id = $1 AND workspace_id = $2 AND archived_at IS NULL`,
+        [current.id, workspaceId]
+      );
+      await client.query(
+        `UPDATE repositories SET archived_at = NULL, updated_at = now()
+         WHERE id = $1 AND workspace_id = $2 AND archived_at IS NOT NULL`,
+        [replacement.id, workspaceId]
+      );
+      await this.insertAudit(client, {
+        workspaceId,
+        actorId,
+        action: "repository.switched",
+        resourceType: "repository",
+        resourceId: replacement.id,
+        metadata: { oldRepositoryId: current.id, newRepositoryId: replacement.id }
+      });
+      return { ...replacement, archivedAt: null };
+    });
   }
 
   async findSnapshotByCommit(

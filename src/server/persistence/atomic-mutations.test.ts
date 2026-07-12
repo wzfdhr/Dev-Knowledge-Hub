@@ -13,6 +13,12 @@ class FailingAuditStore extends MemoryAppStore {
   }
 }
 
+class FailingRepositoryCredentialStore extends MemoryAppStore {
+  protected async createRepositoryCredential(): Promise<void> {
+    throw new Error("credential unavailable");
+  }
+}
+
 describe("core mutation audit atomicity", () => {
   test("rolls back initial setup when its audit insert fails", async () => {
     const store = new FailingAuditStore();
@@ -42,6 +48,68 @@ describe("core mutation audit atomicity", () => {
     expect(store.encryptedCredentials).toEqual([]);
     expect(store.auditEvents.filter((event) => event.action === "repository.connected"))
       .toEqual([]);
+  });
+
+  test("archives the previous repository without changing its release history", async () => {
+    const store = new MemoryAppStore();
+    const setup = await store.createInitialSetup("admin@example.com", "hash");
+    const original = await store.createRepository(setup!.workspace.id, {
+      kind: "local",
+      name: "Original",
+      path: "/original"
+    });
+    store.releases.push({
+      id: "release-original",
+      workspaceId: setup!.workspace.id,
+      repositoryId: original!.id,
+      buildId: "build-original",
+      snapshotId: "snapshot-original",
+      version: "1.0.0",
+      createdAt: new Date("2026-07-11T00:00:00.000Z"),
+      publishedAt: new Date("2026-07-11T00:01:00.000Z")
+    });
+
+    const replacement = await store.switchRepositoryWithAudit(setup!.workspace.id, {
+      kind: "git",
+      name: "Replacement",
+      url: "https://example.com/replacement.git",
+      encryptedToken: "encrypted-token"
+    }, setup!.admin.id);
+
+    await expect(store.currentRepository(setup!.workspace.id)).resolves.toEqual(replacement);
+    await expect(store.listArchivedRepositories(setup!.workspace.id)).resolves.toEqual([
+      expect.objectContaining({ id: original!.id, archivedAt: expect.any(Date) })
+    ]);
+    expect(store.releases).toContainEqual(expect.objectContaining({
+      id: "release-original",
+      repositoryId: original!.id
+    }));
+    expect(store.auditEvents).toContainEqual(expect.objectContaining({
+      action: "repository.switched",
+      metadata: { oldRepositoryId: original!.id, newRepositoryId: replacement!.id }
+    }));
+  });
+
+  test("rolls back a replacement when encrypted credential creation fails", async () => {
+    const store = new FailingRepositoryCredentialStore();
+    const setup = await store.createInitialSetup("admin@example.com", "hash");
+    const original = await store.createRepository(setup!.workspace.id, {
+      kind: "local",
+      name: "Original",
+      path: "/original"
+    });
+
+    await expect(store.switchRepositoryWithAudit(setup!.workspace.id, {
+      kind: "git",
+      name: "Replacement",
+      url: "https://example.com/replacement.git",
+      encryptedToken: "encrypted-token"
+    }, setup!.admin.id)).rejects.toThrow("credential unavailable");
+
+    await expect(store.currentRepository(setup!.workspace.id)).resolves.toEqual(original);
+    await expect(store.listArchivedRepositories(setup!.workspace.id)).resolves.toEqual([]);
+    expect(store.encryptedCredentials).toEqual([]);
+    expect(store.auditEvents.filter((event) => event.action === "repository.switched")).toEqual([]);
   });
 
   test("rolls back a snapshot and its files when the sync audit insert fails", async () => {

@@ -21,9 +21,12 @@ function uniqueIndex(table: Parameters<typeof getTableConfig>[0], name: string) 
 }
 
 describe("Task 2 database contract", () => {
-  test("stores repository kinds and enforces one repository per workspace", () => {
-    expect(columnNames(repositories)).toEqual(expect.arrayContaining(["kind", "local_path", "clone_url"]));
-    expect(uniqueIndex(repositories, "repositories_workspace_unique_idx")).toBe(true);
+  test("stores repository archive state and enforces one current repository per workspace", () => {
+    expect(columnNames(repositories)).toEqual(expect.arrayContaining([
+      "kind", "local_path", "clone_url", "archived_at"
+    ]));
+    expect(uniqueIndex(repositories, "repositories_workspace_unique_idx")).toBeUndefined();
+    expect(uniqueIndex(repositories, "repositories_workspace_current_unique_idx")).toBe(true);
   });
 
   test("credentials belong to repositories and snapshot commits are immutable", () => {
@@ -84,5 +87,18 @@ describe("Task 2 database contract", () => {
     expect(sql).toContain("row_number() OVER (PARTITION BY page_id ORDER BY created_at, id) - 1");
     expect(sql).toContain("ALTER COLUMN position SET NOT NULL");
     expect(sql).toContain("knowledge_chunks_page_position_idx");
+  });
+
+  test("repository archive migration keeps existing repositories current", async () => {
+    const sql = await readFile(
+      new URL("../../drizzle/0009_repository_archives.sql", import.meta.url),
+      "utf8"
+    );
+
+    expect(sql).toContain("ADD COLUMN archived_at timestamptz");
+    expect(sql).toContain("DROP INDEX repositories_workspace_unique_idx");
+    expect(sql).toContain("repositories_workspace_current_unique_idx");
+    expect(sql).toContain("WHERE archived_at IS NULL");
+    expect(sql).toContain("UPDATE repositories SET archived_at = NULL");
   });
 });

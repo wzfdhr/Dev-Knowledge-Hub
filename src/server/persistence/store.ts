@@ -102,6 +102,7 @@ export interface RepositoryRecord {
   localPath: string | null;
   cloneUrl: string | null;
   defaultBranch: string;
+  archivedAt: Date | null;
   hasCredential: boolean;
 }
 
@@ -362,6 +363,12 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
     actorId: string
   ): Promise<RepositoryRecord | null>;
   currentRepository(workspaceId: string): Promise<RepositoryRecord | null>;
+  listArchivedRepositories(workspaceId: string): Promise<RepositoryRecord[]>;
+  switchRepositoryWithAudit(
+    workspaceId: string,
+    input: RepositoryConnectionInput,
+    actorId: string
+  ): Promise<RepositoryRecord | null>;
   findSnapshotByCommit(
     workspaceId: string,
     repositoryId: string,

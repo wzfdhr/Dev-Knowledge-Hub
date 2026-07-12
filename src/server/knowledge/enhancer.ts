@@ -23,7 +23,7 @@ export class AiSdkKnowledgeEnhancer implements KnowledgeEnhancer {
       : "";
     const result = await generateText({
       model: this.model,
-      system: "Improve clarity without adding facts. Preserve headings and cited factual claims.",
+      system: "使用简体中文提升清晰度，不得添加事实。保留标题和带引用的事实陈述；不得翻译代码标识、文件路径、命令、Commit SHA、Blob Hash 或引用字段。",
       prompt: `${request.deterministicBody}${feedbackContext}`
     });
     return result.text.trim() || request.deterministicBody;

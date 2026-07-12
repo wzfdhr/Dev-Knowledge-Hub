@@ -84,33 +84,33 @@ function requiredPages(index: CodeIndex): KnowledgePageDraft[] {
   return [
     page(
       "architecture-overview",
-      "Architecture Overview",
-      `# Architecture Overview\n\nThis snapshot contains ${modules.length} modules and ${index.symbols.length} indexed symbols.\n\n## Symbol inventory\n\n${symbolsByKind(index)}`,
+      "架构概览",
+      `# 架构概览\n\n本快照包含 ${modules.length} 个模块和 ${index.symbols.length} 个已索引符号。\n\n## 符号清单\n\n${symbolsByKind(index)}`,
       modules.length ? modules : [fallback],
       "required"
     ),
     page(
       "conventions",
-      "Conventions",
-      `# Conventions\n\nConfiguration and contributor guidance are defined in ${conventionCitations.map((citation) => citation.path).join(", ") || fallback.path}.`,
+      "开发约定",
+      `# 开发约定\n\n配置和贡献指南定义在 ${conventionCitations.map((citation) => citation.path).join(", ") || fallback.path}。`,
       conventionCitations.length ? conventionCitations : [fallback],
       "required"
     ),
     page(
       "run-test-guide",
-      "Run and Test Guide",
-      `# Run and Test Guide\n\n${scripts.length
+      "运行与测试指南",
+      `# 运行与测试指南\n\n${scripts.length
         ? scripts.map((script) => `- ${script.name}`).join("\n")
-        : "No package scripts were detected."}`,
+        : "未检测到 package scripts。"}`,
       scripts.length ? scripts : [fallback],
       "required"
     ),
     page(
       "dependency-summary",
-      "Dependency Summary",
-      `# Dependency Summary\n\n${dependencies.length
+      "依赖摘要",
+      `# 依赖摘要\n\n${dependencies.length
         ? dependencies.map((edge) => `- ${edge.source} -> ${edge.target}`).join("\n")
-        : "No dependencies were detected."}`,
+        : "未检测到依赖关系。"}`,
       dependencies.length ? dependencies.map((edge) => edge.citation) : [fallback],
       "required"
     )
@@ -121,12 +121,12 @@ function modulePages(index: CodeIndex): KnowledgePageDraft[] {
   return index.symbols.filter((symbol) => symbol.kind === "module").map((module) => {
     const owned = index.symbols.filter((symbol) => symbol.path === module.path && symbol.kind !== "module");
     const edges = index.edges.filter((edge) => edge.source === module.path);
-    const body = `# Module: ${module.path}\n\n## Symbols\n\n${owned.length
+    const body = `# 模块：${module.path}\n\n## 符号\n\n${owned.length
       ? owned.map((symbol) => `- ${symbol.kind} ${symbol.name} (${symbol.startLine}-${symbol.endLine})`).join("\n")
-      : "No declarations were detected."}\n\n## Dependencies\n\n${edges.length
+      : "未检测到声明。"}\n\n## 依赖关系\n\n${edges.length
       ? edges.map((edge) => `- ${edge.kind}: ${edge.target}`).join("\n")
-      : "No module edges were detected."}`;
-    return page(`modules/${slugify(module.path)}`, `Module: ${module.path}`, body, [module], "module");
+      : "未检测到模块依赖。"}`;
+    return page(`modules/${slugify(module.path)}`, `模块：${module.path}`, body, [module], "module");
   });
 }
 
@@ -144,7 +144,7 @@ function symbolPages(index: CodeIndex): KnowledgePageDraft[] {
       ].join(":"))}`;
     }
     seen.add(slug);
-    const body = `# ${symbol.name}\n\n- Kind: ${symbol.kind}\n- Source: ${symbol.path}:${symbol.startLine}-${symbol.endLine}${symbol.signature ? `\n- Signature: ${symbol.signature}` : ""}`;
+    const body = `# ${symbol.name}\n\n- 类型：${symbol.kind}\n- 源码：${symbol.path}:${symbol.startLine}-${symbol.endLine}${symbol.signature ? `\n- 签名：${symbol.signature}` : ""}`;
     return [page(slug, symbol.name, body, [symbol], "symbol")];
   });
 }
@@ -166,19 +166,19 @@ function feedbackPages(index: CodeIndex, purpose: BuildPurpose): KnowledgePageDr
   const fallback = index.files[0];
   if (!citations.length && !fallback) return [];
   const body = [
-    "# Feedback Rebuild Context",
+    "# 反馈重建上下文",
     ...purpose.feedbackContext.flatMap((feedback) => [
-      `## Feedback ${feedback.feedbackId}`,
-      `- Query: ${feedback.query}`,
-      `- Reason: ${feedback.reason}`,
-      `- Expected: ${feedback.expected ?? "Not provided"}`,
-      `- Citations: ${feedback.citations.map((citation) =>
-        `${citation.path}:${citation.startLine}-${citation.endLine}`).join(", ") || "None provided"}`
+      `## 反馈 ${feedback.feedbackId}`,
+      `- 查询：${feedback.query}`,
+      `- 原因：${feedback.reason}`,
+      `- 期望：${feedback.expected ?? "未提供"}`,
+      `- 引用：${feedback.citations.map((citation) =>
+        `${citation.path}:${citation.startLine}-${citation.endLine}`).join(", ") || "未提供"}`
     ])
   ].join("\n\n");
   return [page(
     "feedback-rebuild-context",
-    "Feedback Rebuild Context",
+    "反馈重建上下文",
     body,
     citations.length ? citations : [fallback!],
     "feedback"

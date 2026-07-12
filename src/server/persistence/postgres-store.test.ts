@@ -310,7 +310,7 @@ describe("PostgresAppStore knowledge releases", () => {
     expect(query).toHaveBeenCalledTimes(4);
     for (const [sql] of query.mock.calls) expect(String(sql)).toContain("LIMIT");
     expect(String(query.mock.calls[0][0])).toContain("p.slug = $3");
-    expect(String(query.mock.calls[1][0])).toContain("p.title = 'Module: ' || $3");
+    expect(String(query.mock.calls[1][0])).toContain("p.title IN ('模块：' || $3, 'Module: ' || $3)");
     expect(String(query.mock.calls[2][0])).toContain("p.title = $3");
     expect(query.mock.calls[3][1]).toEqual(["workspace-1", "release-1", 25, 50]);
   });

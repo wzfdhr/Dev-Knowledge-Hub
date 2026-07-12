@@ -1532,7 +1532,7 @@ export class PostgresAppStore implements AppStore {
          ORDER BY selected_chunk.position, selected_chunk.id LIMIT 50
        ) c ON true
        WHERE r.workspace_id = $1 AND r.id = $2
-         AND (p.title = 'Module: ' || $3 OR p.slug = $3)
+         AND (p.title IN ('模块：' || $3, 'Module: ' || $3) OR p.slug = $3)
        GROUP BY p.id ORDER BY p.slug, p.id LIMIT 1`,
       [workspaceId, releaseId, moduleId]
     );
@@ -1627,7 +1627,7 @@ export class PostgresAppStore implements AppStore {
          JOIN code_symbols cs ON cs.source_file_id = sf.id
          JOIN LATERAL (
            SELECT p.* FROM knowledge_pages p WHERE p.build_job_id = sr.build_job_id
-           ORDER BY CASE WHEN p.title = cs.name OR p.title = 'Module: ' || sf.path THEN 0 ELSE 1 END, p.slug LIMIT 1
+           ORDER BY CASE WHEN p.title = cs.name OR p.title IN ('模块：' || sf.path, 'Module: ' || sf.path) THEN 0 ELSE 1 END, p.slug LIMIT 1
          ) kp ON true
          WHERE lower(cs.name) LIKE lower($3) || '%' OR lower(sf.path) LIKE lower($3) || '%'
             OR similarity(lower(cs.name), lower($3)) > 0.2
@@ -1636,7 +1636,8 @@ export class PostgresAppStore implements AppStore {
          FROM symbol_candidates
        ), neighbor_candidates AS (
          SELECT DISTINCT 'dependency-neighbor' AS kind,
-                CASE WHEN kp.title LIKE 'Module: %' THEN substring(kp.title FROM 9)
+                CASE WHEN kp.title LIKE '模块：%' THEN substring(kp.title FROM 4)
+                     WHEN kp.title LIKE 'Module: %' THEN substring(kp.title FROM 9)
                      ELSE neighbor.name END AS title,
                 left(kp.body, 240) AS excerpt, 60::real AS score,
                 kp.id AS page_id, sr.id AS release_id, kc.citations

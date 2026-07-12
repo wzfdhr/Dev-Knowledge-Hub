@@ -58,7 +58,7 @@ describe("weighted knowledge search", () => {
       result.kind === "dependency-neighbor" && result.title === "src/math.ts"
     );
     expect(store.knowledgePages.find((page) => page.id === moduleNeighbor?.pageId)?.title)
-      .toBe("Module: src/math.ts");
+      .toBe("模块：src/math.ts");
   });
 
   test("ranks exact paths and dependency neighbors deterministically", async () => {
@@ -88,11 +88,11 @@ describe("weighted knowledge search", () => {
         repositoryId,
         buildId: build.id,
         slug: `modules/src-neighbors-${String(position).padStart(2, "0")}-ts`,
-        title: `Module: ${source}`,
-        body: `# Module: ${source}\n\nUses src/util.js for bounded values.`,
+        title: `模块：${source}`,
+        body: `# 模块：${source}\n\n使用 src/util.js 处理边界值。`,
         chunks: [{
           id: `${build.id}:neighbor-chunk-${position}`,
-          heading: `Module: ${source}`,
+          heading: `模块：${source}`,
           content: `Uses src/util.js for bounded values.`,
           citations: [citation]
         }]
@@ -114,7 +114,7 @@ describe("weighted knowledge search", () => {
     expect(first.some((result) => result.title === "src/missing-source.ts")).toBe(false);
     expect(first.filter((result) => result.kind === "dependency-neighbor").every((result) =>
       store.knowledgePages.some((page) =>
-        page.id === result.pageId && page.title === `Module: ${result.title}`
+        page.id === result.pageId && page.title === `模块：${result.title}`
       )
     )).toBe(true);
   });

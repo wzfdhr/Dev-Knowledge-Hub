@@ -859,7 +859,7 @@ export class MemoryAppStore implements AppStore {
     const release = this.releaseById(workspaceId, releaseId);
     const page = release ? this.knowledgePages.find((page) =>
       page.workspaceId === workspaceId && page.buildId === release.buildId
-      && (page.title === `Module: ${moduleId}` || page.slug === moduleId)
+      && (page.title === `模块：${moduleId}` || page.title === `Module: ${moduleId}` || page.slug === moduleId)
     ) ?? null : null;
     return page ? boundedKnowledgePage(page) : null;
   }
@@ -951,15 +951,19 @@ export class MemoryAppStore implements AppStore {
           ? edge.citation.path
           : edge.targetPath;
         const targetPage = pages.find((page) =>
-          page.title === `Module: ${neighbor}`
+          page.title === `模块：${neighbor}`
+          || page.title === `模块：${neighborPath}`
+          || page.title === `Module: ${neighbor}`
           || page.title === `Module: ${neighborPath}`
           || (page.title === neighbor && page.chunks.some((chunk) =>
             chunk.citations.some((citation) => citation.path === neighborPath)
           ))
         );
-        const title = targetPage?.title.startsWith("Module: ")
-          ? targetPage.title.slice("Module: ".length)
-          : neighbor;
+        const title = targetPage?.title.startsWith("模块：")
+          ? targetPage.title.slice("模块：".length)
+          : targetPage?.title.startsWith("Module: ")
+            ? targetPage.title.slice("Module: ".length)
+            : neighbor;
         add("dependency-neighbor", title, 60, [edge.citation], targetPage, true);
       }
     }

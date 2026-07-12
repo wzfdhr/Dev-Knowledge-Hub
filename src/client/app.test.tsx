@@ -43,10 +43,103 @@ describe("shared console copy", () => {
     renderPage(<><App api={api} /><ErrorState message="Retry fixture" retry={() => {}} /></>);
 
     expect(await screen.findByRole("link", { name: "总览" })).toBeVisible();
+    expect(screen.getByRole("navigation", { name: "主导航" })).toBeVisible();
     expect(screen.getByRole("link", { name: "知识库" })).toBeVisible();
     expect(screen.getByRole("link", { name: "反馈" })).toBeVisible();
     expect(screen.getByRole("link", { name: "设置" })).toBeVisible();
     expect(screen.getByRole("button", { name: "重试" })).toBeVisible();
+  });
+});
+
+describe("operations page copy", () => {
+  test("renders Chinese operations copy", async () => {
+    const user = userEvent.setup();
+    const commit = "a".repeat(40);
+    const overviewApi = {
+      getRepository: vi.fn().mockResolvedValue({ repository: {
+        id: "repo", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main"
+      } }),
+      listBuilds: vi.fn().mockResolvedValue({ builds: [{
+        id: "build", status: "published", snapshotId: "snap", commitSha: commit,
+        warnings: [], cancelRequested: false
+      }] }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [{
+        id: "release", buildId: "build", snapshotId: "snap", version: "1.0.0",
+        createdAt: "2026-07-11", publishedAt: "2026-07-11"
+      }] }),
+      listFeedback: vi.fn().mockResolvedValue({ feedback: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<OverviewPage api={overviewApi} />);
+    expect(await screen.findByRole("heading", { name: "总览" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "同步仓库" })).toBeVisible();
+    cleanup();
+
+    const knowledgeApi = {
+      getRepositoryStatus: vi.fn().mockResolvedValue({
+        repository: { id: "repo" },
+        latestSnapshot: { id: "snap", commitSha: commit, ref: "main", commitTimestamp: "2026-07-11" }
+      }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [{
+        id: "release", buildId: "build", snapshotId: "snap", version: "1.0.0",
+        createdAt: "2026-07-11", publishedAt: "2026-07-11"
+      }] }),
+      getKnowledgeMetadata: vi.fn().mockResolvedValue({ symbols: [], dependencies: [] }),
+      listKnowledgePages: vi.fn().mockResolvedValue({ pages: [{
+        id: "page", slug: "module-math", title: "模块：math", body: "数学模块。", chunks: [{
+          id: "chunk", heading: "add", content: "Adds numbers.", citations: [{
+            path: "src/math.ts", startLine: 16, endLine: 18, commitSha: commit, blobHash: "b".repeat(64)
+          }]
+        }]
+      }] }),
+      getKnowledgePage: vi.fn().mockResolvedValue({ page: {
+        id: "page", slug: "module-math", title: "模块：math", body: "数学模块。", chunks: [{
+          id: "chunk", heading: "add", content: "Adds numbers.", citations: [{
+            path: "src/math.ts", startLine: 16, endLine: 18, commitSha: commit, blobHash: "b".repeat(64)
+          }]
+        }]
+      } }),
+      getSource: vi.fn().mockResolvedValue({
+        path: "src/math.ts", startLine: 16, endLine: 18, commitSha: commit,
+        blobHash: "b".repeat(64), content: "export function add() {}"
+      })
+    } as unknown as ApiClient;
+
+    renderPage(<KnowledgePage api={knowledgeApi} />);
+    expect(await screen.findByRole("heading", { name: "知识库" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "模块：math" }));
+    await user.click(screen.getByRole("button", { name: /src\/math.ts 第 16 至 18 行/i }));
+    expect(await screen.findByText(`Commit ${"a".repeat(12)}`)).toBeVisible();
+    cleanup();
+
+    const feedbackApi = {
+      listFeedback: vi.fn().mockResolvedValue({ feedback: [{
+        id: "feedback", releaseId: "release", query: "How do I deploy?", reason: "Missing runbook",
+        expected: null, status: "open", rebuildBuildId: null, citations: [],
+        createdAt: "2026-07-11T00:00:00Z", updatedAt: "2026-07-11T00:00:00Z"
+      }] })
+    } as unknown as ApiClient;
+
+    renderPage(<FeedbackPage api={feedbackApi} />);
+    expect(await screen.findByRole("heading", { name: "反馈" })).toBeVisible();
+    await user.click(await screen.findByRole("button", { name: "How do I deploy?" }));
+    expect(screen.getByRole("button", { name: "确认处理" })).toBeVisible();
+    cleanup();
+
+    const settingsApi = {
+      getRepository: vi.fn().mockResolvedValue({ repository: {
+        id: "repo", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main"
+      } }),
+      getModelConfig: vi.fn().mockResolvedValue({ config: null }),
+      getMcpConnection: vi.fn().mockResolvedValue({
+        endpoint: "/mcp", transport: "streamable-http", authorization: "bearer", tools: []
+      }),
+      listMcpTokens: vi.fn().mockResolvedValue({ tokens: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<SettingsPage api={settingsApi} />);
+    expect(await screen.findByRole("heading", { name: "设置" })).toBeVisible();
+    expect(await screen.findByText("本地路径")).toBeVisible();
   });
 });
 
@@ -90,7 +183,7 @@ describe("overview primary command", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Build state unavailable");
     expect(screen.queryByRole("button", { name: /sync repository|start knowledge build|review ready build|publish release/i })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Retry overview data" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "重试总览数据" })).toBeVisible();
   });
 
   test("review mode keeps exactly one blue primary command", async () => {
@@ -109,9 +202,9 @@ describe("overview primary command", () => {
     } as unknown as ApiClient;
 
     const { container } = renderPage(<OverviewPage api={api} />);
-    await user.click(await screen.findByRole("button", { name: "Review ready build" }));
+    await user.click(await screen.findByRole("button", { name: "审核就绪构建" }));
 
-    expect(screen.getByRole("button", { name: "Create release draft" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "创建版本草稿" })).toBeVisible();
     expect(container.querySelectorAll("button.button.primary")).toHaveLength(1);
   });
 
@@ -152,8 +245,8 @@ describe("overview primary command", () => {
       </Routes>
     </MemoryRouter></QueryClientProvider>);
 
-    await user.click(await screen.findByRole("button", { name: "Review ready build" }));
-    await user.click(screen.getByRole("button", { name: "Inspect knowledge" }));
+    await user.click(await screen.findByRole("button", { name: "审核就绪构建" }));
+    await user.click(screen.getByRole("button", { name: "查看知识" }));
 
     await waitFor(() => expect(createRelease).toHaveBeenCalledWith("build", "1.0.0"));
     expect(await screen.findByText("Knowledge route")).toBeVisible();
@@ -183,13 +276,13 @@ describe("overview primary command", () => {
     } as unknown as ApiClient;
 
     const { container } = renderPage(<OverviewPage api={api} />);
-    await screen.findByText("synthesizing", { selector: "h2" });
+    await screen.findByText("生成中", { selector: "h2" });
     expect(container.querySelector("progress")).toHaveAttribute("value", "66");
     expect(container.querySelector(".progress [style]")).toBeNull();
     FakeEventSource.instance.onerror?.();
 
-    await waitFor(() => expect(screen.getByText("synthesizing", { selector: "h2" }).closest("section"))
-      .toHaveTextContent("Reconnecting to build updates"));
+    await waitFor(() => expect(screen.getByText("生成中", { selector: "h2" }).closest("section"))
+      .toHaveTextContent("正在重新连接构建更新"));
     expect(FakeEventSource.instance.close).not.toHaveBeenCalled();
   });
 
@@ -215,7 +308,7 @@ describe("overview primary command", () => {
     renderPage(<OverviewPage api={api} />);
 
     expect(await screen.findByText("Provider rejected the request")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Retry knowledge build" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "重试知识构建" })).toBeVisible();
   });
 
   test("ignores an older failure after the latest build is published", async () => {
@@ -238,7 +331,7 @@ describe("overview primary command", () => {
       createdAt: "2026-07-11", publishedAt: "2026-07-11"
     }];
     expect(derivePrimaryAction({ repository, builds, releases, snapshotId: "current-snap" })).toEqual({
-      kind: "sync", label: "Sync repository"
+      kind: "sync", label: "同步仓库"
     });
     const api = {
       getRepository: vi.fn().mockResolvedValue({ repository }),
@@ -249,9 +342,9 @@ describe("overview primary command", () => {
 
     renderPage(<OverviewPage api={api} />);
 
-    expect(await screen.findByRole("button", { name: "Sync repository" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "同步仓库" })).toBeVisible();
     expect(screen.queryByText("Obsolete provider failure")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Retry knowledge build" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试知识构建" })).not.toBeInTheDocument();
   });
 });
 
@@ -290,10 +383,10 @@ describe("knowledge citations", () => {
       </MemoryRouter>
     </QueryClientProvider>);
 
-    expect(await screen.findByText("Release 0.1.0")).toBeVisible();
+    expect(await screen.findByText("版本 0.1.0")).toBeVisible();
     expect(getRelease).toHaveBeenCalledWith("release-old");
     expect(listKnowledgePages).toHaveBeenCalledWith("release-old", { limit: 100, offset: 0 });
-    expect(screen.queryByText("Release 2.0.0")).not.toBeInTheDocument();
+    expect(screen.queryByText("版本 2.0.0")).not.toBeInTheDocument();
   });
 
   test("retries a transient exact requested release error", async () => {
@@ -337,7 +430,7 @@ describe("knowledge citations", () => {
     expect(error).toHaveTextContent("Exact release temporarily unavailable");
     await user.click(within(error).getByRole("button", { name: "重试" }));
 
-    expect(await screen.findByText("Release 0.1.0")).toBeVisible();
+    expect(await screen.findByText("版本 0.1.0")).toBeVisible();
     expect(getRelease).toHaveBeenCalledTimes(2);
     expect(listKnowledgePages).toHaveBeenCalledWith("release-old", { limit: 100, offset: 0 });
   });
@@ -349,7 +442,7 @@ describe("knowledge citations", () => {
       listReleases: vi.fn().mockResolvedValue({ releases: [{ id: "release-1", buildId: "build-1", snapshotId: "snapshot-1", version: "1.0.0", createdAt: "2026-07-11", publishedAt: "2026-07-11" }] }),
       getKnowledgeMetadata: vi.fn().mockResolvedValue({ symbols: [], dependencies: [] }),
       listKnowledgePages: vi.fn().mockResolvedValue({ pages: [{
-        id: "page-1", slug: "module-math", title: "Module: math", body: "Math module.", chunks: [{
+        id: "page-1", slug: "module-math", title: "模块：math", body: "数学模块。", chunks: [{
           id: "chunk-1", heading: "add", content: "Adds numbers.", citations: [{
             path: "src/math.ts", startLine: 16, endLine: 18,
             commitSha: "a".repeat(40), blobHash: "b".repeat(64)
@@ -357,7 +450,7 @@ describe("knowledge citations", () => {
         }]
       }] }),
       getKnowledgePage: vi.fn().mockResolvedValue({ page: {
-        id: "page-1", slug: "module-math", title: "Module: math", body: "Math module.", chunks: [{
+        id: "page-1", slug: "module-math", title: "模块：math", body: "数学模块。", chunks: [{
           id: "chunk-1", heading: "add", content: "Adds numbers.", citations: [{
             path: "src/math.ts", startLine: 16, endLine: 18,
             commitSha: "a".repeat(40), blobHash: "b".repeat(64)
@@ -371,8 +464,8 @@ describe("knowledge citations", () => {
     } as unknown as ApiClient;
 
     renderPage(<KnowledgePage api={api} />);
-    await user.click(await screen.findByRole("button", { name: /module: math/i }));
-    await user.click(await screen.findByRole("button", { name: /src\/math.ts lines 16 to 18/i }));
+    await user.click(await screen.findByRole("button", { name: "模块：math" }));
+    await user.click(await screen.findByRole("button", { name: /src\/math.ts 第 16 至 18 行/i }));
 
     expect(api.getSource).toHaveBeenCalledWith({ path: "src/math.ts", startLine: 16, endLine: 18, releaseId: "release-1" });
     expect(await screen.findByText(/export function add/)).toBeVisible();
@@ -408,8 +501,8 @@ describe("knowledge citations", () => {
 
     renderPage(<KnowledgePage api={api} />);
 
-    expect(await screen.findByText("Unpublished draft")).toBeVisible();
-    expect(screen.getByText(/newer repository snapshot/i)).toBeVisible();
+    expect(await screen.findByText("未发布草稿")).toBeVisible();
+    expect(screen.getByText("有更新的仓库快照可用。")).toBeVisible();
     expect(screen.getByText(`${"a".repeat(12)} → ${"b".repeat(12)}`)).toBeVisible();
   });
 
@@ -464,7 +557,7 @@ describe("feedback workflow", () => {
       </Routes>
     </MemoryRouter></QueryClientProvider>);
 
-    await screen.findByText("Human exceptions");
+    await screen.findByText("人工待处理项");
     await user.click(screen.getByRole("button", { name: "Open feedback route" }));
 
     expect(await screen.findByRole("button", { name: "Cached gap" })).toBeVisible();
@@ -488,14 +581,14 @@ describe("feedback workflow", () => {
 
     renderPage(<FeedbackPage api={api} />);
     await user.click(await screen.findByRole("button", { name: /how do i deploy/i }));
-    const actions = screen.getByRole("group", { name: /feedback actions/i });
-    expect(within(actions).getByRole("button", { name: "Acknowledge" })).toBeVisible();
-    expect(within(actions).queryByRole("button", { name: "Mark fixed" })).not.toBeInTheDocument();
-    await user.click(within(actions).getByRole("button", { name: "Acknowledge" }));
+    const actions = screen.getByRole("group", { name: "反馈操作" });
+    expect(within(actions).getByRole("button", { name: "确认处理" })).toBeVisible();
+    expect(within(actions).queryByRole("button", { name: "标记为已修复" })).not.toBeInTheDocument();
+    await user.click(within(actions).getByRole("button", { name: "确认处理" }));
 
     await waitFor(() => expect(transitionFeedback).toHaveBeenCalledWith("f1", "acknowledged"));
-    expect(await screen.findByRole("button", { name: "Request rebuild" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Mark fixed" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "请求重新构建" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "标记为已修复" })).toBeVisible();
   });
 
   test("opens a persisted feedback citation as an exact source excerpt", async () => {
@@ -518,7 +611,7 @@ describe("feedback workflow", () => {
 
     renderPage(<FeedbackPage api={api} />);
     await user.click(await screen.findByRole("button", { name: "add" }));
-    await user.click(screen.getByRole("button", { name: /src\/math.ts lines 16 to 18/i }));
+    await user.click(screen.getByRole("button", { name: /src\/math.ts 第 16 至 18 行/i }));
 
     expect(getSource).toHaveBeenCalledWith({
       path: "src/math.ts", startLine: 16, endLine: 18, releaseId: "r1"
@@ -558,19 +651,19 @@ describe("feedback workflow", () => {
 
     renderPage(<FeedbackPage api={api} />);
     await user.click(await screen.findByRole("button", { name: "First gap" }));
-    await user.click(screen.getByRole("button", { name: /src\/first.ts lines 2 to 4/i }));
+    await user.click(screen.getByRole("button", { name: /src\/first.ts 第 2 至 4 行/i }));
     expect(await screen.findByText("r1:src/first.ts")).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "Second gap" }));
-    expect(screen.queryByRole("complementary", { name: "Feedback source excerpt" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "反馈来源代码" })).not.toBeInTheDocument();
     expect(getSource).not.toHaveBeenCalledWith(expect.objectContaining({
       releaseId: "r2", path: "src/first.ts"
     }));
 
-    await user.click(screen.getByRole("button", { name: /src\/second.ts lines 8 to 9/i }));
+    await user.click(screen.getByRole("button", { name: /src\/second.ts 第 8 至 9 行/i }));
     expect(await screen.findByText("r2:src/second.ts")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Open" }));
-    expect(screen.queryByRole("complementary", { name: "Feedback source excerpt" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "关闭反馈来源代码" }));
+    expect(screen.queryByRole("complementary", { name: "反馈来源代码" })).not.toBeInTheDocument();
     expect(getSource).not.toHaveBeenCalledWith(expect.objectContaining({
       releaseId: "r1", path: "src/second.ts"
     }));
@@ -591,11 +684,11 @@ describe("MCP token disclosure", () => {
     } as unknown as ApiClient;
 
     renderPage(<SettingsPage api={api} />);
-    await user.type(await screen.findByLabelText("Token name"), "Local agent");
-    await user.click(screen.getByRole("button", { name: "Create token" }));
-    const dialog = await screen.findByRole("dialog", { name: "MCP token created" });
+    await user.type(await screen.findByLabelText("Token 名称"), "Local agent");
+    await user.click(screen.getByRole("button", { name: "创建 Token" }));
+    const dialog = await screen.findByRole("dialog", { name: "已创建 MCP Token" });
     expect(within(dialog).getByText(plaintext)).toBeVisible();
-    await user.click(within(dialog).getByRole("button", { name: "I have copied it" }));
+    await user.click(within(dialog).getByRole("button", { name: "我已复制" }));
     expect(screen.queryByText(plaintext)).not.toBeInTheDocument();
     expect(screen.getByText("dkh_secret-t")).toBeVisible();
   });
@@ -631,7 +724,7 @@ describe("MCP token disclosure", () => {
     } as unknown as ApiClient;
 
     renderPage(<SettingsPage api={api} />);
-    await user.click(await screen.findByRole("button", { name: "Load more tokens" }));
+    await user.click(await screen.findByRole("button", { name: "加载更多 Token" }));
 
     expect(await screen.findByText("Agent after 100")).toBeVisible();
     expect(listMcpTokens).toHaveBeenNthCalledWith(1, { limit: 100, offset: 0 });
@@ -657,15 +750,15 @@ describe("model settings", () => {
 
     renderPage(<SettingsPage api={api} />);
     expect(await screen.findByDisplayValue("gpt-5-mini")).toBeEnabled();
-    await user.selectOptions(screen.getByLabelText("Provider"), "anthropic");
-    await user.clear(screen.getByLabelText("Model"));
-    await user.type(screen.getByLabelText("Model"), "claude-sonnet-4-5");
-    expect(screen.getByLabelText("API key")).toHaveValue("");
-    await user.click(screen.getByRole("button", { name: "Save model settings" }));
+    await user.selectOptions(screen.getByLabelText("服务商"), "anthropic");
+    await user.clear(screen.getByLabelText("模型"));
+    await user.type(screen.getByLabelText("模型"), "claude-sonnet-4-5");
+    expect(screen.getByLabelText("API Key")).toHaveValue("");
+    await user.click(screen.getByRole("button", { name: "保存模型设置" }));
 
     expect(updateModelConfig).toHaveBeenCalledWith({
       provider: "anthropic", model: "claude-sonnet-4-5", apiKey: ""
     });
-    expect(await screen.findByText("Model settings saved.")).toBeVisible();
+    expect(await screen.findByText("模型设置已保存。")).toBeVisible();
   });
 });

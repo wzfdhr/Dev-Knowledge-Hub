@@ -18,7 +18,7 @@ export function AppShell({ email, onLogout }: { email: string; onLogout: () => v
     {open && <button className="nav-scrim" aria-label="关闭导航" onClick={() => setOpen(false)} />}
     <aside className={`sidebar ${open ? "open" : ""}`}>
       <header><div className="brand-mark">DK</div><div><strong>{APP_NAME}</strong><span>运营控制台</span></div><button className="icon-button sidebar-close" aria-label="关闭导航" onClick={() => setOpen(false)}><X aria-hidden="true" /></button></header>
-      <nav aria-label="Primary navigation">{navigation.map(({ to, label, icon: Icon }) => <NavLink key={to} to={to} onClick={() => setOpen(false)}><Icon aria-hidden="true" />{label}</NavLink>)}</nav>
+      <nav aria-label="主导航">{navigation.map(({ to, label, icon: Icon }) => <NavLink key={to} to={to} onClick={() => setOpen(false)}><Icon aria-hidden="true" />{label}</NavLink>)}</nav>
       <footer><div className="admin"><span>{email.slice(0, 1).toUpperCase()}</span><div><strong>管理员</strong><small>{email}</small></div></div><button className="icon-button" aria-label="退出登录" onClick={onLogout}><LogOut aria-hidden="true" /></button></footer>
     </aside>
     <div className="content"><Outlet /></div>

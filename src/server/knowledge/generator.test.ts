@@ -39,6 +39,10 @@ describe("deterministic knowledge generation", () => {
     expect(output.pages.flatMap((page) => page.chunks).every((chunk) =>
       chunk.content.length > 0 && chunk.citations.length > 0
     )).toBe(true);
+    const architecture = output.pages.find((page) => page.slug === "architecture-overview");
+    expect(architecture?.title).toBe("架构概览");
+    expect(architecture?.body).toContain("本快照包含");
+    expect(architecture?.citations.some((citation) => citation.path === "src/math.ts")).toBe(true);
     expect(() => validateKnowledge(output, index)).not.toThrow();
   });
 
@@ -86,7 +90,7 @@ describe("deterministic knowledge generation", () => {
     expect(enhance).toHaveBeenCalled();
     expect(output.warnings).toEqual([expect.objectContaining({ code: "ENHANCER_FAILED" })]);
     expect(output.pages.find((page) => page.slug === "architecture-overview")?.body)
-      .toContain("# Architecture Overview");
+      .toContain("# 架构概览");
     expect(() => validateKnowledge(output, index)).not.toThrow();
   });
 

@@ -94,6 +94,35 @@ describe("deterministic knowledge generation", () => {
     expect(() => validateKnowledge(output, index)).not.toThrow();
   });
 
+  test.each([
+    ["English prose", async ({ deterministicBody }: { deterministicBody: string }) => `${deterministicBody}\n\nThis is an English summary.`],
+    ["a source path", async ({ deterministicBody }: { deterministicBody: string }) => deterministicBody.replace("src/math.ts", "src/calculator.ts")],
+    ["a symbol", async ({ deterministicBody }: { deterministicBody: string }) => deterministicBody.replace("add", "sum")],
+    ["a command", async ({ deterministicBody }: { deterministicBody: string }) => deterministicBody.replace("test", "verify")],
+    ["a title or heading", async ({ deterministicBody }: { deterministicBody: string }) => deterministicBody.replace("# 架构概览", "# 系统概览")],
+    ["a cited fact", async ({ deterministicBody }: { deterministicBody: string }) => deterministicBody.replace("本快照包含", "本项目包含")]
+  ])("preserves deterministic Chinese knowledge when enhancement changes %s", async (_unsafeChange, enhance) => {
+    const deterministic = await generateKnowledge(index);
+    const output = await generateKnowledge(index, { enhance });
+
+    expect(output.warnings).toEqual([expect.objectContaining({ code: "ENHANCER_FAILED" })]);
+    expect(output.pages).toEqual(deterministic.pages);
+    expect(() => validateKnowledge(output, index)).not.toThrow();
+  });
+
+  test("accepts a Chinese enhancement that preserves deterministic knowledge and citations", async () => {
+    const deterministic = await generateKnowledge(index);
+    const output = await generateKnowledge(index, {
+      enhance: async ({ deterministicBody }) => `${deterministicBody}\n\n以上内容基于当前快照整理。`
+    });
+
+    expect(output.warnings).toEqual([]);
+    expect(output.pages.find((page) => page.slug === "architecture-overview")?.body)
+      .toContain("以上内容基于当前快照整理。");
+    expect(output.pages.map((page) => page.citations)).toEqual(deterministic.pages.map((page) => page.citations));
+    expect(() => validateKnowledge(output, index)).not.toThrow();
+  });
+
   test("uses collision-safe stable slugs for every overload declaration", async () => {
     const output = await generateKnowledge(index);
     const overloadPages = output.pages.filter((page) =>

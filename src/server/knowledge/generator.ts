@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import type { KnowledgeEnhancer } from "./enhancer.js";
+import { validateKnowledgeEnhancement, type KnowledgeEnhancer } from "./enhancer.js";
 import type { Citation, CodeIndex, CodeSymbol } from "./intelligence.js";
 import type { BuildPurpose } from "./build-service.js";
 
@@ -238,12 +238,15 @@ export async function generateKnowledge(
   if (enhancer) {
     for (const draft of pages) {
       try {
-        draft.body = await enhancer.enhance({
+        const enhancedBody = await enhancer.enhance({
           slug: draft.slug,
           title: draft.title,
           deterministicBody: draft.body,
+          citations: draft.citations,
           buildPurpose: context.purpose
         });
+        validateKnowledgeEnhancement(draft.body, enhancedBody);
+        draft.body = enhancedBody;
         draft.chunks = chunkPage(draft);
       } catch (error) {
         warnings.push({

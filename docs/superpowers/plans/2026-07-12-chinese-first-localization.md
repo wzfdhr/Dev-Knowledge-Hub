@@ -255,4 +255,3 @@ Open `http://127.0.0.1:5173`, complete the deterministic first-run flow, and ins
 git add tests/e2e/console.spec.ts src/client/app.test.tsx
 git commit -m "test: cover Chinese console workflow"
 ```
-

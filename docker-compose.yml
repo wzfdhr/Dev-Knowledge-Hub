@@ -34,17 +34,35 @@ services:
       DATABASE_URL: postgres://devkh:${POSTGRES_PASSWORD}@postgres:5432/dev_knowledge_hub
       DEVKH_MASTER_KEY: ${DEVKH_MASTER_KEY:?set DEVKH_MASTER_KEY}
       DEVKH_SESSION_SECRET: ${DEVKH_SESSION_SECRET:?set DEVKH_SESSION_SECRET}
-    ports:
-      - "${DEVKH_PORT:-3000}:3000"
     volumes:
       - snapshot_data:/var/lib/devkh/snapshots
       - repository_mirrors:/var/lib/devkh/repos
+      - upload_staging:/var/lib/devkh/uploads
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
     read_only: true
     security_opt:
       - no-new-privileges:true
     stop_grace_period: 30s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      DEVKH_DOMAIN: ${DEVKH_DOMAIN:?set DEVKH_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deployment/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    security_opt:
+      - no-new-privileges:true
 
   integration:
     profiles: [test]
@@ -70,3 +88,6 @@ volumes:
   postgres_data:
   snapshot_data:
   repository_mirrors:
+  upload_staging:
+  caddy_data:
+  caddy_config:

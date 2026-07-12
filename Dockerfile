@@ -32,7 +32,7 @@ WORKDIR /app
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git \
   && rm -rf /var/lib/apt/lists/* \
-  && mkdir -p /var/lib/devkh/snapshots /var/lib/devkh/repos \
+  && mkdir -p /var/lib/devkh/snapshots /var/lib/devkh/repos /var/lib/devkh/uploads \
   && chown -R node:node /app /var/lib/devkh
 
 COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules

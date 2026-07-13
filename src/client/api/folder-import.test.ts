@@ -57,4 +57,16 @@ describe("folder import scanning", () => {
     expect(report.acceptedFiles.map((item) => item.path)).toEqual(["src/main.ts"]);
     expect(report.ignored.reasons).toEqual({ unsupported_extension: 1 });
   });
+
+  test("reports reading and filtering progress while scanning", async () => {
+    const progress: Array<{ phase: string; processedFiles?: number; totalFiles?: number }> = [];
+
+    await scanDirectory(directory("demo", [
+      file("one.ts", "export const one = 1;"),
+      file("two.ts", "export const two = 2;")
+    ]), { onProgress: (value) => progress.push(value) });
+
+    expect(progress[0]).toMatchObject({ phase: "reading", processedFiles: 0 });
+    expect(progress).toContainEqual(expect.objectContaining({ phase: "filtering", processedFiles: 2, totalFiles: 2 }));
+  });
 });

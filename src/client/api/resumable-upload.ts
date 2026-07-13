@@ -1,4 +1,5 @@
 import type { UploadSnapshotSummary } from "./types";
+import type { ImportProgress } from "./types";
 
 export const RESUMABLE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 
@@ -31,6 +32,77 @@ export interface ResumableUploadOptions {
   chunkSize?: number;
   storage?: UploadStorage;
   onProgress?(status: ResumableUploadStatus): void;
+  onTransferProgress?(progress: ImportProgress): void;
+  controller?: UploadController;
+  now?(): number;
+}
+
+export interface TransferSample {
+  receivedBytes: number;
+  at: number;
+}
+
+export interface CurrentTransferSample extends TransferSample {
+  totalBytes: number;
+}
+
+export interface TransferProgress {
+  bytesPerSecond: number;
+  estimatedSeconds: number;
+  percent: number;
+}
+
+export function calculateTransferProgress(
+  previous: TransferSample,
+  current: CurrentTransferSample
+): TransferProgress {
+  const elapsedSeconds = Math.max((current.at - previous.at) / 1000, 0.001);
+  const bytesPerSecond = Math.max(0, (current.receivedBytes - previous.receivedBytes) / elapsedSeconds);
+  const remainingBytes = Math.max(0, current.totalBytes - current.receivedBytes);
+  return {
+    bytesPerSecond,
+    estimatedSeconds: bytesPerSecond > 0 ? Math.ceil(remainingBytes / bytesPerSecond) : 0,
+    percent: current.totalBytes > 0 ? Math.round((current.receivedBytes / current.totalBytes) * 100) : 0
+  };
+}
+
+export class UploadCancelledError extends Error {
+  constructor() {
+    super("Upload cancelled");
+    this.name = "UploadCancelledError";
+  }
+}
+
+export interface UploadController {
+  readonly paused: boolean;
+  readonly cancelled: boolean;
+  pause(): void;
+  resume(): void;
+  cancel(): void;
+  waitUntilRunnable(): Promise<void>;
+}
+
+export function createUploadController(): UploadController {
+  let paused = false;
+  let cancelled = false;
+  let resumeWaiters: Array<() => void> = [];
+  const releaseWaiters = () => {
+    const waiters = resumeWaiters;
+    resumeWaiters = [];
+    for (const resolve of waiters) resolve();
+  };
+  return {
+    get paused() { return paused; },
+    get cancelled() { return cancelled; },
+    pause() { if (!cancelled) paused = true; },
+    resume() { paused = false; releaseWaiters(); },
+    cancel() { cancelled = true; paused = false; releaseWaiters(); },
+    async waitUntilRunnable() {
+      if (cancelled) throw new UploadCancelledError();
+      if (paused) await new Promise<void>((resolve) => resumeWaiters.push(resolve));
+      if (cancelled) throw new UploadCancelledError();
+    }
+  };
 }
 
 function browserStorage(): UploadStorage | undefined {
@@ -88,15 +160,38 @@ async function uploadZipResumably(
   }
   storage?.set(key, status.id);
   options.onProgress?.(status);
+  const now = options.now ?? Date.now;
+  let previousSample: TransferSample = { receivedBytes: status.receivedBytes, at: now() };
 
   for (let index = status.receivedChunks; index < status.chunkCount; index += 1) {
+    await options.controller?.waitUntilRunnable();
     const start = index * status.chunkSize;
     const end = Math.min(start + status.chunkSize, file.size);
     status = await api.uploadResumableChunk(status.id, index, file.slice(start, end));
     options.onProgress?.(status);
+    const currentSample = { receivedBytes: status.receivedBytes, totalBytes: status.totalBytes, at: now() };
+    const transfer = calculateTransferProgress(previousSample, currentSample);
+    options.onTransferProgress?.({
+      phase: "uploading", status: "running", percent: transfer.percent,
+      processedBytes: status.receivedBytes, totalBytes: status.totalBytes,
+      bytesPerSecond: transfer.bytesPerSecond, estimatedSeconds: transfer.estimatedSeconds,
+      detail: `正在上传第 ${status.receivedChunks}/${status.chunkCount} 块`
+    });
+    previousSample = currentSample;
   }
 
+  await options.controller?.waitUntilRunnable();
+  options.onTransferProgress?.({
+    phase: "validating", status: "running", percent: 0,
+    processedBytes: status.receivedBytes, totalBytes: status.totalBytes,
+    detail: "正在进行服务端校验"
+  });
   const summary = await importUpload(status.id);
+  options.onTransferProgress?.({
+    phase: "snapshot", status: "completed", percent: 100,
+    processedBytes: status.receivedBytes, totalBytes: status.totalBytes,
+    detail: summary.unchanged ? "内容版本没有变化" : "已创建新的内容版本"
+  });
   storage?.delete(key);
   return summary;
 }

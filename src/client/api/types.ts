@@ -34,6 +34,20 @@ export interface UploadSnapshotSummary {
   unchanged: boolean;
   ignored: { total: number; reasons: Record<string, number> };
 }
+export type ImportPhase = "reading" | "filtering" | "packaging" | "uploading" | "validating" | "snapshot";
+export type ImportRunStatus = "idle" | "running" | "paused" | "failed" | "completed" | "cancelled";
+export interface ImportProgress {
+  phase: ImportPhase;
+  status: ImportRunStatus;
+  percent: number;
+  processedFiles?: number;
+  totalFiles?: number;
+  processedBytes?: number;
+  totalBytes?: number;
+  bytesPerSecond?: number;
+  estimatedSeconds?: number;
+  detail?: string;
+}
 export interface SnapshotSummary {
   snapshotId: string;
   commitSha: string;

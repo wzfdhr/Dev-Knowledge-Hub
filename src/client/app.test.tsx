@@ -201,6 +201,35 @@ describe("shared console copy", () => {
     expect(screen.getAllByText("admin@example.com")).not.toHaveLength(0);
   });
 
+  test("shows project delivery state in the fusion project center", async () => {
+    const api = {
+      setupStatus: vi.fn().mockResolvedValue({ setupRequired: false }),
+      session: vi.fn().mockResolvedValue({ admin: { email: "admin@example.com", role: "admin" } }),
+      logout: vi.fn().mockResolvedValue(undefined),
+      listProjects: vi.fn().mockResolvedValue({ projects: [{
+        id: "project-1", name: "AHeart Admin", slug: "aheart-admin",
+        archivedAt: null, createdAt: "2026-07-13T00:00:00Z"
+      }] }),
+      getProjectSummary: vi.fn().mockResolvedValue({
+        project: { id: "project-1", name: "AHeart Admin", slug: "aheart-admin", archivedAt: null, createdAt: "2026-07-13T00:00:00Z" },
+        repository: { id: "repo-1", projectId: "project-1", kind: "upload", name: "管理后台源码", defaultBranch: "main" },
+        latestSnapshot: { id: "snapshot-1", commitSha: "a".repeat(40), ref: "upload", commitTimestamp: "2026-07-13T08:00:00Z", fileCount: 128 },
+        currentRelease: { id: "release-1", buildId: "build-1", snapshotId: "snapshot-1", version: "v1.4.0", createdAt: "2026-07-13T08:10:00Z", publishedAt: "2026-07-13T08:20:00Z" },
+        latestBuild: { id: "build-1", snapshotId: "snapshot-1", commitSha: "a".repeat(40), status: "published", warnings: [], cancelRequested: false },
+        memberCount: 3
+      })
+    } as unknown as ApiClient;
+
+    renderAppAt(api, "/projects");
+
+    expect(await screen.findByRole("heading", { name: "项目中心" })).toBeVisible();
+    expect(await screen.findByText("v1.4.0")).toBeVisible();
+    expect(screen.getAllByText("当前发布")).not.toHaveLength(0);
+    expect(screen.getAllByText("最近导入")).not.toHaveLength(0);
+    expect(screen.getByText("3 人")).toBeVisible();
+    expect(screen.getByText("128 个文件")).toBeVisible();
+  });
+
   test("renders Chinese console navigation", async () => {
     const user = userEvent.setup();
     const api = {

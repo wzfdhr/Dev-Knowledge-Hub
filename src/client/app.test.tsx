@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { KnowledgePage } from "./pages/knowledge-page";
 import { FeedbackPage } from "./pages/feedback-page";
 import { SettingsPage } from "./pages/settings-page";
+import { ProjectImportsPage } from "./pages/project-imports-page";
 import { derivePrimaryAction, OverviewPage } from "./pages/overview-page";
 import { ApiError, type ApiClient } from "./api/client";
 import { App } from "./app";
@@ -61,6 +62,27 @@ describe("shared console copy", () => {
     expect(screen.getByRole("link", { name: "团队协作" })).toHaveAttribute("href", "/projects/project-1/collaboration");
     expect(screen.getByRole("link", { name: "Codex 接入" })).toHaveAttribute("href", "/projects/project-1/codex");
     expect(screen.getByRole("heading", { name: "团队协作" })).toBeVisible();
+  });
+
+  test("renders folder import as a dedicated project workflow", async () => {
+    const api = {
+      setupStatus: vi.fn().mockResolvedValue({ setupRequired: false }),
+      session: vi.fn().mockResolvedValue({ admin: { email: "admin@example.com", role: "admin" } }),
+      logout: vi.fn().mockResolvedValue(undefined),
+      listProjects: vi.fn().mockResolvedValue({ projects: [{
+        id: "project-1", name: "AHeart Admin", slug: "aheart-admin",
+        archivedAt: null, createdAt: "2026-07-13T00:00:00Z"
+      }] }),
+      getRepository: vi.fn().mockRejectedValue(new ApiError(404, "REPOSITORY_NOT_FOUND", "No repository"))
+    } as unknown as ApiClient;
+
+    renderAppAt(api, "/projects/project-1/imports");
+
+    expect(await screen.findByRole("heading", { name: "资料上传" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "选择项目文件夹" })).toBeVisible();
+    expect(within(screen.getByRole("list", { name: "导入阶段" })).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      "读取文件", "安全过滤", "本地压缩", "分块上传", "服务端校验", "创建内容版本"
+    ]);
   });
 
   test("renders Chinese console navigation", async () => {
@@ -179,7 +201,8 @@ describe("operations page copy", () => {
 
     renderPage(<SettingsPage api={settingsApi} />);
     expect(await screen.findByRole("heading", { name: "设置" })).toBeVisible();
-    expect(await screen.findByText("本地路径")).toBeVisible();
+    expect(await screen.findByText("模型服务商")).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "仓库" })).not.toBeInTheDocument();
   });
 });
 
@@ -752,11 +775,11 @@ describe("repository replacement", () => {
       replaceRepository
     } as unknown as ApiClient;
 
-    renderPage(<SettingsPage api={api} />);
+    renderPage(<ProjectImportsPage api={api} projectId="project" />);
 
-    await user.click(await screen.findByRole("button", { name: "更换仓库" }));
-    expect(screen.getByRole("dialog", { name: "更换仓库" })).toHaveTextContent("Current repository");
-    expect(screen.getByRole("button", { name: "确认更换" })).toBeVisible();
+    await user.click(await screen.findByRole("button", { name: "更换资料来源" }));
+    expect(screen.getByRole("dialog", { name: "更换资料来源" })).toHaveTextContent("旧来源和已发布知识会保留为只读历史");
+    expect(within(screen.getByRole("dialog", { name: "更换资料来源" })).getByRole("button", { name: "选择项目文件夹" })).toBeInTheDocument();
   });
 
   test("records an uploaded snapshot so Overview can start a build", async () => {
@@ -783,11 +806,9 @@ describe("repository replacement", () => {
       listMcpTokens: vi.fn().mockResolvedValue({ tokens: [] })
     } as unknown as ApiClient;
 
-    renderPage(<SettingsPage api={api} />);
-    await user.click(await screen.findByRole("button", { name: "上传 ZIP" }));
-    await user.type(screen.getByLabelText("仓库名称"), "Uploaded project");
+    renderPage(<ProjectImportsPage api={api} projectId="project" />);
     const zip = new File(["zip"], "project.zip", { type: "application/zip" });
-    const uploadInput = screen.getByLabelText("ZIP 项目包") as HTMLInputElement;
+    const uploadInput = await screen.findByLabelText("ZIP 项目包") as HTMLInputElement;
     await user.upload(uploadInput, zip);
     expect(uploadInput.files?.[0]).toBe(zip);
     expect({
@@ -796,8 +817,7 @@ describe("repository replacement", () => {
       typeMismatch: uploadInput.validity.typeMismatch,
       customError: uploadInput.validity.customError
     }).toEqual({ valid: true, valueMissing: false, typeMismatch: false, customError: false });
-    expect(uploadInput.closest("form")?.checkValidity()).toBe(true);
-    await user.click(screen.getByRole("button", { name: "连接仓库" }));
+    await user.click(screen.getByRole("button", { name: "开始上传" }));
 
     await waitFor(() => expect(api.importResumableUpload).toHaveBeenCalledWith("project", "session"));
     await waitFor(() => expect(sessionStorage.getItem("devkh:last-snapshot")).toContain("snapshot"));

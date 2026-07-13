@@ -13,6 +13,7 @@ import { KnowledgePage } from "./pages/knowledge-page";
 import { MembersPage } from "./pages/members-page";
 import { OverviewPage } from "./pages/overview-page";
 import { ProjectsPage } from "./pages/projects-page";
+import { ProjectImportsPage } from "./pages/project-imports-page";
 import { SettingsPage } from "./pages/settings-page";
 
 function ProjectSectionPlaceholder({ title }: { title: string }) {
@@ -50,7 +51,7 @@ export function App({ api = defaultApi }: { api?: ApiClient }) {
     <Route path="/projects/:projectId" element={<ProjectLayout api={api} />}>
       <Route index element={<Navigate to="overview" replace />} />
       <Route path="overview" element={<OverviewPage api={api} />} />
-      <Route path="imports" element={<ProjectSectionPlaceholder title="资料上传" />} />
+      <Route path="imports" element={<ProjectImportsPage api={api} />} />
       <Route path="versions" element={<ProjectSectionPlaceholder title="知识版本" />} />
       <Route path="collaboration" element={<ProjectSectionPlaceholder title="团队协作" />} />
       <Route path="codex" element={<ProjectSectionPlaceholder title="Codex 接入" />} />

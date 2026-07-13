@@ -2,20 +2,21 @@ import { randomBytes } from "node:crypto";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { buildServer } from "./app";
+import { buildServer, type ServerOptions } from "./app";
 import { MemoryAppStore } from "./persistence/memory-store";
 
 const apps: ReturnType<typeof buildServer>[] = [];
 
-async function authenticatedTeam() {
+async function authenticatedTeam(overrides: { publicBaseUrl?: string } = {}) {
   const store = new MemoryAppStore();
   const app = buildServer({
     store,
     masterKey: randomBytes(32).toString("base64"),
     sessionSecret: "team-route-test-session-secret",
     dataDir: "/tmp/devkh-team-tests",
-    nodeEnv: "test"
-  });
+    nodeEnv: "test",
+    ...overrides
+  } as ServerOptions);
   apps.push(app);
   await app.inject({
     method: "POST",
@@ -162,6 +163,22 @@ describe("team projects and members", () => {
       environmentVariable: "DEVKH_PAYMENTS_TOKEN",
       configToml: expect.stringContaining('url = "http://devkh.example.com/mcp"'),
       agentsMarkdown: expect.stringContaining("支付服务")
+    });
+  });
+
+  test("uses the configured public HTTPS origin in a Codex connection pack", async () => {
+    const { app, cookie } = await authenticatedTeam({ publicBaseUrl: "https://knowledge.example.com/" });
+    const project = await app.inject({
+      method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "线上服务", slug: "online" }
+    });
+    const projectId = project.json<{ project: { id: string } }>().project.id;
+
+    const pack = await app.inject({
+      method: "GET", url: `/api/projects/${projectId}/codex-connection`, headers: { cookie, host: "127.0.0.1:3000" }
+    });
+
+    expect(pack.json()).toMatchObject({
+      configToml: expect.stringContaining('url = "https://knowledge.example.com/mcp"')
     });
   });
 });

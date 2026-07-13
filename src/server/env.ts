@@ -5,13 +5,19 @@ const masterKeySchema = z.string().refine((value) => {
   return decoded.length === 32 && decoded.toString("base64") === value;
 }, "Master key must be exactly 32 bytes encoded as base64");
 
+const publicBaseUrlSchema = z.string().url().refine((value) => {
+  const url = new URL(value);
+  return url.protocol === "https:" && !url.username && !url.password;
+}, "PUBLIC_BASE_URL must be an HTTPS URL without credentials");
+
 const sharedEnvSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
   HOST: z.string().min(1).default("127.0.0.1"),
   DATA_DIR: z.string().min(1).default("./data"),
   DATABASE_URL: z.string().min(1).optional(),
   DEVKH_MASTER_KEY: masterKeySchema.optional(),
-  DEVKH_SESSION_SECRET: z.string().min(1).optional()
+  DEVKH_SESSION_SECRET: z.string().min(1).optional(),
+  PUBLIC_BASE_URL: publicBaseUrlSchema.optional()
 });
 
 const productionEnvSchema = sharedEnvSchema.extend({
@@ -30,6 +36,7 @@ export interface AppEnv {
   databaseUrl?: string;
   masterKey?: string;
   sessionSecret?: string;
+  publicBaseUrl?: string;
 }
 
 export function loadEnv({
@@ -48,7 +55,8 @@ export function loadEnv({
       dataDir: parsed.DATA_DIR,
       databaseUrl: parsed.DATABASE_URL,
       masterKey: parsed.DEVKH_MASTER_KEY,
-      sessionSecret: parsed.DEVKH_SESSION_SECRET
+      sessionSecret: parsed.DEVKH_SESSION_SECRET,
+      publicBaseUrl: parsed.PUBLIC_BASE_URL
     };
   }
 
@@ -60,6 +68,7 @@ export function loadEnv({
     dataDir: parsed.DATA_DIR,
     databaseUrl: parsed.DATABASE_URL,
     masterKey: parsed.DEVKH_MASTER_KEY,
-    sessionSecret: parsed.DEVKH_SESSION_SECRET
+    sessionSecret: parsed.DEVKH_SESSION_SECRET,
+    publicBaseUrl: parsed.PUBLIC_BASE_URL
   };
 }

@@ -117,6 +117,7 @@ export interface ServerOptions {
   nodeEnv: "development" | "production" | "test";
   clientDir?: string;
   rateLimits?: RateLimitPolicy;
+  publicBaseUrl?: string;
 }
 
 function sseEvent(event: BuildEvent): string {
@@ -512,7 +513,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const pack = createCodexConnectionPack({
       projectName: project.name,
       projectId: project.id,
-      endpoint: `${request.protocol}://${request.host}/mcp`,
+      endpoint: `${(options.publicBaseUrl ?? `${request.protocol}://${request.host}`).replace(/\/+$/, "")}/mcp`,
       environmentVariable
     });
     return { projectId: project.id, environmentVariable, ...pack };

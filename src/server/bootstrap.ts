@@ -68,6 +68,7 @@ export async function bootstrapServer(
     sessionSecret: env.sessionSecret,
     dataDir: env.dataDir,
     nodeEnv: env.nodeEnv,
+    ...(env.publicBaseUrl ? { publicBaseUrl: env.publicBaseUrl } : {}),
     ...(mode === "production" ? { clientDir: path.resolve("dist/client") } : {})
   });
   server.addHook("onClose", async () => {

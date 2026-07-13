@@ -26,8 +26,11 @@ import type {
   ReleaseRecord,
   RepositoryConnectionInput,
   RepositoryRecord,
+  ProjectRecord,
   SetupResult,
   SourceSnapshotRecord,
+  TeamMemberRecord,
+  TeamRole,
   WorkspaceRecord
 } from "./store.js";
 import type {
@@ -47,6 +50,7 @@ interface Queryable {
 interface RepositoryRow extends QueryResultRow {
   id: string;
   workspace_id: string;
+  project_id: string;
   kind: "local" | "git" | "upload";
   name: string;
   local_path: string | null;
@@ -109,6 +113,7 @@ interface ReleaseRow extends QueryResultRow {
 interface McpTokenRow extends QueryResultRow {
   id: string;
   workspace_id: string;
+  project_id: string;
   name: string;
   token_hash: string;
   token_prefix: string;
@@ -131,10 +136,29 @@ interface FeedbackRow extends QueryResultRow {
   updated_at: Date;
 }
 
+interface ProjectRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  name: string;
+  slug: string;
+  archived_at: Date | null;
+  created_at: Date;
+}
+
+interface TeamMemberRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  email: string;
+  password_hash: string;
+  role: TeamRole;
+  created_at: Date;
+}
+
 function repositoryRecord(row: RepositoryRow): RepositoryRecord {
   return {
     id: row.id,
     workspaceId: row.workspace_id,
+    projectId: row.project_id,
     kind: row.kind,
     name: row.name,
     localPath: row.local_path,
@@ -211,6 +235,7 @@ function mcpTokenRecord(row: McpTokenRow): McpTokenRecord {
   return {
     id: row.id,
     workspaceId: row.workspace_id,
+    projectId: row.project_id,
     name: row.name,
     tokenHash: row.token_hash,
     tokenPrefix: row.token_prefix,
@@ -233,6 +258,28 @@ function feedbackRecord(row: FeedbackRow): AgentFeedbackRecord {
     rebuildBuildId: row.rebuild_build_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at
+  };
+}
+
+function projectRecord(row: ProjectRow): ProjectRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    name: row.name,
+    slug: row.slug,
+    archivedAt: row.archived_at,
+    createdAt: row.created_at
+  };
+}
+
+function teamMemberRecord(row: TeamMemberRow): TeamMemberRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    email: row.email,
+    passwordHash: row.password_hash,
+    role: row.role,
+    createdAt: row.created_at
   };
 }
 
@@ -303,6 +350,14 @@ export class PostgresAppStore implements AppStore {
         [workspace.id, email, passwordHash]
       );
       const admin = adminResult.rows[0];
+      await client.query(
+        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'admin')",
+        [workspace.id, admin.id]
+      );
+      await client.query(
+        "INSERT INTO projects (workspace_id, name, slug) VALUES ($1, $2, $3)",
+        [workspace.id, "默认项目", "default-project"]
+      );
       await this.insertAudit(client, {
         workspaceId: workspace.id,
         actorId: admin.id,
@@ -317,7 +372,8 @@ export class PostgresAppStore implements AppStore {
           id: admin.id,
           workspaceId: admin.workspace_id,
           email: admin.email,
-          passwordHash: admin.password_hash
+          passwordHash: admin.password_hash,
+          role: "admin"
         }
       };
     } catch (error) {
@@ -329,10 +385,11 @@ export class PostgresAppStore implements AppStore {
   }
 
   async findAdminByEmail(email: string): Promise<AdminRecord | null> {
-    const { rows } = await this.pool.query<{
-      id: string; workspace_id: string; email: string; password_hash: string;
-    }>(
-      "SELECT id, workspace_id, email, password_hash FROM admin_users WHERE email = $1 LIMIT 1",
+    const { rows } = await this.pool.query<TeamMemberRow>(
+      `SELECT u.id, u.workspace_id, u.email, u.password_hash, m.role, m.created_at
+       FROM admin_users u
+       JOIN workspace_members m ON m.workspace_id = u.workspace_id AND m.user_id = u.id
+       WHERE u.email = $1 LIMIT 1`,
       [email]
     );
     const row = rows[0];
@@ -340,16 +397,17 @@ export class PostgresAppStore implements AppStore {
       id: row.id,
       workspaceId: row.workspace_id,
       email: row.email,
-      passwordHash: row.password_hash
+      passwordHash: row.password_hash,
+      role: row.role
     } : null;
   }
 
   async findAdminById(id: string, workspaceId: string): Promise<AdminRecord | null> {
-    const { rows } = await this.pool.query<{
-      id: string; workspace_id: string; email: string; password_hash: string;
-    }>(
-      `SELECT id, workspace_id, email, password_hash FROM admin_users
-       WHERE id = $1 AND workspace_id = $2`,
+    const { rows } = await this.pool.query<TeamMemberRow>(
+      `SELECT u.id, u.workspace_id, u.email, u.password_hash, m.role, m.created_at
+       FROM admin_users u
+       JOIN workspace_members m ON m.workspace_id = u.workspace_id AND m.user_id = u.id
+       WHERE u.id = $1 AND u.workspace_id = $2`,
       [id, workspaceId]
     );
     const row = rows[0];
@@ -357,8 +415,96 @@ export class PostgresAppStore implements AppStore {
       id: row.id,
       workspaceId: row.workspace_id,
       email: row.email,
-      passwordHash: row.password_hash
+      passwordHash: row.password_hash,
+      role: row.role
     } : null;
+  }
+
+  async listTeamMembers(workspaceId: string, pagination?: Pagination): Promise<TeamMemberRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    const { rows } = await this.pool.query<TeamMemberRow>(
+      `SELECT u.id, u.workspace_id, u.email, u.password_hash, m.role, m.created_at
+       FROM admin_users u
+       JOIN workspace_members m ON m.workspace_id = u.workspace_id AND m.user_id = u.id
+       WHERE u.workspace_id = $1
+       ORDER BY m.created_at ASC, u.id ASC
+       LIMIT $2 OFFSET $3`,
+      [workspaceId, limit, offset]
+    );
+    return rows.map(teamMemberRecord);
+  }
+
+  async createTeamMember(
+    workspaceId: string,
+    input: { email: string; passwordHash: string; role: TeamRole },
+    actorId: string
+  ): Promise<TeamMemberRecord | null> {
+    return this.transaction(async (client) => {
+      const inserted = await client.query<{ id: string; workspace_id: string; email: string; password_hash: string }>(
+        `INSERT INTO admin_users (workspace_id, email, password_hash)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (workspace_id, email) DO NOTHING
+         RETURNING id, workspace_id, email, password_hash`,
+        [workspaceId, input.email, input.passwordHash]
+      );
+      const user = inserted.rows[0];
+      if (!user) return null;
+      const membership = await client.query<TeamMemberRow>(
+        `INSERT INTO workspace_members (workspace_id, user_id, role)
+         VALUES ($1, $2, $3)
+         RETURNING $2::uuid AS id, $1::uuid AS workspace_id, $4::text AS email,
+                   $5::text AS password_hash, role, created_at`,
+        [workspaceId, user.id, input.role, user.email, user.password_hash]
+      );
+      const member = teamMemberRecord(membership.rows[0]);
+      await this.insertAudit(client, {
+        workspaceId,
+        actorId,
+        action: "member.created",
+        resourceType: "workspace_member",
+        resourceId: member.id,
+        metadata: { role: member.role }
+      });
+      return member;
+    });
+  }
+
+  async listProjects(workspaceId: string, pagination?: Pagination): Promise<ProjectRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    const { rows } = await this.pool.query<ProjectRow>(
+      `SELECT id, workspace_id, name, slug, archived_at, created_at
+       FROM projects WHERE workspace_id = $1
+       ORDER BY created_at ASC, id ASC LIMIT $2 OFFSET $3`,
+      [workspaceId, limit, offset]
+    );
+    return rows.map(projectRecord);
+  }
+
+  async createProject(
+    workspaceId: string,
+    input: { name: string; slug: string },
+    actorId: string
+  ): Promise<ProjectRecord | null> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<ProjectRow>(
+        `INSERT INTO projects (workspace_id, name, slug)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (workspace_id, slug) DO NOTHING
+         RETURNING id, workspace_id, name, slug, archived_at, created_at`,
+        [workspaceId, input.name, input.slug]
+      );
+      const row = rows[0];
+      if (!row) return null;
+      const project = projectRecord(row);
+      await this.insertAudit(client, {
+        workspaceId,
+        actorId,
+        action: "project.created",
+        resourceType: "project",
+        resourceId: project.id
+      });
+      return project;
+    });
   }
 
   async defaultWorkspace(): Promise<WorkspaceRecord | null> {
@@ -376,11 +522,11 @@ export class PostgresAppStore implements AppStore {
     input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">
   ): Promise<McpTokenRecord> {
     const { rows } = await this.pool.query<McpTokenRow>(
-      `INSERT INTO mcp_tokens (workspace_id, name, token_hash, token_prefix)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, workspace_id, name, token_hash, token_prefix,
-                 created_at, last_used_at, revoked_at`,
-      [input.workspaceId, input.name, input.tokenHash, input.tokenPrefix]
+      `INSERT INTO mcp_tokens (workspace_id, project_id, name, token_hash, token_prefix)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, workspace_id, project_id, name, token_hash, token_prefix,
+               created_at, last_used_at, revoked_at`,
+      [input.workspaceId, input.projectId, input.name, input.tokenHash, input.tokenPrefix]
     );
     return mcpTokenRecord(rows[0]);
   }
@@ -391,11 +537,11 @@ export class PostgresAppStore implements AppStore {
   ): Promise<McpTokenRecord> {
     return this.transaction(async (client) => {
       const { rows } = await client.query<McpTokenRow>(
-        `INSERT INTO mcp_tokens (workspace_id, name, token_hash, token_prefix)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id, workspace_id, name, token_hash, token_prefix,
-                   created_at, last_used_at, revoked_at`,
-        [input.workspaceId, input.name, input.tokenHash, input.tokenPrefix]
+        `INSERT INTO mcp_tokens (workspace_id, project_id, name, token_hash, token_prefix)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, workspace_id, project_id, name, token_hash, token_prefix,
+                 created_at, last_used_at, revoked_at`,
+        [input.workspaceId, input.projectId, input.name, input.tokenHash, input.tokenPrefix]
       );
       const token = mcpTokenRecord(rows[0]);
       await this.insertAudit(client, {
@@ -412,7 +558,7 @@ export class PostgresAppStore implements AppStore {
   async listMcpTokens(workspaceId: string, pagination?: Pagination): Promise<McpTokenRecord[]> {
     const { limit, offset } = normalizePagination(pagination);
     const { rows } = await this.pool.query<McpTokenRow>(
-      `SELECT id, workspace_id, name, token_hash, token_prefix,
+      `SELECT id, workspace_id, project_id, name, token_hash, token_prefix,
               created_at, last_used_at, revoked_at
        FROM mcp_tokens WHERE workspace_id = $1 ORDER BY created_at DESC, id DESC
        LIMIT $2 OFFSET $3`,
@@ -431,9 +577,9 @@ export class PostgresAppStore implements AppStore {
 
   async findActiveMcpToken(tokenHash: string): Promise<McpTokenRecord | null> {
     const { rows } = await this.pool.query<McpTokenRow>(
-      `SELECT id, workspace_id, name, token_hash, token_prefix,
+      `SELECT id, workspace_id, project_id, name, token_hash, token_prefix,
               created_at, last_used_at, revoked_at
-       FROM mcp_tokens WHERE token_hash = $1 AND revoked_at IS NULL LIMIT 1`,
+       FROM mcp_tokens WHERE token_hash = $1 AND revoked_at IS NULL AND project_id IS NOT NULL LIMIT 1`,
       [tokenHash]
     );
     return rows[0] ? mcpTokenRecord(rows[0]) : null;
@@ -450,7 +596,7 @@ export class PostgresAppStore implements AppStore {
     const { rows } = await this.pool.query<McpTokenRow>(
       `UPDATE mcp_tokens SET revoked_at = COALESCE(revoked_at, now()), updated_at = now()
        WHERE workspace_id = $1 AND id = $2
-       RETURNING id, workspace_id, name, token_hash, token_prefix,
+       RETURNING id, workspace_id, project_id, name, token_hash, token_prefix,
                  created_at, last_used_at, revoked_at`,
       [workspaceId, tokenId]
     );
@@ -466,7 +612,7 @@ export class PostgresAppStore implements AppStore {
       const { rows } = await client.query<McpTokenRow>(
         `UPDATE mcp_tokens SET revoked_at = COALESCE(revoked_at, now()), updated_at = now()
          WHERE workspace_id = $1 AND id = $2
-         RETURNING id, workspace_id, name, token_hash, token_prefix,
+         RETURNING id, workspace_id, project_id, name, token_hash, token_prefix,
                    created_at, last_used_at, revoked_at`,
         [workspaceId, tokenId]
       );
@@ -737,24 +883,36 @@ export class PostgresAppStore implements AppStore {
 
   async createRepository(
     workspaceId: string,
-    input: RepositoryConnectionInput
+    input: RepositoryConnectionInput,
+    projectId?: string
   ): Promise<RepositoryRecord | null> {
-    return this.transaction((client) => this.insertRepository(client, workspaceId, input));
+    return this.transaction((client) => this.insertRepository(client, workspaceId, input, null, projectId));
   }
 
   private async insertRepository(
     client: Queryable,
     workspaceId: string,
     input: RepositoryConnectionInput,
-    archivedAt: Date | null = null
+    archivedAt: Date | null = null,
+    requestedProjectId?: string
   ): Promise<RepositoryRecord | null> {
+    const projects = await client.query<{ id: string }>(
+      `SELECT id FROM projects
+       WHERE workspace_id = $1 AND archived_at IS NULL
+         AND ($2::uuid IS NULL OR id = $2)
+       ORDER BY created_at ASC, id ASC LIMIT 1`,
+      [workspaceId, requestedProjectId ?? null]
+    );
+    const project = projects.rows[0];
+    if (!project) return null;
     const result = await client.query<RepositoryRow>(
-        `INSERT INTO repositories (workspace_id, kind, name, local_path, clone_url, archived_at)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (workspace_id) WHERE archived_at IS NULL DO NOTHING
-         RETURNING id, workspace_id, kind, name, local_path, clone_url, default_branch, archived_at`,
+        `INSERT INTO repositories (workspace_id, project_id, kind, name, local_path, clone_url, archived_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (project_id) WHERE archived_at IS NULL DO NOTHING
+         RETURNING id, workspace_id, project_id, kind, name, local_path, clone_url, default_branch, archived_at`,
         [
           workspaceId,
+          project.id,
           input.kind,
           input.name,
           input.kind === "local" ? input.path : null,
@@ -778,10 +936,11 @@ export class PostgresAppStore implements AppStore {
   async createRepositoryWithAudit(
     workspaceId: string,
     input: RepositoryConnectionInput,
-    actorId: string
+    actorId: string,
+    projectId?: string
   ): Promise<RepositoryRecord | null> {
     return this.transaction(async (client) => {
-      const repository = await this.insertRepository(client, workspaceId, input);
+      const repository = await this.insertRepository(client, workspaceId, input, null, projectId);
       if (!repository) return null;
       await this.insertAudit(client, {
         workspaceId,
@@ -795,23 +954,24 @@ export class PostgresAppStore implements AppStore {
     });
   }
 
-  async currentRepository(workspaceId: string): Promise<RepositoryRecord | null> {
+  async currentRepository(workspaceId: string, projectId?: string): Promise<RepositoryRecord | null> {
     const { rows } = await this.pool.query<RepositoryRow>(
-      `SELECT r.id, r.workspace_id, r.kind, r.name, r.local_path, r.clone_url,
+      `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
               r.default_branch, r.archived_at,
               EXISTS (
                 SELECT 1 FROM encrypted_credentials c
                 WHERE c.workspace_id = r.workspace_id AND c.repository_id = r.id
               ) AS has_credential
-       FROM repositories r WHERE r.workspace_id = $1 AND r.archived_at IS NULL LIMIT 1`,
-      [workspaceId]
+       FROM repositories r WHERE r.workspace_id = $1 AND r.archived_at IS NULL
+         AND ($2::uuid IS NULL OR r.project_id = $2) LIMIT 1`,
+      [workspaceId, projectId ?? null]
     );
     return rows[0] ? repositoryRecord(rows[0]) : null;
   }
 
   async listArchivedRepositories(workspaceId: string): Promise<RepositoryRecord[]> {
     const { rows } = await this.pool.query<RepositoryRow>(
-      `SELECT r.id, r.workspace_id, r.kind, r.name, r.local_path, r.clone_url,
+      `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
               r.default_branch, r.archived_at,
               EXISTS (
                 SELECT 1 FROM encrypted_credentials c
@@ -832,7 +992,7 @@ export class PostgresAppStore implements AppStore {
   ): Promise<RepositoryRecord | null> {
     return this.transaction(async (client) => {
       const selected = await client.query<RepositoryRow>(
-        `SELECT r.id, r.workspace_id, r.kind, r.name, r.local_path, r.clone_url,
+        `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
                 r.default_branch, r.archived_at,
                 EXISTS (
                   SELECT 1 FROM encrypted_credentials c
@@ -908,14 +1068,14 @@ export class PostgresAppStore implements AppStore {
   ): Promise<RepositoryRecord | null> {
     return this.transaction(async (client) => {
       const current = await client.query<RepositoryRow>(
-        `SELECT r.id, r.workspace_id, r.kind, r.name, r.local_path, r.clone_url,
+        `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
                 r.default_branch, r.archived_at, false AS has_credential
          FROM repositories r
          WHERE r.workspace_id = $1 AND r.archived_at IS NULL FOR UPDATE`,
         [workspaceId]
       );
       const candidate = await client.query<RepositoryRow>(
-        `SELECT r.id, r.workspace_id, r.kind, r.name, r.local_path, r.clone_url,
+        `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
                 r.default_branch, r.archived_at, false AS has_credential
          FROM repositories r
          WHERE r.workspace_id = $1 AND r.id = $2 AND r.kind = 'upload'
@@ -931,7 +1091,7 @@ export class PostgresAppStore implements AppStore {
       const promoted = await client.query<RepositoryRow>(
         `UPDATE repositories SET archived_at = NULL, updated_at = now()
          WHERE id = $1 AND workspace_id = $2 AND archived_at IS NOT NULL
-         RETURNING id, workspace_id, kind, name, local_path, clone_url,
+         RETURNING id, workspace_id, project_id, kind, name, local_path, clone_url,
                    default_branch, archived_at`,
         [repositoryId, workspaceId]
       );

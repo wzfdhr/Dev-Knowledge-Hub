@@ -179,6 +179,7 @@ describe("MCP bearer tokens", () => {
     for (let index = 0; index < 125; index += 1) {
       await store.createMcpToken({
         workspaceId,
+        projectId: "project-1",
         name: `Agent ${String(index).padStart(3, "0")}`,
         tokenHash: String(index).padStart(64, "0"),
         tokenPrefix: `dkh_${String(index).padStart(8, "0")}`

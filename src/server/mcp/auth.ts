@@ -26,6 +26,7 @@ export function createMcpAuthorizationGuard(store: AppStore, plaintext: string) 
 export function sanitizedMcpToken(token: McpTokenRecord) {
   return {
     id: token.id,
+    projectId: token.projectId,
     name: token.name,
     tokenPrefix: token.tokenPrefix,
     createdAt: token.createdAt,

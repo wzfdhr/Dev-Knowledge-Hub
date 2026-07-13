@@ -215,7 +215,7 @@ describe("audited mutation atomicity", () => {
     const store = new FailingAuditStore();
     const { app, cookie, workspaceId } = await context(store);
     const token = await store.createMcpToken({
-      workspaceId, name: "CI", tokenHash: "c".repeat(64), tokenPrefix: "dkh_example"
+      workspaceId, projectId: "project-1", name: "CI", tokenHash: "c".repeat(64), tokenPrefix: "dkh_example"
     });
     const auditCount = store.auditEvents.length;
     store.failAudit = true;

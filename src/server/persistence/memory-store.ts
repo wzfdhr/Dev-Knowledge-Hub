@@ -31,6 +31,9 @@ import type {
   SourceFileRecord,
   SourceSnapshotRecord,
   SetupResult,
+  TeamMemberRecord,
+  TeamRole,
+  ProjectRecord,
   WorkspaceRecord
 } from "./store.js";
 import type {
@@ -45,6 +48,8 @@ import type { CodeIndex } from "../knowledge/intelligence.js";
 export class MemoryAppStore implements AppStore {
   private workspace: WorkspaceRecord | null = null;
   private admin: AdminRecord | null = null;
+  private readonly members: TeamMemberRecord[] = [];
+  private readonly projects: ProjectRecord[] = [];
   private readonly repositories: RepositoryRecord[] = [];
   readonly auditEvents: AuditEventRecord[] = [];
   readonly mcpTokens: McpTokenRecord[] = [];
@@ -79,8 +84,18 @@ export class MemoryAppStore implements AppStore {
         id: randomUUID(),
         workspaceId: this.workspace.id,
         email,
-        passwordHash
+        passwordHash,
+        role: "admin"
       };
+      this.members.push({ ...this.admin, createdAt: new Date() });
+      this.projects.push({
+        id: randomUUID(),
+        workspaceId: this.workspace.id,
+        name: "默认项目",
+        slug: "default-project",
+        archivedAt: null,
+        createdAt: new Date()
+      });
       await this.recordAudit({
         workspaceId: this.workspace.id,
         actorId: this.admin.id,
@@ -98,11 +113,94 @@ export class MemoryAppStore implements AppStore {
   }
 
   async findAdminByEmail(email: string): Promise<AdminRecord | null> {
-    return this.admin?.email === email ? this.admin : null;
+    const member = this.members.find((candidate) => candidate.email === email);
+    return member ? {
+      id: member.id,
+      workspaceId: member.workspaceId,
+      email: member.email,
+      passwordHash: member.passwordHash,
+      role: member.role
+    } : null;
   }
 
   async findAdminById(id: string, workspaceId: string): Promise<AdminRecord | null> {
-    return this.admin?.id === id && this.admin.workspaceId === workspaceId ? this.admin : null;
+    const member = this.members.find((candidate) => candidate.id === id && candidate.workspaceId === workspaceId);
+    return member ? {
+      id: member.id,
+      workspaceId: member.workspaceId,
+      email: member.email,
+      passwordHash: member.passwordHash,
+      role: member.role
+    } : null;
+  }
+
+  async listTeamMembers(workspaceId: string, pagination?: Pagination): Promise<TeamMemberRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    return this.members.filter((member) => member.workspaceId === workspaceId)
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id))
+      .slice(offset, offset + limit);
+  }
+
+  async createTeamMember(
+    workspaceId: string,
+    input: { email: string; passwordHash: string; role: TeamRole },
+    actorId: string
+  ): Promise<TeamMemberRecord | null> {
+    if (this.members.some((member) => member.workspaceId === workspaceId && member.email === input.email)) {
+      return null;
+    }
+    const member: TeamMemberRecord = {
+      id: randomUUID(),
+      workspaceId,
+      email: input.email,
+      passwordHash: input.passwordHash,
+      role: input.role,
+      createdAt: new Date()
+    };
+    this.members.push(member);
+    await this.recordAudit({
+      workspaceId,
+      actorId,
+      action: "member.created",
+      resourceType: "workspace_member",
+      resourceId: member.id,
+      metadata: { role: member.role }
+    });
+    return member;
+  }
+
+  async listProjects(workspaceId: string, pagination?: Pagination): Promise<ProjectRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    return this.projects.filter((project) => project.workspaceId === workspaceId)
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id))
+      .slice(offset, offset + limit);
+  }
+
+  async createProject(
+    workspaceId: string,
+    input: { name: string; slug: string },
+    actorId: string
+  ): Promise<ProjectRecord | null> {
+    if (this.projects.some((project) => project.workspaceId === workspaceId && project.slug === input.slug)) {
+      return null;
+    }
+    const project: ProjectRecord = {
+      id: randomUUID(),
+      workspaceId,
+      name: input.name,
+      slug: input.slug,
+      archivedAt: null,
+      createdAt: new Date()
+    };
+    this.projects.push(project);
+    await this.recordAudit({
+      workspaceId,
+      actorId,
+      action: "project.created",
+      resourceType: "project",
+      resourceId: project.id
+    });
+    return project;
   }
 
   async defaultWorkspace(): Promise<WorkspaceRecord | null> {
@@ -391,12 +489,13 @@ export class MemoryAppStore implements AppStore {
 
   async createRepository(
     workspaceId: string,
-    input: RepositoryConnectionInput
+    input: RepositoryConnectionInput,
+    projectId?: string
   ): Promise<RepositoryRecord | null> {
     const repositoryLength = this.repositories.length;
     const credentialLength = this.encryptedCredentials.length;
     try {
-      return await this.insertRepository(workspaceId, input, null, true);
+      return await this.insertRepository(workspaceId, input, null, true, projectId);
     } catch (error) {
       this.repositories.splice(repositoryLength);
       this.encryptedCredentials.splice(credentialLength);
@@ -408,12 +507,20 @@ export class MemoryAppStore implements AppStore {
     workspaceId: string,
     input: RepositoryConnectionInput,
     archivedAt: Date | null,
-    requiresNoCurrentRepository: boolean
+    requiresNoCurrentRepository: boolean,
+    projectId?: string
   ): Promise<RepositoryRecord | null> {
-    if (requiresNoCurrentRepository && await this.currentRepository(workspaceId)) return null;
+    if (requiresNoCurrentRepository && await this.currentRepository(workspaceId, projectId)) return null;
+    const project = this.projects.find((candidate) =>
+      candidate.workspaceId === workspaceId
+      && candidate.archivedAt === null
+      && (projectId ? candidate.id === projectId : true)
+    );
+    if (!project) return null;
     const repository: RepositoryRecord = {
       id: randomUUID(),
       workspaceId,
+      projectId: project.id,
       kind: input.kind,
       name: input.name,
       localPath: input.kind === "local" ? input.path : null,
@@ -443,13 +550,14 @@ export class MemoryAppStore implements AppStore {
   async createRepositoryWithAudit(
     workspaceId: string,
     input: RepositoryConnectionInput,
-    actorId: string
+    actorId: string,
+    projectId?: string
   ): Promise<RepositoryRecord | null> {
     const repositoryLength = this.repositories.length;
     const credentialLength = this.encryptedCredentials.length;
     const auditLength = this.auditEvents.length;
     try {
-      const repository = await this.createRepository(workspaceId, input);
+      const repository = await this.createRepository(workspaceId, input, projectId);
       if (!repository) return null;
       await this.recordAudit({
         workspaceId,
@@ -468,9 +576,11 @@ export class MemoryAppStore implements AppStore {
     }
   }
 
-  async currentRepository(workspaceId: string): Promise<RepositoryRecord | null> {
+  async currentRepository(workspaceId: string, projectId?: string): Promise<RepositoryRecord | null> {
     return this.repositories.find((repository) =>
-      repository.workspaceId === workspaceId && repository.archivedAt === null
+      repository.workspaceId === workspaceId
+      && repository.archivedAt === null
+      && (projectId ? repository.projectId === projectId : true)
     ) ?? null;
   }
 

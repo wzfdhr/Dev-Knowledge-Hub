@@ -21,12 +21,13 @@ function uniqueIndex(table: Parameters<typeof getTableConfig>[0], name: string) 
 }
 
 describe("Task 2 database contract", () => {
-  test("stores repository archive state and enforces one current repository per workspace", () => {
+  test("stores repository archive state and enforces one current repository per project", () => {
     expect(columnNames(repositories)).toEqual(expect.arrayContaining([
       "kind", "local_path", "clone_url", "archived_at"
     ]));
     expect(uniqueIndex(repositories, "repositories_workspace_unique_idx")).toBeUndefined();
-    expect(uniqueIndex(repositories, "repositories_workspace_current_unique_idx")).toBe(true);
+    expect(columnNames(repositories)).toContain("project_id");
+    expect(uniqueIndex(repositories, "repositories_project_current_unique_idx")).toBe(true);
   });
 
   test("credentials belong to repositories and snapshot commits are immutable", () => {

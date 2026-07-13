@@ -19,6 +19,28 @@ export interface AdminRecord {
   workspaceId: string;
   email: string;
   passwordHash: string;
+  role: TeamRole;
+}
+
+export const TEAM_ROLES = ["admin", "member", "reader"] as const;
+export type TeamRole = (typeof TEAM_ROLES)[number];
+
+export interface TeamMemberRecord {
+  id: string;
+  workspaceId: string;
+  email: string;
+  passwordHash: string;
+  role: TeamRole;
+  createdAt: Date;
+}
+
+export interface ProjectRecord {
+  id: string;
+  workspaceId: string;
+  name: string;
+  slug: string;
+  archivedAt: Date | null;
+  createdAt: Date;
 }
 
 export interface AuditEventInput {
@@ -37,6 +59,7 @@ export interface AuditEventRecord extends AuditEventInput {
 export interface McpTokenRecord {
   id: string;
   workspaceId: string;
+  projectId: string;
   name: string;
   tokenHash: string;
   tokenPrefix: string;
@@ -97,6 +120,7 @@ export type RepositoryKind = "local" | "git" | "upload";
 export interface RepositoryRecord {
   id: string;
   workspaceId: string;
+  projectId: string;
   kind: RepositoryKind;
   name: string;
   localPath: string | null;
@@ -308,6 +332,18 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   createInitialSetup(email: string, passwordHash: string): Promise<SetupResult | null>;
   findAdminByEmail(email: string): Promise<AdminRecord | null>;
   findAdminById(id: string, workspaceId: string): Promise<AdminRecord | null>;
+  listTeamMembers(workspaceId: string, pagination?: Pagination): Promise<TeamMemberRecord[]>;
+  createTeamMember(
+    workspaceId: string,
+    input: { email: string; passwordHash: string; role: TeamRole },
+    actorId: string
+  ): Promise<TeamMemberRecord | null>;
+  listProjects(workspaceId: string, pagination?: Pagination): Promise<ProjectRecord[]>;
+  createProject(
+    workspaceId: string,
+    input: { name: string; slug: string },
+    actorId: string
+  ): Promise<ProjectRecord | null>;
   defaultWorkspace(): Promise<WorkspaceRecord | null>;
   recordAudit(event: AuditEventInput): Promise<void>;
   createMcpToken(input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">):
@@ -356,14 +392,16 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   ): Promise<{ build: BuildRecord; created: boolean }>;
   createRepository(
     workspaceId: string,
-    input: RepositoryConnectionInput
+    input: RepositoryConnectionInput,
+    projectId?: string
   ): Promise<RepositoryRecord | null>;
   createRepositoryWithAudit(
     workspaceId: string,
     input: RepositoryConnectionInput,
-    actorId: string
+    actorId: string,
+    projectId?: string
   ): Promise<RepositoryRecord | null>;
-  currentRepository(workspaceId: string): Promise<RepositoryRecord | null>;
+  currentRepository(workspaceId: string, projectId?: string): Promise<RepositoryRecord | null>;
   listArchivedRepositories(workspaceId: string): Promise<RepositoryRecord[]>;
   switchRepositoryWithAudit(
     workspaceId: string,

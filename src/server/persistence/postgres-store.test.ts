@@ -9,6 +9,7 @@ describe("PostgresAppStore repository reads", () => {
         rows: [{
           id: "repo-1",
           workspace_id: "workspace-1",
+          project_id: "project-1",
           kind: "git",
           name: "Private",
           local_path: null,
@@ -25,6 +26,7 @@ describe("PostgresAppStore repository reads", () => {
     expect(repository).toEqual({
       id: "repo-1",
       workspaceId: "workspace-1",
+      projectId: "project-1",
       kind: "git",
       name: "Private",
       localPath: null,
@@ -44,6 +46,7 @@ describe("PostgresAppStore repository reads", () => {
     const original = {
       id: "repo-original",
       workspace_id: "workspace-1",
+      project_id: "project-1",
       kind: "local",
       name: "Original",
       local_path: "/original",
@@ -55,6 +58,7 @@ describe("PostgresAppStore repository reads", () => {
     const replacement = {
       id: "repo-replacement",
       workspace_id: "workspace-1",
+      project_id: "project-1",
       kind: "git",
       name: "Replacement",
       local_path: null,
@@ -65,6 +69,7 @@ describe("PostgresAppStore repository reads", () => {
     };
     const query = vi.fn(async (sql: string, _values?: unknown[]) => {
       void _values;
+      if (sql.includes("FROM projects")) return { rows: [{ id: "project-1" }] };
       if (sql.includes("FROM repositories r") && sql.includes("FOR UPDATE")) {
         return { rows: [original] };
       }
@@ -84,6 +89,7 @@ describe("PostgresAppStore repository reads", () => {
     expect(switched).toEqual({
       id: "repo-replacement",
       workspaceId: "workspace-1",
+      projectId: "project-1",
       kind: "git",
       name: "Replacement",
       localPath: null,
@@ -93,12 +99,12 @@ describe("PostgresAppStore repository reads", () => {
       hasCredential: true
     });
     expect(query.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/)[0])).toEqual([
-      "BEGIN", "SELECT", "INSERT", "INSERT", "UPDATE", "UPDATE", "INSERT", "COMMIT"
+      "BEGIN", "SELECT", "SELECT", "INSERT", "INSERT", "UPDATE", "UPDATE", "INSERT", "COMMIT"
     ]);
-    expect(String(query.mock.calls[2][0])).toContain("archived_at");
-    expect(String(query.mock.calls[4][0])).toContain("SET archived_at = now()");
-    expect(String(query.mock.calls[5][0])).toContain("SET archived_at = NULL");
-    expect(query.mock.calls[6][1]).toEqual(expect.arrayContaining([
+    expect(String(query.mock.calls[3][0])).toContain("archived_at");
+    expect(String(query.mock.calls[5][0])).toContain("SET archived_at = now()");
+    expect(String(query.mock.calls[6][0])).toContain("SET archived_at = NULL");
+    expect(query.mock.calls[7][1]).toEqual(expect.arrayContaining([
       expect.stringContaining("oldRepositoryId"),
       expect.stringContaining("newRepositoryId")
     ]));
@@ -127,6 +133,7 @@ describe("PostgresAppStore repository reads", () => {
     };
     const query = vi.fn(async (sql: string, _values?: unknown[]) => {
       void _values;
+      if (sql.includes("FROM projects")) return { rows: [{ id: "project-1" }] };
       if (sql.includes("FROM repositories r") && sql.includes("FOR UPDATE")) {
         return { rows: [original] };
       }
@@ -147,7 +154,7 @@ describe("PostgresAppStore repository reads", () => {
     }, "admin-1")).rejects.toThrow("credential unavailable");
 
     expect(query.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/)[0])).toEqual([
-      "BEGIN", "SELECT", "INSERT", "INSERT", "ROLLBACK"
+      "BEGIN", "SELECT", "SELECT", "INSERT", "INSERT", "ROLLBACK"
     ]);
     expect(query.mock.calls.some(([sql]) => String(sql).includes("UPDATE repositories"))).toBe(false);
   });
@@ -542,6 +549,7 @@ describe("PostgresAppStore audited mutations", () => {
     }, "admin-1")],
     ["token create", (store: PostgresAppStore) => store.createMcpTokenWithAudit({
       workspaceId: "workspace-1",
+      projectId: "project-1",
       name: "CI",
       tokenHash: "a".repeat(64),
       tokenPrefix: "dkh_example"
@@ -572,6 +580,7 @@ describe("PostgresAppStore audited mutations", () => {
       if (sql.includes("INSERT INTO workspaces")) return { rows: [workspaceRow] };
       if (sql.includes("INSERT INTO admin_users")) return { rows: [adminRow] };
       if (sql.includes("SELECT 1 FROM admin_users")) return { rows: [] };
+      if (sql.includes("FROM projects")) return { rows: [{ id: "project-1" }] };
       if (sql.includes("INSERT INTO repositories")) return { rows: [repositoryRow] };
       if (sql.includes("INSERT INTO source_snapshots")) return { rows: [snapshotRow] };
       if (sql.includes("INSERT INTO mcp_tokens") || sql.includes("UPDATE mcp_tokens")) {

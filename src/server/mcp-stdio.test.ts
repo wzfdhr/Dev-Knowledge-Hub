@@ -41,6 +41,7 @@ describe("createMcpServer", () => {
     const plaintext = `dkh_${"a".repeat(43)}`;
     const token = await store.createMcpToken({
       workspaceId: setup!.workspace.id,
+      projectId: (await store.listProjects(setup!.workspace.id))[0]!.id,
       name: "stdio",
       tokenHash: hashMcpToken(plaintext),
       tokenPrefix: plaintext.slice(0, 12)

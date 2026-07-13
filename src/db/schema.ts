@@ -25,6 +25,7 @@ export { AGENT_FEEDBACK_STATUSES, BUILD_JOB_STATUSES } from "../shared/contracts
 
 export const buildJobStatus = pgEnum("build_job_status", BUILD_JOB_STATUSES);
 export const agentFeedbackStatus = pgEnum("agent_feedback_status", AGENT_FEEDBACK_STATUSES);
+export const teamRole = pgEnum("team_role", ["admin", "member", "reader"]);
 
 const timestamps = {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -49,9 +50,38 @@ export const adminUsers = pgTable("admin_users", {
   uniqueIndex("admin_users_workspace_email_idx").on(table.workspaceId, table.email)
 ]);
 
+export const workspaceMembers = pgTable("workspace_members", {
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  userId: uuid("user_id").notNull(),
+  role: teamRole("role").notNull().default("member"),
+  ...timestamps
+}, (table) => [
+  uniqueIndex("workspace_members_workspace_user_idx").on(table.workspaceId, table.userId),
+  index("workspace_members_workspace_role_idx").on(table.workspaceId, table.role),
+  foreignKey({
+    columns: [table.userId, table.workspaceId],
+    foreignColumns: [adminUsers.id, adminUsers.workspaceId],
+    name: "workspace_members_user_workspace_fk"
+  }).onDelete("cascade")
+]);
+
+export const projects = pgTable("projects", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  slug: text("slug").notNull(),
+  archivedAt: timestamp("archived_at", { withTimezone: true }),
+  ...timestamps
+}, (table) => [
+  uniqueIndex("projects_workspace_slug_idx").on(table.workspaceId, table.slug),
+  uniqueIndex("projects_id_workspace_idx").on(table.id, table.workspaceId),
+  index("projects_workspace_active_idx").on(table.workspaceId, table.archivedAt)
+]);
+
 export const repositories = pgTable("repositories", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  projectId: uuid("project_id").notNull(),
   name: text("name").notNull(),
   kind: text("kind").notNull().default("git"),
   localPath: text("local_path"),
@@ -61,9 +91,15 @@ export const repositories = pgTable("repositories", {
   ...timestamps
 }, (table) => [
   uniqueIndex("repositories_id_workspace_idx").on(table.id, table.workspaceId),
-  uniqueIndex("repositories_workspace_current_unique_idx")
-    .on(table.workspaceId)
+  uniqueIndex("repositories_project_current_unique_idx")
+    .on(table.projectId)
     .where(sql`${table.archivedAt} IS NULL`)
+  ,
+  foreignKey({
+    columns: [table.projectId, table.workspaceId],
+    foreignColumns: [projects.id, projects.workspaceId],
+    name: "repositories_project_workspace_fk"
+  }).onDelete("cascade")
 ]);
 
 export const encryptedCredentials = pgTable("encrypted_credentials", {
@@ -332,6 +368,7 @@ export const releaseChannels = pgTable("release_channels", {
 export const mcpTokens = pgTable("mcp_tokens", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  projectId: uuid("project_id"),
   name: text("name").notNull(),
   tokenHash: text("token_hash").notNull(),
   tokenPrefix: text("token_prefix").notNull(),
@@ -341,7 +378,8 @@ export const mcpTokens = pgTable("mcp_tokens", {
 }, (table) => [
   uniqueIndex("mcp_tokens_id_workspace_idx").on(table.id, table.workspaceId),
   uniqueIndex("mcp_tokens_hash_idx").on(table.tokenHash),
-  index("mcp_tokens_workspace_idx").on(table.workspaceId)
+  index("mcp_tokens_workspace_idx").on(table.workspaceId),
+  index("mcp_tokens_workspace_project_idx").on(table.workspaceId, table.projectId)
 ]);
 
 export const agentFeedback = pgTable("agent_feedback", {

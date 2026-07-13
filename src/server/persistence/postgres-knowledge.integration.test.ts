@@ -236,6 +236,7 @@ integration("PostgreSQL cited knowledge integration", () => {
       const plaintext = `dkh_${"z".repeat(43)}`;
       const token = await store.createMcpToken({
         workspaceId: setup!.workspace.id,
+        projectId: repository!.projectId,
         name: "integration",
         tokenHash: hashMcpToken(plaintext),
         tokenPrefix: plaintext.slice(0, 12)

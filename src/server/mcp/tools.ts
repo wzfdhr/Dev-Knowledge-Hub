@@ -42,6 +42,7 @@ export const MCP_TOOL_NAMES = [
 export interface McpToolContext {
   store: AppStore;
   workspaceId: string;
+  projectId: string;
   authorize?: () => Promise<boolean>;
   onUnauthorized?: () => Promise<void> | void;
 }
@@ -135,7 +136,7 @@ function failed(error: unknown) {
 
 async function published(context?: McpToolContext) {
   if (!context) throw new McpToolError("UNPUBLISHED", "MCP knowledge context is unavailable");
-  const repository = await context.store.currentRepository(context.workspaceId);
+  const repository = await context.store.currentRepository(context.workspaceId, context.projectId);
   if (!repository) throw new McpToolError("UNPUBLISHED", "No knowledge release is published");
   const release = await context.store.currentRelease(context.workspaceId, repository.id);
   if (!release?.publishedAt) throw new McpToolError("UNPUBLISHED", "No knowledge release is published");

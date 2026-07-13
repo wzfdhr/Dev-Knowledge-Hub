@@ -20,7 +20,10 @@ import {
   InvalidFeedbackTransitionError,
   type AdminRecord,
   type AppStore,
-  type RepositoryRecord
+  type RepositoryRecord,
+  type TeamMemberRecord,
+  type TeamRole,
+  type ProjectRecord
 } from "./persistence/store.js";
 import { decryptSecret, encryptSecret } from "./security/crypto.js";
 import { DirtyWorktreeError, syncRepository } from "./git/snapshot.js";
@@ -81,6 +84,17 @@ const paginationQuerySchema = {
   offset: z.coerce.number().int().min(0).optional()
 };
 
+const teamRoleSchema = z.enum(["admin", "member", "reader"]);
+const projectSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  slug: z.string().trim().toLowerCase().regex(/^[a-z0-9][a-z0-9-]{0,79}$/)
+});
+const memberSchema = z.object({
+  email: z.email().transform((value) => value.toLowerCase()),
+  password: z.string().min(12),
+  role: teamRoleSchema
+});
+
 function paginationMetadata(total: number, offset: number, itemCount: number) {
   const consumed = offset + itemCount;
   return {
@@ -117,6 +131,7 @@ function repositoryDto(repository: RepositoryRecord) {
   return {
     repository: {
       id: repository.id,
+      projectId: repository.projectId,
       kind: repository.kind,
       name: repository.name,
       ...(kind === "local" ? { path: repository.localPath } : {}),
@@ -148,6 +163,25 @@ function archivedRepositoryDto(repository: RepositoryRecord) {
     kind: repository.kind,
     archivedAt: repository.archivedAt
   };
+}
+
+function memberDto(member: TeamMemberRecord | AdminRecord) {
+  return { id: member.id, email: member.email, role: member.role, createdAt: "createdAt" in member ? member.createdAt : undefined };
+}
+
+function projectDto(project: ProjectRecord) {
+  return {
+    id: project.id,
+    name: project.name,
+    slug: project.slug,
+    archivedAt: project.archivedAt,
+    createdAt: project.createdAt
+  };
+}
+
+function roleAllows(role: TeamRole, minimum: TeamRole): boolean {
+  const rank: Record<TeamRole, number> = { reader: 0, member: 1, admin: 2 };
+  return rank[role] >= rank[minimum];
 }
 
 export function buildServer(options: ServerOptions): FastifyInstance {
@@ -225,6 +259,21 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   }
 
+  async function requireRole(
+    role: TeamRole,
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    await requireAdmin(request, reply);
+    if (reply.sent) return;
+    if (!roleAllows((request as AuthenticatedRequest).sessionAdmin.role, role)) {
+      sendError(reply, 403, "FORBIDDEN", "Insufficient workspace role");
+    }
+  }
+
+  const requireAdministrator = (request: FastifyRequest, reply: FastifyReply) =>
+    requireRole("admin", request, reply);
+
   server.get("/api/health", async () => ({ status: "ok", service: SERVICE_NAME }));
 
   server.get("/api/setup/status", async () => ({
@@ -281,7 +330,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       action: "session.login_succeeded",
       resourceType: "session"
     }).catch(() => undefined);
-    return { authenticated: true, admin: { id: admin.id, email: admin.email } };
+    return { authenticated: true, admin: { id: admin.id, email: admin.email, role: admin.role } };
   });
 
   server.delete("/api/session", async (_request, reply) => {
@@ -291,7 +340,65 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.get("/api/session", { preHandler: requireAdmin }, async (request) => {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    return { authenticated: true, admin: { id: admin.id, email: admin.email } };
+    return { authenticated: true, admin: { id: admin.id, email: admin.email, role: admin.role } };
+  });
+
+  server.get("/api/projects", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object(paginationQuerySchema).safeParse(request.query);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project query");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const projects = await options.store.listProjects(admin.workspaceId, parsed.data);
+    return { projects: projects.map(projectDto) };
+  });
+
+  server.post("/api/projects", { preHandler: requireAdministrator }, async (request, reply) => {
+    const parsed = projectSchema.safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project details");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const project = await options.store.createProject(admin.workspaceId, parsed.data, admin.id);
+    if (!project) return sendError(reply, 409, "PROJECT_EXISTS", "A project with this slug already exists");
+    return reply.code(201).send({ project: projectDto(project) });
+  });
+
+  server.post("/api/projects/:projectId/repositories", { preHandler: requireAdministrator }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    const parsed = repositorySchema.safeParse(request.body);
+    if (!params.success || !parsed.success) {
+      return sendError(reply, 400, "INVALID_REQUEST", "Invalid project repository details");
+    }
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const project = (await options.store.listProjects(admin.workspaceId, { limit: 100 }))
+      .find((candidate) => candidate.id === params.data.projectId && candidate.archivedAt === null);
+    if (!project) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    const repository = await options.store.createRepositoryWithAudit(
+      admin.workspaceId,
+      repositoryInput(parsed.data, options.masterKey),
+      admin.id,
+      project.id
+    );
+    if (!repository) return sendError(reply, 409, "REPOSITORY_EXISTS", "Project already has a current repository");
+    return reply.code(201).send(repositoryDto(repository));
+  });
+
+  server.get("/api/members", { preHandler: requireAdministrator }, async (request, reply) => {
+    const parsed = z.object(paginationQuerySchema).safeParse(request.query);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid member query");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const members = await options.store.listTeamMembers(admin.workspaceId, parsed.data);
+    return { members: members.map(memberDto) };
+  });
+
+  server.post("/api/members", { preHandler: requireAdministrator }, async (request, reply) => {
+    const parsed = memberSchema.safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid member details");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const member = await options.store.createTeamMember(admin.workspaceId, {
+      email: parsed.data.email,
+      passwordHash: await hashPassword(parsed.data.password),
+      role: parsed.data.role
+    }, admin.id);
+    if (!member) return sendError(reply, 409, "MEMBER_EXISTS", "A member with this email already exists");
+    return reply.code(201).send({ member: memberDto(member) });
   });
 
   const modelConfigDto = (config: Awaited<ReturnType<AppStore["getModelConfig"]>>) => ({
@@ -323,14 +430,20 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
 
-  server.post("/api/mcp/tokens", { preHandler: requireAdmin }, async (request, reply) => {
-    const parsed = z.object({ name: z.string().trim().min(1).max(100) }).safeParse(request.body);
+  server.post("/api/mcp/tokens", { preHandler: requireAdministrator }, async (request, reply) => {
+    const parsed = z.object({ name: z.string().trim().min(1).max(100), projectId: z.uuid().optional() }).safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MCP token");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const projects = await options.store.listProjects(admin.workspaceId, { limit: 100 });
+    const project = parsed.data.projectId
+      ? projects.find((candidate) => candidate.id === parsed.data.projectId && candidate.archivedAt === null)
+      : projects.find((candidate) => candidate.archivedAt === null);
+    if (!project) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
     const plaintext = generateMcpToken();
     try {
       const token = await options.store.createMcpTokenWithAudit({
         workspaceId: admin.workspaceId,
+        projectId: project.id,
         name: parsed.data.name,
         tokenHash: hashMcpToken(plaintext),
         tokenPrefix: plaintext.slice(0, 12)
@@ -341,7 +454,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
 
-  server.get("/api/mcp/tokens", { preHandler: requireAdmin }, async (request, reply) => {
+  server.get("/api/mcp/tokens", { preHandler: requireAdministrator }, async (request, reply) => {
     const parsed = z.object(paginationQuerySchema).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid pagination");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
@@ -355,7 +468,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     };
   });
 
-  server.post("/api/mcp/tokens/:id/revoke", { preHandler: requireAdmin }, async (request, reply) => {
+  server.post("/api/mcp/tokens/:id/revoke", { preHandler: requireAdministrator }, async (request, reply) => {
     const parsed = z.object({ id: z.uuid() }).safeParse(request.params);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MCP token");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
@@ -1076,6 +1189,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const mcp = createRegisteredMcpServer({
       store: options.store,
       workspaceId: token.workspaceId,
+      projectId: token.projectId,
       authorize: createMcpAuthorizationGuard(options.store, match![1]),
       onUnauthorized: () => {
         setImmediate(() => void mcp.close());

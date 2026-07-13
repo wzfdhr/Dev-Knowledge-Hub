@@ -35,6 +35,7 @@ export async function runMcpStdio(context?: McpToolContext): Promise<void> {
     selected = {
       store,
       workspaceId: token.workspaceId,
+      projectId: token.projectId,
       authorize: createMcpAuthorizationGuard(store, plaintext),
       onUnauthorized: () => terminateOnRevocation()
     };

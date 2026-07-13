@@ -92,10 +92,12 @@ Integration cleanup must target only `TEST_DATABASE_URL`; never point it at `dev
 ## Operating workflow
 
 1. Open the console and complete one-time admin setup.
-2. Connect a clean local Git worktree or a credential-free HTTPS remote plus optional PAT.
-3. Sync an immutable commit snapshot, build knowledge, review the draft, and publish a release.
-4. Create an MCP token in Settings. Its plaintext is shown once.
-5. Review reported gaps in Feedback; acknowledge before rebuilding. Rebuild never auto-publishes.
+2. Enter a project from Project Center and open **Data Upload**. Select the original project folder; the browser filters dependencies, build output, binary files, and sensitive files before resumable upload. ZIP, Git HTTPS, and server-local paths remain alternative sources.
+3. Open **Knowledge Versions**, build the immutable source snapshot, review the cited draft, and explicitly publish it.
+4. Open the project's **Codex Integration** page, create a project-scoped MCP token, and install the generated `.codex/config.toml` and `AGENTS.md` snippets. Token plaintext is shown once.
+5. Use **Team Collaboration** to inspect workspace members and project-isolated audit activity. Review reported gaps in Feedback; acknowledge before rebuilding. Rebuild never auto-publishes.
+
+Folder imports accept up to 50,000 selected files, 2 GiB of accepted source before compression, and a 500 MiB filtered archive. The original folder never leaves the browser: only the filtered archive is uploaded. The server removes upload staging and raw ZIP bytes after import.
 
 `SIGTERM` and `SIGINT` stop HTTP intake, close active MCP sessions, drain pg-boss, and close the database pool. Compose grants 30 seconds for this path.
 
@@ -196,7 +198,7 @@ CI runs these gates with PostgreSQL 16 and uploads Playwright artifacts on failu
 - **PostgreSQL remains unhealthy:** inspect `docker compose logs postgres`; verify the password and volume ownership before changing state.
 - **Local sync reports a dirty worktree:** commit, stash, or remove every changed/untracked file. Snapshots intentionally reject dirty local repositories.
 - **Remote sync fails:** use a credential-free HTTPS URL. Supply the PAT separately; never embed credentials in the URL.
-- **MCP returns `UNAUTHORIZED`:** rotate/recreate the token in Settings and update the client environment. Revoked tokens stop working immediately.
+- **MCP returns `UNAUTHORIZED`:** rotate/recreate the token under the project's Codex Integration page and update the client environment. Revoked tokens stop working immediately.
 - **MCP returns `UNPUBLISHED`:** publish a ready release in the console; drafts are not agent-visible.
 - **Citations cannot be read:** restore the matching immutable snapshot volume and database backup together.
 - **Build interrupted:** the restarted worker fails interrupted active builds and safely reenqueues only queued builds with present snapshots. Persisted queued work is also reconciled periodically after dispatch failures.

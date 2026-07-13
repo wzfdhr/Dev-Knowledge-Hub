@@ -737,13 +737,17 @@ describe("knowledge citations", () => {
   });
 
   test("displays backend symbol and dependency metadata", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const api = {
       getRepositoryStatus: vi.fn().mockResolvedValue({ repository: { id: "repo" }, latestSnapshot: { id: "snap", commitSha: "a".repeat(40), ref: "main", commitTimestamp: "2026-07-11" } }),
       listReleases: vi.fn().mockResolvedValue({ releases: [{ id: "release-1", buildId: "build-1", snapshotId: "snap", commitSha: "a".repeat(40), version: "1.0.0", createdAt: "2026-07-11", publishedAt: "2026-07-11" }] }),
       listKnowledgePages: vi.fn().mockResolvedValue({ pages: [] }),
       getKnowledgeMetadata: vi.fn().mockResolvedValue({
         symbols: [{ name: "add", kind: "function", path: "src/math.ts", startLine: 16, endLine: 18, exported: true }],
-        dependencies: [{ source: "math", target: "util", kind: "imports", path: "src/math.ts", startLine: 1, endLine: 1 }]
+        dependencies: [
+          { source: "math", target: "util", kind: "imports", path: "src/math.ts", startLine: 1, endLine: 1 },
+          { source: "math", target: "util", kind: "module-dependency", path: "src/math.ts", startLine: 1, endLine: 1 }
+        ]
       })
     } as unknown as ApiClient;
 
@@ -751,8 +755,10 @@ describe("knowledge citations", () => {
 
     expect(await screen.findByText("add")).toBeVisible();
     expect(screen.getByText("function · src/math.ts:16-18")).toBeVisible();
-    expect(screen.getByText("math → util")).toBeVisible();
+    expect(screen.getAllByText("math → util")).toHaveLength(2);
     expect(screen.getByText("imports · src/math.ts:1")).toBeVisible();
+    expect(consoleError.mock.calls.flat().join(" ")).not.toContain("same key");
+    consoleError.mockRestore();
   });
 });
 

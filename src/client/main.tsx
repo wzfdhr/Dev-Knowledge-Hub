@@ -1,3 +1,4 @@
+import "@ant-design/v5-patch-for-react-19";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App as AntApp, ConfigProvider } from "antd";
 import { StrictMode } from "react";

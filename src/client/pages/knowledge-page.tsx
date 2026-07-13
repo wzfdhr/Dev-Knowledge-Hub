@@ -106,7 +106,7 @@ export function KnowledgePage({ api }: { api: ApiClient }) {
       <section className="metadata-band" aria-label="代码元数据">
         {metadata.isLoading ? <Loading label="正在加载符号元数据" /> : metadata.error ? <ErrorState message={errorMessage(metadata.error)} retry={() => void metadata.refetch()} /> : <>
           <div><h2><Braces aria-hidden="true" />符号 <span>{metadata.data?.symbols.length ?? 0}</span></h2>{metadata.data?.symbols.slice(0, 12).map((symbol) => <div className="metadata-row" key={`${symbol.path}-${symbol.startLine}-${symbol.name}`}><strong>{symbol.name}</strong><small>{symbol.kind} · {symbol.path}:{symbol.startLine}-{symbol.endLine}</small></div>)}</div>
-          <div><h2><Network aria-hidden="true" />依赖关系 <span>{metadata.data?.dependencies.length ?? 0}</span></h2>{metadata.data?.dependencies.slice(0, 12).map((dependency) => <div className="metadata-row" key={`${dependency.path}-${dependency.startLine}-${dependency.source}-${dependency.target}`}><strong>{dependency.source} → {dependency.target}</strong><small>{dependency.kind} · {dependency.path}:{dependency.startLine}</small></div>)}</div>
+          <div><h2><Network aria-hidden="true" />依赖关系 <span>{metadata.data?.dependencies.length ?? 0}</span></h2>{metadata.data?.dependencies.slice(0, 12).map((dependency) => <div className="metadata-row" key={`${dependency.kind}-${dependency.path}-${dependency.startLine}-${dependency.endLine}-${dependency.source}-${dependency.target}`}><strong>{dependency.source} → {dependency.target}</strong><small>{dependency.kind} · {dependency.path}:{dependency.startLine}</small></div>)}</div>
         </>}
       </section>
       <div className="knowledge-layout">

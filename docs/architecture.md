@@ -7,6 +7,8 @@ The React/Vite console and Fastify API are built into one Node.js 22.13.0 runtim
 ```mermaid
 flowchart LR
   Console["React administration console"] --> API["Fastify HTTP API"]
+  Folder["Local project folder"] --> Filter["Browser filter and ZIP packaging"]
+  Filter --> API
   Agent["MCP client"] --> HTTP["Streamable HTTP /mcp"]
   Stdio["MCP stdio client"] --> Tools["Shared MCP tools"]
   HTTP --> Tools
@@ -21,11 +23,11 @@ flowchart LR
 
 ## Data flow
 
-1. Repository sync resolves a clean local commit or fetches a credential-free HTTPS mirror with the image's static askpass helper.
-2. Valid UTF-8 tracked text files are copied into an immutable snapshot directory and recorded with byte-level content hashes; invalid text is skipped before indexing.
+1. Each workspace contains multiple isolated projects. A project accepts a browser-filtered folder archive, a ZIP, a clean server-local Git worktree, or a credential-free HTTPS mirror with the image's static askpass helper.
+2. Folder imports discard dependencies, build output, binary files, and sensitive paths before resumable upload. The server repeats archive safety and source filtering, then records accepted UTF-8 text with byte-level hashes in an immutable project snapshot.
 3. A durable build carries those persisted hashes into symbols/pages/citations, creates deterministic knowledge, and validates generated knowledge. Feedback rebuilds persist and inject their acknowledged feedback context.
 4. Operators create and explicitly publish a release. Only the current published release is visible through MCP.
-5. MCP responses pin `releaseId` and `commitSha`; citations include path, inclusive line range, commit, and blob hash.
+5. MCP tokens are project-scoped. Responses pin `releaseId` and `commitSha`; citations include path, inclusive line range, commit/content version, and blob hash.
 
 ## Ownership boundaries
 

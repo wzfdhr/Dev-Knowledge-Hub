@@ -31,6 +31,7 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.12",
     "@ai-sdk/openai": "^4.0.11",
+    "@ant-design/v5-patch-for-react-19": "^1.0.3",
     "@fastify/cookie": "^11.0.2",
     "@fastify/multipart": "^10.1.0",
     "@fastify/static": "^9.3.0",

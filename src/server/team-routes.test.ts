@@ -144,4 +144,24 @@ describe("team projects and members", () => {
     expect(token.statusCode).toBe(201);
     expect(token.json()).toMatchObject({ projectId, name: "数据服务 Codex" });
   });
+
+  test("an administrator can retrieve a project-specific Codex connection pack", async () => {
+    const { app, cookie } = await authenticatedTeam();
+    const project = await app.inject({
+      method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "支付服务", slug: "payments" }
+    });
+    const projectId = project.json<{ project: { id: string } }>().project.id;
+
+    const pack = await app.inject({
+      method: "GET", url: `/api/projects/${projectId}/codex-connection`, headers: { cookie, host: "devkh.example.com" }
+    });
+
+    expect(pack.statusCode).toBe(200);
+    expect(pack.json()).toMatchObject({
+      projectId,
+      environmentVariable: "DEVKH_PAYMENTS_TOKEN",
+      configToml: expect.stringContaining('url = "http://devkh.example.com/mcp"'),
+      agentsMarkdown: expect.stringContaining("支付服务")
+    });
+  });
 });

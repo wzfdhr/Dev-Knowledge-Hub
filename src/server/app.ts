@@ -29,6 +29,7 @@ import { decryptSecret, encryptSecret } from "./security/crypto.js";
 import { DirtyWorktreeError, syncRepository } from "./git/snapshot.js";
 import { hashPassword, verifyPassword } from "./security/password.js";
 import { createSessionToken, verifySessionToken } from "./security/session.js";
+import { createCodexConnectionPack } from "./codex/connection-pack.js";
 import type { BuildEvent, BuildService } from "./knowledge/build-service.js";
 import {
   authenticateMcpToken,
@@ -489,6 +490,23 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     );
     if (!repository) return sendError(reply, 409, "REPOSITORY_EXISTS", "Project already has a current repository");
     return reply.code(201).send(repositoryDto(repository));
+  });
+
+  server.get("/api/projects/:projectId/codex-connection", { preHandler: requireAdministrator }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const project = (await options.store.listProjects(admin.workspaceId, { limit: 100 }))
+      .find((candidate) => candidate.id === params.data.projectId && candidate.archivedAt === null);
+    if (!project) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    const environmentVariable = `DEVKH_${project.slug.replace(/[^a-z0-9]+/gi, "_").toUpperCase()}_TOKEN`;
+    const pack = createCodexConnectionPack({
+      projectName: project.name,
+      projectId: project.id,
+      endpoint: `${request.protocol}://${request.host}/mcp`,
+      environmentVariable
+    });
+    return { projectId: project.id, environmentVariable, ...pack };
   });
 
   server.get("/api/members", { preHandler: requireAdministrator }, async (request, reply) => {

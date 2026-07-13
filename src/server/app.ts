@@ -49,6 +49,10 @@ import {
   MAX_UPLOAD_COMPRESSED_BYTES,
   UploadArchiveError
 } from "./uploads/zip-import.js";
+import {
+  ResumableUploadError,
+  ResumableUploadSessionManager
+} from "./uploads/resumable-upload.js";
 
 const SESSION_COOKIE = "devkh_session";
 const SESSION_MAX_AGE = 8 * 60 * 60;
@@ -201,7 +205,15 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       }
     }
   });
+  const resumableUploads = new ResumableUploadSessionManager(
+    path.join(options.dataDir, "upload-staging")
+  );
   registerHttpSecurity(server, options.rateLimits ?? DEFAULT_RATE_LIMITS);
+  server.addContentTypeParser(
+    "application/octet-stream",
+    { parseAs: "buffer" },
+    (_request, body, done) => done(null, body)
+  );
   server.setErrorHandler((error, request, reply) => {
     const statusCode = typeof error === "object" && error && "statusCode" in error
       && typeof error.statusCode === "number"
@@ -209,7 +221,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       : 500;
     if (statusCode === 413) {
       if (/^\/api\/repositories\/(?:current|[^/]+)\/uploads$/.test(request.url.split("?", 1)[0])) {
-        return sendError(reply, 413, "ZIP_TOO_LARGE", "ZIP exceeds the 100 MiB compressed limit");
+        return sendError(reply, 413, "ZIP_TOO_LARGE", "ZIP exceeds the 500 MiB compressed limit");
       }
       return sendError(reply, 413, "BODY_TOO_LARGE", "Request body exceeds 1 MiB");
     }
@@ -342,6 +354,105 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     return { authenticated: true, admin: { id: admin.id, email: admin.email, role: admin.role } };
   });
+
+  server.post("/api/uploads/resumable", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({
+      totalBytes: z.number().int().positive(),
+      chunkSize: z.number().int().positive()
+    }).safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload dimensions");
+    try {
+      return reply.code(201).send(await resumableUploads.create(parsed.data));
+    } catch (error) {
+      if (error instanceof ResumableUploadError) {
+        return sendError(reply, 413, error.code, error.message);
+      }
+      request.log.error({ err: error }, "Resumable upload creation failed");
+      return sendError(reply, 500, "UPLOAD_FAILED", "Unable to create upload session");
+    }
+  });
+
+  server.get("/api/uploads/resumable/:id", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({ id: z.uuid() }).safeParse(request.params);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload session");
+    try {
+      return resumableUploads.status(parsed.data.id);
+    } catch (error) {
+      if (error instanceof ResumableUploadError) {
+        return sendError(reply, 404, error.code, error.message);
+      }
+      request.log.error({ err: error }, "Resumable upload status failed");
+      return sendError(reply, 500, "UPLOAD_FAILED", "Unable to read upload session");
+    }
+  });
+
+  server.put(
+    "/api/uploads/resumable/:id/chunks/:index",
+    { preHandler: requireAdmin, bodyLimit: 16 * 1024 * 1024 + 1024 },
+    async (request, reply) => {
+      const params = z.object({ id: z.uuid(), index: z.coerce.number().int().min(0) }).safeParse(request.params);
+      const declaredSize = z.coerce.number().int().positive().safeParse(request.headers["x-upload-chunk-size"]);
+      if (!params.success || !declaredSize.success || !Buffer.isBuffer(request.body)) {
+        return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload chunk");
+      }
+      try {
+        return await resumableUploads.uploadChunk(
+          params.data.id,
+          params.data.index,
+          request.body,
+          declaredSize.data
+        );
+      } catch (error) {
+        if (error instanceof ResumableUploadError) {
+          const statusCode = error.code === "SESSION_NOT_FOUND" ? 404 : 409;
+          return sendError(reply, statusCode, error.code, error.message);
+        }
+        request.log.error({ err: error }, "Resumable upload chunk failed");
+        return sendError(reply, 500, "UPLOAD_FAILED", "Unable to save upload chunk");
+      }
+    }
+  );
+
+  server.post(
+    "/api/projects/:projectId/uploads/resumable/:id/import",
+    { preHandler: requireAdmin },
+    async (request, reply) => {
+      const params = z.object({ projectId: z.uuid(), id: z.uuid() }).safeParse(request.params);
+      if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload import");
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      const repository = await options.store.currentRepository(admin.workspaceId, params.data.projectId);
+      if (!repository || repository.kind !== "upload") {
+        return sendError(reply, 409, "UPLOAD_REPOSITORY_REQUIRED", "Project requires an upload source");
+      }
+      try {
+        const finalized = await resumableUploads.finalize(params.data.id);
+        const summary = await importZipArchive({
+          archivePath: finalized.path,
+          dataDir: options.dataDir,
+          workspaceId: admin.workspaceId,
+          repositoryId: repository.id,
+          actorId: admin.id,
+          store: options.store
+        });
+        return reply.code(summary.unchanged ? 200 : 201).send({
+          snapshotId: summary.snapshotId,
+          sourceVersion: summary.sourceVersion,
+          fileCount: summary.fileCount,
+          unchanged: summary.unchanged,
+          ignored: summary.ignored
+        });
+      } catch (error) {
+        if (error instanceof ResumableUploadError || error instanceof UploadArchiveError) {
+          const statusCode = error instanceof ResumableUploadError
+            ? (error.code === "SESSION_NOT_FOUND" ? 404 : 409)
+            : (error.code === "COMPRESSED_SIZE_LIMIT" ? 413 : 400);
+          return sendError(reply, statusCode, error.code, error.message);
+        }
+        request.log.error({ err: error }, "Resumable ZIP import failed");
+        return sendError(reply, 500, "UPLOAD_FAILED", "Unable to import ZIP upload");
+      }
+    }
+  );
 
   server.get("/api/projects", { preHandler: requireAdmin }, async (request, reply) => {
     const parsed = z.object(paginationQuerySchema).safeParse(request.query);
@@ -606,7 +717,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
             return uploadError(
               413,
               "ZIP_TOO_LARGE",
-              "ZIP exceeds the 100 MiB compressed limit"
+              "ZIP exceeds the 500 MiB compressed limit"
             );
           }
         }
@@ -635,7 +746,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           ? String(error.code)
           : "";
         if (code === "FST_REQ_FILE_TOO_LARGE") {
-          return uploadError(413, "ZIP_TOO_LARGE", "ZIP exceeds the 100 MiB compressed limit");
+          return uploadError(413, "ZIP_TOO_LARGE", "ZIP exceeds the 500 MiB compressed limit");
         }
         if (code === "FST_FILES_LIMIT" || code === "FST_PARTS_LIMIT" || code === "FST_FIELDS_LIMIT") {
           return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file");
@@ -645,7 +756,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
             return uploadError(
               413,
               "ZIP_TOO_LARGE",
-              "ZIP exceeds the 100 MiB compressed limit"
+              "ZIP exceeds the 500 MiB compressed limit"
             );
           }
           return uploadError(400, error.code, error.message);
@@ -695,7 +806,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           if (fileCount > 1) return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file");
           await pipeline(part.file, createWriteStream(archivePath, { flags: "wx", mode: 0o600 }));
           if (part.file.truncated) {
-            return uploadError(413, "ZIP_TOO_LARGE", "ZIP exceeds the 100 MiB compressed limit");
+            return uploadError(413, "ZIP_TOO_LARGE", "ZIP exceeds the 500 MiB compressed limit");
           }
         }
         if (fileCount !== 1) return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file");
@@ -727,7 +838,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       } catch (error) {
         const code = typeof error === "object" && error && "code" in error ? String(error.code) : "";
         if (code === "FST_REQ_FILE_TOO_LARGE" || code === "COMPRESSED_SIZE_LIMIT") {
-          return uploadError(413, "ZIP_TOO_LARGE", "ZIP exceeds the 100 MiB compressed limit");
+          return uploadError(413, "ZIP_TOO_LARGE", "ZIP exceeds the 500 MiB compressed limit");
         }
         if (code === "FST_FILES_LIMIT" || code === "FST_PARTS_LIMIT" || code === "FST_FIELDS_LIMIT") {
           return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file");

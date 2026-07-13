@@ -265,3 +265,73 @@ describe("POST /api/repositories/current/uploads", () => {
     expect(await readdir(path.join(dataDir, "uploads"))).toEqual([]);
   });
 });
+
+describe("resumable upload session routes", () => {
+  test("creates an authenticated resumable session with bounded dimensions", async () => {
+    const { app, cookie } = await authenticatedApp();
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/uploads/resumable",
+      headers: { cookie },
+      payload: { totalBytes: 9, chunkSize: 4 }
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({
+      id: expect.any(String), totalBytes: 9, chunkSize: 4, receivedBytes: 0, complete: false
+    });
+  });
+
+  test("accepts an indexed binary chunk and reports resumable progress", async () => {
+    const { app, cookie } = await authenticatedApp();
+    const session = await app.inject({
+      method: "POST", url: "/api/uploads/resumable", headers: { cookie }, payload: { totalBytes: 8, chunkSize: 4 }
+    });
+
+    const uploaded = await app.inject({
+      method: "PUT",
+      url: `/api/uploads/resumable/${session.json<{ id: string }>().id}/chunks/0`,
+      headers: { cookie, "content-type": "application/octet-stream", "x-upload-chunk-size": "4" },
+      payload: Buffer.from("abcd")
+    });
+
+    expect(uploaded.statusCode).toBe(200);
+    expect(uploaded.json()).toMatchObject({ receivedBytes: 4, receivedChunks: 1, complete: false });
+  });
+
+  test("finalizes a resumable ZIP into an immutable project upload snapshot", async () => {
+    const { app, cookie } = await authenticatedApp();
+    const project = await app.inject({
+      method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "上传项目", slug: "upload-project" }
+    });
+    const projectId = project.json<{ project: { id: string } }>().project.id;
+    await app.inject({
+      method: "POST",
+      url: `/api/projects/${projectId}/repositories`,
+      headers: { cookie },
+      payload: { kind: "upload", name: "项目包" }
+    });
+    const zip = await archive();
+    const session = await app.inject({
+      method: "POST", url: "/api/uploads/resumable", headers: { cookie },
+      payload: { totalBytes: zip.length, chunkSize: zip.length }
+    });
+    const sessionId = session.json<{ id: string }>().id;
+    await app.inject({
+      method: "PUT",
+      url: `/api/uploads/resumable/${sessionId}/chunks/0`,
+      headers: { cookie, "content-type": "application/octet-stream", "x-upload-chunk-size": String(zip.length) },
+      payload: zip
+    });
+
+    const imported = await app.inject({
+      method: "POST",
+      url: `/api/projects/${projectId}/uploads/resumable/${sessionId}/import`,
+      headers: { cookie }
+    });
+
+    expect(imported.statusCode).toBe(201);
+    expect(imported.json()).toMatchObject({ fileCount: 1, unchanged: false, sourceVersion: expect.any(String) });
+  });
+});

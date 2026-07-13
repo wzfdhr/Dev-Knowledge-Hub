@@ -138,7 +138,7 @@ describe("ZIP snapshot import", () => {
       .toMatchObject({ code: "EXPANDED_SIZE_LIMIT" });
   });
 
-  test("rejects a compressed upload larger than 100 MiB without reading it", async () => {
+  test("rejects a compressed upload larger than 500 MiB without reading it", async () => {
     const context = await fixture();
     const file = await open(context.archivePath, "w");
     await file.truncate(MAX_UPLOAD_COMPRESSED_BYTES + 1);

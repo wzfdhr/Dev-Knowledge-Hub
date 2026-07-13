@@ -24,9 +24,9 @@ import type {
   SourceSnapshotRecord
 } from "../persistence/store.js";
 
-export const MAX_UPLOAD_COMPRESSED_BYTES = 100 * 1024 * 1024;
-export const MAX_UPLOAD_ENTRIES = 10_000;
-export const MAX_UPLOAD_EXPANDED_BYTES = 500 * 1024 * 1024;
+export const MAX_UPLOAD_COMPRESSED_BYTES = 500 * 1024 * 1024;
+export const MAX_UPLOAD_ENTRIES = 50_000;
+export const MAX_UPLOAD_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024;
 export const MAX_UPLOAD_SOURCE_FILE_BYTES = 1024 * 1024;
 
 export interface UploadArchiveLimits {
@@ -167,7 +167,7 @@ function validatedEntries(entries: Entry[], limits: UploadArchiveLimits) {
     if (!Number.isSafeInteger(expandedBytes) || expandedBytes > limits.maxExpandedBytes) {
       throw new UploadArchiveError(
         "EXPANDED_SIZE_LIMIT",
-        "ZIP expands beyond the 500 MiB limit"
+        "ZIP expands beyond the 2 GiB limit"
       );
     }
     const filePath = archivePath(entry);
@@ -203,7 +203,7 @@ async function readBoundedEntries(
       if (entries.length > limits.maxEntries) {
         throw new UploadArchiveError(
           "TOO_MANY_ENTRIES",
-          "ZIP contains more than 10,000 entries"
+          "ZIP contains more than 50,000 entries"
         );
       }
     }
@@ -288,7 +288,7 @@ export async function importZipArchive({
     if ((await stat(sourceArchivePath)).size > MAX_UPLOAD_COMPRESSED_BYTES) {
       throw new UploadArchiveError(
         "COMPRESSED_SIZE_LIMIT",
-        "ZIP exceeds the 100 MiB compressed limit"
+        "ZIP exceeds the 500 MiB compressed limit"
       );
     }
     reader = new ZipReader(new BlobReader(await openAsBlob(sourceArchivePath)));

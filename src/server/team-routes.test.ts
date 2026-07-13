@@ -192,6 +192,31 @@ describe("team projects and members", () => {
     expect(token.json()).toMatchObject({ projectId, name: "数据服务 Codex" });
   });
 
+  test("lists only MCP tokens belonging to the requested project", async () => {
+    const { app, cookie } = await authenticatedTeam();
+    const first = await app.inject({
+      method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "项目一", slug: "project-one" }
+    });
+    const second = await app.inject({
+      method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "项目二", slug: "project-two" }
+    });
+    const firstId = first.json<{ project: { id: string } }>().project.id;
+    const secondId = second.json<{ project: { id: string } }>().project.id;
+    await app.inject({ method: "POST", url: "/api/mcp/tokens", headers: { cookie }, payload: { name: "项目一 Codex", projectId: firstId } });
+    await app.inject({ method: "POST", url: "/api/mcp/tokens", headers: { cookie }, payload: { name: "项目二 Codex", projectId: secondId } });
+
+    const listed = await app.inject({
+      method: "GET", url: `/api/mcp/tokens?projectId=${firstId}`, headers: { cookie }
+    });
+
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toMatchObject({
+      tokens: [{ projectId: firstId, name: "项目一 Codex" }],
+      total: 1,
+      nextOffset: null
+    });
+  });
+
   test("an administrator can retrieve a project-specific Codex connection pack", async () => {
     const { app, cookie } = await authenticatedTeam();
     const project = await app.inject({

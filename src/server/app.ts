@@ -558,13 +558,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       .find((candidate) => candidate.id === params.data.projectId && candidate.archivedAt === null);
     if (!project) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
     const environmentVariable = `DEVKH_${project.slug.replace(/[^a-z0-9]+/gi, "_").toUpperCase()}_TOKEN`;
+    const endpoint = `${(options.publicBaseUrl ?? `${request.protocol}://${request.host}`).replace(/\/+$/, "")}/mcp`;
     const pack = createCodexConnectionPack({
       projectName: project.name,
       projectId: project.id,
-      endpoint: `${(options.publicBaseUrl ?? `${request.protocol}://${request.host}`).replace(/\/+$/, "")}/mcp`,
+      endpoint,
       environmentVariable
     });
-    return { projectId: project.id, environmentVariable, ...pack };
+    return { projectId: project.id, endpoint, environmentVariable, ...pack };
   });
 
   server.get("/api/members", { preHandler: requireAdministrator }, async (request, reply) => {
@@ -642,12 +643,12 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
 
   server.get("/api/mcp/tokens", { preHandler: requireAdministrator }, async (request, reply) => {
-    const parsed = z.object(paginationQuerySchema).safeParse(request.query);
+    const parsed = z.object({ ...paginationQuerySchema, projectId: z.uuid().optional() }).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid pagination");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const [tokens, total] = await Promise.all([
-      options.store.listMcpTokens(admin.workspaceId, parsed.data),
-      options.store.countMcpTokens(admin.workspaceId)
+      options.store.listMcpTokens(admin.workspaceId, parsed.data, parsed.data.projectId),
+      options.store.countMcpTokens(admin.workspaceId, parsed.data.projectId)
     ]);
     return {
       tokens: tokens.map(sanitizedMcpToken),

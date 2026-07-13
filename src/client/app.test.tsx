@@ -8,7 +8,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { KnowledgePage } from "./pages/knowledge-page";
 import { FeedbackPage } from "./pages/feedback-page";
-import { SettingsPage } from "./pages/settings-page";
+import { SystemSettingsPage as SettingsPage } from "./pages/system-settings-page";
+import { ProjectCodexPage } from "./pages/project-codex-page";
 import { ProjectImportsPage } from "./pages/project-imports-page";
 import { derivePrimaryAction, ProjectVersionsPage as OverviewPage } from "./pages/project-versions-page";
 import { ApiError, type ApiClient } from "./api/client";
@@ -25,6 +26,17 @@ function renderPage(node: React.ReactNode) {
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>{node}</MemoryRouter>
+    </QueryClientProvider>
+  );
+}
+
+function renderPageAt(node: React.ReactNode, path: string) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
+  });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={[path]}>{node}</MemoryRouter>
     </QueryClientProvider>
   );
 }
@@ -124,6 +136,44 @@ describe("shared console copy", () => {
     renderAppAt(api, "/projects/project-1/versions");
     expect(await screen.findByRole("heading", { name: "知识版本" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "最近构建" })).toBeVisible();
+  });
+
+  test("moves project Codex access out of system settings", async () => {
+    const api = {
+      setupStatus: vi.fn().mockResolvedValue({ setupRequired: false }),
+      session: vi.fn().mockResolvedValue({ admin: { email: "admin@example.com", role: "admin" } }),
+      logout: vi.fn().mockResolvedValue(undefined),
+      listProjects: vi.fn().mockResolvedValue({ projects: [{
+        id: "project-1", name: "AHeart Admin", slug: "aheart-admin",
+        archivedAt: null, createdAt: "2026-07-13T00:00:00Z"
+      }] }),
+      getProjectCodexConnection: vi.fn().mockResolvedValue({
+        projectId: "project-1", endpoint: "https://knowledge.example.com/mcp",
+        environmentVariable: "DEVKH_AHEART_ADMIN_TOKEN",
+        configToml: "[mcp_servers.devkh_project-1]",
+        agentsMarkdown: "# AHeart Admin 知识库规则",
+        checkCommand: "test -n \"$DEVKH_AHEART_ADMIN_TOKEN\""
+      }),
+      listMcpTokens: vi.fn().mockResolvedValue({ tokens: [], total: 0, nextOffset: null })
+    } as unknown as ApiClient;
+
+    renderAppAt(api, "/projects/project-1/codex");
+    expect(await screen.findByRole("heading", { name: "Codex 接入" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: ".codex/config.toml" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "AGENTS.md" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "项目 Token" })).toBeVisible();
+    cleanup();
+
+    const settingsApi = {
+      setupStatus: vi.fn().mockResolvedValue({ setupRequired: false }),
+      session: vi.fn().mockResolvedValue({ admin: { email: "admin@example.com", role: "admin" } }),
+      logout: vi.fn().mockResolvedValue(undefined),
+      getModelConfig: vi.fn().mockResolvedValue({ config: null })
+    } as unknown as ApiClient;
+    renderAppAt(settingsApi, "/settings");
+    expect(await screen.findByRole("heading", { name: "设置" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "MCP 连接" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "访问 Token" })).not.toBeInTheDocument();
   });
 
   test("renders Chinese console navigation", async () => {
@@ -871,21 +921,20 @@ describe("MCP token disclosure", () => {
     const user = userEvent.setup();
     const plaintext = "dkh_secret-token-shown-once";
     const api = {
-      getRepository: vi.fn().mockRejectedValue(Object.assign(new Error("none"), { status: 404 })),
-      getMcpConnection: vi.fn().mockResolvedValue({ endpoint: "/mcp", transport: "streamable-http", authorization: "bearer", stdioCommand: "npm run mcp:stdio", tools: [] }),
-      listMcpTokens: vi.fn().mockResolvedValueOnce({ tokens: [] }).mockResolvedValue({ tokens: [{ id: "t1", name: "Local agent", tokenPrefix: "dkh_secret-t", createdAt: "2026-07-11", lastUsedAt: null, revokedAt: null }] }),
+      getProjectCodexConnection: vi.fn().mockResolvedValue({ projectId: "project", endpoint: "/mcp", environmentVariable: "DEVKH_PROJECT_TOKEN", configToml: "[mcp]", agentsMarkdown: "# Rules", checkCommand: "test -n token" }),
+      listProjectMcpTokens: vi.fn().mockResolvedValueOnce({ tokens: [] }).mockResolvedValue({ tokens: [{ id: "t1", projectId: "project", name: "Local agent", tokenPrefix: "dkh_secret-t", createdAt: "2026-07-11", lastUsedAt: null, revokedAt: null }] }),
       createMcpToken: vi.fn().mockResolvedValue({
-        id: "t1", name: "Local agent", tokenPrefix: "dkh_secret-t", createdAt: "2026-07-11", lastUsedAt: null, revokedAt: null, token: plaintext
+        id: "t1", projectId: "project", name: "Local agent", tokenPrefix: "dkh_secret-t", createdAt: "2026-07-11", lastUsedAt: null, revokedAt: null, token: plaintext
       })
     } as unknown as ApiClient;
 
-    renderPage(<SettingsPage api={api} />);
+    renderPageAt(<Routes><Route path="/projects/:projectId/codex" element={<ProjectCodexPage api={api} />} /></Routes>, "/projects/project/codex");
     await user.type(await screen.findByLabelText("Token 名称"), "Local agent");
     await user.click(screen.getByRole("button", { name: "创建 Token" }));
-    const dialog = await screen.findByRole("dialog", { name: "已创建 MCP Token" });
-    expect(within(dialog).getByText(plaintext)).toBeVisible();
-    await user.click(within(dialog).getByRole("button", { name: "我已复制" }));
-    expect(screen.queryByText(plaintext)).not.toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", { name: "已创建项目 Token" });
+    expect(within(dialog).getByText(plaintext)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "我已保存" }));
+    await waitFor(() => expect(screen.queryByText(plaintext)).not.toBeInTheDocument());
     expect(screen.getByText("dkh_secret-t")).toBeVisible();
   });
 
@@ -899,7 +948,7 @@ describe("MCP token disclosure", () => {
       lastUsedAt: null,
       revokedAt: null
     }));
-    const listMcpTokens = vi.fn()
+    const listProjectMcpTokens = vi.fn()
       .mockResolvedValueOnce({ tokens: firstPage, total: 101, nextOffset: 100 })
       .mockResolvedValueOnce({
         tokens: [{
@@ -910,21 +959,16 @@ describe("MCP token disclosure", () => {
         nextOffset: null
       });
     const api = {
-      getRepository: vi.fn().mockRejectedValue(Object.assign(new Error("none"), { status: 404 })),
-      getModelConfig: vi.fn().mockResolvedValue({ config: null }),
-      getMcpConnection: vi.fn().mockResolvedValue({
-        endpoint: "/mcp", transport: "streamable-http", authorization: "bearer",
-        stdioCommand: "npm run mcp:stdio", tools: []
-      }),
-      listMcpTokens
+      getProjectCodexConnection: vi.fn().mockResolvedValue({ projectId: "project", endpoint: "/mcp", environmentVariable: "DEVKH_PROJECT_TOKEN", configToml: "[mcp]", agentsMarkdown: "# Rules", checkCommand: "test -n token" }),
+      listProjectMcpTokens
     } as unknown as ApiClient;
 
-    renderPage(<SettingsPage api={api} />);
+    renderPageAt(<Routes><Route path="/projects/:projectId/codex" element={<ProjectCodexPage api={api} />} /></Routes>, "/projects/project/codex");
     await user.click(await screen.findByRole("button", { name: "加载更多 Token" }));
 
     expect(await screen.findByText("Agent after 100")).toBeVisible();
-    expect(listMcpTokens).toHaveBeenNthCalledWith(1, { limit: 100, offset: 0 });
-    expect(listMcpTokens).toHaveBeenNthCalledWith(2, { limit: 100, offset: 100 });
+    expect(listProjectMcpTokens).toHaveBeenNthCalledWith(1, "project", { limit: 100, offset: 0 });
+    expect(listProjectMcpTokens).toHaveBeenNthCalledWith(2, "project", { limit: 100, offset: 100 });
   });
 });
 

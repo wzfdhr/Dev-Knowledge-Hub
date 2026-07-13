@@ -563,22 +563,22 @@ export class PostgresAppStore implements AppStore {
     });
   }
 
-  async listMcpTokens(workspaceId: string, pagination?: Pagination): Promise<McpTokenRecord[]> {
+  async listMcpTokens(workspaceId: string, pagination?: Pagination, projectId?: string): Promise<McpTokenRecord[]> {
     const { limit, offset } = normalizePagination(pagination);
     const { rows } = await this.pool.query<McpTokenRow>(
       `SELECT id, workspace_id, project_id, name, token_hash, token_prefix,
               created_at, last_used_at, revoked_at
-       FROM mcp_tokens WHERE workspace_id = $1 ORDER BY created_at DESC, id DESC
-       LIMIT $2 OFFSET $3`,
-      [workspaceId, limit, offset]
+       FROM mcp_tokens WHERE workspace_id = $1 AND ($2::uuid IS NULL OR project_id = $2)
+       ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`,
+      [workspaceId, projectId ?? null, limit, offset]
     );
     return rows.map(mcpTokenRecord);
   }
 
-  async countMcpTokens(workspaceId: string): Promise<number> {
+  async countMcpTokens(workspaceId: string, projectId?: string): Promise<number> {
     const { rows } = await this.pool.query<{ total: string }>(
-      "SELECT count(*)::text AS total FROM mcp_tokens WHERE workspace_id = $1",
-      [workspaceId]
+      "SELECT count(*)::text AS total FROM mcp_tokens WHERE workspace_id = $1 AND ($2::uuid IS NULL OR project_id = $2)",
+      [workspaceId, projectId ?? null]
     );
     return Number(rows[0]?.total ?? 0);
   }

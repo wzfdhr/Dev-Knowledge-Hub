@@ -1,7 +1,7 @@
 import type {
   ApiErrorShape, Build, Feedback, McpConnection, McpToken, KnowledgePageRecord,
   ArchivedRepository, KnowledgeMetadata, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotSummary, SourceExcerpt,
-  UploadSnapshotSummary, TeamMember, Project, ProjectSummary
+  UploadSnapshotSummary, TeamMember, Project, ProjectSummary, CodexConnectionPack
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
@@ -92,7 +92,9 @@ export interface ApiClient extends ResumableUploadApi {
   rebuildFeedback(id: string): Promise<{ build: Build; created: boolean }>;
   getMcpConnection(): Promise<McpConnection>;
   listMcpTokens(pagination: PaginationParams): Promise<{ tokens: McpToken[] } & PaginatedResponse>;
-  createMcpToken(name: string): Promise<McpToken & { token: string }>;
+  listProjectMcpTokens(projectId: string, pagination: PaginationParams): Promise<{ tokens: McpToken[] } & PaginatedResponse>;
+  getProjectCodexConnection(projectId: string): Promise<CodexConnectionPack>;
+  createMcpToken(name: string, projectId: string): Promise<McpToken & { token: string }>;
   revokeMcpToken(id: string): Promise<{ token: McpToken }>;
   getModelConfig(): Promise<{ config: ModelConfig | null }>;
   updateModelConfig(input: { provider: ModelProvider; model: string; apiKey: string }): Promise<{ config: ModelConfig }>;
@@ -193,7 +195,9 @@ export const api: ApiClient = {
   rebuildFeedback: (id) => request(`/api/feedback/${id}/rebuild`, { method: "POST" }),
   getMcpConnection: () => request("/api/mcp/connection"),
   listMcpTokens: (pagination) => request(listPath("/api/mcp/tokens", pagination)),
-  createMcpToken: (name) => request("/api/mcp/tokens", { method: "POST", body: json({ name }) }),
+  listProjectMcpTokens: (projectId, pagination) => request(listPath("/api/mcp/tokens", pagination, { projectId })),
+  getProjectCodexConnection: (projectId) => request(`/api/projects/${encodeURIComponent(projectId)}/codex-connection`),
+  createMcpToken: (name, projectId) => request("/api/mcp/tokens", { method: "POST", body: json({ name, projectId }) }),
   revokeMcpToken: (id) => request(`/api/mcp/tokens/${id}/revoke`, { method: "POST" }),
   getModelConfig: () => request("/api/settings/model"),
   updateModelConfig: (input) => request("/api/settings/model", { method: "PUT", body: json(input) })

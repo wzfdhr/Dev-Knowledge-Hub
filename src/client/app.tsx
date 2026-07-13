@@ -14,8 +14,9 @@ import { MembersPage } from "./pages/members-page";
 import { ProjectOverviewPage } from "./pages/overview-page";
 import { ProjectsPage } from "./pages/projects-page";
 import { ProjectImportsPage } from "./pages/project-imports-page";
+import { ProjectCodexPage } from "./pages/project-codex-page";
 import { ProjectVersionsPage } from "./pages/project-versions-page";
-import { SettingsPage } from "./pages/settings-page";
+import { SystemSettingsPage } from "./pages/system-settings-page";
 
 function ProjectSectionPlaceholder({ title }: { title: string }) {
   return <div className="page project-section-page"><header className="page-header"><div><h1>{title}</h1><p>该项目工作区正在接入现有功能。</p></div></header></div>;
@@ -55,13 +56,13 @@ export function App({ api = defaultApi }: { api?: ApiClient }) {
       <Route path="imports" element={<ProjectImportsPage api={api} />} />
       <Route path="versions" element={<ProjectVersionsPage api={api} />} />
       <Route path="collaboration" element={<ProjectSectionPlaceholder title="团队协作" />} />
-      <Route path="codex" element={<ProjectSectionPlaceholder title="Codex 接入" />} />
+      <Route path="codex" element={<ProjectCodexPage api={api} />} />
     </Route>
     <Route path="/overview" element={<LegacyProjectRedirect section="overview" />} />
     <Route path="/knowledge" element={<KnowledgePage api={api} />} />
     <Route path="/feedback" element={<FeedbackPage api={api} />} />
     <Route path="/members" element={<MembersPage api={api} />} />
-    <Route path="/settings" element={<SettingsPage api={api} />} />
+    <Route path="/settings" element={<SystemSettingsPage api={api} />} />
     <Route path="*" element={<Navigate to="/projects" replace />} />
   </Route></Routes>;
 }

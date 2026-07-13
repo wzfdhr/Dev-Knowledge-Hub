@@ -22,3 +22,19 @@ describe("release API client", () => {
     );
   });
 });
+
+describe("project Codex API client", () => {
+  test("creates an MCP token with an explicit project scope", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      id: "token", projectId: "project-1", name: "Local Codex", token: "dkh_secret"
+    }), { status: 201, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.createMcpToken("Local Codex", "project-1");
+
+    expect(fetch).toHaveBeenCalledWith("/api/mcp/tokens", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ name: "Local Codex", projectId: "project-1" })
+    }));
+  });
+});

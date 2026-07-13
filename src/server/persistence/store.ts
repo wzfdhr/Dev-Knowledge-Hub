@@ -353,8 +353,8 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
     input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">,
     actorId: string
   ): Promise<McpTokenRecord>;
-  listMcpTokens(workspaceId: string, pagination?: Pagination): Promise<McpTokenRecord[]>;
-  countMcpTokens(workspaceId: string): Promise<number>;
+  listMcpTokens(workspaceId: string, pagination?: Pagination, projectId?: string): Promise<McpTokenRecord[]>;
+  countMcpTokens(workspaceId: string, projectId?: string): Promise<number>;
   findActiveMcpToken(tokenHash: string): Promise<McpTokenRecord | null>;
   touchMcpToken(tokenId: string): Promise<void>;
   revokeMcpToken(workspaceId: string, tokenId: string): Promise<McpTokenRecord | null>;

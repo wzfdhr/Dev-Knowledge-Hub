@@ -141,6 +141,7 @@ export interface Feedback {
 }
 export interface McpToken {
   id: string;
+  projectId: string;
   name: string;
   tokenPrefix: string;
   createdAt: string;
@@ -153,6 +154,14 @@ export interface McpConnection {
   authorization: string;
   stdioCommand: string;
   tools: string[];
+}
+export interface CodexConnectionPack {
+  projectId: string;
+  endpoint: string;
+  environmentVariable: string;
+  configToml: string;
+  agentsMarkdown: string;
+  checkCommand: string;
 }
 export type ModelProvider = "openai" | "anthropic";
 export interface ModelConfig {

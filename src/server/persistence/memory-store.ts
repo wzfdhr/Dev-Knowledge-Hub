@@ -252,16 +252,20 @@ export class MemoryAppStore implements AppStore {
     }
   }
 
-  async listMcpTokens(workspaceId: string, pagination?: Pagination): Promise<McpTokenRecord[]> {
+  async listMcpTokens(workspaceId: string, pagination?: Pagination, projectId?: string): Promise<McpTokenRecord[]> {
     const { limit, offset } = normalizePagination(pagination);
-    return this.mcpTokens.filter((token) => token.workspaceId === workspaceId)
+    return this.mcpTokens.filter((token) =>
+      token.workspaceId === workspaceId && (!projectId || token.projectId === projectId)
+    )
       .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()
         || right.id.localeCompare(left.id))
       .slice(offset, offset + limit);
   }
 
-  async countMcpTokens(workspaceId: string): Promise<number> {
-    return this.mcpTokens.filter((token) => token.workspaceId === workspaceId).length;
+  async countMcpTokens(workspaceId: string, projectId?: string): Promise<number> {
+    return this.mcpTokens.filter((token) =>
+      token.workspaceId === workspaceId && (!projectId || token.projectId === projectId)
+    ).length;
   }
 
   async findActiveMcpToken(tokenHash: string): Promise<McpTokenRecord | null> {

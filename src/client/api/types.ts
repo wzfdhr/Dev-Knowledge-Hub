@@ -4,6 +4,13 @@ import type { BuildStatus } from "../../server/knowledge/build-service";
 export interface Admin { id: string; email: string; role?: "admin" | "member" | "reader" }
 export interface Session { authenticated: true; admin: Admin }
 export interface TeamMember { id: string; email: string; role: "admin" | "member" | "reader"; createdAt?: string }
+export interface Project {
+  id: string;
+  name: string;
+  slug: string;
+  archivedAt: string | null;
+  createdAt: string;
+}
 export interface Repository {
   id: string;
   projectId: string;

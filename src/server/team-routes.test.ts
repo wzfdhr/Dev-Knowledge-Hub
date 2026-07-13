@@ -69,6 +69,31 @@ describe("team projects and members", () => {
     });
   });
 
+  test("uses the requested project when resolving the current repository", async () => {
+    const { app, cookie } = await authenticatedTeam();
+    await app.inject({
+      method: "POST", url: "/api/repositories", headers: { cookie },
+      payload: { kind: "local", name: "默认来源", path: "/tmp/default-project" }
+    });
+    const project = await app.inject({
+      method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "移动端", slug: "mobile" }
+    });
+    const projectId = project.json<{ project: { id: string } }>().project.id;
+    await app.inject({
+      method: "POST", url: `/api/projects/${projectId}/repositories`, headers: { cookie },
+      payload: { kind: "upload", name: "移动端项目包" }
+    });
+
+    const current = await app.inject({
+      method: "GET", url: "/api/repositories/current", headers: { cookie, "x-devkh-project": projectId }
+    });
+
+    expect(current.statusCode).toBe(200);
+    expect(current.json()).toMatchObject({
+      repository: { projectId, kind: "upload", name: "移动端项目包" }
+    });
+  });
+
   test("an administrator can add a read-only member but that member cannot administer projects", async () => {
     const { app, cookie } = await authenticatedTeam();
     const added = await app.inject({
@@ -100,6 +125,27 @@ describe("team projects and members", () => {
 
     expect(denied.statusCode).toBe(403);
     expect(denied.json()).toMatchObject({ error: { code: "FORBIDDEN" } });
+  });
+
+  test("a read-only member cannot start an upload session", async () => {
+    const { app, cookie } = await authenticatedTeam();
+    await app.inject({
+      method: "POST", url: "/api/members", headers: { cookie },
+      payload: { email: "reader@example.com", password: "a secure reader password", role: "reader" }
+    });
+    const login = await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "reader@example.com", password: "a secure reader password" }
+    });
+    const readerCookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+
+    const upload = await app.inject({
+      method: "POST", url: "/api/uploads/resumable", headers: { cookie: readerCookie },
+      payload: { totalBytes: 8, chunkSize: 4 }
+    });
+
+    expect(upload.statusCode).toBe(403);
+    expect(upload.json()).toMatchObject({ error: { code: "FORBIDDEN" } });
   });
 
   test("an administrator attaches an independent upload source to a project", async () => {

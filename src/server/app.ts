@@ -190,6 +190,11 @@ function roleAllows(role: TeamRole, minimum: TeamRole): boolean {
   return rank[role] >= rank[minimum];
 }
 
+function requestedProjectId(request: FastifyRequest): string | undefined {
+  const value = request.headers["x-devkh-project"];
+  return typeof value === "string" && z.uuid().safeParse(value).success ? value : undefined;
+}
+
 export function buildServer(options: ServerOptions): FastifyInstance {
   const server = Fastify({
     bodyLimit: MAX_REQUEST_BODY_BYTES,
@@ -287,6 +292,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   const requireAdministrator = (request: FastifyRequest, reply: FastifyReply) =>
     requireRole("admin", request, reply);
+  const requireContributor = (request: FastifyRequest, reply: FastifyReply) =>
+    requireRole("member", request, reply);
 
   server.get("/api/health", async () => ({ status: "ok", service: SERVICE_NAME }));
 
@@ -357,7 +364,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return { authenticated: true, admin: { id: admin.id, email: admin.email, role: admin.role } };
   });
 
-  server.post("/api/uploads/resumable", { preHandler: requireAdmin }, async (request, reply) => {
+  server.post("/api/uploads/resumable", { preHandler: requireContributor }, async (request, reply) => {
     const parsed = z.object({
       totalBytes: z.number().int().positive(),
       chunkSize: z.number().int().positive()
@@ -375,7 +382,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
 
-  server.get("/api/uploads/resumable/:id", { preHandler: requireAdmin }, async (request, reply) => {
+  server.get("/api/uploads/resumable/:id", { preHandler: requireContributor }, async (request, reply) => {
     const parsed = z.object({ id: z.uuid() }).safeParse(request.params);
     if (!parsed.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload session");
     try {
@@ -392,7 +399,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.put(
     "/api/uploads/resumable/:id/chunks/:index",
-    { preHandler: requireAdmin, bodyLimit: 16 * 1024 * 1024 + 1024 },
+    { preHandler: requireContributor, bodyLimit: 16 * 1024 * 1024 + 1024 },
     async (request, reply) => {
       const params = z.object({ id: z.uuid(), index: z.coerce.number().int().min(0) }).safeParse(request.params);
       const declaredSize = z.coerce.number().int().positive().safeParse(request.headers["x-upload-chunk-size"]);
@@ -421,7 +428,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.post(
     "/api/projects/:projectId/uploads/resumable/:id/import",
-    { preHandler: requireAdmin },
+    { preHandler: requireContributor },
     async (request, reply) => {
       const params = z.object({ projectId: z.uuid(), id: z.uuid() }).safeParse(request.params);
       if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload import");
@@ -549,7 +556,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return modelConfigDto(await options.store.getModelConfig(admin.workspaceId));
   });
 
-  server.put("/api/settings/model", { preHandler: requireAdmin }, async (request, reply) => {
+  server.put("/api/settings/model", { preHandler: requireAdministrator }, async (request, reply) => {
     const parsed = z.object({
       provider: z.enum(["openai", "anthropic"]),
       model: z.string().trim().min(1).max(200),
@@ -678,14 +685,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.get("/api/repositories/current", { preHandler: requireAdmin }, async (request, reply) => {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId);
+    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
     return repositoryDto(repository);
   });
 
   server.get("/api/repositories/current/status", { preHandler: requireAdmin }, async (request, reply) => {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId);
+    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
     const latest = await options.store.latestSnapshot(admin.workspaceId, repository.id);
     return {
@@ -708,7 +715,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     },
     async (request, reply) => {
       const admin = (request as AuthenticatedRequest).sessionAdmin;
-      const repository = await options.store.currentRepository(admin.workspaceId);
+      const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
       if (!repository || (repository as { kind: string }).kind !== "upload") {
         return sendError(
           reply,
@@ -887,7 +894,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.post(
     "/api/repositories/:repositoryId/uploads/resumable/:id/import",
-    { preHandler: requireAdmin },
+    { preHandler: requireContributor },
     async (request, reply) => {
       const params = z.object({ repositoryId: z.uuid(), id: z.uuid() }).safeParse(request.params);
       if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload replacement");
@@ -954,7 +961,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     { preHandler: requireAdmin },
     async (request, reply) => {
       const admin = (request as AuthenticatedRequest).sessionAdmin;
-      const repository = await options.store.currentRepository(admin.workspaceId);
+      const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
       if (!repository) {
         return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
       }
@@ -1001,14 +1008,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   );
 
-  server.post("/api/builds", { preHandler: requireAdmin }, async (request, reply) => {
+  server.post("/api/builds", { preHandler: requireContributor }, async (request, reply) => {
     if (!options.buildService) {
       return sendError(reply, 503, "BUILD_SERVICE_UNAVAILABLE", "Build service is unavailable");
     }
     const parsed = z.object({ snapshotId: z.uuid() }).safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid build request");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId);
+    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
     const snapshot = await options.store.findSnapshotById(admin.workspaceId, parsed.data.snapshotId);
     if (!snapshot || snapshot.repositoryId !== repository.id) {
@@ -1028,7 +1035,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const parsed = z.object(paginationQuerySchema).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid pagination");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId);
+    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
     const [builds, total] = await Promise.all([
       options.store.listBuilds(admin.workspaceId, repository.id, parsed.data),
@@ -1050,7 +1057,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return { build };
   });
 
-  server.post("/api/builds/:id/cancel", { preHandler: requireAdmin }, async (request, reply) => {
+  server.post("/api/builds/:id/cancel", { preHandler: requireContributor }, async (request, reply) => {
     if (!options.buildService) {
       return sendError(reply, 503, "BUILD_SERVICE_UNAVAILABLE", "Build service is unavailable");
     }
@@ -1132,7 +1139,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       .safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid search query");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId);
+    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
     return {
       results: await options.store.searchKnowledge(
@@ -1187,7 +1194,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       .safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid source range");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId);
+    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
     const release = parsed.data.releaseId
       ? await options.store.getRelease(admin.workspaceId, parsed.data.releaseId)
@@ -1227,12 +1234,12 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     };
   });
 
-  server.post("/api/releases", { preHandler: requireAdmin }, async (request, reply) => {
+  server.post("/api/releases", { preHandler: requireContributor }, async (request, reply) => {
     const parsed = z.object({ buildId: z.string().min(1), version: z.string().trim().min(1) })
       .safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid release draft");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId);
+    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
     try {
       const release = await options.store.createReleaseDraft(
@@ -1244,7 +1251,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
 
-  server.post("/api/releases/:id/publish", { preHandler: requireAdmin }, async (request, reply) => {
+  server.post("/api/releases/:id/publish", { preHandler: requireAdministrator }, async (request, reply) => {
     const parsed = z.object({ id: z.string().min(1) }).safeParse(request.params);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid release");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
@@ -1257,7 +1264,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.get("/api/releases/current", { preHandler: requireAdmin }, async (request, reply) => {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId);
+    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
     const release = await options.store.currentRelease(admin.workspaceId, repository.id);
     if (!release) return sendError(reply, 404, "RELEASE_NOT_FOUND", "No release is published");
@@ -1279,7 +1286,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const parsed = z.object(paginationQuerySchema).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid pagination");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId);
+    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
     if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
     const [releases, total] = await Promise.all([
       options.store.listReleases(admin.workspaceId, repository.id, parsed.data),
@@ -1312,7 +1319,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     };
   });
 
-  server.patch("/api/feedback/:id", { preHandler: requireAdmin }, async (request, reply) => {
+  server.patch("/api/feedback/:id", { preHandler: requireContributor }, async (request, reply) => {
     const params = z.object({ id: z.uuid() }).safeParse(request.params);
     const body = z.object({ status: z.enum(AGENT_FEEDBACK_STATUSES) }).safeParse(request.body);
     if (!params.success || !body.success) {
@@ -1333,7 +1340,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
 
-  server.post("/api/feedback/:id/rebuild", { preHandler: requireAdmin }, async (request, reply) => {
+  server.post("/api/feedback/:id/rebuild", { preHandler: requireContributor }, async (request, reply) => {
     if (!options.buildService) {
       return sendError(reply, 503, "BUILD_SERVICE_UNAVAILABLE", "Build service is unavailable");
     }
@@ -1345,7 +1352,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (feedback.status !== "acknowledged") {
       return sendError(reply, 409, "FEEDBACK_NOT_ACKNOWLEDGED", "Feedback must be acknowledged first");
     }
-    const repository = await options.store.currentRepository(admin.workspaceId);
+    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
     const release = repository
       ? await options.store.currentRelease(admin.workspaceId, repository.id)
       : null;

@@ -1,7 +1,7 @@
 import type {
   ApiErrorShape, Build, Feedback, McpConnection, McpToken, KnowledgePageRecord,
   ArchivedRepository, KnowledgeMetadata, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotSummary, SourceExcerpt,
-  UploadSnapshotSummary, TeamMember
+  UploadSnapshotSummary, TeamMember, Project
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
@@ -25,14 +25,26 @@ export interface PaginatedResponse {
 }
 
 export const LIST_PAGE_SIZE = 100;
+export const ACTIVE_PROJECT_STORAGE_KEY = "devkh:active-project-id";
+
+export function activeProjectId(): string | undefined {
+  try {
+    return typeof window === "undefined" ? undefined : window.localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const projectId = activeProjectId();
   const response = await fetch(path, {
     credentials: "same-origin",
     ...init,
-    headers: typeof init?.body === "string"
-      ? { "content-type": "application/json", ...init.headers }
-      : init?.headers
+    headers: {
+      ...(projectId ? { "x-devkh-project": projectId } : {}),
+      ...(typeof init?.body === "string" ? { "content-type": "application/json" } : {}),
+      ...init?.headers
+    }
   });
   if (!response.ok) {
     const body = await response.json().catch(() => null) as ApiErrorShape | null;
@@ -49,6 +61,8 @@ export interface ApiClient extends ResumableUploadApi {
   logout(): Promise<void>;
   listMembers(): Promise<{ members: TeamMember[] }>;
   createMember(input: { email: string; password: string; role: TeamMember["role"] }): Promise<{ member: TeamMember }>;
+  listProjects(): Promise<{ projects: Project[] }>;
+  createProject(input: { name: string; slug: string }): Promise<{ project: Project }>;
   connectRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository }>;
   replaceRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository; pendingUpload?: boolean }>;
   listArchivedRepositories(): Promise<{ repositories: ArchivedRepository[] }>;
@@ -103,7 +117,14 @@ export const api: ApiClient = {
   logout: () => request("/api/session", { method: "DELETE" }),
   listMembers: () => request("/api/members"),
   createMember: (input) => request("/api/members", { method: "POST", body: json(input) }),
-  connectRepository: (input) => request("/api/repositories", { method: "POST", body: json(input) }),
+  listProjects: () => request("/api/projects"),
+  createProject: (input) => request("/api/projects", { method: "POST", body: json(input) }),
+  connectRepository: (input) => {
+    const projectId = activeProjectId();
+    return request(projectId ? `/api/projects/${encodeURIComponent(projectId)}/repositories` : "/api/repositories", {
+      method: "POST", body: json(input)
+    });
+  },
   replaceRepository: (input) => request("/api/repositories/current/replace", { method: "POST", body: json(input) }),
   listArchivedRepositories: () => request("/api/repositories/archived"),
   uploadZip: (file) => {

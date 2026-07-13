@@ -30,6 +30,7 @@ function renderPage(node: React.ReactNode) {
 
 describe("shared console copy", () => {
   test("renders Chinese console navigation", async () => {
+    const user = userEvent.setup();
     const api = {
       setupStatus: vi.fn().mockResolvedValue({ setupRequired: false }),
       session: vi.fn().mockResolvedValue({ admin: { email: "admin@example.com" } }),
@@ -42,12 +43,17 @@ describe("shared console copy", () => {
 
     renderPage(<><App api={api} /><ErrorState message="Retry fixture" retry={() => {}} /></>);
 
-    expect(await screen.findByRole("link", { name: "总览" })).toBeVisible();
+    expect(await screen.findByRole("link", { name: "项目中心" })).toBeVisible();
     expect(screen.getByRole("navigation", { name: "主导航" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "项目中心" })).toBeVisible();
     expect(screen.getByRole("link", { name: "知识库" })).toBeVisible();
     expect(screen.getByRole("link", { name: "反馈" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "成员" })).toBeVisible();
     expect(screen.getByRole("link", { name: "设置" })).toBeVisible();
     expect(screen.getByRole("button", { name: "重试" })).toBeVisible();
+
+    await user.click(screen.getByRole("link", { name: "成员" }));
+    expect(await screen.findByRole("heading", { name: "成员" })).toBeVisible();
   });
 });
 

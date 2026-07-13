@@ -1,8 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { App as AntApp, ConfigProvider } from "antd";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 
+import "antd/dist/reset.css";
 import "./styles.css";
 import { App } from "./app";
 
@@ -13,8 +15,12 @@ if (!root) throw new Error("Missing #root element");
 
 createRoot(root).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter><App /></BrowserRouter>
-    </QueryClientProvider>
+    <ConfigProvider theme={{ token: { colorPrimary: "#1769e0", borderRadius: 6, fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif" } }}>
+      <AntApp>
+        <QueryClientProvider client={queryClient}>
+          <BrowserRouter><App /></BrowserRouter>
+        </QueryClientProvider>
+      </AntApp>
+    </ConfigProvider>
   </StrictMode>
 );

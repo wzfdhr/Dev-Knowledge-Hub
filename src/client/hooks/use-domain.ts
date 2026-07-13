@@ -14,6 +14,7 @@ export const keys = {
 export const projectKeys = {
   repository: (projectId: string) => ["projects", projectId, "repository"] as const,
   summary: (projectId: string) => ["projects", projectId, "summary"] as const,
+  activity: (projectId: string) => ["projects", projectId, "activity"] as const,
   builds: (projectId: string) => ["projects", projectId, "builds"] as const,
   releases: (projectId: string) => ["projects", projectId, "releases"] as const
 };

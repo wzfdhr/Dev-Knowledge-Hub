@@ -13,6 +13,7 @@ import type {
   AgentFeedbackStatus,
   AppStore,
   AuditEventInput,
+  AuditEventRecord,
   CreateFeedbackInput,
   CreateSnapshotInput,
   FeedbackRebuildInput,
@@ -154,6 +155,17 @@ interface TeamMemberRow extends QueryResultRow {
   created_at: Date;
 }
 
+interface AuditEventRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  actor_id: string | null;
+  action: string;
+  resource_type: string;
+  resource_id: string | null;
+  metadata: Record<string, unknown>;
+  created_at: Date;
+}
+
 function repositoryRecord(row: RepositoryRow): RepositoryRecord {
   return {
     id: row.id,
@@ -279,6 +291,19 @@ function teamMemberRecord(row: TeamMemberRow): TeamMemberRecord {
     email: row.email,
     passwordHash: row.password_hash,
     role: row.role,
+    createdAt: row.created_at
+  };
+}
+
+function auditEventRecord(row: AuditEventRow): AuditEventRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    ...(row.actor_id ? { actorId: row.actor_id } : {}),
+    action: row.action,
+    resourceType: row.resource_type,
+    ...(row.resource_id ? { resourceId: row.resource_id } : {}),
+    metadata: row.metadata ?? {},
     createdAt: row.created_at
   };
 }
@@ -524,6 +549,60 @@ export class PostgresAppStore implements AppStore {
 
   async recordAudit(event: AuditEventInput): Promise<void> {
     await this.insertAudit(this.pool, event);
+  }
+
+  async listProjectActivity(
+    workspaceId: string,
+    projectId: string,
+    pagination?: Pagination
+  ): Promise<AuditEventRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    const { rows } = await this.pool.query<AuditEventRow>(
+      `SELECT a.id, a.workspace_id, a.actor_id, a.action, a.resource_type,
+              a.resource_id, a.metadata, a.created_at
+       FROM audit_events a
+       WHERE a.workspace_id = $1 AND (
+         (a.resource_type = 'project' AND a.resource_id = $2::text)
+         OR EXISTS (
+           SELECT 1 FROM repositories r
+           WHERE r.workspace_id = a.workspace_id AND r.project_id = $2
+             AND r.id::text = a.resource_id
+         )
+         OR EXISTS (
+           SELECT 1 FROM mcp_tokens t
+           WHERE t.workspace_id = a.workspace_id AND t.project_id = $2
+             AND t.id::text = a.resource_id
+         )
+         OR a.metadata->>'projectId' = $2::text
+       )
+       ORDER BY a.created_at DESC, a.id DESC
+       LIMIT $3 OFFSET $4`,
+      [workspaceId, projectId, limit, offset]
+    );
+    return rows.map(auditEventRecord);
+  }
+
+  async countProjectActivity(workspaceId: string, projectId: string): Promise<number> {
+    const { rows } = await this.pool.query<{ total: string }>(
+      `SELECT count(*)::text AS total
+       FROM audit_events a
+       WHERE a.workspace_id = $1 AND (
+         (a.resource_type = 'project' AND a.resource_id = $2::text)
+         OR EXISTS (
+           SELECT 1 FROM repositories r
+           WHERE r.workspace_id = a.workspace_id AND r.project_id = $2
+             AND r.id::text = a.resource_id
+         )
+         OR EXISTS (
+           SELECT 1 FROM mcp_tokens t
+           WHERE t.workspace_id = a.workspace_id AND t.project_id = $2
+             AND t.id::text = a.resource_id
+         )
+         OR a.metadata->>'projectId' = $2::text
+       )`,
+      [workspaceId, projectId]
+    );
+    return Number(rows[0]?.total ?? 0);
   }
 
   async createMcpToken(

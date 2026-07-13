@@ -19,6 +19,17 @@ export interface ProjectSummary {
   latestBuild: Build | null;
   memberCount: number;
 }
+export interface ProjectActivity {
+  id: string;
+  projectId: string;
+  actorId: string | null;
+  actorEmail: string | null;
+  action: string;
+  resourceType: string;
+  resourceId: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+}
 export interface Repository {
   id: string;
   projectId: string;

@@ -1,7 +1,7 @@
 import type {
   ApiErrorShape, Build, Feedback, McpConnection, McpToken, KnowledgePageRecord,
   ArchivedRepository, KnowledgeMetadata, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotSummary, SourceExcerpt,
-  UploadSnapshotSummary, TeamMember, Project, ProjectSummary, CodexConnectionPack
+  UploadSnapshotSummary, TeamMember, Project, ProjectSummary, ProjectActivity, CodexConnectionPack
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
@@ -64,6 +64,8 @@ export interface ApiClient extends ResumableUploadApi {
   listProjects(): Promise<{ projects: Project[] }>;
   createProject(input: { name: string; slug: string }): Promise<{ project: Project }>;
   getProjectSummary(projectId: string): Promise<ProjectSummary>;
+  listProjectActivity(projectId: string, pagination: PaginationParams):
+    Promise<{ activity: ProjectActivity[]; members: TeamMember[] } & PaginatedResponse>;
   connectRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository }>;
   replaceRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository; pendingUpload?: boolean }>;
   listArchivedRepositories(): Promise<{ repositories: ArchivedRepository[] }>;
@@ -123,6 +125,10 @@ export const api: ApiClient = {
   listProjects: () => request("/api/projects"),
   createProject: (input) => request("/api/projects", { method: "POST", body: json(input) }),
   getProjectSummary: (projectId) => request(`/api/projects/${encodeURIComponent(projectId)}/summary`),
+  listProjectActivity: (projectId, pagination) => request(listPath(
+    `/api/projects/${encodeURIComponent(projectId)}/activity`,
+    pagination
+  )),
   connectRepository: (input) => {
     const projectId = activeProjectId();
     return request(projectId ? `/api/projects/${encodeURIComponent(projectId)}/repositories` : "/api/repositories", {

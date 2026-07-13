@@ -36,6 +36,36 @@ afterEach(async () => {
 });
 
 describe("team projects and members", () => {
+  test("isolates project activity and allows a reader to inspect it", async () => {
+    const { app, store, cookie } = await authenticatedTeam();
+    const workspace = await store.defaultWorkspace();
+    const admin = await store.findAdminByEmail("admin@example.com");
+    const first = await app.inject({ method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "项目甲", slug: "project-a" } });
+    const second = await app.inject({ method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "项目乙", slug: "project-b" } });
+    const firstId = first.json<{ project: { id: string } }>().project.id;
+    const secondId = second.json<{ project: { id: string } }>().project.id;
+    const firstRepo = await app.inject({ method: "POST", url: `/api/projects/${firstId}/repositories`, headers: { cookie }, payload: { kind: "upload", name: "甲资料" } });
+    const secondRepo = await app.inject({ method: "POST", url: `/api/projects/${secondId}/repositories`, headers: { cookie }, payload: { kind: "upload", name: "乙资料" } });
+    await store.recordAudit({ workspaceId: workspace!.id, actorId: admin!.id, action: "repository.sync_succeeded", resourceType: "repository", resourceId: firstRepo.json().repository.id });
+    await store.recordAudit({ workspaceId: workspace!.id, actorId: admin!.id, action: "repository.sync_failed", resourceType: "repository", resourceId: secondRepo.json().repository.id });
+    await app.inject({ method: "POST", url: "/api/members", headers: { cookie }, payload: { email: "reader@example.com", password: "a secure reader password", role: "reader" } });
+    const login = await app.inject({ method: "POST", url: "/api/session", payload: { email: "reader@example.com", password: "a secure reader password" } });
+    const readerCookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+
+    const response = await app.inject({ method: "GET", url: `/api/projects/${firstId}/activity`, headers: { cookie: readerCookie } });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "repository.sync_succeeded", projectId: firstId, actorEmail: "admin@example.com" })
+    ]));
+    expect(response.json().activity).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "repository.sync_failed" })
+    ]));
+    expect(response.json().members).toEqual(expect.arrayContaining([
+      expect.objectContaining({ email: "reader@example.com", role: "reader" })
+    ]));
+  });
+
   test("initial setup provisions a default project for existing single-project workflows", async () => {
     const { app, cookie } = await authenticatedTeam();
 

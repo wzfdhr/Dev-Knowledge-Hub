@@ -54,6 +54,7 @@ export interface AuditEventInput {
 
 export interface AuditEventRecord extends AuditEventInput {
   id: string;
+  createdAt: Date;
 }
 
 export interface McpTokenRecord {
@@ -347,6 +348,12 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   ): Promise<ProjectRecord | null>;
   defaultWorkspace(): Promise<WorkspaceRecord | null>;
   recordAudit(event: AuditEventInput): Promise<void>;
+  listProjectActivity(
+    workspaceId: string,
+    projectId: string,
+    pagination?: Pagination
+  ): Promise<AuditEventRecord[]>;
+  countProjectActivity(workspaceId: string, projectId: string): Promise<number>;
   createMcpToken(input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">):
     Promise<McpTokenRecord>;
   createMcpTokenWithAudit(

@@ -15,12 +15,9 @@ import { ProjectOverviewPage } from "./pages/overview-page";
 import { ProjectsPage } from "./pages/projects-page";
 import { ProjectImportsPage } from "./pages/project-imports-page";
 import { ProjectCodexPage } from "./pages/project-codex-page";
+import { ProjectCollaborationPage } from "./pages/project-collaboration-page";
 import { ProjectVersionsPage } from "./pages/project-versions-page";
 import { SystemSettingsPage } from "./pages/system-settings-page";
-
-function ProjectSectionPlaceholder({ title }: { title: string }) {
-  return <div className="page project-section-page"><header className="page-header"><div><h1>{title}</h1><p>该项目工作区正在接入现有功能。</p></div></header></div>;
-}
 
 function LegacyProjectRedirect({ section }: { section: string }) {
   const projectId = localStorage.getItem("devkh:active-project-id");
@@ -55,7 +52,7 @@ export function App({ api = defaultApi }: { api?: ApiClient }) {
       <Route path="overview" element={<ProjectOverviewPage api={api} />} />
       <Route path="imports" element={<ProjectImportsPage api={api} />} />
       <Route path="versions" element={<ProjectVersionsPage api={api} />} />
-      <Route path="collaboration" element={<ProjectSectionPlaceholder title="团队协作" />} />
+      <Route path="collaboration" element={<ProjectCollaborationPage api={api} />} />
       <Route path="codex" element={<ProjectCodexPage api={api} />} />
     </Route>
     <Route path="/overview" element={<LegacyProjectRedirect section="overview" />} />

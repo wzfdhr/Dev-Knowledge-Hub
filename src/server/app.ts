@@ -530,6 +530,39 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     };
   });
 
+  server.get("/api/projects/:projectId/activity", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    const parsed = z.object(paginationQuerySchema).safeParse(request.query);
+    if (!params.success || !parsed.success) {
+      return sendError(reply, 400, "INVALID_REQUEST", "Invalid project activity query");
+    }
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const project = (await options.store.listProjects(admin.workspaceId, { limit: 100 }))
+      .find((candidate) => candidate.id === params.data.projectId && candidate.archivedAt === null);
+    if (!project) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    const [activity, total, members] = await Promise.all([
+      options.store.listProjectActivity(admin.workspaceId, project.id, parsed.data),
+      options.store.countProjectActivity(admin.workspaceId, project.id),
+      options.store.listTeamMembers(admin.workspaceId, { limit: 100 })
+    ]);
+    const actorEmails = new Map(members.map((member) => [member.id, member.email]));
+    return {
+      activity: activity.map((event) => ({
+        id: event.id,
+        projectId: project.id,
+        actorId: event.actorId ?? null,
+        actorEmail: event.actorId ? actorEmails.get(event.actorId) ?? null : null,
+        action: event.action,
+        resourceType: event.resourceType,
+        resourceId: event.resourceId ?? null,
+        metadata: event.metadata ?? {},
+        createdAt: event.createdAt
+      })),
+      members: members.map(memberDto),
+      ...paginationMetadata(total, parsed.data.offset ?? 0, activity.length)
+    };
+  });
+
   server.post("/api/projects/:projectId/repositories", { preHandler: requireAdministrator }, async (request, reply) => {
     const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
     const parsed = repositorySchema.safeParse(request.body);

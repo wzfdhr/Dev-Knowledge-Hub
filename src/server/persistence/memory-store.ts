@@ -212,7 +212,39 @@ export class MemoryAppStore implements AppStore {
   }
 
   async recordAudit(event: AuditEventInput): Promise<void> {
-    this.auditEvents.push({ id: randomUUID(), metadata: {}, ...event });
+    this.auditEvents.push({ id: randomUUID(), createdAt: new Date(), metadata: {}, ...event });
+  }
+
+  private projectOwnsAuditEvent(projectId: string, event: AuditEventRecord): boolean {
+    if (event.resourceType === "project" && event.resourceId === projectId) return true;
+    if (event.resourceType === "repository") {
+      return this.repositories.some((repository) =>
+        repository.id === event.resourceId && repository.projectId === projectId
+      );
+    }
+    if (event.resourceType === "mcp_token") {
+      return this.mcpTokens.some((token) => token.id === event.resourceId && token.projectId === projectId);
+    }
+    return event.metadata?.projectId === projectId;
+  }
+
+  async listProjectActivity(
+    workspaceId: string,
+    projectId: string,
+    pagination?: Pagination
+  ): Promise<AuditEventRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    return this.auditEvents
+      .filter((event) => event.workspaceId === workspaceId && this.projectOwnsAuditEvent(projectId, event))
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()
+        || right.id.localeCompare(left.id))
+      .slice(offset, offset + limit);
+  }
+
+  async countProjectActivity(workspaceId: string, projectId: string): Promise<number> {
+    return this.auditEvents.filter((event) =>
+      event.workspaceId === workspaceId && this.projectOwnsAuditEvent(projectId, event)
+    ).length;
   }
 
   async createMcpToken(

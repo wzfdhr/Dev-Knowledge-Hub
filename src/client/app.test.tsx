@@ -61,7 +61,10 @@ describe("shared console copy", () => {
       listProjects: vi.fn().mockResolvedValue({ projects: [{
         id: "project-1", name: "AHeart Admin", slug: "aheart-admin",
         archivedAt: null, createdAt: "2026-07-13T00:00:00Z"
-      }] })
+      }] }),
+      listProjectActivity: vi.fn().mockResolvedValue({
+        activity: [], members: [], total: 0, nextOffset: null
+      })
     } as unknown as ApiClient;
 
     renderAppAt(api, "/projects/project-1/collaboration");
@@ -73,7 +76,7 @@ describe("shared console copy", () => {
     expect(screen.getByRole("link", { name: "知识版本" })).toHaveAttribute("href", "/projects/project-1/versions");
     expect(screen.getByRole("link", { name: "团队协作" })).toHaveAttribute("href", "/projects/project-1/collaboration");
     expect(screen.getByRole("link", { name: "Codex 接入" })).toHaveAttribute("href", "/projects/project-1/codex");
-    expect(screen.getByRole("heading", { name: "团队协作" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "团队协作" })).toBeVisible();
   });
 
   test("renders folder import as a dedicated project workflow", async () => {
@@ -174,6 +177,28 @@ describe("shared console copy", () => {
     expect(await screen.findByRole("heading", { name: "设置" })).toBeVisible();
     expect(screen.queryByRole("heading", { name: "MCP 连接" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "访问 Token" })).not.toBeInTheDocument();
+  });
+
+  test("shows real members and persisted activity in project collaboration", async () => {
+    const api = {
+      setupStatus: vi.fn().mockResolvedValue({ setupRequired: false }),
+      session: vi.fn().mockResolvedValue({ admin: { email: "admin@example.com", role: "admin" } }),
+      logout: vi.fn().mockResolvedValue(undefined),
+      listProjects: vi.fn().mockResolvedValue({ projects: [{ id: "project-1", name: "AHeart Admin", slug: "aheart-admin", archivedAt: null, createdAt: "2026-07-13" }] }),
+      listProjectActivity: vi.fn().mockResolvedValue({
+        activity: [{ id: "event-1", projectId: "project-1", actorEmail: "admin@example.com", action: "repository.sync_succeeded", resourceType: "repository", resourceId: "repo", metadata: {}, createdAt: "2026-07-13T08:00:00Z" }],
+        members: [{ id: "member-1", email: "admin@example.com", role: "admin", createdAt: "2026-07-11T08:00:00Z" }],
+        total: 1,
+        nextOffset: null
+      })
+    } as unknown as ApiClient;
+
+    renderAppAt(api, "/projects/project-1/collaboration");
+
+    expect(await screen.findByRole("heading", { name: "团队协作" })).toBeVisible();
+    expect(screen.getByText("团队角色")).toBeVisible();
+    expect(screen.getByText("资料同步成功")).toBeVisible();
+    expect(screen.getAllByText("admin@example.com")).not.toHaveLength(0);
   });
 
   test("renders Chinese console navigation", async () => {

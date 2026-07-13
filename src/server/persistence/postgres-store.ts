@@ -434,6 +434,14 @@ export class PostgresAppStore implements AppStore {
     return rows.map(teamMemberRecord);
   }
 
+  async countTeamMembers(workspaceId: string): Promise<number> {
+    const { rows } = await this.pool.query<{ total: string }>(
+      `SELECT count(*)::text AS total FROM workspace_members WHERE workspace_id = $1`,
+      [workspaceId]
+    );
+    return Number(rows[0]?.total ?? 0);
+  }
+
   async createTeamMember(
     workspaceId: string,
     input: { email: string; passwordHash: string; role: TeamRole },

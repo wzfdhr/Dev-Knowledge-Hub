@@ -333,6 +333,7 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   findAdminByEmail(email: string): Promise<AdminRecord | null>;
   findAdminById(id: string, workspaceId: string): Promise<AdminRecord | null>;
   listTeamMembers(workspaceId: string, pagination?: Pagination): Promise<TeamMemberRecord[]>;
+  countTeamMembers(workspaceId: string): Promise<number>;
   createTeamMember(
     workspaceId: string,
     input: { email: string; passwordHash: string; role: TeamRole },

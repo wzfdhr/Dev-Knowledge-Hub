@@ -141,6 +141,10 @@ export class MemoryAppStore implements AppStore {
       .slice(offset, offset + limit);
   }
 
+  async countTeamMembers(workspaceId: string): Promise<number> {
+    return this.members.filter((member) => member.workspaceId === workspaceId).length;
+  }
+
   async createTeamMember(
     workspaceId: string,
     input: { email: string; passwordHash: string; role: TeamRole },

@@ -10,7 +10,7 @@ import { KnowledgePage } from "./pages/knowledge-page";
 import { FeedbackPage } from "./pages/feedback-page";
 import { SettingsPage } from "./pages/settings-page";
 import { ProjectImportsPage } from "./pages/project-imports-page";
-import { derivePrimaryAction, OverviewPage } from "./pages/overview-page";
+import { derivePrimaryAction, ProjectVersionsPage as OverviewPage } from "./pages/project-versions-page";
 import { ApiError, type ApiClient } from "./api/client";
 import { App } from "./app";
 import { ErrorState } from "./components/ui";
@@ -85,6 +85,47 @@ describe("shared console copy", () => {
     ]);
   });
 
+  test("separates project overview from knowledge version operations", async () => {
+    const api = {
+      setupStatus: vi.fn().mockResolvedValue({ setupRequired: false }),
+      session: vi.fn().mockResolvedValue({ admin: { email: "admin@example.com", role: "admin" } }),
+      logout: vi.fn().mockResolvedValue(undefined),
+      listProjects: vi.fn().mockResolvedValue({ projects: [{
+        id: "project-1", name: "AHeart Admin", slug: "aheart-admin",
+        archivedAt: null, createdAt: "2026-07-13T00:00:00Z"
+      }] }),
+      getRepository: vi.fn().mockResolvedValue({ repository: {
+        id: "repo", projectId: "project-1", kind: "upload", name: "AHeart Admin", defaultBranch: "upload"
+      } }),
+      getRepositoryStatus: vi.fn().mockResolvedValue({
+        repository: { id: "repo", projectId: "project-1", kind: "upload", name: "AHeart Admin", defaultBranch: "upload" },
+        latestSnapshot: { id: "snapshot", commitSha: "a".repeat(40), ref: "upload", commitTimestamp: "2026-07-13", fileCount: 10 }
+      }),
+      listBuilds: vi.fn().mockResolvedValue({ builds: [], total: 0, nextOffset: null }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [], total: 0, nextOffset: null }),
+      listFeedback: vi.fn().mockResolvedValue({ feedback: [], total: 0, nextOffset: null }),
+      getProjectSummary: vi.fn().mockResolvedValue({
+        project: { id: "project-1", name: "AHeart Admin", slug: "aheart-admin", archivedAt: null, createdAt: "2026-07-13T00:00:00Z" },
+        repository: { id: "repo", projectId: "project-1", kind: "upload", name: "AHeart Admin", defaultBranch: "upload" },
+        latestSnapshot: { id: "snapshot", commitSha: "a".repeat(40), ref: "upload", commitTimestamp: "2026-07-13", fileCount: 10 },
+        currentRelease: null,
+        latestBuild: null,
+        memberCount: 1
+      })
+    } as unknown as ApiClient;
+
+    renderAppAt(api, "/projects/project-1/overview");
+    expect(await screen.findByRole("heading", { name: "项目概览" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "上传新资料" })).toHaveAttribute("href", "/projects/project-1/imports");
+    expect(screen.getByRole("link", { name: "管理知识版本" })).toHaveAttribute("href", "/projects/project-1/versions");
+    expect(screen.queryByRole("heading", { name: "最近构建" })).not.toBeInTheDocument();
+    cleanup();
+
+    renderAppAt(api, "/projects/project-1/versions");
+    expect(await screen.findByRole("heading", { name: "知识版本" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "最近构建" })).toBeVisible();
+  });
+
   test("renders Chinese console navigation", async () => {
     const user = userEvent.setup();
     const api = {
@@ -133,7 +174,7 @@ describe("operations page copy", () => {
     } as unknown as ApiClient;
 
     renderPage(<OverviewPage api={overviewApi} />);
-    expect(await screen.findByRole("heading", { name: "总览" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "知识版本" })).toBeVisible();
     expect(screen.getByRole("button", { name: "同步仓库" })).toBeVisible();
     cleanup();
 

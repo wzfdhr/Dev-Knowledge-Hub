@@ -38,6 +38,48 @@ afterEach(async () => {
 });
 
 describe("repository routes", () => {
+  test("returns a persisted project summary without fabricated defaults", async () => {
+    const { app, cookie } = await authenticatedApp();
+    const projects = await app.inject({ method: "GET", url: "/api/projects", headers: { cookie } });
+    const projectId = projects.json().projects[0].id as string;
+
+    const empty = await app.inject({
+      method: "GET",
+      url: `/api/projects/${projectId}/summary`,
+      headers: { cookie }
+    });
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json()).toMatchObject({
+      project: { id: projectId },
+      repository: null,
+      latestSnapshot: null,
+      currentRelease: null,
+      latestBuild: null,
+      memberCount: 1
+    });
+
+    await app.inject({
+      method: "POST",
+      url: `/api/projects/${projectId}/repositories`,
+      headers: { cookie },
+      payload: { kind: "upload", name: "Uploaded project" }
+    });
+    const connected = await app.inject({
+      method: "GET",
+      url: `/api/projects/${projectId}/summary`,
+      headers: { cookie }
+    });
+    expect(connected.statusCode).toBe(200);
+    expect(connected.json()).toMatchObject({
+      project: { id: projectId },
+      repository: { projectId, kind: "upload", name: "Uploaded project" },
+      latestSnapshot: null,
+      currentRelease: null,
+      latestBuild: null,
+      memberCount: 1
+    });
+  });
+
   test("connects one local repository and returns sanitized current metadata", async () => {
     const { app, cookie } = await authenticatedApp();
     const created = await app.inject({

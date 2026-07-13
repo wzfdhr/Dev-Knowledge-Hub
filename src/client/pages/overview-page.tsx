@@ -1,194 +1,48 @@
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowRight, GitBranch, Play, RefreshCw, Send, Square, TriangleAlert } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { ArrowRight, BookOpenCheck, MessageSquareText, UploadCloud, Users } from "lucide-react";
+import { Link, useParams } from "react-router-dom";
 
-import { ApiError, errorMessage, LIST_PAGE_SIZE, type ApiClient } from "../api/client";
-import type { Build, Release, Repository, SnapshotSummary } from "../api/types";
-import { Empty, ErrorState, Loading, Status } from "../components/ui";
-import { statusLabel } from "../copy";
-import { keys, useFeedback, useRepository } from "../hooks/use-domain";
-import "../progress.css";
+import { errorMessage, type ApiClient } from "../api/client";
+import { ErrorState, Loading, Status } from "../components/ui";
+import { projectKeys, useFeedback } from "../hooks/use-domain";
 
-type PrimaryKind = "connect" | "sync" | "start-build" | "retry-build" | "review" | "publish" | "none";
-interface OverviewState { repository: Repository | null; builds: Build[]; releases: Release[]; snapshotId?: string }
-
-export function derivePrimaryAction(state: OverviewState): { kind: PrimaryKind; label: string } {
-  if (!state.repository) return { kind: "connect", label: "连接仓库" };
-  const latestBuild = state.builds[0];
-  if (latestBuild && !["ready", "published", "failed"].includes(latestBuild.status)) {
-    return { kind: "none", label: "构建进行中" };
-  }
-  if (latestBuild?.status === "ready") {
-    const draft = state.releases.find((release) => release.buildId === latestBuild.id && !release.publishedAt);
-    return draft ? { kind: "publish", label: "发布版本" } : { kind: "review", label: "审核就绪构建" };
-  }
-  if (latestBuild?.status === "failed" && (state.snapshotId ?? latestBuild.snapshotId)) {
-    return { kind: "retry-build", label: "重试知识构建" };
-  }
-  if (state.snapshotId && latestBuild?.snapshotId === state.snapshotId && latestBuild.status === "published") {
-    return { kind: "sync", label: state.repository.kind === "upload" ? "导入新 ZIP 版本" : "同步仓库" };
-  }
-  if (state.snapshotId) return { kind: "start-build", label: "开始构建知识" };
-  return { kind: "sync", label: state.repository.kind === "upload" ? "导入 ZIP 项目包" : "同步仓库" };
-}
-
-const snapshotKey = "devkh:last-snapshot";
-const terminal = new Set(["ready", "published", "failed"]);
-
-export function OverviewPage({ api }: { api: ApiClient }) {
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
-  const repositoryQuery = useRepository(api);
-  const repositoryMissing = repositoryQuery.error instanceof ApiError && repositoryQuery.error.status === 404;
-  const repository = repositoryMissing ? null : repositoryQuery.data?.repository ?? null;
-  const repositoryStatusQuery = useQuery({
-    queryKey: ["repository-status", repository?.id],
-    queryFn: () => api.getRepositoryStatus?.() ?? Promise.resolve({ repository: repository!, latestSnapshot: null }),
-    enabled: Boolean(repository),
+export function ProjectOverviewPage({ api }: { api: ApiClient }) {
+  const { projectId = "" } = useParams();
+  const summary = useQuery({
+    queryKey: projectKeys.summary(projectId),
+    queryFn: () => api.getProjectSummary(projectId),
+    enabled: Boolean(projectId),
     retry: false
   });
-  const buildsQuery = useInfiniteQuery({
-    queryKey: keys.builds,
-    initialPageParam: 0,
-    queryFn: ({ pageParam }) => api.listBuilds({ limit: LIST_PAGE_SIZE, offset: pageParam }),
-    getNextPageParam: (lastPage) => lastPage.nextOffset ?? undefined,
-    enabled: Boolean(repository),
-    refetchInterval: 3000
-  });
-  const releasesQuery = useQuery({ queryKey: keys.releases, queryFn: () => api.listReleases({ limit: LIST_PAGE_SIZE, offset: 0 }), enabled: Boolean(repository), retry: false });
-  const feedbackQuery = useFeedback(api, undefined, Boolean(repository));
-  const [sessionSnapshot, setSessionSnapshot] = useState<SnapshotSummary | null>(() => {
-    const raw = sessionStorage.getItem(snapshotKey);
-    return raw ? JSON.parse(raw) as SnapshotSummary : null;
-  });
-  const [reviewBuild, setReviewBuild] = useState<Build | null>(null);
-  const [version, setVersion] = useState("1.0.0");
-  const [eventState, setEventState] = useState<"idle" | "connecting" | "connected" | "reconnecting">("idle");
+  const feedback = useFeedback(api, undefined, Boolean(projectId));
 
-  const builds = buildsQuery.data?.pages.flatMap((page) => page.builds) ?? [];
-  const releases = releasesQuery.data?.releases ?? [];
-  const latestBuild = builds[0];
-  const activeBuild = latestBuild && !terminal.has(latestBuild.status) ? latestBuild : undefined;
-  const failedBuild = latestBuild?.status === "failed" ? latestBuild : undefined;
-  const serverSnapshot = repositoryStatusQuery.data?.latestSnapshot;
-  const snapshot: SnapshotSummary | null = serverSnapshot ? {
-    snapshotId: serverSnapshot.id,
-    commitSha: serverSnapshot.commitSha,
-    ref: serverSnapshot.ref,
-    fileCount: serverSnapshot.fileCount ?? 0,
-    unchanged: sessionSnapshot?.snapshotId === serverSnapshot.id ? sessionSnapshot.unchanged : true
-  } : sessionSnapshot;
-  const effectiveSnapshotId = snapshot?.snapshotId ?? failedBuild?.snapshotId;
-  const requiredLoading = Boolean(repository) && (buildsQuery.isLoading || releasesQuery.isLoading || repositoryStatusQuery.isLoading);
-  const blockingError = repositoryQuery.error && !repositoryMissing
-    ? repositoryQuery.error
-    : buildsQuery.error ?? releasesQuery.error ?? repositoryStatusQuery.error;
-  const action = blockingError || requiredLoading
-    ? null
-    : derivePrimaryAction({ repository, builds, releases, snapshotId: effectiveSnapshotId });
+  if (summary.isLoading) return <div className="page"><Loading label="正在加载项目概览" /></div>;
+  if (summary.error) return <div className="page"><ErrorState message={errorMessage(summary.error)} retry={() => void summary.refetch()} /></div>;
+  if (!summary.data) return null;
 
-  useEffect(() => {
-    if (!activeBuild) {
-      setEventState("idle");
-      return;
-    }
-    setEventState("connecting");
-    const source = new EventSource(`/api/builds/${encodeURIComponent(activeBuild.id)}/events`);
-    source.onopen = () => setEventState("connected");
-    source.addEventListener("build", () => {
-      setEventState("connected");
-      void queryClient.invalidateQueries({ queryKey: keys.builds });
-    });
-    source.onerror = () => setEventState("reconnecting");
-    return () => source.close();
-  }, [activeBuild, queryClient]);
-
-  const invalidate = async () => Promise.all([
-    queryClient.invalidateQueries({ queryKey: keys.builds }),
-    queryClient.invalidateQueries({ queryKey: keys.releases }),
-    queryClient.invalidateQueries({ queryKey: ["repository-status"] })
-  ]);
-  const sync = useMutation({ mutationFn: api.syncRepository, onSuccess: (value) => {
-    setSessionSnapshot(value);
-    sessionStorage.setItem(snapshotKey, JSON.stringify(value));
-  } });
-  const start = useMutation({ mutationFn: (id: string) => api.startBuild(id), onSuccess: invalidate });
-  const createRelease = useMutation({
-    mutationFn: ({ buildId, value }: {
-      buildId: string;
-      value: string;
-      navigateToKnowledge?: boolean;
-    }) => api.createRelease(buildId, value),
-    onSuccess: async (result, variables) => {
-      setReviewBuild(null);
-      await invalidate();
-      if (variables.navigateToKnowledge) {
-        navigate(`/knowledge?releaseId=${encodeURIComponent(result.release.id)}`);
-      }
-    }
-  });
-  const publish = useMutation({ mutationFn: api.publishRelease, onSuccess: invalidate });
-  const cancel = useMutation({ mutationFn: api.cancelBuild, onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.builds }) });
-  const operationError = sync.error ?? start.error ?? createRelease.error ?? publish.error ?? cancel.error;
-
-  const handlePrimary = () => {
-    if (reviewBuild) {
-      createRelease.mutate({ buildId: reviewBuild.id, value: version });
-      return;
-    }
-    if (!action) return;
-    if (action.kind === "connect") navigate("/settings?connect=1");
-    if (action.kind === "sync") {
-      if (repository?.kind === "upload") navigate("/settings#repository");
-      else sync.mutate();
-    }
-    if (["start-build", "retry-build"].includes(action.kind) && effectiveSnapshotId) start.mutate(effectiveSnapshotId);
-    if (action.kind === "review") setReviewBuild(latestBuild?.status === "ready" ? latestBuild : null);
-    if (action.kind === "publish") {
-      const draft = releases.find((release) => release.buildId === latestBuild?.id && !release.publishedAt);
-      if (draft) publish.mutate(draft.id);
-    }
-  };
-  const inspectKnowledge = () => {
-    if (!reviewBuild) return;
-    const draft = releases.find((release) => release.buildId === reviewBuild.id);
-    if (draft) {
-      navigate(`/knowledge?releaseId=${encodeURIComponent(draft.id)}`);
-      return;
-    }
-    createRelease.mutate({
-      buildId: reviewBuild.id,
-      value: version,
-      navigateToKnowledge: true
-    });
-  };
-  const commit = snapshot?.commitSha ?? latestBuild?.commitSha;
+  const { repository, latestSnapshot, currentRelease, latestBuild, memberCount } = summary.data;
+  const openFeedback = feedback.data?.pages.flatMap((page) => page.feedback)
+    .filter((item) => item.status === "open" || item.status === "acknowledged").length ?? 0;
   const sourceLabel = repository?.kind === "upload" ? "内容版本" : "Commit";
-  const progress = useMemo(() => ({ queued: 8, syncing: 20, parsing: 42, synthesizing: 66, validating: 86, ready: 100, published: 100, failed: 100 }[activeBuild?.status ?? "queued"]), [activeBuild]);
-  const retryOverview = () => void Promise.all([
-    repositoryQuery.refetch(),
-    ...(repository ? [buildsQuery.refetch(), releasesQuery.refetch(), repositoryStatusQuery.refetch()] : [])
-  ]);
+  const sourceVersion = latestSnapshot?.commitSha ?? latestBuild?.commitSha;
 
-  if (repositoryQuery.isLoading) return <Loading label="正在加载操作台" />;
-  return <div className="page overview-page">
-    <header className="page-header"><div><p className="eyebrow">操作台</p><h1>总览</h1><p>查看仓库知识状态和下一步操作。</p></div>
-      {!blockingError && !requiredLoading && (reviewBuild || (action && action.kind !== "none")) && <button className="button primary command" onClick={handlePrimary} disabled={sync.isPending || start.isPending || publish.isPending || createRelease.isPending}>
-        {!reviewBuild && action?.kind === "sync" && <RefreshCw aria-hidden="true" />}{!reviewBuild && ["start-build", "retry-build"].includes(action?.kind ?? "") && <Play aria-hidden="true" />}{!reviewBuild && action?.kind === "publish" && <Send aria-hidden="true" />}{(reviewBuild || ["connect", "review"].includes(action?.kind ?? "")) && <ArrowRight aria-hidden="true" />}{reviewBuild ? "创建版本草稿" : action?.label}
-      </button>}
-    </header>
-    {blockingError && <div className="state error blocking-error" role="alert"><TriangleAlert aria-hidden="true" /><span>{errorMessage(blockingError)}</span><button className="button" onClick={retryOverview}>重试总览数据</button></div>}
-    {requiredLoading && <Loading label="正在加载构建和版本状态" />}
-    {!blockingError && operationError && <ErrorState message={errorMessage(operationError)} />}
-    {!blockingError && !requiredLoading && <>
-      <section className="repo-strip" aria-label="仓库状态"><div><span>仓库</span><strong>{repository?.name ?? "未连接"}</strong></div><div><span>{repository?.kind === "upload" ? "来源" : "分支"}</span><strong><GitBranch aria-hidden="true" />{snapshot?.ref ?? repository?.defaultBranch ?? "-"}</strong></div><div><span>{sourceLabel}</span><strong className="mono">{commit?.slice(0, 12) ?? "暂无快照"}</strong></div><div><span>待同步</span><strong>{snapshot ? (snapshot.unchanged ? "没有变更" : `已采集 ${snapshot.fileCount} 个文件`) : repository ? repository.kind === "upload" ? "等待导入 ZIP" : "需要同步" : "-"}</strong></div></section>
-      <section className="metric-grid" aria-label="工作区摘要"><article><span>当前版本</span><strong>{releases.find((release) => release.publishedAt)?.version ?? "未发布"}</strong></article><article><span>人工待处理项</span><strong>{feedbackQuery.data?.pages.flatMap((page) => page.feedback).filter((item) => ["open", "acknowledged"].includes(item.status)).length ?? 0}</strong></article><article><span>构建数</span><strong>{builds.length}</strong></article><article><span>知识状态</span><strong>{latestBuild ? <Status value={latestBuild.status} /> : "尚未构建"}</strong></article></section>
-      {feedbackQuery.error && <ErrorState message={`无法读取反馈数量：${errorMessage(feedbackQuery.error)}`} retry={() => void feedbackQuery.refetch()} />}
-      {activeBuild && <section className="panel active-build"><div className="section-heading"><div><p className="eyebrow">正在构建</p><h2>{statusLabel(activeBuild.status)}</h2></div><Status value={activeBuild.status} /></div><progress className="progress" aria-label="构建进度" max={100} value={progress} /><p className="muted">{sourceLabel} <span className="mono">{activeBuild.commitSha.slice(0, 12)}</span>。{eventState === "reconnecting" ? "正在重新连接构建更新" : eventState === "connected" ? "已连接实时更新" : "正在连接实时更新"}</p><button className="button danger" onClick={() => cancel.mutate(activeBuild.id)} disabled={activeBuild.cancelRequested}><Square aria-hidden="true" />{activeBuild.cancelRequested ? "已请求取消" : "取消构建"}</button></section>}
-      {failedBuild && <section className="panel failed-build" role="alert"><div className="section-heading"><div><p className="eyebrow">构建失败</p><h2>{failedBuild.errorMessage ?? "知识构建失败"}</h2></div><Status value="failed" /></div><p className="muted">修正报告的问题后，可重试此快照。</p></section>}
-      {reviewBuild && <section className="panel review-panel" aria-label="版本审核"><div><p className="eyebrow">等待审核</p><h2>构建 {reviewBuild.id.slice(0, 8)}</h2><p>选择草稿版本，然后检查生成的知识。</p></div><div className="review-actions"><button className="button" onClick={inspectKnowledge} disabled={createRelease.isPending}>查看知识</button><label>版本<input value={version} onChange={(event) => setVersion(event.target.value)} /></label></div></section>}
-      <section className="section"><div className="section-heading"><div><p className="eyebrow">历史记录</p><h2>最近构建</h2></div></div>{builds.length === 0 ? <Empty>{repository?.kind === "upload" ? "暂无构建，请先导入 ZIP 项目包。" : "暂无构建，请先同步仓库。"}</Empty> : <><div className="table-wrap"><table><thead><tr><th>状态</th><th>{sourceLabel}</th><th>警告</th><th>构建</th></tr></thead><tbody>{builds.map((build) => <tr key={build.id}><td><Status value={build.status} /></td><td className="mono">{build.commitSha.slice(0, 12)}</td><td>{build.warnings.length}</td><td className="mono">{build.id.slice(0, 8)}</td></tr>)}</tbody></table></div>{buildsQuery.hasNextPage && <button className="button continuation" onClick={() => void buildsQuery.fetchNextPage()} disabled={buildsQuery.isFetchingNextPage}>{buildsQuery.isFetchingNextPage ? "正在加载构建..." : "加载更多构建"}</button>}</>}</section>
-    </>}
+  return <div className="page project-overview-page">
+    <header className="page-header"><div><p className="eyebrow">项目运行状态</p><h1>项目概览</h1><p>查看当前线上知识、最近资料和团队待办，然后进入对应工作区处理。</p></div></header>
+    <section className="overview-status-band" aria-label="项目状态摘要">
+      <div><span>当前发布</span><strong>{currentRelease?.version ?? "暂无发布"}</strong><small>{currentRelease?.publishedAt ? new Date(currentRelease.publishedAt).toLocaleString() : "尚未向 Codex 提供知识"}</small></div>
+      <div><span>知识状态</span><strong>{latestBuild ? <Status value={latestBuild.status} /> : "尚未构建"}</strong><small>{latestBuild ? `构建 ${latestBuild.id.slice(0, 8)}` : "上传资料后开始首次构建"}</small></div>
+      <div><span>{sourceLabel}</span><strong className="mono">{sourceVersion?.slice(0, 12) ?? "暂无资料"}</strong><small>{latestSnapshot ? `${latestSnapshot.fileCount ?? 0} 个可采集文件` : "等待导入项目资料"}</small></div>
+      <div><span>团队协作</span><strong>{memberCount} 人</strong><small>{openFeedback} 项反馈待处理</small></div>
+    </section>
+    <div className="overview-actions">
+      <Link aria-label="上传新资料" to={`/projects/${projectId}/imports`}><UploadCloud aria-hidden="true" /><span><strong>上传新资料</strong><small>选择完整项目文件夹，自动过滤并生成内容版本</small></span><ArrowRight aria-hidden="true" /></Link>
+      <Link aria-label="管理知识版本" to={`/projects/${projectId}/versions`}><BookOpenCheck aria-hidden="true" /><span><strong>管理知识版本</strong><small>构建、审核和发布可信的项目知识</small></span><ArrowRight aria-hidden="true" /></Link>
+      <Link aria-label="处理团队反馈" to="/feedback"><MessageSquareText aria-hidden="true" /><span><strong>处理团队反馈</strong><small>{openFeedback ? `${openFeedback} 项需要确认或修复` : "当前没有待处理反馈"}</small></span><ArrowRight aria-hidden="true" /></Link>
+    </div>
+    <section className="overview-current-source">
+      <div><Users aria-hidden="true" /><span><p className="eyebrow">当前资料来源</p><h2>{repository?.name ?? "尚未连接资料来源"}</h2></span></div>
+      <dl><div><dt>来源类型</dt><dd>{repository ? repository.kind === "upload" ? "文件夹 / ZIP 上传" : repository.kind === "git" ? "Git HTTPS" : "服务器本地路径" : "-"}</dd></div><div><dt>最近快照</dt><dd>{latestSnapshot ? new Date(latestSnapshot.commitTimestamp).toLocaleString() : "暂无"}</dd></div></dl>
+    </section>
+    {feedback.error && <ErrorState message={`无法读取反馈数量：${errorMessage(feedback.error)}`} retry={() => void feedback.refetch()} />}
   </div>;
 }

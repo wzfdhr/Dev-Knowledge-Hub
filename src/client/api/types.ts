@@ -11,6 +11,14 @@ export interface Project {
   archivedAt: string | null;
   createdAt: string;
 }
+export interface ProjectSummary {
+  project: Project;
+  repository: Repository | null;
+  latestSnapshot: RepositoryStatus["latestSnapshot"];
+  currentRelease: Release | null;
+  latestBuild: Build | null;
+  memberCount: number;
+}
 export interface Repository {
   id: string;
   projectId: string;

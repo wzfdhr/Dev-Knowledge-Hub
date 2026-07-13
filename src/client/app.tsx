@@ -11,9 +11,10 @@ import { ErrorState, Loading } from "./components/ui";
 import { FeedbackPage } from "./pages/feedback-page";
 import { KnowledgePage } from "./pages/knowledge-page";
 import { MembersPage } from "./pages/members-page";
-import { OverviewPage } from "./pages/overview-page";
+import { ProjectOverviewPage } from "./pages/overview-page";
 import { ProjectsPage } from "./pages/projects-page";
 import { ProjectImportsPage } from "./pages/project-imports-page";
+import { ProjectVersionsPage } from "./pages/project-versions-page";
 import { SettingsPage } from "./pages/settings-page";
 
 function ProjectSectionPlaceholder({ title }: { title: string }) {
@@ -50,9 +51,9 @@ export function App({ api = defaultApi }: { api?: ApiClient }) {
     <Route path="/projects" element={<ProjectsPage api={api} />} />
     <Route path="/projects/:projectId" element={<ProjectLayout api={api} />}>
       <Route index element={<Navigate to="overview" replace />} />
-      <Route path="overview" element={<OverviewPage api={api} />} />
+      <Route path="overview" element={<ProjectOverviewPage api={api} />} />
       <Route path="imports" element={<ProjectImportsPage api={api} />} />
-      <Route path="versions" element={<ProjectSectionPlaceholder title="知识版本" />} />
+      <Route path="versions" element={<ProjectVersionsPage api={api} />} />
       <Route path="collaboration" element={<ProjectSectionPlaceholder title="团队协作" />} />
       <Route path="codex" element={<ProjectSectionPlaceholder title="Codex 接入" />} />
     </Route>

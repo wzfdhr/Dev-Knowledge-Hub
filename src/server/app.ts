@@ -489,6 +489,47 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return reply.code(201).send({ project: projectDto(project) });
   });
 
+  server.get("/api/projects/:projectId/summary", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const project = (await options.store.listProjects(admin.workspaceId, { limit: 100 }))
+      .find((candidate) => candidate.id === params.data.projectId && candidate.archivedAt === null);
+    if (!project) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    const [repository, memberCount] = await Promise.all([
+      options.store.currentRepository(admin.workspaceId, project.id),
+      options.store.countTeamMembers(admin.workspaceId)
+    ]);
+    if (!repository) {
+      return {
+        project: projectDto(project), repository: null, latestSnapshot: null,
+        currentRelease: null, latestBuild: null, memberCount
+      };
+    }
+    const [latestSnapshot, currentRelease, latestBuilds] = await Promise.all([
+      options.store.latestSnapshot(admin.workspaceId, repository.id),
+      options.store.currentRelease(admin.workspaceId, repository.id),
+      options.store.listBuilds(admin.workspaceId, repository.id, { limit: 1 })
+    ]);
+    const fileCount = latestSnapshot
+      ? await options.store.countSnapshotFiles(latestSnapshot.id)
+      : 0;
+    return {
+      project: projectDto(project),
+      repository: repositoryDto(repository).repository,
+      latestSnapshot: latestSnapshot ? {
+        id: latestSnapshot.id,
+        commitSha: latestSnapshot.commitSha,
+        ref: latestSnapshot.ref,
+        commitTimestamp: latestSnapshot.commitTimestamp,
+        fileCount
+      } : null,
+      currentRelease,
+      latestBuild: latestBuilds[0] ?? null,
+      memberCount
+    };
+  });
+
   server.post("/api/projects/:projectId/repositories", { preHandler: requireAdministrator }, async (request, reply) => {
     const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
     const parsed = repositorySchema.safeParse(request.body);

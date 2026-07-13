@@ -22,7 +22,7 @@ import type { ImportProgress as ImportProgressValue, Repository, UploadSnapshotS
 import { FolderFilterReport, formatBytes, ImportResultReport } from "../components/import-report";
 import { ImportProgress } from "../components/import-progress";
 import { ErrorState, Loading } from "../components/ui";
-import { keys } from "../hooks/use-domain";
+import { keys, projectKeys } from "../hooks/use-domain";
 
 type SourceKind = "upload" | "git" | "local";
 
@@ -37,7 +37,7 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
   const folderInput = useRef<HTMLInputElement>(null);
   const zipInput = useRef<HTMLInputElement>(null);
   const controller = useRef<UploadController | null>(null);
-  const repository = useQuery({ queryKey: [...keys.repository, projectId], queryFn: api.getRepository, retry: false });
+  const repository = useQuery({ queryKey: projectKeys.repository(projectId), queryFn: api.getRepository, retry: false });
   const missingRepository = repository.error instanceof ApiError && repository.error.status === 404;
   const [sourceKind, setSourceKind] = useState<SourceKind>("upload");
   const [report, setReport] = useState<FolderImportReport | null>(null);
@@ -64,6 +64,7 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
     setZip(null);
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: keys.repository }),
+      queryClient.invalidateQueries({ queryKey: projectKeys.repository(projectId) }),
       queryClient.invalidateQueries({ queryKey: keys.builds }),
       queryClient.invalidateQueries({ queryKey: keys.releases })
     ]);

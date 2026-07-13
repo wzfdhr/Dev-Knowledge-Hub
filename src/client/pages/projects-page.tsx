@@ -26,12 +26,12 @@ export function ProjectsPage({ api }: { api: ApiClient }) {
       setOpen(false);
       form.resetFields();
       window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, result.project.id);
-      navigate("/overview");
+      navigate(`/projects/${result.project.id}/overview`);
     }
   });
   const openProject = (project: Project) => {
     window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, project.id);
-    navigate("/overview");
+    navigate(`/projects/${project.id}/overview`);
   };
   if (projects.isLoading) return <Loading label="正在加载项目中心" />;
   if (projects.error) return <ErrorState message={errorMessage(projects.error)} retry={() => void projects.refetch()} />;

@@ -6,6 +6,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { api as defaultApi, ApiError, errorMessage, type ApiClient } from "./api/client";
 import { AppShell } from "./components/app-shell";
+import { ProjectLayout } from "./components/project-layout";
 import { ErrorState, Loading } from "./components/ui";
 import { FeedbackPage } from "./pages/feedback-page";
 import { KnowledgePage } from "./pages/knowledge-page";
@@ -13,6 +14,15 @@ import { MembersPage } from "./pages/members-page";
 import { OverviewPage } from "./pages/overview-page";
 import { ProjectsPage } from "./pages/projects-page";
 import { SettingsPage } from "./pages/settings-page";
+
+function ProjectSectionPlaceholder({ title }: { title: string }) {
+  return <div className="page project-section-page"><header className="page-header"><div><h1>{title}</h1><p>该项目工作区正在接入现有功能。</p></div></header></div>;
+}
+
+function LegacyProjectRedirect({ section }: { section: string }) {
+  const projectId = localStorage.getItem("devkh:active-project-id");
+  return <Navigate to={projectId ? `/projects/${projectId}/${section}` : "/projects"} replace />;
+}
 
 function AuthScreen({ mode, api, onAuthenticated, onSetup }: { mode: "setup" | "login"; api: ApiClient; onAuthenticated: (email: string) => void; onSetup: () => void }) {
   const [email, setEmail] = useState("");
@@ -35,5 +45,21 @@ export function App({ api = defaultApi }: { api?: ApiClient }) {
   if (setup.data?.setupRequired && !setupFinished) return <AuthScreen mode="setup" api={api} onSetup={() => { setSetupFinished(true); void setup.refetch(); }} onAuthenticated={() => {}} />;
   if (session.isLoading) return <div className="boot"><Loading label="正在检查会话" /></div>;
   if (session.error instanceof ApiError && session.error.status === 401 || !session.data) return <AuthScreen mode="login" api={api} onSetup={() => {}} onAuthenticated={() => void session.refetch()} />;
-  return <Routes><Route element={<AppShell email={session.data.admin.email} onLogout={() => logout.mutate()} />}><Route path="/projects" element={<ProjectsPage api={api} />} /><Route path="/overview" element={<OverviewPage api={api} />} /><Route path="/knowledge" element={<KnowledgePage api={api} />} /><Route path="/feedback" element={<FeedbackPage api={api} />} /><Route path="/members" element={<MembersPage api={api} />} /><Route path="/settings" element={<SettingsPage api={api} />} /><Route path="*" element={<Navigate to="/projects" replace />} /></Route></Routes>;
+  return <Routes><Route element={<AppShell email={session.data.admin.email} onLogout={() => logout.mutate()} />}>
+    <Route path="/projects" element={<ProjectsPage api={api} />} />
+    <Route path="/projects/:projectId" element={<ProjectLayout api={api} />}>
+      <Route index element={<Navigate to="overview" replace />} />
+      <Route path="overview" element={<OverviewPage api={api} />} />
+      <Route path="imports" element={<ProjectSectionPlaceholder title="资料上传" />} />
+      <Route path="versions" element={<ProjectSectionPlaceholder title="知识版本" />} />
+      <Route path="collaboration" element={<ProjectSectionPlaceholder title="团队协作" />} />
+      <Route path="codex" element={<ProjectSectionPlaceholder title="Codex 接入" />} />
+    </Route>
+    <Route path="/overview" element={<LegacyProjectRedirect section="overview" />} />
+    <Route path="/knowledge" element={<KnowledgePage api={api} />} />
+    <Route path="/feedback" element={<FeedbackPage api={api} />} />
+    <Route path="/members" element={<MembersPage api={api} />} />
+    <Route path="/settings" element={<SettingsPage api={api} />} />
+    <Route path="*" element={<Navigate to="/projects" replace />} />
+  </Route></Routes>;
 }

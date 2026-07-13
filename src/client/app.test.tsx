@@ -28,7 +28,41 @@ function renderPage(node: React.ReactNode) {
   );
 }
 
+function renderAppAt(api: ApiClient, path: string) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
+  });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={[path]}><App api={api} /></MemoryRouter>
+    </QueryClientProvider>
+  );
+}
+
 describe("shared console copy", () => {
+  test("keeps project navigation scoped to the project URL", async () => {
+    const api = {
+      setupStatus: vi.fn().mockResolvedValue({ setupRequired: false }),
+      session: vi.fn().mockResolvedValue({ admin: { email: "admin@example.com", role: "admin" } }),
+      logout: vi.fn().mockResolvedValue(undefined),
+      listProjects: vi.fn().mockResolvedValue({ projects: [{
+        id: "project-1", name: "AHeart Admin", slug: "aheart-admin",
+        archivedAt: null, createdAt: "2026-07-13T00:00:00Z"
+      }] })
+    } as unknown as ApiClient;
+
+    renderAppAt(api, "/projects/project-1/collaboration");
+
+    expect(await screen.findByRole("heading", { name: "AHeart Admin" })).toBeVisible();
+    expect(screen.getByRole("navigation", { name: "项目导航" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "项目概览" })).toHaveAttribute("href", "/projects/project-1/overview");
+    expect(screen.getByRole("link", { name: "资料上传" })).toHaveAttribute("href", "/projects/project-1/imports");
+    expect(screen.getByRole("link", { name: "知识版本" })).toHaveAttribute("href", "/projects/project-1/versions");
+    expect(screen.getByRole("link", { name: "团队协作" })).toHaveAttribute("href", "/projects/project-1/collaboration");
+    expect(screen.getByRole("link", { name: "Codex 接入" })).toHaveAttribute("href", "/projects/project-1/codex");
+    expect(screen.getByRole("heading", { name: "团队协作" })).toBeVisible();
+  });
+
   test("renders Chinese console navigation", async () => {
     const user = userEvent.setup();
     const api = {

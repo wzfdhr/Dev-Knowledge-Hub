@@ -16,12 +16,13 @@ const navigation = [
 export function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) {
   const [open, setOpen] = useState(false);
   const location = useLocation();
+  const selectedKey = location.pathname.startsWith("/projects/") ? "/projects" : location.pathname;
   const menuItems: MenuProps["items"] = navigation.map(({ to, label, icon: Icon }) => ({
     key: to,
     icon: <Icon aria-hidden="true" />,
     label: <NavLink to={to} onClick={() => setOpen(false)}>{label}</NavLink>
   }));
-  const navigationContent = <nav aria-label="主导航"><Menu theme="dark" mode="inline" selectedKeys={[location.pathname]} items={menuItems} /></nav>;
+  const navigationContent = <nav aria-label="主导航"><Menu theme="dark" mode="inline" selectedKeys={[selectedKey]} items={menuItems} /></nav>;
   const account = <footer><div className="admin"><span>{email.slice(0, 1).toUpperCase()}</span><div><strong>管理员</strong><small>{email}</small></div></div><Button type="text" aria-label="退出登录" icon={<LogOut aria-hidden="true" />} onClick={onLogout} /></footer>;
 
   return <Layout className="app-shell">

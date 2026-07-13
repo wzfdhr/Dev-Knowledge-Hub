@@ -63,7 +63,7 @@ describe("operations page copy", () => {
     const commit = "a".repeat(40);
     const overviewApi = {
       getRepository: vi.fn().mockResolvedValue({ repository: {
-        id: "repo", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main"
+        id: "repo", projectId: "project", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main"
       } }),
       listBuilds: vi.fn().mockResolvedValue({ builds: [{
         id: "build", status: "published", snapshotId: "snap", commitSha: commit,
@@ -154,21 +154,21 @@ describe("overview primary command", () => {
     expect(derivePrimaryAction({ repository: null, builds: [], releases: [] }).kind)
       .toBe("connect");
     expect(derivePrimaryAction({
-      repository: { id: "repo", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main" },
+      repository: { id: "repo", projectId: "project", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main" },
       builds: [], releases: [], snapshotId: "snap"
     }).kind).toBe("start-build");
     expect(derivePrimaryAction({
-      repository: { id: "repo", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main" },
+      repository: { id: "repo", projectId: "project", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main" },
       builds: [{ id: "build", status: "ready", snapshotId: "snap", commitSha: "abc", warnings: [], cancelRequested: false }],
       releases: []
     }).kind).toBe("review");
     expect(derivePrimaryAction({
-      repository: { id: "repo", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main" },
+      repository: { id: "repo", projectId: "project", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main" },
       builds: [{ id: "build", status: "ready", snapshotId: "snap", commitSha: "abc", warnings: [], cancelRequested: false }],
       releases: [{ id: "release", buildId: "build", snapshotId: "snap", version: "1.0.0", createdAt: "2026-07-11", publishedAt: null }]
     }).kind).toBe("publish");
     expect(derivePrimaryAction({
-      repository: { id: "repo", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main" },
+      repository: { id: "repo", projectId: "project", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main" },
       builds: [{ id: "build", status: "published", snapshotId: "snap", commitSha: "abc", warnings: [], cancelRequested: false }],
       releases: [{ id: "release", buildId: "build", snapshotId: "snap", version: "1.0.0", createdAt: "2026-07-11", publishedAt: "2026-07-11" }],
       snapshotId: "snap"
@@ -344,7 +344,7 @@ describe("overview primary command", () => {
       snapshotId: "current-snap", commitSha: "b".repeat(40), ref: "main", fileCount: 4, unchanged: true
     }));
     const repository = {
-      id: "repo", kind: "local" as const, name: "Fixture", path: "/fixture", defaultBranch: "main"
+      id: "repo", projectId: "project", kind: "local" as const, name: "Fixture", path: "/fixture", defaultBranch: "main"
     };
     const builds = [{
       id: "published-build", status: "published" as const, snapshotId: "current-snap",
@@ -702,11 +702,11 @@ describe("repository replacement", () => {
   test("offers a connected administrator a deliberate repository replacement", async () => {
     const user = userEvent.setup();
     const replaceRepository = vi.fn().mockResolvedValue({ repository: {
-      id: "replacement", kind: "upload", name: "Uploaded project", defaultBranch: "upload"
+      id: "replacement", projectId: "project", kind: "upload", name: "Uploaded project", defaultBranch: "upload"
     } });
     const api = {
       getRepository: vi.fn().mockResolvedValue({ repository: {
-        id: "repo", kind: "git", name: "Current repository",
+        id: "repo", projectId: "project", kind: "git", name: "Current repository",
         url: "https://github.com/example/current.git", hasCredential: false, defaultBranch: "main"
       } }),
       getModelConfig: vi.fn().mockResolvedValue({ config: null }),
@@ -730,9 +730,17 @@ describe("repository replacement", () => {
     const api = {
       getRepository: vi.fn().mockRejectedValue(new ApiError(404, "REPOSITORY_NOT_FOUND", "missing")),
       connectRepository: vi.fn().mockResolvedValue({ repository: {
-        id: "upload", kind: "upload", name: "Uploaded project", defaultBranch: "upload"
+        id: "upload", projectId: "project", kind: "upload", name: "Uploaded project", defaultBranch: "upload"
       } }),
-      uploadZip: vi.fn().mockResolvedValue({
+      createResumableUpload: vi.fn().mockResolvedValue({
+        id: "session", totalBytes: 3, chunkSize: 8 * 1024 * 1024, chunkCount: 1,
+        receivedBytes: 0, receivedChunks: 0, complete: false, finalized: false
+      }),
+      uploadResumableChunk: vi.fn().mockResolvedValue({
+        id: "session", totalBytes: 3, chunkSize: 8 * 1024 * 1024, chunkCount: 1,
+        receivedBytes: 3, receivedChunks: 1, complete: true, finalized: false
+      }),
+      importResumableUpload: vi.fn().mockResolvedValue({
         snapshotId: "snapshot", sourceVersion: "a".repeat(40), fileCount: 2, unchanged: false,
         ignored: { total: 2, reasons: { binary: 1, generated: 1 } }
       }),
@@ -757,7 +765,7 @@ describe("repository replacement", () => {
     expect(uploadInput.closest("form")?.checkValidity()).toBe(true);
     await user.click(screen.getByRole("button", { name: "连接仓库" }));
 
-    await waitFor(() => expect(api.uploadZip).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api.importResumableUpload).toHaveBeenCalledWith("project", "session"));
     await waitFor(() => expect(sessionStorage.getItem("devkh:last-snapshot")).toContain("snapshot"));
     expect(await screen.findByText("已忽略 2 个文件")).toBeVisible();
   });

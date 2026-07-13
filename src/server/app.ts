@@ -363,7 +363,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }).safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload dimensions");
     try {
-      return reply.code(201).send(await resumableUploads.create(parsed.data));
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      return reply.code(201).send(await resumableUploads.create({ ...parsed.data, ownerId: admin.id }));
     } catch (error) {
       if (error instanceof ResumableUploadError) {
         return sendError(reply, 413, error.code, error.message);
@@ -377,7 +378,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const parsed = z.object({ id: z.uuid() }).safeParse(request.params);
     if (!parsed.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload session");
     try {
-      return resumableUploads.status(parsed.data.id);
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      return await resumableUploads.status(parsed.data.id, admin.id);
     } catch (error) {
       if (error instanceof ResumableUploadError) {
         return sendError(reply, 404, error.code, error.message);
@@ -397,11 +399,13 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload chunk");
       }
       try {
+        const admin = (request as AuthenticatedRequest).sessionAdmin;
         return await resumableUploads.uploadChunk(
           params.data.id,
           params.data.index,
           request.body,
-          declaredSize.data
+          declaredSize.data,
+          admin.id
         );
       } catch (error) {
         if (error instanceof ResumableUploadError) {
@@ -425,8 +429,10 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       if (!repository || repository.kind !== "upload") {
         return sendError(reply, 409, "UPLOAD_REPOSITORY_REQUIRED", "Project requires an upload source");
       }
+      let finalizedPath: string | undefined;
       try {
-        const finalized = await resumableUploads.finalize(params.data.id);
+        const finalized = await resumableUploads.finalize(params.data.id, admin.id);
+        finalizedPath = finalized.path;
         const summary = await importZipArchive({
           archivePath: finalized.path,
           dataDir: options.dataDir,
@@ -435,13 +441,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           actorId: admin.id,
           store: options.store
         });
-        return reply.code(summary.unchanged ? 200 : 201).send({
+        reply.code(summary.unchanged ? 200 : 201);
+        return {
           snapshotId: summary.snapshotId,
           sourceVersion: summary.sourceVersion,
           fileCount: summary.fileCount,
           unchanged: summary.unchanged,
           ignored: summary.ignored
-        });
+        };
       } catch (error) {
         if (error instanceof ResumableUploadError || error instanceof UploadArchiveError) {
           const statusCode = error instanceof ResumableUploadError
@@ -451,6 +458,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         }
         request.log.error({ err: error }, "Resumable ZIP import failed");
         return sendError(reply, 500, "UPLOAD_FAILED", "Unable to import ZIP upload");
+      } finally {
+        if (finalizedPath) await resumableUploads.discard(params.data.id, admin.id).catch(() => undefined);
       }
     }
   );
@@ -846,13 +855,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         }
         replacementActivated = true;
         await cleanup();
-        return reply.code(summary.unchanged ? 200 : 201).send({
+        reply.code(summary.unchanged ? 200 : 201);
+        return {
           snapshotId: summary.snapshotId,
           sourceVersion: summary.sourceVersion,
           fileCount: summary.fileCount,
           unchanged: summary.unchanged,
           ignored: summary.ignored
-        });
+        };
       } catch (error) {
         const code = typeof error === "object" && error && "code" in error ? String(error.code) : "";
         if (code === "FST_REQ_FILE_TOO_LARGE" || code === "COMPRESSED_SIZE_LIMIT") {
@@ -866,6 +876,70 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         return uploadError(500, "UPLOAD_FAILED", "ZIP upload failed");
       } finally {
         await cleanup();
+        if (!replacementActivated) {
+          await options.store.discardPendingUploadReplacement(admin.workspaceId, repository.id)
+            .catch(() => undefined);
+        }
+      }
+    }
+  );
+
+  server.post(
+    "/api/repositories/:repositoryId/uploads/resumable/:id/import",
+    { preHandler: requireAdmin },
+    async (request, reply) => {
+      const params = z.object({ repositoryId: z.uuid(), id: z.uuid() }).safeParse(request.params);
+      if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload replacement");
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      const candidates = await options.store.listArchivedRepositories(admin.workspaceId);
+      const repository = candidates.find((candidate) =>
+        candidate.id === params.data.repositoryId && candidate.kind === "upload"
+      );
+      if (!repository || await options.store.latestSnapshot(admin.workspaceId, repository.id)) {
+        return sendError(reply, 404, "UPLOAD_REPLACEMENT_NOT_FOUND", "Upload replacement was not found");
+      }
+
+      let finalizedPath: string | undefined;
+      let replacementActivated = false;
+      try {
+        const finalized = await resumableUploads.finalize(params.data.id, admin.id);
+        finalizedPath = finalized.path;
+        const summary = await importZipArchive({
+          archivePath: finalized.path,
+          dataDir: options.dataDir,
+          workspaceId: admin.workspaceId,
+          repositoryId: repository.id,
+          actorId: admin.id,
+          store: options.store
+        });
+        const activated = await options.store.activateUploadReplacementWithAudit(
+          admin.workspaceId,
+          repository.id,
+          admin.id
+        );
+        if (!activated) {
+          return sendError(reply, 409, "UPLOAD_REPLACEMENT_NOT_FOUND", "Upload replacement was not found");
+        }
+        replacementActivated = true;
+        reply.code(summary.unchanged ? 200 : 201);
+        return {
+          snapshotId: summary.snapshotId,
+          sourceVersion: summary.sourceVersion,
+          fileCount: summary.fileCount,
+          unchanged: summary.unchanged,
+          ignored: summary.ignored
+        };
+      } catch (error) {
+        if (error instanceof ResumableUploadError || error instanceof UploadArchiveError) {
+          const statusCode = error instanceof ResumableUploadError
+            ? (error.code === "SESSION_NOT_FOUND" ? 404 : 409)
+            : (error.code === "COMPRESSED_SIZE_LIMIT" ? 413 : 400);
+          return sendError(reply, statusCode, error.code, error.message);
+        }
+        request.log.error({ err: error }, "Resumable ZIP replacement import failed");
+        return sendError(reply, 500, "UPLOAD_FAILED", "Unable to import ZIP upload");
+      } finally {
+        if (finalizedPath) await resumableUploads.discard(params.data.id, admin.id).catch(() => undefined);
         if (!replacementActivated) {
           await options.store.discardPendingUploadReplacement(admin.workspaceId, repository.id)
             .catch(() => undefined);

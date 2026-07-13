@@ -5,6 +5,7 @@ import type {
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
+import type { ResumableUploadApi, ResumableUploadStatus } from "./resumable-upload";
 
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly details?: ApiErrorShape["error"]) {
@@ -29,7 +30,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     credentials: "same-origin",
     ...init,
-    headers: init?.body && !(init.body instanceof FormData)
+    headers: typeof init?.body === "string"
       ? { "content-type": "application/json", ...init.headers }
       : init?.headers
   });
@@ -40,7 +41,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.status === 204 ? undefined as T : response.json() as Promise<T>;
 }
 
-export interface ApiClient {
+export interface ApiClient extends ResumableUploadApi {
   setupStatus(): Promise<{ setupRequired: boolean }>;
   setup(input: { email: string; password: string }): Promise<unknown>;
   login(input: { email: string; password: string }): Promise<Session>;
@@ -115,6 +116,27 @@ export const api: ApiClient = {
     data.append("file", file, file.name);
     return request(`/api/repositories/${encodeURIComponent(repositoryId)}/uploads`, { method: "POST", body: data });
   },
+  createResumableUpload: (input) => request<ResumableUploadStatus>("/api/uploads/resumable", { method: "POST", body: json(input) }),
+  getResumableUpload: (id) => request<ResumableUploadStatus>(`/api/uploads/resumable/${encodeURIComponent(id)}`),
+  uploadResumableChunk: (id, index, content) => request<ResumableUploadStatus>(
+    `/api/uploads/resumable/${encodeURIComponent(id)}/chunks/${index}`,
+    {
+      method: "PUT",
+      body: content,
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-upload-chunk-size": String(content.size)
+      }
+    }
+  ),
+  importResumableUpload: (projectId, id) => request(
+    `/api/projects/${encodeURIComponent(projectId)}/uploads/resumable/${encodeURIComponent(id)}/import`,
+    { method: "POST" }
+  ),
+  importResumableReplacementUpload: (repositoryId, id) => request(
+    `/api/repositories/${encodeURIComponent(repositoryId)}/uploads/resumable/${encodeURIComponent(id)}/import`,
+    { method: "POST" }
+  ),
   getRepository: () => request("/api/repositories/current"),
   getRepositoryStatus: () => request("/api/repositories/current/status"),
   syncRepository: () => request("/api/repositories/current/sync", { method: "POST" }),

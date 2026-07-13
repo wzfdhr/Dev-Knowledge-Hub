@@ -300,8 +300,32 @@ describe("resumable upload session routes", () => {
     expect(uploaded.json()).toMatchObject({ receivedBytes: 4, receivedChunks: 1, complete: false });
   });
 
-  test("finalizes a resumable ZIP into an immutable project upload snapshot", async () => {
+  test("does not disclose one member's resumable session to another member", async () => {
     const { app, cookie } = await authenticatedApp();
+    await app.inject({
+      method: "POST", url: "/api/members", headers: { cookie },
+      payload: { email: "member@example.com", password: "a secure member password", role: "member" }
+    });
+    const memberLogin = await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "member@example.com", password: "a secure member password" }
+    });
+    const memberCookie = String(memberLogin.headers["set-cookie"]).split(";", 1)[0];
+    const session = await app.inject({
+      method: "POST", url: "/api/uploads/resumable", headers: { cookie }, payload: { totalBytes: 8, chunkSize: 4 }
+    });
+
+    const status = await app.inject({
+      method: "GET", url: `/api/uploads/resumable/${session.json<{ id: string }>().id}`,
+      headers: { cookie: memberCookie }
+    });
+
+    expect(status.json()).toMatchObject({ error: { code: "SESSION_NOT_FOUND" } });
+    expect(status.statusCode).toBe(404);
+  });
+
+  test("finalizes a resumable ZIP into an immutable project upload snapshot", async () => {
+    const { app, cookie, dataDir } = await authenticatedApp();
     const project = await app.inject({
       method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "上传项目", slug: "upload-project" }
     });
@@ -333,5 +357,42 @@ describe("resumable upload session routes", () => {
 
     expect(imported.statusCode).toBe(201);
     expect(imported.json()).toMatchObject({ fileCount: 1, unchanged: false, sourceVersion: expect.any(String) });
+    expect(await readdir(path.join(dataDir, "upload-staging", "sessions"))).toEqual([]);
+    expect(await readdir(path.join(dataDir, "upload-staging", "completed"))).toEqual([]);
+  });
+
+  test("activates an uploaded replacement only after its resumable import succeeds", async () => {
+    const { app, cookie, dataDir } = await authenticatedApp();
+    await app.inject({
+      method: "POST", url: "/api/repositories", headers: { cookie },
+      payload: { kind: "local", name: "Current project", path: "/tmp/current-project" }
+    });
+    const prepared = await app.inject({
+      method: "POST", url: "/api/repositories/current/replace", headers: { cookie },
+      payload: { kind: "upload", name: "Uploaded replacement" }
+    });
+    const repositoryId = prepared.json<{ repository: { id: string } }>().repository.id;
+    const zip = await archive();
+    const session = await app.inject({
+      method: "POST", url: "/api/uploads/resumable", headers: { cookie },
+      payload: { totalBytes: zip.length, chunkSize: zip.length }
+    });
+    const sessionId = session.json<{ id: string }>().id;
+    await app.inject({
+      method: "PUT", url: `/api/uploads/resumable/${sessionId}/chunks/0`,
+      headers: { cookie, "content-type": "application/octet-stream", "x-upload-chunk-size": String(zip.length) },
+      payload: zip
+    });
+
+    const imported = await app.inject({
+      method: "POST", url: `/api/repositories/${repositoryId}/uploads/resumable/${sessionId}/import`,
+      headers: { cookie }
+    });
+
+    expect(imported.statusCode).toBe(201);
+    const current = await app.inject({ method: "GET", url: "/api/repositories/current", headers: { cookie } });
+    expect(current.json()).toMatchObject({ repository: { id: repositoryId, kind: "upload" } });
+    expect(await readdir(path.join(dataDir, "upload-staging", "sessions"))).toEqual([]);
+    expect(await readdir(path.join(dataDir, "upload-staging", "completed"))).toEqual([]);
   });
 });

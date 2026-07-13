@@ -38,6 +38,7 @@ export class ResumableUploadError extends Error {
 export interface CreateResumableUploadSession {
   totalBytes: number;
   chunkSize: number;
+  ownerId?: string;
 }
 
 export interface ResumableUploadStatus {
@@ -61,6 +62,7 @@ interface SessionMetadata {
   id: string;
   totalBytes: number;
   chunkSize: number;
+  ownerId?: string;
 }
 
 interface FinalizationMetadata {
@@ -93,7 +95,8 @@ function isSessionMetadata(value: unknown): value is SessionMetadata {
     && isSafePositiveInteger(candidate.totalBytes)
     && candidate.totalBytes <= MAX_RESUMABLE_UPLOAD_BYTES
     && isSafePositiveInteger(candidate.chunkSize)
-    && candidate.chunkSize <= MAX_RESUMABLE_UPLOAD_CHUNK_BYTES;
+    && candidate.chunkSize <= MAX_RESUMABLE_UPLOAD_CHUNK_BYTES
+    && (candidate.ownerId === undefined || (typeof candidate.ownerId === "string" && candidate.ownerId.length > 0));
 }
 
 function isFinalizationMetadata(value: unknown): value is FinalizationMetadata {
@@ -111,20 +114,20 @@ export class ResumableUploadSessionManager {
     this.root = path.resolve(tempRoot);
   }
 
-  async create({ totalBytes, chunkSize }: CreateResumableUploadSession): Promise<ResumableUploadStatus> {
+  async create({ totalBytes, chunkSize, ownerId }: CreateResumableUploadSession): Promise<ResumableUploadStatus> {
     this.validateDimensions(totalBytes, chunkSize);
     await this.ensureRoots();
 
-    const metadata: SessionMetadata = { id: randomUUID(), totalBytes, chunkSize };
+    const metadata: SessionMetadata = { id: randomUUID(), totalBytes, chunkSize, ...(ownerId ? { ownerId } : {}) };
     const directory = path.join(this.sessionsDirectory(), metadata.id);
     await mkdir(directory, { mode: 0o700 });
     await mkdir(this.chunksDirectory(directory), { mode: 0o700 });
     await this.writeJsonAtomically(path.join(directory, "session.json"), metadata);
-    return this.status(metadata.id);
+    return this.status(metadata.id, ownerId);
   }
 
-  async status(sessionId: string): Promise<ResumableUploadStatus> {
-    const session = await this.requireSession(sessionId);
+  async status(sessionId: string, ownerId?: string): Promise<ResumableUploadStatus> {
+    const session = await this.requireSession(sessionId, ownerId);
     const progress = await this.progress(session);
     const finalized = await this.finalization(session);
     return {
@@ -144,9 +147,10 @@ export class ResumableUploadSessionManager {
     sessionId: string,
     index: number,
     content: Uint8Array,
-    declaredSize: number
+    declaredSize: number,
+    ownerId?: string
   ): Promise<ResumableUploadStatus> {
-    const session = await this.requireSession(sessionId);
+    const session = await this.requireSession(sessionId, ownerId);
     const expectedSize = this.expectedChunkSize(session.metadata, index);
     if (!isSafePositiveInteger(declaredSize) || declaredSize !== expectedSize || content.byteLength !== declaredSize) {
       throw new ResumableUploadError(
@@ -170,11 +174,11 @@ export class ResumableUploadSessionManager {
     } finally {
       await rm(temporaryPath, { force: true });
     }
-    return this.status(session.metadata.id);
+    return this.status(session.metadata.id, ownerId);
   }
 
-  async finalize(sessionId: string): Promise<FinalizedResumableUpload> {
-    const session = await this.requireSession(sessionId);
+  async finalize(sessionId: string, ownerId?: string): Promise<FinalizedResumableUpload> {
+    const session = await this.requireSession(sessionId, ownerId);
     const existing = await this.finalization(session);
     if (existing) return this.finalizedUpload(session.metadata.id, existing);
 
@@ -222,6 +226,15 @@ export class ResumableUploadSessionManager {
       await lock.close();
       await rm(lockPath, { force: true });
     }
+  }
+
+  async discard(sessionId: string, ownerId?: string): Promise<void> {
+    const session = await this.requireSession(sessionId, ownerId);
+    const finalized = await this.finalization(session);
+    if (finalized) {
+      await rm(path.join(this.completedDirectory(), finalized.fileName), { force: true });
+    }
+    await rm(session.directory, { recursive: true, force: true });
   }
 
   private sessionsDirectory(): string {
@@ -273,7 +286,7 @@ export class ResumableUploadSessionManager {
     return Math.min(metadata.chunkSize, finalChunkSize);
   }
 
-  private async requireSession(sessionId: string): Promise<Session> {
+  private async requireSession(sessionId: string, ownerId?: string): Promise<Session> {
     await this.ensureRoots();
     const entries = await readdir(this.sessionsDirectory(), { withFileTypes: true });
     const directoryEntry = entries.find((entry) => entry.isDirectory() && entry.name === sessionId);
@@ -290,6 +303,9 @@ export class ResumableUploadSessionManager {
     }
     if (!isSessionMetadata(parsed) || parsed.id !== sessionId) {
       throw new ResumableUploadError("SESSION_CORRUPT", "Upload session metadata is invalid");
+    }
+    if (parsed.ownerId !== undefined && parsed.ownerId !== ownerId) {
+      throw new ResumableUploadError("SESSION_NOT_FOUND", "Upload session was not found");
     }
     return { directory, metadata: parsed };
   }

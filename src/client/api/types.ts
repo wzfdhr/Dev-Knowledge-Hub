@@ -6,6 +6,7 @@ export interface Session { authenticated: true; admin: Admin }
 export interface TeamMember { id: string; email: string; role: "admin" | "member" | "reader"; createdAt?: string }
 export interface Repository {
   id: string;
+  projectId: string;
   kind: "local" | "git" | "upload";
   name: string;
   path?: string | null;

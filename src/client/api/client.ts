@@ -1,7 +1,7 @@
 import type {
   ApiErrorShape, Build, Feedback, McpConnection, McpToken, KnowledgePageRecord,
   ArchivedRepository, KnowledgeMetadata, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotSummary, SourceExcerpt,
-  UploadSnapshotSummary
+  UploadSnapshotSummary, TeamMember
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
@@ -46,6 +46,8 @@ export interface ApiClient {
   login(input: { email: string; password: string }): Promise<Session>;
   session(): Promise<Session>;
   logout(): Promise<void>;
+  listMembers(): Promise<{ members: TeamMember[] }>;
+  createMember(input: { email: string; password: string; role: TeamMember["role"] }): Promise<{ member: TeamMember }>;
   connectRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository }>;
   replaceRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository; pendingUpload?: boolean }>;
   listArchivedRepositories(): Promise<{ repositories: ArchivedRepository[] }>;
@@ -98,6 +100,8 @@ export const api: ApiClient = {
   login: (input) => request("/api/session", { method: "POST", body: json(input) }),
   session: () => request("/api/session"),
   logout: () => request("/api/session", { method: "DELETE" }),
+  listMembers: () => request("/api/members"),
+  createMember: (input) => request("/api/members", { method: "POST", body: json(input) }),
   connectRepository: (input) => request("/api/repositories", { method: "POST", body: json(input) }),
   replaceRepository: (input) => request("/api/repositories/current/replace", { method: "POST", body: json(input) }),
   listArchivedRepositories: () => request("/api/repositories/archived"),

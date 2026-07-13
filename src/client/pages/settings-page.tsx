@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Copy, FileArchive, KeyRound, Link2, LockKeyhole, PlugZap, ShieldCheck, Trash2, Upload } from "lucide-react";
+import { Check, Copy, FileArchive, FolderOpen, KeyRound, Link2, LockKeyhole, PlugZap, ShieldCheck, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
@@ -10,6 +10,13 @@ import {
   uploadReplacementZipResumably,
   type ResumableUploadStatus
 } from "../api/resumable-upload";
+import {
+  packageFolderImport,
+  scanDirectory,
+  scanSelectedFiles,
+  type DirectoryDirectoryHandle,
+  type FolderImportReport
+} from "../api/folder-import";
 import { Empty, ErrorState, Loading, Status } from "../components/ui";
 import { keys, useRepository } from "../hooks/use-domain";
 
@@ -32,6 +39,78 @@ function UploadSummary({ upload }: { upload: UploadSnapshotSummary }) {
     .map(([reason, count]) => `${ignoredReasonLabel[reason] ?? reason} ${count}`)
     .join("、");
   return <p className="success-message">已采集 {upload.fileCount} 个文件；<strong>已忽略 {upload.ignored.total} 个文件</strong>{reasons ? `（${reasons}）` : ""}。</p>;
+}
+
+function FolderPicker({ onPackaged }: { onPackaged: (file: File) => void }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [report, setReport] = useState<FolderImportReport | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [packaging, setPackaging] = useState(false);
+
+  useEffect(() => {
+    inputRef.current?.setAttribute("webkitdirectory", "");
+  }, []);
+
+  const inspect = async (action: () => Promise<FolderImportReport>) => {
+    setError(null);
+    try {
+      setReport(await action());
+    } catch (value) {
+      setError(errorMessage(value));
+    }
+  };
+  const chooseFolder = () => {
+    const picker = (window as Window & {
+      showDirectoryPicker?: () => Promise<DirectoryDirectoryHandle>;
+    }).showDirectoryPicker;
+    if (picker) {
+      void inspect(async () => scanDirectory(await picker()));
+      return;
+    }
+    inputRef.current?.click();
+  };
+  const confirm = async () => {
+    if (!report) return;
+    setPackaging(true);
+    setError(null);
+    try {
+      onPackaged(await packageFolderImport(report));
+      setReport(null);
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setPackaging(false);
+    }
+  };
+  const ignored = report ? Object.entries(report.ignored.reasons)
+    .map(([reason, count]) => `${ignoredReasonLabel[reason] ?? reason} ${count}`)
+    .join("、") : "";
+
+  return <div className="folder-picker">
+    <input ref={inputRef} className="visually-hidden" type="file" multiple onChange={(event) => {
+      const files = Array.from(event.target.files ?? []);
+      event.target.value = "";
+      if (files.length) void inspect(() => scanSelectedFiles(files));
+    }} />
+    <button type="button" className="button" onClick={chooseFolder}><FolderOpen aria-hidden="true" />选择项目文件夹</button>
+    <p className="field-note">系统会自动过滤依赖目录、构建产物、二进制文件、密钥和超过 1 MB 的单个文本文件。</p>
+    {error && <ErrorState message={error} />}
+    {report && <div className="modal-backdrop" role="presentation"><div className="modal" role="dialog" aria-modal="true" aria-labelledby="folder-import-title">
+      <div className="modal-icon"><FolderOpen aria-hidden="true" /></div>
+      <h2 id="folder-import-title">确认导入项目文件夹</h2>
+      <p>系统只会上传可采集的源码、配置和文档；原始文件夹不会上传。</p>
+      <dl className="detail-list horizontal"><div><dt>扫描文件</dt><dd>{report.totalFiles}</dd></div><div><dt>准备上传</dt><dd>{report.acceptedFiles.length} 个文件</dd></div><div><dt>准备上传大小</dt><dd>{formatBytes(report.acceptedBytes)}</dd></div><div><dt>自动忽略</dt><dd>{report.ignored.total} 个文件</dd></div></dl>
+      {ignored && <p className="field-note">忽略原因：{ignored}</p>}
+      {report.acceptedFiles.length === 0 && <ErrorState message="没有找到可采集的源码、配置或文档。" />}
+      <div className="inline-actions"><button type="button" className="button primary" disabled={packaging || report.acceptedFiles.length === 0} onClick={() => void confirm()}>{packaging ? "正在准备项目包..." : "确认并准备上传"}</button><button type="button" className="button" disabled={packaging} onClick={() => setReport(null)}>取消</button></div>
+    </div></div>}
+  </div>;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function ConnectionForm({ api, onConnected, mode = "connect" }: {
@@ -66,7 +145,25 @@ function ConnectionForm({ api, onConnected, mode = "connect" }: {
     onSuccess: (upload) => { setToken(""); setFile(null); setUploadProgress(null); onConnected(upload); }
   });
   const percent = uploadProgress ? Math.round((uploadProgress.receivedBytes / uploadProgress.totalBytes) * 100) : null;
-  return <form className="form-stack" onSubmit={(event) => { event.preventDefault(); connect.mutate(); }}><div className="segmented compact" role="group" aria-label="仓库类型"><button type="button" aria-pressed={kind === "local"} onClick={() => setKind("local")}>本地路径</button><button type="button" aria-pressed={kind === "git"} onClick={() => setKind("git")}>Git HTTPS</button><button type="button" aria-pressed={kind === "upload"} onClick={() => setKind("upload")}>上传 ZIP</button></div><label>仓库名称<input required value={name} onChange={(event) => setName(event.target.value)} /></label>{kind === "upload" ? <label>ZIP 项目包<input aria-label="ZIP 项目包" type="file" accept="application/zip,.zip" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label> : <><label>{kind === "local" ? "本地路径" : "HTTPS URL"}<input required type={kind === "git" ? "url" : "text"} value={location} onChange={(event) => setLocation(event.target.value)} placeholder={kind === "local" ? "/path/to/repository" : "https://github.com/org/repo.git"} /></label>{kind === "git" && <label>个人访问 Token <span>（可选）</span><input type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} /></label>}</>}{percent !== null && <p className="field-note" aria-live="polite">正在上传项目包：{percent}%</p>}{connect.error && <ErrorState message={errorMessage(connect.error)} />}<button className="button primary" disabled={connect.isPending}><Link2 aria-hidden="true" />{connect.isPending ? (percent === null ? "正在处理中..." : `正在上传 ${percent}%`) : mode === "replace" ? "确认更换" : "连接仓库"}</button></form>;
+  return <form className="form-stack" onSubmit={(event) => { event.preventDefault(); connect.mutate(); }}>
+    <div className="segmented compact" role="group" aria-label="仓库类型">
+      <button type="button" aria-pressed={kind === "local"} onClick={() => setKind("local")}>本地路径</button>
+      <button type="button" aria-pressed={kind === "git"} onClick={() => setKind("git")}>Git HTTPS</button>
+      <button type="button" aria-pressed={kind === "upload"} onClick={() => setKind("upload")}>上传 ZIP</button>
+    </div>
+    <label>仓库名称<input required value={name} onChange={(event) => setName(event.target.value)} /></label>
+    {kind === "upload" ? <>
+      <FolderPicker onPackaged={setFile} />
+      <label>或选择已存在的 ZIP 项目包<input aria-label="ZIP 项目包" type="file" accept="application/zip,.zip" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label>
+      {file && <p className="field-note">已准备上传：{file.name}（{formatBytes(file.size)}）</p>}
+    </> : <>
+      <label>{kind === "local" ? "本地路径" : "HTTPS URL"}<input required type={kind === "git" ? "url" : "text"} value={location} onChange={(event) => setLocation(event.target.value)} placeholder={kind === "local" ? "/path/to/repository" : "https://github.com/org/repo.git"} /></label>
+      {kind === "git" && <label>个人访问 Token <span>（可选）</span><input type="password" autoComplete="off" value={token} onChange={(event) => setToken(event.target.value)} /></label>}
+    </>}
+    {percent !== null && <p className="field-note" aria-live="polite">正在上传项目包：{percent}%</p>}
+    {connect.error && <ErrorState message={errorMessage(connect.error)} />}
+    <button className="button primary" disabled={connect.isPending}><Link2 aria-hidden="true" />{connect.isPending ? (percent === null ? "正在处理中..." : `正在上传 ${percent}%`) : mode === "replace" ? "确认更换" : "连接仓库"}</button>
+  </form>;
 }
 
 function UploadForm({ api, projectId, onUploaded }: { api: ApiClient; projectId: string; onUploaded: (upload: UploadSnapshotSummary) => void }) {
@@ -77,7 +174,15 @@ function UploadForm({ api, projectId, onUploaded }: { api: ApiClient; projectId:
     return uploadProjectZipResumably(api, projectId, file, { onProgress: setUploadProgress });
   }, onSuccess: (value) => { setFile(null); setUploadProgress(null); onUploaded(value); } });
   const percent = uploadProgress ? Math.round((uploadProgress.receivedBytes / uploadProgress.totalBytes) * 100) : null;
-  return <form className="form-stack" onSubmit={(event) => { event.preventDefault(); upload.mutate(); }}><label>更新 ZIP 项目包<input aria-label="更新 ZIP 项目包" type="file" accept="application/zip,.zip" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label>{percent !== null && <p className="field-note" aria-live="polite">正在上传项目包：{percent}%</p>}{upload.error && <ErrorState message={errorMessage(upload.error)} />} {upload.isSuccess && <p className="success-message">已创建新的不可变内容版本，请前往总览构建知识。</p>}<button className="button primary" disabled={upload.isPending}><Upload aria-hidden="true" />{upload.isPending ? (percent === null ? "正在导入..." : `正在上传 ${percent}%`) : "导入 ZIP"}</button></form>;
+  return <form className="form-stack" onSubmit={(event) => { event.preventDefault(); upload.mutate(); }}>
+    <FolderPicker onPackaged={setFile} />
+    <label>或更新 ZIP 项目包<input aria-label="更新 ZIP 项目包" type="file" accept="application/zip,.zip" onChange={(event) => setFile(event.target.files?.[0] ?? null)} /></label>
+    {file && <p className="field-note">已准备上传：{file.name}（{formatBytes(file.size)}）</p>}
+    {percent !== null && <p className="field-note" aria-live="polite">正在上传项目包：{percent}%</p>}
+    {upload.error && <ErrorState message={errorMessage(upload.error)} />}
+    {upload.isSuccess && <p className="success-message">已创建新的不可变内容版本，请前往总览构建知识。</p>}
+    <button className="button primary" disabled={upload.isPending}><Upload aria-hidden="true" />{upload.isPending ? (percent === null ? "正在导入..." : `正在上传 ${percent}%`) : "导入项目"}</button>
+  </form>;
 }
 
 function ModelForm({ api, firstRun }: { api: ApiClient; firstRun: boolean }) {

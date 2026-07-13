@@ -18,6 +18,8 @@ import {
   ZipReader
 } from "@zip.js/zip.js";
 
+import { filterImportFile, MAX_IMPORT_SOURCE_FILE_BYTES } from "../../shared/import-filter.js";
+
 import type {
   AppStore,
   SourceFileRecord,
@@ -27,7 +29,7 @@ import type {
 export const MAX_UPLOAD_COMPRESSED_BYTES = 500 * 1024 * 1024;
 export const MAX_UPLOAD_ENTRIES = 50_000;
 export const MAX_UPLOAD_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024;
-export const MAX_UPLOAD_SOURCE_FILE_BYTES = 1024 * 1024;
+export const MAX_UPLOAD_SOURCE_FILE_BYTES = MAX_IMPORT_SOURCE_FILE_BYTES;
 
 export interface UploadArchiveLimits {
   maxEntries: number;
@@ -41,17 +43,6 @@ const DEFAULT_LIMITS: UploadArchiveLimits = {
   maxSourceFileBytes: MAX_UPLOAD_SOURCE_FILE_BYTES
 };
 
-const SKIPPED_DIRECTORIES = new Set([
-  ".git",
-  "node_modules",
-  "dist",
-  "build",
-  "coverage",
-  ".next"
-]);
-const SOURCE_EXTENSIONS = new Set([
-  ".ts", ".tsx", ".js", ".jsx", ".md", ".json", ".yaml", ".yml"
-]);
 
 export type UploadArchiveErrorCode =
   | "COMPRESSED_SIZE_LIMIT"
@@ -100,40 +91,8 @@ function isSymlink(entry: Entry): boolean {
   return (unixMode & 0o170000) === 0o120000;
 }
 
-function isCandidate(filePath: string): boolean {
-  const segments = filePath.split("/");
-  if (segments.some((segment) => SKIPPED_DIRECTORIES.has(segment))) return false;
-  if (filePath === ".env") return false;
-  if (filePath === ".env.example") return true;
-
-  const basename = path.posix.basename(filePath);
-  if (/^package(?:-lock)?\.json$/.test(basename)) return true;
-  if (["pnpm-lock.yaml", "yarn.lock"].includes(basename)) return true;
-  if (/^tsconfig(?:\.[^.]+)?\.json$/.test(basename)) return true;
-  if (/^(?:vitest|jest|playwright|cypress)\.config\.(?:ts|js|tsx|jsx)$/.test(basename)) {
-    return true;
-  }
-  return SOURCE_EXTENSIONS.has(path.posix.extname(filePath).toLowerCase());
-}
-
 function recordIgnored(reasons: Record<string, number>, reason: string): void {
   reasons[reason] = (reasons[reason] ?? 0) + 1;
-}
-
-function isGenerated(content: Buffer): boolean {
-  const header = content.subarray(0, 2048).toString("utf8").toLowerCase();
-  return header.includes("@generated")
-    || header.includes("generated file")
-    || header.includes("do not edit");
-}
-
-function isUtf8(content: Buffer): boolean {
-  try {
-    new TextDecoder("utf-8", { fatal: true }).decode(content);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function languageFor(filePath: string): string | null {
@@ -301,16 +260,9 @@ export async function importZipArchive({
         recordIgnored(ignoredReasons, "file_too_large");
         continue;
       }
-      if (value.filePath.split("/").some((segment) => SKIPPED_DIRECTORIES.has(segment))) {
-        recordIgnored(ignoredReasons, "excluded_directory");
-        continue;
-      }
-      if (value.filePath === ".env") {
-        recordIgnored(ignoredReasons, "sensitive_file");
-        continue;
-      }
-      if (!isCandidate(value.filePath)) {
-        recordIgnored(ignoredReasons, "unsupported_extension");
+      const decision = filterImportFile({ path: value.filePath, byteSize: value.entry.uncompressedSize });
+      if (!decision.accepted) {
+        recordIgnored(ignoredReasons, decision.reason);
         continue;
       }
       candidates.push(value as { entry: FileEntry; filePath: string });
@@ -329,12 +281,9 @@ export async function importZipArchive({
 
     for (const { entry, filePath } of candidates) {
       const content = await extractBounded(entry, limits.maxSourceFileBytes);
-      if (content.includes(0) || !isUtf8(content)) {
-        recordIgnored(ignoredReasons, "binary");
-        continue;
-      }
-      if (isGenerated(content)) {
-        recordIgnored(ignoredReasons, "generated");
+      const decision = filterImportFile({ path: filePath, byteSize: content.byteLength, content });
+      if (!decision.accepted) {
+        recordIgnored(ignoredReasons, decision.reason);
         continue;
       }
       const pathBytes = Buffer.from(filePath, "utf8");

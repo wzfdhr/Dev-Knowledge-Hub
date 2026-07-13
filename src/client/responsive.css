@@ -1,0 +1,21 @@
+@media (max-width: 1200px) {
+  .sidebar.ant-layout-sider {
+    display: none;
+  }
+
+  .content.ant-layout-content {
+    margin-left: 0;
+  }
+
+  .mobile-menu.ant-btn {
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    z-index: 20;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-color: var(--border);
+    box-shadow: 0 2px 8px rgba(26, 35, 49, 0.1);
+  }
+}

@@ -6,6 +6,7 @@ import { BrowserRouter } from "react-router-dom";
 
 import "antd/dist/reset.css";
 import "./styles.css";
+import "./responsive.css";
 import { App } from "./app";
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 2_000, retry: 1 } } });

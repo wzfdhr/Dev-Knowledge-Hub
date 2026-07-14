@@ -72,6 +72,71 @@ describe("team projects and members", () => {
     ]));
   });
 
+  test("keeps project activity permission-scoped and redacts unapproved audit metadata", async () => {
+    const { app, store, cookie } = await authenticatedTeam();
+    const workspace = await store.defaultWorkspace();
+    const admin = await store.findAdminByEmail("admin@example.com");
+    const first = await app.inject({
+      method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "项目甲", slug: "project-a" }
+    });
+    const second = await app.inject({
+      method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "项目乙", slug: "project-b" }
+    });
+    const firstId = first.json<{ project: { id: string } }>().project.id;
+    const secondId = second.json<{ project: { id: string } }>().project.id;
+    const reader = await app.inject({
+      method: "POST", url: "/api/members", headers: { cookie },
+      payload: { email: "reader@example.com", password: "a secure reader password", role: "reader" }
+    });
+    const readerId = reader.json<{ member: { id: string } }>().member.id;
+    await app.inject({
+      method: "POST", url: `/api/projects/${firstId}/members`, headers: { cookie },
+      payload: { userId: readerId, role: "reader" }
+    });
+    await store.recordAudit({
+      workspaceId: workspace!.id,
+      actorId: admin!.id,
+      action: "project.audit_checked",
+      resourceType: "project",
+      resourceId: firstId,
+      metadata: { projectId: firstId, code: "SAFE", token: "dkh_should-not-leak", password: "should-not-leak" }
+    });
+    const login = await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "reader@example.com", password: "a secure reader password" }
+    });
+    const readerCookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+
+    const allowed = await app.inject({
+      method: "GET", url: `/api/projects/${firstId}/activity`, headers: { cookie: readerCookie }
+    });
+    const denied = await app.inject({
+      method: "GET", url: `/api/projects/${secondId}/activity`, headers: { cookie: readerCookie }
+    });
+    const memberWrite = await app.inject({
+      method: "PATCH", url: `/api/projects/${firstId}/members/${readerId}`, headers: { cookie: readerCookie },
+      payload: { role: "member" }
+    });
+    const adminRead = await app.inject({
+      method: "GET", url: `/api/projects/${secondId}/activity`, headers: { cookie }
+    });
+
+    expect(allowed.statusCode).toBe(200);
+    expect(allowed.json().activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "project.audit_checked",
+        metadata: { code: "SAFE" }
+      })
+    ]));
+    expect(allowed.body).not.toContain("dkh_should-not-leak");
+    expect(allowed.body).not.toContain("should-not-leak");
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json()).toMatchObject({ error: { code: "PROJECT_ACCESS_DENIED" } });
+    expect(memberWrite.statusCode).toBe(403);
+    expect(memberWrite.json()).toMatchObject({ error: { code: "PROJECT_ACCESS_DENIED" } });
+    expect(adminRead.statusCode).toBe(200);
+  });
+
   test("initial setup provisions a default project for existing single-project workflows", async () => {
     const { app, cookie } = await authenticatedTeam();
 

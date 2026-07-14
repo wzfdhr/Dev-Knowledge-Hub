@@ -110,6 +110,31 @@ const memberDisabledSchema = z.object({ disabled: z.boolean() });
 const projectMemberSchema = z.object({ userId: z.uuid(), role: teamRoleSchema });
 const projectMemberRoleSchema = z.object({ role: teamRoleSchema });
 
+const PROJECT_ACTIVITY_METADATA_KEYS = new Set([
+  "buildId",
+  "code",
+  "commitSha",
+  "kind",
+  "model",
+  "newRepositoryId",
+  "oldRepositoryId",
+  "provider",
+  "releaseId",
+  "replacementTokenId",
+  "role",
+  "status",
+  "unchanged"
+]);
+
+function projectActivityMetadata(metadata: Record<string, unknown> | undefined): Record<string, string | number | boolean | null> {
+  if (!metadata) return {};
+  return Object.fromEntries(Object.entries(metadata).flatMap(([key, value]) =>
+    PROJECT_ACTIVITY_METADATA_KEYS.has(key) && (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null)
+      ? [[key, value]]
+      : []
+  ));
+}
+
 function paginationMetadata(total: number, offset: number, itemCount: number) {
   const consumed = offset + itemCount;
   return {
@@ -740,7 +765,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         action: event.action,
         resourceType: event.resourceType,
         resourceId: event.resourceId ?? null,
-        metadata: event.metadata ?? {},
+        metadata: projectActivityMetadata(event.metadata),
         createdAt: event.createdAt
       })),
       members: members.map(memberDto),

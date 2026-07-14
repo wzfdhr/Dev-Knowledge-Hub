@@ -54,17 +54,17 @@ expect(result.token).toMatch(/^dkh_/);
 **Rollback：** 隐藏轮换 UI 并禁用 route；已撤销 Token 不恢复，管理员用创建 Token 流程生成新的替代 Token。
 **提交：** `feat: add atomic mcp token rotation`。
 
-### Task 2: 收口工作区/项目基线与审计查询
+### Task 2: 收口工作区/项目基线与活动审计查询
 
 **依赖：** Task 1。
-**Files：** Modify `src/server/team-routes.test.ts`, `src/server/app.ts`, `src/server/persistence/store.ts`, `src/server/persistence/postgres-store.ts`, `src/client/pages/project-collaboration-page.tsx`; Create `src/server/audit.test.ts`.
+**Files：** Modify `src/server/team-routes.test.ts`, `src/server/app.ts`.
 **输入：** `project_members`、`audit_events`。
-**输出：** 项目范围审计查询 `GET /api/projects/:projectId/audit?limit=&offset=`。
+**输出：** 项目范围活动审计查询 `GET /api/projects/:projectId/activity?limit=&offset=`，并在 API 出口按 allowlist 返回 metadata。
 
-**TDD：** 写两个项目、三个角色的失败矩阵：reader 只读授权项目；member 不能管理成员；project admin 能读审计；workspace admin 能读所有本工作区项目；跨项目 `403 PROJECT_ACCESS_DENIED`。运行 `npm test -- src/server/team-routes.test.ts src/server/audit.test.ts`，实现 `requireProjectRole` 与 cursor-safe 分页后重跑。
+**TDD：** 写两个项目、三个角色的失败矩阵：reader 只读授权项目；member 不能管理成员；project admin 能读活动；workspace admin 能读所有本工作区项目；跨项目 `403 PROJECT_ACCESS_DENIED`；手工写入的 `token`、`password` 等非 allowlist metadata 不能从 API 返回。运行 `npm test -- src/server/team-routes.test.ts`，在现有 `requireProjectRole` 与 offset 分页合同上补 API 出口过滤后重跑。
 
 ```ts
-server.get("/api/projects/:projectId/audit", { preHandler: requireProjectReader }, listAudit);
+server.get("/api/projects/:projectId/activity", { preHandler: requireAdmin }, listProjectActivity);
 ```
 
 **验收：** 审计行带 actor、action、resource、metadata allowlist、时间，不含 Token/PAT；活动页面同样不泄露。

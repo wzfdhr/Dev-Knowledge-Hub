@@ -6,12 +6,56 @@ import type {
   PersistedKnowledge
 } from "../knowledge/build-service.js";
 import type { Citation } from "../knowledge/intelligence.js";
+import type {
+  ArtifactManifest,
+  BuildStage,
+  StageRun,
+  StageStatus
+} from "../knowledge/pipeline/contracts.js";
 import type { AGENT_FEEDBACK_STATUSES } from "../../shared/contracts.js";
 
 export interface WorkspaceRecord {
   id: string;
   name: string;
   slug: string;
+}
+
+export interface PipelineStageRunRecord extends StageRun {
+  workspaceId: string;
+  projectId: string;
+  snapshotId: string;
+}
+
+export interface CreateStageRunInput {
+  workspaceId: string;
+  projectId: string;
+  snapshotId: string;
+  buildId: string;
+  stage: BuildStage;
+  attempt: number;
+  inputDigest: string;
+}
+
+export interface PipelineArtifactStore {
+  createStageRun(input: CreateStageRunInput): Promise<PipelineStageRunRecord>;
+  claimNextStageRun(workspaceId: string, projectId: string): Promise<PipelineStageRunRecord | null>;
+  transitionStageRun(
+    workspaceId: string,
+    projectId: string,
+    stageRunId: string,
+    expectedStatus: StageStatus,
+    status: StageStatus,
+    details?: { outputManifestIds?: string[]; errorCode?: string; errorDetail?: string }
+  ): Promise<PipelineStageRunRecord | null>;
+  createArtifactWithAudit(manifest: ArtifactManifest, actorId?: string): Promise<ArtifactManifest>;
+  findReusableArtifact(
+    workspaceId: string,
+    projectId: string,
+    snapshotId: string,
+    stage: BuildStage,
+    kind: string,
+    inputDigest: string
+  ): Promise<ArtifactManifest | null>;
 }
 
 export interface AdminRecord {

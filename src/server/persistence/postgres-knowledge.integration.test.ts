@@ -53,10 +53,10 @@ integration("PostgreSQL cited knowledge integration", () => {
       `SELECT json_agg(table_name ORDER BY table_name) AS names
        FROM information_schema.tables
        WHERE table_schema = 'public'
-         AND table_name IN ('auth_sessions', 'build_events', 'build_jobs', 'import_reports', 'knowledge_chunks', 'project_members', 'releases')`
+         AND table_name IN ('auth_sessions', 'build_events', 'build_jobs', 'build_stage_runs', 'import_reports', 'knowledge_artifacts', 'knowledge_chunks', 'project_members', 'releases')`
     );
     expect(rows[0].names).toEqual([
-      "auth_sessions", "build_events", "build_jobs", "import_reports", "knowledge_chunks", "project_members", "releases"
+      "auth_sessions", "build_events", "build_jobs", "build_stage_runs", "import_reports", "knowledge_artifacts", "knowledge_chunks", "project_members", "releases"
     ]);
     const extension = await pool.query(
       "SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'"
@@ -123,6 +123,69 @@ integration("PostgreSQL cited knowledge integration", () => {
     const [recovery] = await store.listActiveAdminMfaRecoveryCodes(setup!.workspace.id, setup!.admin.id);
     await expect(store.consumeAdminMfaRecoveryCode(setup!.workspace.id, setup!.admin.id, recovery.id)).resolves.toBe(true);
     await expect(store.consumeAdminMfaRecoveryCode(setup!.workspace.id, setup!.admin.id, recovery.id)).resolves.toBe(false);
+  }, 30_000);
+
+  test(databaseUrl
+    ? "isolates stage artifacts, claims queued work once, and retains published artifacts"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("pipeline@example.com", "hash");
+    const repository = await store.createRepository(setup!.workspace.id, { kind: "upload", name: "Pipeline" });
+    const snapshotId = randomUUID();
+    await store.createSnapshot({
+      snapshot: {
+        id: snapshotId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+        commitSha: "a".repeat(40), ref: "upload", remoteUrl: null,
+        commitTimestamp: new Date("2026-07-14T00:00:00.000Z"), storagePath: "/tmp/pipeline-snapshot"
+      },
+      files: []
+    });
+    const build = await store.createBuild({
+      workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId,
+      snapshotPath: "/tmp/pipeline-snapshot", commitSha: "a".repeat(40)
+    });
+    const baseStage = {
+      workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId, buildId: build.build.id,
+      attempt: 1, inputDigest: "b".repeat(64)
+    };
+    await store.createStageRun({ ...baseStage, stage: "convert" });
+    await store.createStageRun({ ...baseStage, stage: "extract" });
+    const [firstClaim, secondClaim] = await Promise.all([
+      store.claimNextStageRun(setup!.workspace.id, repository!.projectId),
+      store.claimNextStageRun(setup!.workspace.id, repository!.projectId)
+    ]);
+    expect(firstClaim).toMatchObject({ status: "running" });
+    expect(secondClaim).toMatchObject({ status: "running" });
+    expect(firstClaim?.id).not.toBe(secondClaim?.id);
+
+    const artifact = {
+      id: randomUUID(), workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId, buildId: build.build.id,
+      stage: "convert" as const, kind: "normalized-source", schemaVersion: 1, inputDigest: "c".repeat(64), contentDigest: "d".repeat(64),
+      storageKey: `${repository!.projectId}/${snapshotId}/convert/${"d".repeat(64)}.json`, sourceRefs: [], producer: "deterministic" as const,
+      createdAt: "2026-07-14T00:00:00.000Z"
+    };
+    await expect(store.createArtifactWithAudit(artifact, setup!.admin.id)).resolves.toMatchObject({ id: artifact.id });
+    await expect(store.findReusableArtifact(
+      setup!.workspace.id, repository!.projectId, snapshotId, "convert", "normalized-source", artifact.inputDigest
+    )).resolves.toMatchObject({ id: artifact.id });
+    await expect(store.createArtifactWithAudit({ ...artifact, id: randomUUID() }, setup!.admin.id))
+      .resolves.toMatchObject({ id: artifact.id });
+
+    const otherProject = await store.createProject(
+      setup!.workspace.id, { name: "Other pipeline", slug: "other-pipeline" }, setup!.admin.id
+    );
+    await expect(store.createStageRun({ ...baseStage, projectId: otherProject!.id, stage: "tables" }))
+      .rejects.toThrow("Stage run does not match");
+
+    await store.transitionBuild(build.build.id, "queued", "ready");
+    const release = await store.createReleaseDraft(setup!.workspace.id, repository!.id, build.build.id, "1.0.0");
+    await store.publishRelease(setup!.workspace.id, release.id);
+    await expect(pool.query("DELETE FROM knowledge_artifacts WHERE id = $1", [artifact.id]))
+      .rejects.toThrow("Cannot delete artifacts from a published build");
   }, 30_000);
 
   test(databaseUrl

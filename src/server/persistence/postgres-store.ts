@@ -31,6 +31,9 @@ import type {
   McpTokenRecord,
   CreateMcpTokenInput,
   Pagination,
+  PipelineArtifactStore,
+  PipelineStageRunRecord,
+  CreateStageRunInput,
   ReleaseRecord,
   RepositoryConnectionInput,
   RepositoryRecord,
@@ -55,6 +58,14 @@ import type {
 } from "../knowledge/build-service.js";
 import { standardBuildPurpose } from "../knowledge/build-service.js";
 import type { Citation } from "../knowledge/intelligence.js";
+import {
+  artifactManifestSchema,
+  canTransitionStage,
+  stageRunSchema,
+  type ArtifactManifest,
+  type BuildStage,
+  type StageStatus
+} from "../knowledge/pipeline/contracts.js";
 
 interface Queryable {
   query<T extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]): Promise<{ rows: T[] }>;
@@ -98,6 +109,40 @@ interface BuildRow extends QueryResultRow {
   purpose: "standard" | "feedback";
   feedback_ids: string[];
   feedback_context: BuildRecord["purpose"]["feedbackContext"];
+}
+
+interface StageRunRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  snapshot_id: string;
+  build_job_id: string;
+  stage: BuildStage;
+  attempt: number;
+  status: StageStatus;
+  input_digest: string;
+  output_manifest_ids: string[];
+  started_at: Date | null;
+  finished_at: Date | null;
+  error_code: string | null;
+  error_detail: string | null;
+}
+
+interface ArtifactRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  snapshot_id: string;
+  build_job_id: string;
+  stage: BuildStage;
+  kind: string;
+  schema_version: number;
+  input_digest: string;
+  content_digest: string;
+  storage_key: string;
+  source_refs: ArtifactManifest["sourceRefs"];
+  producer: ArtifactManifest["producer"];
+  created_at: Date;
 }
 
 interface KnowledgePageRow extends QueryResultRow {
@@ -287,6 +332,47 @@ function buildRecord(row: BuildRow): BuildRecord {
   };
 }
 
+function stageRunRecord(row: StageRunRow): PipelineStageRunRecord {
+  const run = stageRunSchema.parse({
+    id: row.id,
+    buildId: row.build_job_id,
+    stage: row.stage,
+    attempt: row.attempt,
+    status: row.status,
+    inputDigest: row.input_digest,
+    outputManifestIds: row.output_manifest_ids ?? [],
+    startedAt: row.started_at?.toISOString() ?? null,
+    finishedAt: row.finished_at?.toISOString() ?? null,
+    errorCode: row.error_code,
+    errorDetail: row.error_detail
+  });
+  return {
+    ...run,
+    workspaceId: row.workspace_id,
+    projectId: row.project_id,
+    snapshotId: row.snapshot_id
+  };
+}
+
+function artifactManifest(row: ArtifactRow): ArtifactManifest {
+  return artifactManifestSchema.parse({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    projectId: row.project_id,
+    snapshotId: row.snapshot_id,
+    buildId: row.build_job_id,
+    stage: row.stage,
+    kind: row.kind,
+    schemaVersion: row.schema_version,
+    inputDigest: row.input_digest,
+    contentDigest: row.content_digest,
+    storageKey: row.storage_key,
+    sourceRefs: row.source_refs,
+    producer: row.producer,
+    createdAt: row.created_at.toISOString()
+  });
+}
+
 function knowledgePageRecord(row: KnowledgePageRow): KnowledgePageRecord {
   return boundedKnowledgePage({
     id: row.id,
@@ -412,7 +498,7 @@ function auditEventRecord(row: AuditEventRow): AuditEventRecord {
   };
 }
 
-export class PostgresAppStore implements AppStore {
+export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   constructor(private readonly pool: Pool & Queryable) {}
 
   private async transaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
@@ -444,6 +530,168 @@ export class PostgresAppStore implements AppStore {
         JSON.stringify(event.metadata ?? {})
       ]
     );
+  }
+
+  async createStageRun(input: CreateStageRunInput): Promise<PipelineStageRunRecord> {
+    const queued = stageRunSchema.parse({
+      id: "pending",
+      buildId: input.buildId,
+      stage: input.stage,
+      attempt: input.attempt,
+      status: "queued",
+      inputDigest: input.inputDigest,
+      outputManifestIds: [],
+      startedAt: null,
+      finishedAt: null,
+      errorCode: null,
+      errorDetail: null
+    });
+    const { rows } = await this.pool.query<StageRunRow>(
+      `INSERT INTO build_stage_runs
+       (workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status, input_digest)
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8
+       FROM build_jobs build
+       JOIN repositories repository
+         ON repository.id = build.repository_id AND repository.workspace_id = build.workspace_id
+       JOIN source_snapshots snapshot
+         ON snapshot.id = build.snapshot_id AND snapshot.workspace_id = build.workspace_id
+       WHERE build.workspace_id = $1 AND build.id = $4
+         AND repository.project_id = $2 AND snapshot.id = $3 AND snapshot.repository_id = build.repository_id
+       RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+                 input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
+      [input.workspaceId, input.projectId, input.snapshotId, input.buildId, queued.stage, queued.attempt, queued.status, queued.inputDigest]
+    );
+    if (!rows[0]) throw new Error("Stage run does not match the project build and snapshot");
+    return stageRunRecord(rows[0]);
+  }
+
+  async claimNextStageRun(workspaceId: string, projectId: string): Promise<PipelineStageRunRecord | null> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<StageRunRow>(
+        `WITH candidate AS (
+           SELECT id FROM build_stage_runs
+           WHERE workspace_id = $1 AND project_id = $2 AND status = 'queued'
+           ORDER BY created_at, id
+           FOR UPDATE SKIP LOCKED
+           LIMIT 1
+         )
+         UPDATE build_stage_runs AS run
+         SET status = 'running', started_at = now(), updated_at = now()
+         FROM candidate
+         WHERE run.id = candidate.id AND run.workspace_id = $1 AND run.project_id = $2
+         RETURNING run.id, run.workspace_id, run.project_id, run.snapshot_id, run.build_job_id,
+                   run.stage, run.attempt, run.status, run.input_digest, run.output_manifest_ids,
+                   run.started_at, run.finished_at, run.error_code, run.error_detail`,
+        [workspaceId, projectId]
+      );
+      return rows[0] ? stageRunRecord(rows[0]) : null;
+    });
+  }
+
+  async transitionStageRun(
+    workspaceId: string,
+    projectId: string,
+    stageRunId: string,
+    expectedStatus: StageStatus,
+    status: StageStatus,
+    details: { outputManifestIds?: string[]; errorCode?: string; errorDetail?: string } = {}
+  ): Promise<PipelineStageRunRecord | null> {
+    if (!canTransitionStage(expectedStatus, status)) {
+      throw new Error(`Illegal stage transition: ${expectedStatus} -> ${status}`);
+    }
+    if (status === "failed" && !details.errorCode) throw new Error("Failed stage runs require errorCode");
+    if (status !== "failed" && (details.errorCode || details.errorDetail)) throw new Error("Only failed stage runs include errors");
+    const terminal = ["succeeded", "failed", "cancelled", "reused", "skipped"].includes(status);
+    const { rows } = await this.pool.query<StageRunRow>(
+      `UPDATE build_stage_runs
+       SET status = $5,
+           output_manifest_ids = COALESCE($6::uuid[], output_manifest_ids),
+           started_at = COALESCE(started_at, now()),
+           finished_at = CASE WHEN $7::boolean THEN now() ELSE NULL END,
+           error_code = $8,
+           error_detail = $9,
+           updated_at = now()
+       WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND status = $4
+       RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+                 input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
+      [
+        workspaceId, projectId, stageRunId, expectedStatus, status,
+        details.outputManifestIds ?? null, terminal,
+        status === "failed" ? details.errorCode ?? null : null,
+        status === "failed" ? details.errorDetail ?? null : null
+      ]
+    );
+    return rows[0] ? stageRunRecord(rows[0]) : null;
+  }
+
+  async createArtifactWithAudit(manifestInput: ArtifactManifest, actorId?: string): Promise<ArtifactManifest> {
+    const manifest = artifactManifestSchema.parse(manifestInput);
+    return this.transaction(async (client) => {
+      const inserted = await client.query<ArtifactRow>(
+        `INSERT INTO knowledge_artifacts
+         (id, workspace_id, project_id, snapshot_id, build_job_id, stage, kind, schema_version,
+          input_digest, content_digest, storage_key, source_refs, producer)
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13
+         FROM build_jobs build
+         JOIN repositories repository
+           ON repository.id = build.repository_id AND repository.workspace_id = build.workspace_id
+         JOIN source_snapshots snapshot
+           ON snapshot.id = build.snapshot_id AND snapshot.workspace_id = build.workspace_id
+         WHERE build.workspace_id = $2 AND build.id = $5 AND repository.project_id = $3
+           AND snapshot.id = $4 AND snapshot.repository_id = build.repository_id
+         ON CONFLICT (project_id, snapshot_id, stage, kind, input_digest) DO NOTHING
+         RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, kind, schema_version,
+                   input_digest, content_digest, storage_key, source_refs, producer, created_at`,
+        [
+          manifest.id, manifest.workspaceId, manifest.projectId, manifest.snapshotId, manifest.buildId,
+          manifest.stage, manifest.kind, manifest.schemaVersion, manifest.inputDigest, manifest.contentDigest,
+          manifest.storageKey, JSON.stringify(manifest.sourceRefs), manifest.producer
+        ]
+      );
+      const artifact = inserted.rows[0] ?? (await client.query<ArtifactRow>(
+        `SELECT id, workspace_id, project_id, snapshot_id, build_job_id, stage, kind, schema_version,
+                input_digest, content_digest, storage_key, source_refs, producer, created_at
+         FROM knowledge_artifacts
+         WHERE workspace_id = $1 AND project_id = $2 AND snapshot_id = $3
+           AND stage = $4 AND kind = $5 AND input_digest = $6`,
+        [manifest.workspaceId, manifest.projectId, manifest.snapshotId, manifest.stage, manifest.kind, manifest.inputDigest]
+      )).rows[0];
+      if (!artifact) throw new Error("Artifact does not match the project build and snapshot");
+      const persisted = artifactManifest(artifact);
+      if (persisted.contentDigest !== manifest.contentDigest || persisted.storageKey !== manifest.storageKey) {
+        throw new Error("Artifact cache collision");
+      }
+      if (inserted.rows[0]) {
+        await this.insertAudit(client, {
+          workspaceId: manifest.workspaceId,
+          actorId,
+          action: "knowledge_artifact.created",
+          resourceType: "knowledge_artifact",
+          resourceId: persisted.id,
+          metadata: { stage: persisted.stage, kind: persisted.kind, contentDigest: persisted.contentDigest }
+        });
+      }
+      return persisted;
+    });
+  }
+
+  async findReusableArtifact(
+    workspaceId: string,
+    projectId: string,
+    snapshotId: string,
+    stage: BuildStage,
+    kind: string,
+    inputDigest: string
+  ): Promise<ArtifactManifest | null> {
+    const { rows } = await this.pool.query<ArtifactRow>(
+      `SELECT id, workspace_id, project_id, snapshot_id, build_job_id, stage, kind, schema_version,
+              input_digest, content_digest, storage_key, source_refs, producer, created_at
+       FROM knowledge_artifacts
+       WHERE workspace_id = $1 AND project_id = $2 AND snapshot_id = $3
+         AND stage = $4 AND kind = $5 AND input_digest = $6`,
+      [workspaceId, projectId, snapshotId, stage, kind, inputDigest]
+    );
+    return rows[0] ? artifactManifest(rows[0]) : null;
   }
 
   async isSetupComplete(): Promise<boolean> {

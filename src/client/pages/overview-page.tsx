@@ -41,7 +41,7 @@ export function ProjectOverviewPage({ api }: { api: ApiClient }) {
     </div>
     <section className="overview-current-source">
       <div><Users aria-hidden="true" /><span><p className="eyebrow">当前资料来源</p><h2>{repository?.name ?? "尚未连接资料来源"}</h2></span></div>
-      <dl><div><dt>来源类型</dt><dd>{repository ? repository.kind === "upload" ? "文件夹 / ZIP 上传" : repository.kind === "git" ? "Git HTTPS" : "服务器本地路径" : "-"}</dd></div><div><dt>最近快照</dt><dd>{latestSnapshot ? new Date(latestSnapshot.commitTimestamp).toLocaleString() : "暂无"}</dd></div></dl>
+      <dl><div><dt>来源类型</dt><dd>{repository ? repository.kind === "upload" ? "文件夹上传" : repository.kind === "git" ? "Git HTTPS" : "服务器本地路径" : "-"}</dd></div><div><dt>最近快照</dt><dd>{latestSnapshot ? new Date(latestSnapshot.commitTimestamp).toLocaleString() : "暂无"}</dd></div></dl>
     </section>
     {feedback.error && <ErrorState message={`无法读取反馈数量：${errorMessage(feedback.error)}`} retry={() => void feedback.refetch()} />}
   </div>;

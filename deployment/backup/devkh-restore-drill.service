@@ -1,0 +1,16 @@
+[Unit]
+Description=Dev Knowledge Hub isolated backup restore drill
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/etc/devkh-backup/backup.env
+ExecStart=/usr/local/lib/devkh-backup/devkh-restore-drill.sh
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/devkh-backup

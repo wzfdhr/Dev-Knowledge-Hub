@@ -425,6 +425,7 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
         kind: "page",
         title: page.title,
         excerpt: page.body.slice(0, 240),
+        matchReason: "变更关联知识页",
         score: 10,
         pageId: page.id,
         releaseId: selected.release.id,

@@ -10,15 +10,17 @@ import "./styles.css";
 import "./responsive.css";
 import "./workbench.css";
 import { App } from "./app";
+import { cspNonceFromDocument } from "./csp-nonce";
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 2_000, retry: 1 } } });
 
 const root = document.querySelector<HTMLDivElement>("#root");
 if (!root) throw new Error("Missing #root element");
+const cspNonce = cspNonceFromDocument(document);
 
 createRoot(root).render(
   <StrictMode>
-    <ConfigProvider theme={{ token: { colorPrimary: "#1769e0", borderRadius: 6, fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif" } }}>
+    <ConfigProvider csp={cspNonce ? { nonce: cspNonce } : undefined} theme={{ token: { colorPrimary: "#1769e0", borderRadius: 6, fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif" } }}>
       <AntApp>
         <QueryClientProvider client={queryClient}>
           <BrowserRouter><App /></BrowserRouter>

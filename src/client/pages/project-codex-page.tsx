@@ -1,6 +1,6 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, Input, Modal, Tag } from "antd";
-import { Check, Clipboard, Code2, FileText, KeyRound, Link2, ShieldCheck, Trash2 } from "lucide-react";
+import { Check, Clipboard, Code2, FileText, KeyRound, Link2, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { useParams } from "react-router-dom";
 
@@ -41,11 +41,11 @@ export function ProjectCodexPage({ api }: { api: ApiClient }) {
     enabled: Boolean(projectId)
   });
   const [tokenName, setTokenName] = useState("");
-  const [plaintext, setPlaintext] = useState<string | null>(null);
+  const [disclosure, setDisclosure] = useState<{ token: string; title: string } | null>(null);
   const create = useMutation({
     mutationFn: () => api.createMcpToken(tokenName, projectId),
     onSuccess: async (value) => {
-      setPlaintext(value.token);
+      setDisclosure({ token: value.token, title: "已创建项目 Token" });
       setTokenName("");
       await queryClient.invalidateQueries({ queryKey: ["projects", projectId, "mcp-tokens"] });
     }
@@ -53,6 +53,13 @@ export function ProjectCodexPage({ api }: { api: ApiClient }) {
   const revoke = useMutation({
     mutationFn: api.revokeMcpToken,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["projects", projectId, "mcp-tokens"] })
+  });
+  const rotate = useMutation({
+    mutationFn: api.rotateMcpToken,
+    onSuccess: async (value) => {
+      setDisclosure({ token: value.token, title: "已轮换项目 Token" });
+      await queryClient.invalidateQueries({ queryKey: ["projects", projectId, "mcp-tokens"] });
+    }
   });
   const listedTokens: McpToken[] = tokens.data?.pages.flatMap((page) => page.tokens) ?? [];
 
@@ -78,12 +85,13 @@ export function ProjectCodexPage({ api }: { api: ApiClient }) {
         <Button type="primary" htmlType="submit" loading={create.isPending}>创建 Token</Button>
       </form>
       {create.error && <ErrorState message={errorMessage(create.error)} />}
-      {tokens.isLoading ? <Loading label="正在加载项目 Token" /> : tokens.error ? <ErrorState message={errorMessage(tokens.error)} retry={() => void tokens.refetch()} /> : listedTokens.length === 0 ? <Empty>当前项目尚未创建 Token。</Empty> : <div className="codex-token-list">{listedTokens.map((item) => <div key={item.id}><KeyRound aria-hidden="true" /><span><strong>{item.name}</strong><small className="mono">{item.tokenPrefix}</small></span><Tag color={item.revokedAt ? "default" : "green"}>{item.revokedAt ? "已撤销" : "可用"}</Tag>{!item.revokedAt && <Button danger type="text" aria-label={`撤销 ${item.name}`} icon={<Trash2 aria-hidden="true" />} onClick={() => revoke.mutate(item.id)} />}</div>)}</div>}
+      {rotate.error && <ErrorState message={errorMessage(rotate.error)} />}
+      {tokens.isLoading ? <Loading label="正在加载项目 Token" /> : tokens.error ? <ErrorState message={errorMessage(tokens.error)} retry={() => void tokens.refetch()} /> : listedTokens.length === 0 ? <Empty>当前项目尚未创建 Token。</Empty> : <div className="codex-token-list">{listedTokens.map((item) => <div key={item.id}><KeyRound aria-hidden="true" /><span><strong>{item.name}</strong><small className="mono">{item.tokenPrefix}</small></span><Tag color={item.revokedAt ? "default" : "green"}>{item.revokedAt ? "已撤销" : "可用"}</Tag>{!item.revokedAt && <><Button type="text" aria-label={`轮换 ${item.name}`} icon={<RefreshCw aria-hidden="true" />} loading={rotate.isPending && rotate.variables === item.id} onClick={() => rotate.mutate(item.id)} /><Button danger type="text" aria-label={`撤销 ${item.name}`} icon={<Trash2 aria-hidden="true" />} onClick={() => revoke.mutate(item.id)} /></>}</div>)}</div>}
       {tokens.hasNextPage && <Button onClick={() => void tokens.fetchNextPage()} loading={tokens.isFetchingNextPage}>加载更多 Token</Button>}
     </section>
-    {plaintext && <Modal title="已创建项目 Token" open destroyOnHidden onCancel={() => setPlaintext(null)} footer={<Button type="primary" onClick={() => setPlaintext(null)}>我已保存</Button>}>
+    {disclosure && <Modal title={disclosure.title} open destroyOnHidden onCancel={() => setDisclosure(null)} footer={<Button type="primary" onClick={() => setDisclosure(null)}>我已保存</Button>}>
       <p>请立即保存此 Token。关闭窗口后不会再次显示。</p>
-      <div className="secret-row"><code>{plaintext}</code><CopyButton value={plaintext} label="复制 Token" /></div>
+      <div className="secret-row"><code>{disclosure.token}</code><CopyButton value={disclosure.token} label="复制 Token" /></div>
     </Modal>}
   </div>;
 }

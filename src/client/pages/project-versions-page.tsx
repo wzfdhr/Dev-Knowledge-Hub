@@ -3,7 +3,7 @@ import { ArrowRight, GitBranch, Play, RefreshCw, Send, Square, TriangleAlert } f
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
-import { ApiError, errorMessage, LIST_PAGE_SIZE, type ApiClient } from "../api/client";
+import { errorMessage, LIST_PAGE_SIZE, type ApiClient } from "../api/client";
 import type { Build, Release, Repository, SnapshotSummary } from "../api/types";
 import { Empty, ErrorState, Loading, Status } from "../components/ui";
 import { statusLabel } from "../copy";
@@ -27,10 +27,10 @@ export function derivePrimaryAction(state: OverviewState): { kind: PrimaryKind; 
     return { kind: "retry-build", label: "重试知识构建" };
   }
   if (state.snapshotId && latestBuild?.snapshotId === state.snapshotId && latestBuild.status === "published") {
-    return { kind: "sync", label: state.repository.kind === "upload" ? "导入新 ZIP 版本" : "同步仓库" };
+    return { kind: "sync", label: state.repository.kind === "upload" ? "导入新文件夹版本" : "同步仓库" };
   }
   if (state.snapshotId) return { kind: "start-build", label: "开始构建知识" };
-  return { kind: "sync", label: state.repository.kind === "upload" ? "导入 ZIP 项目包" : "同步仓库" };
+  return { kind: "sync", label: state.repository.kind === "upload" ? "导入项目文件夹" : "同步仓库" };
 }
 
 const snapshotKey = "devkh:last-snapshot";
@@ -41,8 +41,7 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
   const { projectId = "" } = useParams();
   const queryClient = useQueryClient();
   const repositoryQuery = useQuery({ queryKey: projectKeys.repository(projectId), queryFn: api.getRepository, retry: false });
-  const repositoryMissing = repositoryQuery.error instanceof ApiError && repositoryQuery.error.status === 404;
-  const repository = repositoryMissing ? null : repositoryQuery.data?.repository ?? null;
+  const repository = repositoryQuery.data?.repository ?? null;
   const repositoryStatusQuery = useQuery({
     queryKey: ["repository-status", repository?.id],
     queryFn: () => api.getRepositoryStatus?.() ?? Promise.resolve({ repository: repository!, latestSnapshot: null }),
@@ -82,7 +81,7 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
   } : sessionSnapshot;
   const effectiveSnapshotId = snapshot?.snapshotId ?? failedBuild?.snapshotId;
   const requiredLoading = Boolean(repository) && (buildsQuery.isLoading || releasesQuery.isLoading || repositoryStatusQuery.isLoading);
-  const blockingError = repositoryQuery.error && !repositoryMissing
+  const blockingError = repositoryQuery.error
     ? repositoryQuery.error
     : buildsQuery.error ?? releasesQuery.error ?? repositoryStatusQuery.error;
   const action = blockingError || requiredLoading
@@ -183,13 +182,13 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
     {requiredLoading && <Loading label="正在加载构建和版本状态" />}
     {!blockingError && operationError && <ErrorState message={errorMessage(operationError)} />}
     {!blockingError && !requiredLoading && <>
-      <section className="repo-strip" aria-label="仓库状态"><div><span>仓库</span><strong>{repository?.name ?? "未连接"}</strong></div><div><span>{repository?.kind === "upload" ? "来源" : "分支"}</span><strong><GitBranch aria-hidden="true" />{snapshot?.ref ?? repository?.defaultBranch ?? "-"}</strong></div><div><span>{sourceLabel}</span><strong className="mono">{commit?.slice(0, 12) ?? "暂无快照"}</strong></div><div><span>待同步</span><strong>{snapshot ? (snapshot.unchanged ? "没有变更" : `已采集 ${snapshot.fileCount} 个文件`) : repository ? repository.kind === "upload" ? "等待导入 ZIP" : "需要同步" : "-"}</strong></div></section>
+      <section className="repo-strip" aria-label="仓库状态"><div><span>仓库</span><strong>{repository?.name ?? "未连接"}</strong></div><div><span>{repository?.kind === "upload" ? "来源" : "分支"}</span><strong><GitBranch aria-hidden="true" />{snapshot?.ref ?? repository?.defaultBranch ?? "-"}</strong></div><div><span>{sourceLabel}</span><strong className="mono">{commit?.slice(0, 12) ?? "暂无快照"}</strong></div><div><span>待同步</span><strong>{snapshot ? (snapshot.unchanged ? "没有变更" : `已采集 ${snapshot.fileCount} 个文件`) : repository ? repository.kind === "upload" ? "等待导入项目文件夹" : "需要同步" : "-"}</strong></div></section>
       <section className="metric-grid" aria-label="工作区摘要"><article><span>当前版本</span><strong>{releases.find((release) => release.publishedAt)?.version ?? "未发布"}</strong></article><article><span>人工待处理项</span><strong>{feedbackQuery.data?.pages.flatMap((page) => page.feedback).filter((item) => ["open", "acknowledged"].includes(item.status)).length ?? 0}</strong></article><article><span>构建数</span><strong>{builds.length}</strong></article><article><span>知识状态</span><strong>{latestBuild ? <Status value={latestBuild.status} /> : "尚未构建"}</strong></article></section>
       {feedbackQuery.error && <ErrorState message={`无法读取反馈数量：${errorMessage(feedbackQuery.error)}`} retry={() => void feedbackQuery.refetch()} />}
       {activeBuild && <section className="panel active-build"><div className="section-heading"><div><p className="eyebrow">正在构建</p><h2>{statusLabel(activeBuild.status)}</h2></div><Status value={activeBuild.status} /></div><progress className="progress" aria-label="构建进度" max={100} value={progress} /><p className="muted">{sourceLabel} <span className="mono">{activeBuild.commitSha.slice(0, 12)}</span>。{eventState === "reconnecting" ? "正在重新连接构建更新" : eventState === "connected" ? "已连接实时更新" : "正在连接实时更新"}</p><button className="button danger" onClick={() => cancel.mutate(activeBuild.id)} disabled={activeBuild.cancelRequested}><Square aria-hidden="true" />{activeBuild.cancelRequested ? "已请求取消" : "取消构建"}</button></section>}
       {failedBuild && <section className="panel failed-build" role="alert"><div className="section-heading"><div><p className="eyebrow">构建失败</p><h2>{failedBuild.errorMessage ?? "知识构建失败"}</h2></div><Status value="failed" /></div><p className="muted">修正报告的问题后，可重试此快照。</p></section>}
       {reviewBuild && <section className="panel review-panel" aria-label="版本审核"><div><p className="eyebrow">等待审核</p><h2>构建 {reviewBuild.id.slice(0, 8)}</h2><p>选择草稿版本，然后检查生成的知识。</p></div><div className="review-actions"><button className="button" onClick={inspectKnowledge} disabled={createRelease.isPending}>查看知识</button><label>版本<input value={version} onChange={(event) => setVersion(event.target.value)} /></label></div></section>}
-      <section className="section"><div className="section-heading"><div><p className="eyebrow">历史记录</p><h2>最近构建</h2></div></div>{builds.length === 0 ? <Empty>{repository?.kind === "upload" ? "暂无构建，请先导入 ZIP 项目包。" : "暂无构建，请先同步仓库。"}</Empty> : <><div className="table-wrap"><table><thead><tr><th>状态</th><th>{sourceLabel}</th><th>警告</th><th>构建</th></tr></thead><tbody>{builds.map((build) => <tr key={build.id}><td><Status value={build.status} /></td><td className="mono">{build.commitSha.slice(0, 12)}</td><td>{build.warnings.length}</td><td className="mono">{build.id.slice(0, 8)}</td></tr>)}</tbody></table></div>{buildsQuery.hasNextPage && <button className="button continuation" onClick={() => void buildsQuery.fetchNextPage()} disabled={buildsQuery.isFetchingNextPage}>{buildsQuery.isFetchingNextPage ? "正在加载构建..." : "加载更多构建"}</button>}</>}</section>
+      <section className="section"><div className="section-heading"><div><p className="eyebrow">历史记录</p><h2>最近构建</h2></div></div>{builds.length === 0 ? <Empty>{repository?.kind === "upload" ? "暂无构建，请先导入项目文件夹。" : "暂无构建，请先同步仓库。"}</Empty> : <><div className="table-wrap"><table><thead><tr><th>状态</th><th>{sourceLabel}</th><th>警告</th><th>构建</th></tr></thead><tbody>{builds.map((build) => <tr key={build.id}><td><Status value={build.status} /></td><td className="mono">{build.commitSha.slice(0, 12)}</td><td>{build.warnings.length}</td><td className="mono">{build.id.slice(0, 8)}</td></tr>)}</tbody></table></div>{buildsQuery.hasNextPage && <button className="button continuation" onClick={() => void buildsQuery.fetchNextPage()} disabled={buildsQuery.isFetchingNextPage}>{buildsQuery.isFetchingNextPage ? "正在加载构建..." : "加载更多构建"}</button>}</>}</section>
     </>}
   </div>;
 }

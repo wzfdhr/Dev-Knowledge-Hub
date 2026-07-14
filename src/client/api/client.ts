@@ -1,7 +1,8 @@
 import type {
   ApiErrorShape, Build, Feedback, McpConnection, McpToken, KnowledgePageRecord,
-  ArchivedRepository, KnowledgeMetadata, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotSummary, SourceExcerpt,
-  UploadSnapshotSummary, TeamMember, Project, ProjectSummary, ProjectActivity, CodexConnectionPack
+  ArchivedRepository, KnowledgeMetadata, ProjectKnowledgeQuality, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotChangeSummary, SnapshotSummary, SourceExcerpt,
+  UploadSnapshotSummary, ImportReport, TeamMember, ProjectMember, Project, ProjectSummary, ProjectActivity, CodexConnectionPack,
+  WorkspaceOverview, WorkspaceSearchResult
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
@@ -61,19 +62,31 @@ export interface ApiClient extends ResumableUploadApi {
   logout(): Promise<void>;
   listMembers(): Promise<{ members: TeamMember[] }>;
   createMember(input: { email: string; password: string; role: TeamMember["role"] }): Promise<{ member: TeamMember }>;
+  resetMemberPassword(userId: string, password: string): Promise<{ member: TeamMember }>;
+  setMemberDisabled(userId: string, disabled: boolean): Promise<{ member: TeamMember }>;
   listProjects(): Promise<{ projects: Project[] }>;
+  workspaceOverview(): Promise<WorkspaceOverview>;
+  searchWorkspaceKnowledge(query: string): Promise<{ results: WorkspaceSearchResult[] }>;
   createProject(input: { name: string; slug: string }): Promise<{ project: Project }>;
   getProjectSummary(projectId: string): Promise<ProjectSummary>;
+  listImportReports(projectId: string, pagination: PaginationParams): Promise<{ reports: ImportReport[] } & PaginatedResponse>;
   listProjectActivity(projectId: string, pagination: PaginationParams):
-    Promise<{ activity: ProjectActivity[]; members: TeamMember[] } & PaginatedResponse>;
+    Promise<{ activity: ProjectActivity[]; members: ProjectMember[] } & PaginatedResponse>;
+  listProjectMembers(projectId: string): Promise<{ members: ProjectMember[] }>;
+  listAvailableProjectMembers(projectId: string): Promise<{ members: TeamMember[] }>;
+  addProjectMember(projectId: string, input: { userId: string; role: ProjectMember["role"] }): Promise<{ member: ProjectMember }>;
+  updateProjectMemberRole(projectId: string, userId: string, role: ProjectMember["role"]): Promise<{ member: ProjectMember }>;
+  removeProjectMember(projectId: string, userId: string): Promise<{ member: ProjectMember }>;
   connectRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository }>;
   replaceRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository; pendingUpload?: boolean }>;
   listArchivedRepositories(): Promise<{ repositories: ArchivedRepository[] }>;
   uploadZip(file: File): Promise<UploadSnapshotSummary>;
   uploadReplacementZip(repositoryId: string, file: File): Promise<UploadSnapshotSummary>;
-  getRepository(): Promise<{ repository: Repository }>;
+  getRepository(): Promise<{ repository: Repository | null }>;
   getRepositoryStatus(): Promise<RepositoryStatus>;
   syncRepository(): Promise<SnapshotSummary>;
+  getProjectChanges(projectId: string): Promise<{ change: SnapshotChangeSummary | null }>;
+  getProjectKnowledgeQuality(projectId: string): Promise<ProjectKnowledgeQuality>;
   listBuilds(pagination: PaginationParams): Promise<{ builds: Build[] } & PaginatedResponse>;
   startBuild(snapshotId: string): Promise<{ build: Build; created: boolean }>;
   cancelBuild(id: string): Promise<{ build: Build }>;
@@ -98,6 +111,7 @@ export interface ApiClient extends ResumableUploadApi {
   getProjectCodexConnection(projectId: string): Promise<CodexConnectionPack>;
   createMcpToken(name: string, projectId: string): Promise<McpToken & { token: string }>;
   revokeMcpToken(id: string): Promise<{ token: McpToken }>;
+  rotateMcpToken(id: string): Promise<{ previous: McpToken; replacement: McpToken; token: string }>;
   getModelConfig(): Promise<{ config: ModelConfig | null }>;
   updateModelConfig(input: { provider: ModelProvider; model: string; apiKey: string }): Promise<{ config: ModelConfig }>;
 }
@@ -122,13 +136,33 @@ export const api: ApiClient = {
   logout: () => request("/api/session", { method: "DELETE" }),
   listMembers: () => request("/api/members"),
   createMember: (input) => request("/api/members", { method: "POST", body: json(input) }),
+  resetMemberPassword: (userId, password) => request(`/api/members/${userId}/password`, { method: "PATCH", body: json({ password }) }),
+  setMemberDisabled: (userId, disabled) => request(`/api/members/${userId}/disabled`, { method: "PATCH", body: json({ disabled }) }),
   listProjects: () => request("/api/projects"),
+  workspaceOverview: () => request("/api/workspace/overview"),
+  searchWorkspaceKnowledge: (query) => request(`/api/workspace/knowledge/search?q=${encodeURIComponent(query)}`),
   createProject: (input) => request("/api/projects", { method: "POST", body: json(input) }),
   getProjectSummary: (projectId) => request(`/api/projects/${encodeURIComponent(projectId)}/summary`),
+  listImportReports: (projectId, pagination) => request(listPath(
+    `/api/projects/${encodeURIComponent(projectId)}/import-reports`, pagination
+  )),
   listProjectActivity: (projectId, pagination) => request(listPath(
     `/api/projects/${encodeURIComponent(projectId)}/activity`,
     pagination
   )),
+  listProjectMembers: (projectId) => request(`/api/projects/${encodeURIComponent(projectId)}/members`),
+  listAvailableProjectMembers: (projectId) => request(`/api/projects/${encodeURIComponent(projectId)}/available-members`),
+  addProjectMember: (projectId, input) => request(`/api/projects/${encodeURIComponent(projectId)}/members`, {
+    method: "POST", body: json(input)
+  }),
+  updateProjectMemberRole: (projectId, userId, role) => request(
+    `/api/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(userId)}`,
+    { method: "PATCH", body: json({ role }) }
+  ),
+  removeProjectMember: (projectId, userId) => request(
+    `/api/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(userId)}`,
+    { method: "DELETE" }
+  ),
   connectRepository: (input) => {
     const projectId = activeProjectId();
     return request(projectId ? `/api/projects/${encodeURIComponent(projectId)}/repositories` : "/api/repositories", {
@@ -171,6 +205,8 @@ export const api: ApiClient = {
   getRepository: () => request("/api/repositories/current"),
   getRepositoryStatus: () => request("/api/repositories/current/status"),
   syncRepository: () => request("/api/repositories/current/sync", { method: "POST" }),
+  getProjectChanges: (projectId) => request(`/api/projects/${projectId}/changes`),
+  getProjectKnowledgeQuality: (projectId) => request(`/api/projects/${projectId}/knowledge-quality`),
   listBuilds: (pagination) => request(listPath("/api/builds", pagination)),
   startBuild: (snapshotId) => request("/api/builds", { method: "POST", body: json({ snapshotId }) }),
   cancelBuild: (id) => request(`/api/builds/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
@@ -205,6 +241,7 @@ export const api: ApiClient = {
   getProjectCodexConnection: (projectId) => request(`/api/projects/${encodeURIComponent(projectId)}/codex-connection`),
   createMcpToken: (name, projectId) => request("/api/mcp/tokens", { method: "POST", body: json({ name, projectId }) }),
   revokeMcpToken: (id) => request(`/api/mcp/tokens/${id}/revoke`, { method: "POST" }),
+  rotateMcpToken: (id) => request(`/api/mcp/tokens/${encodeURIComponent(id)}/rotate`, { method: "POST" }),
   getModelConfig: () => request("/api/settings/model"),
   updateModelConfig: (input) => request("/api/settings/model", { method: "PUT", body: json(input) })
 };

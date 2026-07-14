@@ -46,6 +46,7 @@ describe("weighted knowledge search", () => {
     const results = await store.searchKnowledge(workspaceId, repositoryId, "add");
 
     expect(results[0]).toEqual(expect.objectContaining({ kind: "symbol", title: "add" }));
+    expect(results[0].matchReason).toBe("精确符号匹配");
     expect(results[0].score).toBeGreaterThan(
       results.find((result) => result.kind === "page")?.score ?? 0
     );
@@ -66,6 +67,7 @@ describe("weighted knowledge search", () => {
     const neighborResults = await store.searchKnowledge(workspaceId, repositoryId, "src/util.js");
 
     expect(pathResults[0]).toEqual(expect.objectContaining({ kind: "module", title: "src/math.ts" }));
+    expect(pathResults[0].matchReason).toBe("精确路径匹配");
     expect(neighborResults.some((result) => result.kind === "dependency-neighbor")).toBe(true);
     expect(neighborResults).toEqual([...neighborResults].sort((left, right) =>
       right.score - left.score || left.title.localeCompare(right.title)

@@ -20,6 +20,8 @@ export interface AdminRecord {
   email: string;
   passwordHash: string;
   role: TeamRole;
+  disabledAt: Date | null;
+  sessionVersion: number;
 }
 
 export const TEAM_ROLES = ["admin", "member", "reader"] as const;
@@ -32,6 +34,8 @@ export interface TeamMemberRecord {
   passwordHash: string;
   role: TeamRole;
   createdAt: Date;
+  disabledAt: Date | null;
+  sessionVersion: number;
 }
 
 export interface ProjectRecord {
@@ -41,6 +45,51 @@ export interface ProjectRecord {
   slug: string;
   archivedAt: Date | null;
   createdAt: Date;
+}
+
+export type ProjectRole = TeamRole;
+
+export interface ProjectMemberRecord {
+  id: string;
+  projectId: string;
+  workspaceId: string;
+  email: string;
+  role: ProjectRole;
+  createdAt: Date;
+}
+
+export interface ProjectAccess {
+  project: ProjectRecord;
+  role: ProjectRole | null;
+}
+
+export interface WorkspaceProjectOverviewRecord {
+  project: ProjectRecord;
+  repository: RepositoryRecord | null;
+  latestSnapshot: (SourceSnapshotRecord & { fileCount: number }) | null;
+  indexedTextBytes: number;
+  currentRelease: ReleaseRecord | null;
+  latestBuild: BuildRecord | null;
+  memberCount: number;
+  pendingFeedbackCount: number;
+}
+
+export interface WorkspaceKnowledgeSearchRecord extends KnowledgeSearchResult {
+  project: ProjectRecord;
+}
+
+export class LastProjectAdminError extends Error {
+  constructor() {
+    super("A project must retain at least one administrator");
+    this.name = "LastProjectAdminError";
+  }
+}
+
+export class LastWorkspaceAdminError extends Error {
+  constructor() {
+    super("A workspace must retain at least one active administrator");
+    this.name = "LastWorkspaceAdminError";
+  }
 }
 
 export interface AuditEventInput {
@@ -67,6 +116,11 @@ export interface McpTokenRecord {
   createdAt: Date;
   lastUsedAt: Date | null;
   revokedAt: Date | null;
+}
+
+export interface McpTokenRotation {
+  previous: McpTokenRecord;
+  replacement: McpTokenRecord;
 }
 
 export type AgentFeedbackStatus = (typeof AGENT_FEEDBACK_STATUSES)[number];
@@ -175,6 +229,36 @@ export interface SourceFileRecord {
   language: string | null;
 }
 
+export interface SnapshotChangeSummary {
+  snapshotId: string;
+  previousSnapshotId: string | null;
+  added: string[];
+  modified: string[];
+  deleted: string[];
+  requiresBuild: boolean;
+  affectedModules: string[];
+  suggestedTests: string[];
+}
+
+export type ImportReportStatus = "running" | "succeeded" | "failed" | "cancelled";
+
+export interface ImportReportRecord {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  repositoryId: string | null;
+  actorId: string | null;
+  sourceKind: RepositoryKind;
+  status: ImportReportStatus;
+  startedAt: Date;
+  finishedAt: Date | null;
+  collectedFileCount: number;
+  collectedTextBytes: number;
+  ignored: { total: number; reasons: Record<string, number> };
+  snapshotId: string | null;
+  failureCode: string | null;
+}
+
 export interface CreateSnapshotInput {
   snapshot: SourceSnapshotRecord;
   files: SourceFileRecord[];
@@ -237,10 +321,23 @@ export interface KnowledgeSearchResult {
   kind: SearchResultKind;
   title: string;
   excerpt: string;
+  matchReason: string;
   score: number;
   pageId: string;
   releaseId: string;
   citations: Citation[];
+}
+
+export function knowledgeMatchReason(kind: SearchResultKind, title: string, query: string): string {
+  const normalizedTitle = title.trim().toLocaleLowerCase();
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const pathLike = kind === "path" || (kind === "module" && title.includes("/"));
+  if (pathLike && normalizedTitle === normalizedQuery) return "精确路径匹配";
+  if (kind === "symbol" && normalizedTitle === normalizedQuery) return "精确符号匹配";
+  if (pathLike && normalizedTitle.startsWith(normalizedQuery)) return "路径前缀匹配";
+  if (kind === "symbol" && normalizedTitle.startsWith(normalizedQuery)) return "符号前缀匹配";
+  if (kind === "dependency-neighbor") return "依赖邻居匹配";
+  return "知识正文匹配";
 }
 
 export interface KnowledgeMetadata {
@@ -248,7 +345,7 @@ export interface KnowledgeMetadata {
     name: string; kind: string; path: string; startLine: number; endLine: number; exported: boolean;
   }>;
   dependencies: Array<{
-    source: string; target: string; kind: string; path: string; startLine: number; endLine: number;
+    source: string; target: string; kind: string; path: string; targetPath: string | null; startLine: number; endLine: number;
   }>;
 }
 
@@ -340,12 +437,65 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
     input: { email: string; passwordHash: string; role: TeamRole },
     actorId: string
   ): Promise<TeamMemberRecord | null>;
+  resetTeamMemberPassword(
+    workspaceId: string,
+    userId: string,
+    passwordHash: string,
+    actorId: string
+  ): Promise<TeamMemberRecord | null>;
+  setTeamMemberDisabled(
+    workspaceId: string,
+    userId: string,
+    disabled: boolean,
+    actorId: string
+  ): Promise<TeamMemberRecord | null>;
   listProjects(workspaceId: string, pagination?: Pagination): Promise<ProjectRecord[]>;
   createProject(
     workspaceId: string,
     input: { name: string; slug: string },
     actorId: string
   ): Promise<ProjectRecord | null>;
+  listAccessibleProjects(
+    workspaceId: string,
+    userId: string,
+    pagination?: Pagination
+  ): Promise<ProjectRecord[]>;
+  workspaceOverview(workspaceId: string, userId: string): Promise<WorkspaceProjectOverviewRecord[]>;
+  searchWorkspaceKnowledge(
+    workspaceId: string,
+    userId: string,
+    query: string
+  ): Promise<WorkspaceKnowledgeSearchRecord[]>;
+  listProjectMembers(
+    workspaceId: string,
+    projectId: string,
+    pagination?: Pagination
+  ): Promise<ProjectMemberRecord[]>;
+  addProjectMember(
+    workspaceId: string,
+    projectId: string,
+    userId: string,
+    role: ProjectRole,
+    actorId: string
+  ): Promise<ProjectMemberRecord | null>;
+  updateProjectMemberRole(
+    workspaceId: string,
+    projectId: string,
+    userId: string,
+    role: ProjectRole,
+    actorId: string
+  ): Promise<ProjectMemberRecord | null>;
+  removeProjectMember(
+    workspaceId: string,
+    projectId: string,
+    userId: string,
+    actorId: string
+  ): Promise<ProjectMemberRecord | null>;
+  projectAccess(
+    workspaceId: string,
+    projectId: string,
+    userId: string
+  ): Promise<ProjectAccess | null>;
   defaultWorkspace(): Promise<WorkspaceRecord | null>;
   recordAudit(event: AuditEventInput): Promise<void>;
   listProjectActivity(
@@ -354,6 +504,15 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
     pagination?: Pagination
   ): Promise<AuditEventRecord[]>;
   countProjectActivity(workspaceId: string, projectId: string): Promise<number>;
+  createImportReport(input: Omit<ImportReportRecord, "id" | "startedAt" | "finishedAt" | "status" | "collectedFileCount" | "collectedTextBytes" | "ignored" | "snapshotId" | "failureCode">): Promise<ImportReportRecord>;
+  finishImportReport(
+    workspaceId: string,
+    reportId: string,
+    input: Pick<ImportReportRecord, "status" | "collectedFileCount" | "collectedTextBytes" | "ignored" | "snapshotId" | "failureCode">
+  ): Promise<ImportReportRecord | null>;
+  listImportReports(workspaceId: string, projectId: string, pagination?: Pagination): Promise<ImportReportRecord[]>;
+  countImportReports(workspaceId: string, projectId: string): Promise<number>;
+  deleteExpiredImportReports(cutoff: Date): Promise<number>;
   createMcpToken(input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">):
     Promise<McpTokenRecord>;
   createMcpTokenWithAudit(
@@ -370,6 +529,12 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
     tokenId: string,
     actorId: string
   ): Promise<McpTokenRecord | null>;
+  rotateMcpTokenWithAudit(
+    workspaceId: string,
+    tokenId: string,
+    replacement: Pick<McpTokenRecord, "tokenHash" | "tokenPrefix">,
+    actorId: string
+  ): Promise<McpTokenRotation | null>;
   createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord>;
   reportFeedbackWithAudit(input: CreateFeedbackInput): Promise<AgentFeedbackRecord>;
   listFeedback(
@@ -410,6 +575,8 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
     projectId?: string
   ): Promise<RepositoryRecord | null>;
   currentRepository(workspaceId: string, projectId?: string): Promise<RepositoryRecord | null>;
+  listActiveGitRepositories(): Promise<RepositoryRecord[]>;
+  getRepository(workspaceId: string, repositoryId: string): Promise<RepositoryRecord | null>;
   listArchivedRepositories(workspaceId: string): Promise<RepositoryRecord[]>;
   switchRepositoryWithAudit(
     workspaceId: string,
@@ -434,6 +601,7 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   ): Promise<SourceSnapshotRecord | null>;
   findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null>;
   latestSnapshot(workspaceId: string, repositoryId: string): Promise<SourceSnapshotRecord | null>;
+  snapshotChangeSummary(workspaceId: string, repositoryId: string, snapshotId: string): Promise<SnapshotChangeSummary | null>;
   findSourceFile(
     workspaceId: string,
     snapshotId: string,
@@ -442,6 +610,7 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   createSnapshot(input: CreateSnapshotInput): Promise<SourceSnapshotRecord>;
   createSnapshotWithAudit(input: CreateSnapshotInput, actorId: string): Promise<SourceSnapshotRecord>;
   countSnapshotFiles(snapshotId: string): Promise<number>;
+  snapshotTextBytes(snapshotId: string): Promise<number>;
   repositoryCredential(workspaceId: string, repositoryId: string): Promise<string | null>;
   getModelConfig(workspaceId: string): Promise<ModelConfigRecord | null>;
   upsertModelConfig(

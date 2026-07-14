@@ -16,6 +16,7 @@ describe("delivery database isolation", () => {
     expect(compose.services.postgres.volumes).toContain(
       "./docker/postgres/init-test-db.sql:/docker-entrypoint-initdb.d/10-create-test-db.sql:ro"
     );
+    expect(compose.services.integration.build.target).toBe("integration");
     expect(ci.jobs.verify.env.TEST_DATABASE_URL).toContain("/devkh_test");
   });
 
@@ -54,5 +55,20 @@ describe("delivery database isolation", () => {
     expect(smokeSteps).toContain("docker build --target runtime");
     expect(smokeSteps).toContain("docker compose config --quiet");
     expect(smokeSteps).toContain("docker compose up -d");
+  });
+
+  test("mounts resumable upload staging at the same path used by the application", async () => {
+    const dockerfile = await readFile("Dockerfile", "utf8");
+    const compose = parse(await readFile("docker-compose.yml", "utf8"));
+
+    expect(dockerfile).toContain("/var/lib/devkh/upload-staging");
+    expect(compose.services.app.volumes).toContain("upload_staging:/var/lib/devkh/upload-staging");
+  });
+
+  test("keeps uploaded source data in its own durable volume", async () => {
+    const compose = parse(await readFile("docker-compose.yml", "utf8"));
+
+    expect(compose.services.app.volumes).toContain("uploaded_sources:/var/lib/devkh/uploads");
+    expect(compose.volumes).toHaveProperty("uploaded_sources");
   });
 });

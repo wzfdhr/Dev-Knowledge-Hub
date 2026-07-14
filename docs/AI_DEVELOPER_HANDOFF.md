@@ -73,7 +73,6 @@ git status --short
 当前支持：
 
 - 浏览器选择完整项目文件夹，推荐方式。
-- 直接上传 ZIP。
 - HTTPS Git URL，可选 PAT。
 - 服务器自身可访问的本地 Git 绝对路径。
 - 安全更换资料来源，旧来源及其快照/发布保留为只读归档。
@@ -81,7 +80,7 @@ git status --short
 上传限制：
 
 - 过滤后压缩包最大 500 MiB。
-- 最多 50,000 个条目。
+- 最多 50,000 个可采集文件；依赖、缓存和构建目录在扫描时跳过，不计入该限制。
 - 解压后最大 2 GiB。
 - 单个可采集文本文件最大 1 MiB。
 - 分块最大 16 MiB，客户端默认使用固定分块续传。
@@ -97,7 +96,7 @@ git status --short
 - 不支持的扩展名
 - 超过 1 MiB 的源码文本
 
-上传流程有六个固定阶段：读取文件、安全过滤、本地压缩、分块上传、服务端校验、创建内容版本。界面展示进度、速度、预计剩余时间、暂停、继续和取消。
+上传流程有六个固定阶段：读取文件、安全过滤、本地压缩、分块上传、服务端校验、创建内容版本。控制台只提供文件夹选择；压缩包仅为浏览器内部传输格式。界面展示进度、速度、预计剩余时间、暂停、继续和取消。
 
 ### 4.3 不可变快照与知识构建
 
@@ -200,7 +199,7 @@ Codex 行为约束是“代码修改、排错、评审、规划和测试设计�
 - MCP SDK
 - AI SDK
 - Vitest + Testing Library + Playwright
-- Docker Compose + Caddy
+- Docker Compose + Nginx reverse proxy in the deployed public environment
 
 ### 主要边界
 
@@ -252,7 +251,7 @@ Codex 行为约束是“代码修改、排错、评审、规划和测试设计�
 - HTTPS Git URL 禁止内嵌用户名/密码。
 - ZIP 拒绝绝对路径、路径穿越、反斜杠路径、符号链接、密码包、重复/冲突条目和压缩炸弹。
 - 原始 ZIP 导入后删除，只长期保留过滤后的不可变源码和文档。
-- PostgreSQL 不应暴露公网；生产只开放 Caddy 80/443。
+- PostgreSQL 不应暴露公网；生产由 Nginx 为 `hub.starking.icu` 提供 TLS，应用仅监听 localhost。
 - 不要把 `.env`、数据库转储、SSH 私钥、服务器地址、Token 或生成密钥写入仓库、聊天或此文档。
 
 ## 7. 本地运行
@@ -430,6 +429,6 @@ npm test
 - 知识算法：`src/server/knowledge/intelligence.ts`、`generator.ts`、`postgres-store.ts`
 - MCP/Codex：`src/server/mcp/`、`src/server/codex/`、`src/client/pages/project-codex-page.tsx`
 - UI：`src/client/pages/`、`src/client/components/`、`src/client/workbench.css`、`src/client/styles.css`
-- 部署：`Dockerfile`、`docker-compose.yml`、`deployment/Caddyfile`、`src/server/bootstrap.ts`
+- 部署：`Dockerfile`、`docker-compose.yml`、`deployment/nginx/`、`src/server/bootstrap.ts`
 
 这份文档描述的是当前实现边界。任何接手者都应以代码、迁移和测试结果为最终事实来源。

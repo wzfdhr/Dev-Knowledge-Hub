@@ -12,7 +12,7 @@ export class PgBossBuildJobQueue implements BuildJobQueue {
   }
 
   async send(buildId: string): Promise<void> {
-    await this.boss.send(BUILD_QUEUE, { buildId }, { singletonKey: buildId });
+    await this.boss.upsert(BUILD_QUEUE, { buildId }, { singletonKey: buildId });
   }
 
   async start(handler: (buildId: string) => Promise<void>): Promise<void> {

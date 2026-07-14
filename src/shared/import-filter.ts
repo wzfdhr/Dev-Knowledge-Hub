@@ -16,11 +16,20 @@ export interface ImportFilterInput {
 
 export type ImportFilterResult = { accepted: true } | { accepted: false; reason: ImportIgnoreReason };
 
-const excludedDirectories = new Set([".git", "node_modules", "dist", "build", "coverage", ".next"]);
+const excludedDirectories = new Set([
+  ".git", "node_modules", "bower_components", "jspm_packages", ".pnpm-store", ".yarn",
+  "dist", "build", "coverage", ".next", ".nuxt", ".svelte-kit", ".vite", ".turbo",
+  ".cache", ".parcel-cache", "out", "target", ".gradle", ".mvn", ".venv", "venv",
+  "__pycache__", ".pytest_cache", ".mypy_cache", ".tox", ".ruff_cache", ".dart_tool", ".terraform"
+]);
 const sourceExtensions = new Set(["ts", "tsx", "js", "jsx", "md", "json", "yaml", "yml"]);
 
 function basename(filePath: string): string {
   return filePath.split("/").at(-1) ?? filePath;
+}
+
+export function isExcludedImportDirectory(name: string): boolean {
+  return excludedDirectories.has(name);
 }
 
 function hasSupportedExtension(filePath: string): boolean {
@@ -49,7 +58,7 @@ function isGenerated(content: Uint8Array): boolean {
 
 export function filterImportFile(input: ImportFilterInput): ImportFilterResult {
   if (input.byteSize > MAX_IMPORT_SOURCE_FILE_BYTES) return { accepted: false, reason: "file_too_large" };
-  if (input.path.split("/").some((segment) => excludedDirectories.has(segment))) {
+  if (input.path.split("/").some(isExcludedImportDirectory)) {
     return { accepted: false, reason: "excluded_directory" };
   }
   if (basename(input.path) === ".env") return { accepted: false, reason: "sensitive_file" };

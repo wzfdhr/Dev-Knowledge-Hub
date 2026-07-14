@@ -177,50 +177,54 @@
 }
 
 .import-stage-list {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  display: flex;
+  flex-direction: column;
   gap: 0;
   margin: 0 0 22px;
   padding: 0;
-  list-style: none;
 }
 
-.import-stage-list li {
-  position: relative;
+.import-stage {
   min-height: 48px;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
   gap: 9px;
-  padding: 10px 8px 10px 30px;
+  padding: 10px 8px;
   border-bottom: 1px solid #edf0f3;
   color: #8993a3;
   font-size: 12px;
   font-weight: 650;
 }
 
-.import-stage-list li:nth-last-child(-n + 2) {
-  border-bottom: 0;
-}
-
-.import-stage-list li > span {
-  position: absolute;
-  left: 5px;
+.import-stage-icon {
   width: 17px;
   height: 17px;
   display: grid;
+  flex: 0 0 auto;
   place-items: center;
+}
+
+.import-stage-label {
+  min-width: 0;
+  flex: 1 1 0;
+  overflow-wrap: anywhere;
 }
 
 .import-stage-list svg {
   width: 15px;
 }
 
-.import-stage-list li.active {
+.import-stage.active {
   color: #175da9;
 }
 
-.import-stage-list li.complete {
+.import-stage.complete {
   color: #147447;
+}
+
+.import-stage:last-child {
+  border-bottom: 0;
 }
 
 .import-progress-meta {
@@ -364,13 +368,6 @@
     grid-template-columns: 1fr;
   }
 
-  .import-stage-list {
-    grid-template-columns: repeat(3, 1fr);
-  }
-
-  .import-stage-list li:nth-last-child(-n + 3) {
-    border-bottom: 0;
-  }
 }
 
 @media (max-width: 760px) {
@@ -391,14 +388,6 @@
   .import-report,
   .import-confirm-panel {
     padding: 20px;
-  }
-
-  .import-stage-list {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .import-stage-list li:nth-last-child(3) {
-    border-bottom: 1px solid #edf0f3;
   }
 
   .import-metrics {

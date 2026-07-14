@@ -2,7 +2,7 @@
 
 ## Trust model
 
-Dev Knowledge Hub is a private, single-deployment MVP intended for a trusted operator network. It is not yet suitable for untrusted public signup, arbitrary tenant hosting, or internet exposure without an authenticated reverse proxy and the future-public gates below.
+Dev Knowledge Hub is a private, single-deployment service for a trusted, administrator-created team. It is available through the authenticated `hub.starking.icu` reverse proxy, but it is not suitable for untrusted public signup, arbitrary tenant hosting, or anonymous internet use.
 
 ## Controls
 
@@ -13,7 +13,7 @@ Dev Knowledge Hub is a private, single-deployment MVP intended for a trusted ope
 - Published source reads are path-contained, release/snapshot-scoped, hash-verified, and limited to 500 lines.
 - Request bodies are capped at 1 MiB. Fixed-window per-IP limits cover setup, login, all MCP requests, and feedback writes. Default one-minute limits are 5, 10, 120, and 30 respectively. Limiter state sweeps expired buckets every minute and is capped at 10,000 deterministic least-recently-used entries per process.
 - Responses set CSP, frame denial, MIME sniff prevention, opener isolation, and no-referrer policy. Production logs redact authorization, cookies, passwords, tokens, API keys, secrets, and credential fields.
-- The app container runs as the image `node` user with a read-only root filesystem, no-new-privileges, bounded temporary storage, health checks, and persistent writable data mounts only. Caddy is the only Compose service that publishes host ports (`80` and `443`); the app and PostgreSQL remain on the private Compose network.
+- The app container runs as the image `node` user with a read-only root filesystem, no-new-privileges, bounded temporary storage, health checks, and persistent writable data mounts only. Nginx terminates TLS for `hub.starking.icu`; the app binds only to `127.0.0.1:3000` and PostgreSQL remains on the private Compose network.
 - CI scans every Git-tracked file for committed env files, complete and encrypted private-key blocks, GitHub/OpenAI/Anthropic token forms, and credentialized HTTP remotes. Dependency license expressions must match the checked-in allowlist.
 
 ## Secret handling
@@ -25,8 +25,8 @@ Changing `DEVKH_MASTER_KEY` without re-encrypting stored credentials makes those
 ## Known limits
 
 - Rate limits are in-process and per replica; a shared limiter is required before horizontal scaling.
-- Admin access has one role and no MFA, SSO, account recovery, or session revocation list.
-- The app does not terminate TLS. The checked-in Caddy deployment configuration terminates HTTPS automatically for `DEVKH_DOMAIN`; DNS must resolve to the server and inbound TCP `80`/`443` must be available for certificate issuance and renewal.
+- Administrator-created accounts have no MFA, SSO, self-service account recovery, or session revocation list. Do not expose the setup endpoint as a signup workflow.
+- The app does not terminate TLS. The production Nginx virtual host terminates HTTPS for `hub.starking.icu`; DNS must resolve to the server and inbound TCP `80`/`443` must be available for certificate issuance and renewal.
 - Remote repository host allowlisting, egress controls, malware scanning, and webhook signature ingestion are not implemented.
 - Security headers are application defaults, not a substitute for proxy/network controls.
 

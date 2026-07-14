@@ -3,7 +3,14 @@ import type { BuildStatus } from "../../server/knowledge/build-service";
 
 export interface Admin { id: string; email: string; role?: "admin" | "member" | "reader" }
 export interface Session { authenticated: true; admin: Admin }
-export interface TeamMember { id: string; email: string; role: "admin" | "member" | "reader"; createdAt?: string }
+export interface TeamMember {
+  id: string;
+  email: string;
+  role: "admin" | "member" | "reader";
+  createdAt?: string;
+  disabledAt?: string | null;
+}
+export type ProjectMember = TeamMember;
 export interface Project {
   id: string;
   name: string;
@@ -18,6 +25,23 @@ export interface ProjectSummary {
   currentRelease: Release | null;
   latestBuild: Build | null;
   memberCount: number;
+  indexedTextBytes?: number;
+  pendingFeedbackCount?: number;
+}
+export interface ProjectKnowledgeQuality {
+  repository: Repository | null;
+  latestSnapshot: RepositoryStatus["latestSnapshot"];
+  currentRelease: Release | null;
+  latestBuild: Build | null;
+  pendingFeedbackCount: number;
+  indexedTextBytes: number;
+  knowledge: { pageCount: number; chunkCount: number; citationCount: number };
+  change: SnapshotChangeSummary | null;
+  diagnostics: Array<{ code: "SOURCE_MISSING" | "SNAPSHOT_MISSING" | "BUILD_FAILED" | "RELEASE_MISSING" | "REBUILD_RECOMMENDED" | "PUBLISHED" }>;
+}
+export interface WorkspaceOverview {
+  projects: ProjectSummary[];
+  totals: { projects: number; connected: number; published: number; members: number };
 }
 export interface ProjectActivity {
   id: string;
@@ -53,6 +77,20 @@ export interface UploadSnapshotSummary {
   unchanged: boolean;
   ignored: { total: number; reasons: Record<string, number> };
 }
+export interface ImportReport {
+  id: string;
+  projectId: string;
+  repositoryId: string | null;
+  sourceKind: Repository["kind"];
+  status: "running" | "succeeded" | "failed" | "cancelled";
+  startedAt: string;
+  finishedAt: string | null;
+  collectedFileCount: number;
+  collectedTextBytes: number;
+  ignored: { total: number; reasons: Record<string, number> };
+  snapshotId: string | null;
+  failureCode: string | null;
+}
 export type ImportPhase = "reading" | "filtering" | "packaging" | "uploading" | "validating" | "snapshot";
 export type ImportRunStatus = "idle" | "running" | "paused" | "failed" | "completed" | "cancelled";
 export interface ImportProgress {
@@ -72,7 +110,19 @@ export interface SnapshotSummary {
   commitSha: string;
   ref: string;
   fileCount: number;
+  textBytes?: number;
+  ignored?: { total: number; reasons: Record<string, number> };
   unchanged: boolean;
+}
+export interface SnapshotChangeSummary {
+  snapshotId: string;
+  previousSnapshotId: string | null;
+  added: string[];
+  modified: string[];
+  deleted: string[];
+  requiresBuild: boolean;
+  affectedModules: string[];
+  suggestedTests: string[];
 }
 export interface Build {
   id: string;
@@ -93,7 +143,7 @@ export interface Release {
   commitSha?: string | null;
 }
 export interface RepositoryStatus {
-  repository: Repository;
+  repository: Repository | null;
   latestSnapshot: null | {
     id: string; commitSha: string; ref: string; commitTimestamp: string; fileCount?: number;
   };
@@ -103,7 +153,7 @@ export interface KnowledgeMetadata {
     name: string; kind: string; path: string; startLine: number; endLine: number; exported: boolean;
   }>;
   dependencies: Array<{
-    source: string; target: string; kind: string; path: string; startLine: number; endLine: number;
+    source: string; target: string; kind: string; path: string; targetPath: string | null; startLine: number; endLine: number;
   }>;
 }
 export interface Citation {
@@ -132,10 +182,16 @@ export interface SearchResult {
   kind: string;
   title: string;
   excerpt: string;
+  matchReason: string;
   score: number;
   pageId: string;
   releaseId: string;
   citations: Citation[];
+}
+export interface WorkspaceSearchResult extends SearchResult {
+  projectId: string;
+  projectName: string;
+  projectSlug: string;
 }
 export interface SourceExcerpt extends Citation { content: string }
 export interface Feedback {
@@ -149,6 +205,10 @@ export interface Feedback {
   rebuildBuildId: string | null;
   createdAt: string;
   updatedAt: string;
+  projectId: string;
+  projectName: string;
+  projectSlug: string;
+  releaseVersion: string;
 }
 export interface McpToken {
   id: string;

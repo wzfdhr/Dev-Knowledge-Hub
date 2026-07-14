@@ -17,7 +17,7 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   await page.getByRole("button", { name: "登录" }).click();
   await expect(page.getByRole("heading", { name: "项目中心" })).toBeVisible();
 
-  const projectRow = page.getByRole("row").filter({ hasText: "默认项目" });
+  const projectRow = page.locator(".project-directory-row").filter({ hasText: "默认项目" });
   await projectRow.getByRole("button", { name: /切换|打开/ }).click();
   await expect(page.getByRole("heading", { name: "项目概览" })).toBeVisible();
   const projectId = new URL(page.url()).pathname.split("/")[2];
@@ -84,8 +84,40 @@ test("folder import, project release, Codex, and collaboration workflow", async 
 
   await page.goto(`/projects/${projectId}/collaboration`);
   await expect(page.getByRole("heading", { name: "团队协作" })).toBeVisible();
-  await expect(page.getByText("团队角色")).toBeVisible();
+  await expect(page.locator(".member-list-heading")).toContainText("成员项目角色加入时间操作");
+  const adminMemberRow = page.locator(".member-row").filter({ hasText: "admin@example.com" });
+  await expect(adminMemberRow).toHaveCount(1);
+  await expect(adminMemberRow.getByRole("columnheader")).toHaveCount(0);
   await expect(page.getByText("创建了 Codex Token")).toBeVisible();
+
+  await page.goto("/members");
+  await page.getByRole("button", { name: "添加成员" }).click();
+  const createMemberPanel = page.locator(".members-page .panel");
+  await createMemberPanel.getByLabel("邮箱").fill("collaborator@example.com");
+  await createMemberPanel.getByLabel("初始密码").fill("correct horse battery staple");
+  await createMemberPanel.getByRole("button", { name: "创建成员" }).click();
+  await expect(page.locator(".workspace-member-list .member-row").filter({ hasText: "collaborator@example.com" })).toHaveCount(1);
+
+  await page.goto(`/projects/${projectId}/collaboration`);
+  await page.getByRole("button", { name: "添加成员" }).click();
+  const addMemberDialog = page.getByRole("dialog", { name: "添加项目成员" });
+  await addMemberDialog.getByRole("combobox", { name: "选择工作区成员" }).click();
+  await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option").filter({ hasText: "collaborator@example.com" }).click();
+  await addMemberDialog.getByRole("button", { name: "加入项目" }).click();
+  const collaboratorRow = page.locator(".member-row").filter({ hasText: "collaborator@example.com" });
+  await expect(collaboratorRow).toContainText("只读");
+  await collaboratorRow.getByRole("button", { name: "调整角色" }).click();
+  const roleDialog = page.getByRole("dialog", { name: "调整项目角色" });
+  await roleDialog.locator(".ant-select").click();
+  await page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden) .ant-select-item-option").filter({ hasText: "成员" }).click();
+  await roleDialog.getByRole("button", { name: /保\s*存/ }).click();
+  await expect(roleDialog).toBeHidden();
+  await expect(collaboratorRow).toContainText("成员");
+  await page.screenshot({ path: "test-results/collaboration-members-1440x1024.png", fullPage: true });
+  await collaboratorRow.getByRole("button", { name: "移除" }).click();
+  const removeDialog = page.getByRole("dialog", { name: "移除项目成员" });
+  await removeDialog.getByRole("button", { name: /移\s*除/ }).click();
+  await expect(collaboratorRow).toHaveCount(0);
 
   const seeded = await request.post("/__test__/feedback");
   expect(seeded.ok()).toBeTruthy();

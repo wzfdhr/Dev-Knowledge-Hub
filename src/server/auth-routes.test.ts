@@ -121,6 +121,45 @@ describe("setup and session routes", () => {
     expect(String(login.headers["set-cookie"])).toContain("Secure");
   });
 
+  test("an administrator can disable an invited member and immediately revoke that member's session", async () => {
+    const store = new MemoryAppStore();
+    const app = buildServer(options({ store }));
+    apps.push(app);
+    await app.inject({
+      method: "POST", url: "/api/setup",
+      payload: { email: "admin@example.com", password: "a secure admin password" }
+    });
+    const adminLogin = await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "admin@example.com", password: "a secure admin password" }
+    });
+    const adminCookie = sessionCookie(adminLogin);
+    const member = await app.inject({
+      method: "POST", url: "/api/members", headers: { cookie: adminCookie },
+      payload: { email: "member@example.com", password: "a secure member password", role: "member" }
+    });
+    const memberId = member.json<{ member: { id: string } }>().member.id;
+    const memberLogin = await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "member@example.com", password: "a secure member password" }
+    });
+    const memberCookie = sessionCookie(memberLogin);
+
+    const disabled = await app.inject({
+      method: "PATCH", url: `/api/members/${memberId}/disabled`, headers: { cookie: adminCookie },
+      payload: { disabled: true }
+    });
+
+    expect(disabled.statusCode).toBe(200);
+    expect(await app.inject({ method: "GET", url: "/api/session", headers: { cookie: memberCookie } }))
+      .toMatchObject({ statusCode: 401 });
+    expect(await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "member@example.com", password: "a secure member password" }
+    })).toMatchObject({ statusCode: 401 });
+    expect(store.auditEvents.map((event) => event.action)).toContain("member.disabled");
+  });
+
   test("repository routes reject unauthenticated requests", async () => {
     const app = buildServer(options());
     apps.push(app);

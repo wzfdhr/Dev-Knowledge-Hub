@@ -48,7 +48,13 @@ describe("team projects and members", () => {
     const secondRepo = await app.inject({ method: "POST", url: `/api/projects/${secondId}/repositories`, headers: { cookie }, payload: { kind: "upload", name: "乙资料" } });
     await store.recordAudit({ workspaceId: workspace!.id, actorId: admin!.id, action: "repository.sync_succeeded", resourceType: "repository", resourceId: firstRepo.json().repository.id });
     await store.recordAudit({ workspaceId: workspace!.id, actorId: admin!.id, action: "repository.sync_failed", resourceType: "repository", resourceId: secondRepo.json().repository.id });
-    await app.inject({ method: "POST", url: "/api/members", headers: { cookie }, payload: { email: "reader@example.com", password: "a secure reader password", role: "reader" } });
+    const reader = await app.inject({ method: "POST", url: "/api/members", headers: { cookie }, payload: { email: "reader@example.com", password: "a secure reader password", role: "reader" } });
+    await app.inject({
+      method: "POST",
+      url: `/api/projects/${firstId}/members`,
+      headers: { cookie },
+      payload: { userId: reader.json<{ member: { id: string } }>().member.id, role: "reader" }
+    });
     const login = await app.inject({ method: "POST", url: "/api/session", payload: { email: "reader@example.com", password: "a secure reader password" } });
     const readerCookie = String(login.headers["set-cookie"]).split(";", 1)[0];
 
@@ -64,6 +70,71 @@ describe("team projects and members", () => {
     expect(response.json().members).toEqual(expect.arrayContaining([
       expect.objectContaining({ email: "reader@example.com", role: "reader" })
     ]));
+  });
+
+  test("keeps project activity permission-scoped and redacts unapproved audit metadata", async () => {
+    const { app, store, cookie } = await authenticatedTeam();
+    const workspace = await store.defaultWorkspace();
+    const admin = await store.findAdminByEmail("admin@example.com");
+    const first = await app.inject({
+      method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "项目甲", slug: "project-a" }
+    });
+    const second = await app.inject({
+      method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "项目乙", slug: "project-b" }
+    });
+    const firstId = first.json<{ project: { id: string } }>().project.id;
+    const secondId = second.json<{ project: { id: string } }>().project.id;
+    const reader = await app.inject({
+      method: "POST", url: "/api/members", headers: { cookie },
+      payload: { email: "reader@example.com", password: "a secure reader password", role: "reader" }
+    });
+    const readerId = reader.json<{ member: { id: string } }>().member.id;
+    await app.inject({
+      method: "POST", url: `/api/projects/${firstId}/members`, headers: { cookie },
+      payload: { userId: readerId, role: "reader" }
+    });
+    await store.recordAudit({
+      workspaceId: workspace!.id,
+      actorId: admin!.id,
+      action: "project.audit_checked",
+      resourceType: "project",
+      resourceId: firstId,
+      metadata: { projectId: firstId, code: "SAFE", token: "dkh_should-not-leak", password: "should-not-leak" }
+    });
+    const login = await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "reader@example.com", password: "a secure reader password" }
+    });
+    const readerCookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+
+    const allowed = await app.inject({
+      method: "GET", url: `/api/projects/${firstId}/activity`, headers: { cookie: readerCookie }
+    });
+    const denied = await app.inject({
+      method: "GET", url: `/api/projects/${secondId}/activity`, headers: { cookie: readerCookie }
+    });
+    const memberWrite = await app.inject({
+      method: "PATCH", url: `/api/projects/${firstId}/members/${readerId}`, headers: { cookie: readerCookie },
+      payload: { role: "member" }
+    });
+    const adminRead = await app.inject({
+      method: "GET", url: `/api/projects/${secondId}/activity`, headers: { cookie }
+    });
+
+    expect(allowed.statusCode).toBe(200);
+    expect(allowed.json().activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "project.audit_checked",
+        metadata: { code: "SAFE" }
+      })
+    ]));
+    expect(allowed.body).not.toContain("dkh_should-not-leak");
+    expect(allowed.body).not.toContain("should-not-leak");
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json()).toMatchObject({ error: { code: "PROJECT_ACCESS_DENIED" } });
+    expect(memberWrite.statusCode).toBe(403);
+    expect(memberWrite.json()).toMatchObject({ error: { code: "PROJECT_ACCESS_DENIED" } });
+    expect(adminRead.statusCode).toBe(200);
   });
 
   test("initial setup provisions a default project for existing single-project workflows", async () => {
@@ -96,6 +167,116 @@ describe("team projects and members", () => {
     expect(projects.statusCode).toBe(200);
     expect(projects.json()).toMatchObject({
       projects: expect.arrayContaining([expect.objectContaining({ name: "控制台", slug: "console" })])
+    });
+  });
+
+  test("returns a permission-scoped workspace overview with real indexed text totals", async () => {
+    const { app, cookie } = await authenticatedTeam();
+
+    const overview = await app.inject({ method: "GET", url: "/api/workspace/overview", headers: { cookie } });
+
+    expect(overview.statusCode).toBe(200);
+    expect(overview.json()).toMatchObject({
+      projects: [expect.objectContaining({
+        repository: null,
+        latestSnapshot: null,
+        indexedTextBytes: 0,
+        pendingFeedbackCount: 0
+      })]
+    });
+  });
+
+  test("lists the server-side import history for an accessible project", async () => {
+    const { app, cookie } = await authenticatedTeam();
+    const projects = await app.inject({ method: "GET", url: "/api/projects", headers: { cookie } });
+    const projectId = projects.json<{ projects: Array<{ id: string }> }>().projects[0].id;
+
+    const reports = await app.inject({
+      method: "GET",
+      url: `/api/projects/${projectId}/import-reports`,
+      headers: { cookie }
+    });
+
+    expect(reports.statusCode).toBe(200);
+    expect(reports.json()).toMatchObject({ reports: [], total: 0, nextOffset: null });
+  });
+
+  test("returns a permission-scoped summary of the current project's latest snapshot changes", async () => {
+    const { app, store, cookie } = await authenticatedTeam();
+    const projects = await app.inject({ method: "GET", url: "/api/projects", headers: { cookie } });
+    const projectId = projects.json<{ projects: Array<{ id: string }> }>().projects[0].id;
+    const repository = await app.inject({
+      method: "POST", url: `/api/projects/${projectId}/repositories`, headers: { cookie },
+      payload: { kind: "upload", name: "团队资料" }
+    });
+    const repositoryId = repository.json<{ repository: { id: string } }>().repository.id;
+    const workspace = await store.defaultWorkspace();
+    await store.createSnapshot({
+      snapshot: {
+        id: "change-first", workspaceId: workspace!.id, repositoryId, commitSha: "a".repeat(40),
+        ref: "first", remoteUrl: null, commitTimestamp: new Date("2026-01-01T00:00:00.000Z"), storagePath: "/tmp/first"
+      },
+      files: [
+        { id: "first-kept", workspaceId: workspace!.id, snapshotId: "change-first", path: "src/kept.ts", byteSize: 3, contentHash: "one", language: "typescript" },
+        { id: "first-deleted", workspaceId: workspace!.id, snapshotId: "change-first", path: "src/deleted.ts", byteSize: 3, contentHash: "old", language: "typescript" }
+      ]
+    });
+    await store.createSnapshot({
+      snapshot: {
+        id: "change-second", workspaceId: workspace!.id, repositoryId, commitSha: "b".repeat(40),
+        ref: "second", remoteUrl: null, commitTimestamp: new Date("2026-01-02T00:00:00.000Z"), storagePath: "/tmp/second"
+      },
+      files: [
+        { id: "second-kept", workspaceId: workspace!.id, snapshotId: "change-second", path: "src/kept.ts", byteSize: 3, contentHash: "two", language: "typescript" },
+        { id: "second-added", workspaceId: workspace!.id, snapshotId: "change-second", path: "src/added.ts", byteSize: 3, contentHash: "new", language: "typescript" }
+      ]
+    });
+    await app.inject({
+      method: "POST", url: "/api/members", headers: { cookie },
+      payload: { email: "reader@example.com", password: "a secure reader password", role: "reader" }
+    });
+    const members = await app.inject({ method: "GET", url: "/api/members", headers: { cookie } });
+    const readerId = members.json<{ members: Array<{ id: string; email: string }> }>().members
+      .find((member) => member.email === "reader@example.com")!.id;
+    await app.inject({
+      method: "POST", url: `/api/projects/${projectId}/members`, headers: { cookie },
+      payload: { userId: readerId, role: "reader" }
+    });
+    const login = await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "reader@example.com", password: "a secure reader password" }
+    });
+    const readerCookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+
+    const changes = await app.inject({
+      method: "GET", url: `/api/projects/${projectId}/changes`, headers: { cookie: readerCookie }
+    });
+
+    expect(changes.statusCode).toBe(200);
+    expect(changes.json()).toEqual({
+      change: expect.objectContaining({
+        snapshotId: "change-second", previousSnapshotId: "change-first",
+        added: ["src/added.ts"], modified: ["src/kept.ts"], deleted: ["src/deleted.ts"], requiresBuild: true
+      })
+    });
+  });
+
+  test("reports a source-free project as an onboarding quality state instead of an API failure", async () => {
+    const { app, cookie } = await authenticatedTeam();
+    const projects = await app.inject({ method: "GET", url: "/api/projects", headers: { cookie } });
+    const projectId = projects.json<{ projects: Array<{ id: string }> }>().projects[0].id;
+
+    const quality = await app.inject({
+      method: "GET", url: `/api/projects/${projectId}/knowledge-quality`, headers: { cookie }
+    });
+
+    expect(quality.statusCode).toBe(200);
+    expect(quality.json()).toMatchObject({
+      repository: null,
+      latestSnapshot: null,
+      currentRelease: null,
+      knowledge: { pageCount: 0, chunkCount: 0, citationCount: 0 },
+      diagnostics: [expect.objectContaining({ code: "SOURCE_MISSING" })]
     });
   });
 
@@ -281,5 +462,56 @@ describe("team projects and members", () => {
     expect(pack.json()).toMatchObject({
       configToml: expect.stringContaining('url = "https://knowledge.example.com/mcp"')
     });
+  });
+
+  test("requires explicit project membership and lets a project administrator manage that project only", async () => {
+    const { app, cookie } = await authenticatedTeam();
+    const first = await app.inject({
+      method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "项目甲", slug: "project-a" }
+    });
+    const second = await app.inject({
+      method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "项目乙", slug: "project-b" }
+    });
+    const firstId = first.json<{ project: { id: string } }>().project.id;
+    const secondId = second.json<{ project: { id: string } }>().project.id;
+    await app.inject({ method: "POST", url: `/api/projects/${firstId}/repositories`, headers: { cookie }, payload: { kind: "upload", name: "甲资料" } });
+    await app.inject({ method: "POST", url: `/api/projects/${secondId}/repositories`, headers: { cookie }, payload: { kind: "upload", name: "乙资料" } });
+    const member = await app.inject({
+      method: "POST", url: "/api/members", headers: { cookie },
+      payload: { email: "member@example.com", password: "a secure member password", role: "member" }
+    });
+    const memberId = member.json<{ member: { id: string } }>().member.id;
+    const login = await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "member@example.com", password: "a secure member password" }
+    });
+    const memberCookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+
+    const denied = await app.inject({ method: "GET", url: `/api/projects/${firstId}/summary`, headers: { cookie: memberCookie } });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json()).toMatchObject({ error: { code: "PROJECT_ACCESS_DENIED" } });
+
+    await app.inject({
+      method: "POST", url: `/api/projects/${firstId}/members`, headers: { cookie },
+      payload: { userId: memberId, role: "admin" }
+    });
+    const visible = await app.inject({ method: "GET", url: "/api/projects", headers: { cookie: memberCookie } });
+    expect(visible.json()).toMatchObject({ projects: [expect.objectContaining({ id: firstId })] });
+    const projectRead = await app.inject({
+      method: "GET", url: "/api/repositories/current", headers: { cookie: memberCookie, "x-devkh-project": firstId }
+    });
+    expect(projectRead.statusCode).toBe(200);
+    const otherProject = await app.inject({ method: "GET", url: `/api/projects/${secondId}/summary`, headers: { cookie: memberCookie } });
+    expect(otherProject.statusCode).toBe(403);
+
+    const reader = await app.inject({
+      method: "POST", url: "/api/members", headers: { cookie },
+      payload: { email: "project-reader@example.com", password: "a secure reader password", role: "reader" }
+    });
+    const added = await app.inject({
+      method: "POST", url: `/api/projects/${firstId}/members`, headers: { cookie: memberCookie },
+      payload: { userId: reader.json<{ member: { id: string } }>().member.id, role: "reader" }
+    });
+    expect(added.statusCode).toBe(201);
   });
 });

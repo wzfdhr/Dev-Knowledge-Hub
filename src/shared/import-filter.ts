@@ -22,7 +22,7 @@ const excludedDirectories = new Set([
   ".cache", ".parcel-cache", "out", "target", ".gradle", ".mvn", ".venv", "venv",
   "__pycache__", ".pytest_cache", ".mypy_cache", ".tox", ".ruff_cache", ".dart_tool", ".terraform"
 ]);
-const sourceExtensions = new Set(["ts", "tsx", "js", "jsx", "md", "json", "yaml", "yml"]);
+const sourceExtensions = new Set(["ts", "tsx", "js", "jsx", "md", "json", "yaml", "yml", "csv", "xlsx"]);
 
 function basename(filePath: string): string {
   return filePath.split("/").at(-1) ?? filePath;
@@ -40,6 +40,10 @@ function hasSupportedExtension(filePath: string): boolean {
   if (/^tsconfig(?:\.[^.]+)?\.json$/.test(name)) return true;
   if (/^(?:vitest|jest|playwright|cypress)\.config\.(?:ts|js|tsx|jsx)$/.test(name)) return true;
   return sourceExtensions.has(name.split(".").at(-1)?.toLowerCase() ?? "");
+}
+
+function isTableWorkbook(filePath: string): boolean {
+  return basename(filePath).toLowerCase().endsWith(".xlsx");
 }
 
 function isUtf8(content: Uint8Array): boolean {
@@ -63,7 +67,7 @@ export function filterImportFile(input: ImportFilterInput): ImportFilterResult {
   }
   if (basename(input.path) === ".env") return { accepted: false, reason: "sensitive_file" };
   if (!hasSupportedExtension(input.path)) return { accepted: false, reason: "unsupported_extension" };
-  if (input.content && (input.content.includes(0) || !isUtf8(input.content))) return { accepted: false, reason: "binary" };
+  if (input.content && !isTableWorkbook(input.path) && (input.content.includes(0) || !isUtf8(input.content))) return { accepted: false, reason: "binary" };
   if (input.content && isGenerated(input.content)) return { accepted: false, reason: "generated" };
   return { accepted: true };
 }

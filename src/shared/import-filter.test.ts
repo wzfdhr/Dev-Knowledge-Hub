@@ -5,12 +5,16 @@ import { filterImportFile, isExcludedImportDirectory } from "./import-filter";
 describe("filterImportFile", () => {
   test("keeps supported source files and reports local exclusions", () => {
     expect(filterImportFile({ path: "src/main.ts", byteSize: 12 })).toEqual({ accepted: true });
+    expect(filterImportFile({ path: "data/usage.csv", byteSize: 12 })).toEqual({ accepted: true });
+    expect(filterImportFile({ path: "data/usage.xlsx", byteSize: 12 })).toEqual({ accepted: true });
     expect(filterImportFile({ path: "node_modules/react/index.js", byteSize: 12 }))
       .toEqual({ accepted: false, reason: "excluded_directory" });
     expect(filterImportFile({ path: ".env", byteSize: 12 }))
       .toEqual({ accepted: false, reason: "sensitive_file" });
     expect(filterImportFile({ path: "assets/logo.png", byteSize: 12 }))
       .toEqual({ accepted: false, reason: "unsupported_extension" });
+    expect(filterImportFile({ path: "data/usage.xlsx", byteSize: 2, content: new Uint8Array([0x50, 0x4b]) }))
+      .toEqual({ accepted: true });
   });
 
   test("rejects generated, binary and oversized source files when content is available", () => {

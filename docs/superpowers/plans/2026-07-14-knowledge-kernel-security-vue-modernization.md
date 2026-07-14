@@ -398,7 +398,7 @@ await expect(enhance(invalidCitationPayload, context)).resolves.toMatchObject({ 
 ### Task 19: Graph 模型与关系构建
 
 **依赖：** 阶段 3 门禁。
-**Files：** Create `drizzle/0019_knowledge_graph.sql`, `graph.ts`, `graph.test.ts`; Modify persistence contract/store/integration tests.
+**Files：** Create `drizzle/0020_knowledge_graph.sql`, `graph.ts`, `graph.test.ts`; Modify persistence contract/store/integration tests.
 **输入：** KnowledgeIR、TableSchema。
 **输出：** facts/candidates graph artifacts。
 

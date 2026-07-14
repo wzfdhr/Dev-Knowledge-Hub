@@ -53,10 +53,10 @@ integration("PostgreSQL cited knowledge integration", () => {
       `SELECT json_agg(table_name ORDER BY table_name) AS names
        FROM information_schema.tables
        WHERE table_schema = 'public'
-         AND table_name IN ('auth_sessions', 'build_events', 'build_jobs', 'build_stage_runs', 'import_reports', 'knowledge_artifacts', 'knowledge_chunks', 'project_members', 'releases')`
+         AND table_name IN ('auth_sessions', 'build_events', 'build_jobs', 'build_stage_runs', 'import_reports', 'knowledge_artifacts', 'knowledge_chunks', 'knowledge_graph_edges', 'knowledge_graph_nodes', 'project_members', 'releases')`
     );
     expect(rows[0].names).toEqual([
-      "auth_sessions", "build_events", "build_jobs", "build_stage_runs", "import_reports", "knowledge_artifacts", "knowledge_chunks", "project_members", "releases"
+      "auth_sessions", "build_events", "build_jobs", "build_stage_runs", "import_reports", "knowledge_artifacts", "knowledge_chunks", "knowledge_graph_edges", "knowledge_graph_nodes", "project_members", "releases"
     ]);
     const extension = await pool.query(
       "SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'"

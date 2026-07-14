@@ -15,6 +15,7 @@ import Fastify, {
 import { z } from "zod";
 
 import { AGENT_FEEDBACK_STATUSES, SERVICE_NAME } from "../shared/contracts.js";
+import { MAX_IMPORT_SOURCE_FILE_BYTES } from "../shared/import-filter.js";
 import {
   FeedbackNotAcknowledgedError,
   InvalidFeedbackTransitionError,
@@ -75,6 +76,12 @@ import {
   ResumableUploadError,
   ResumableUploadSessionManager
 } from "./uploads/resumable-upload.js";
+import {
+  FolderUploadError,
+  importFolderFiles,
+  MAX_FOLDER_UPLOAD_FILES,
+  type FolderUploadFile
+} from "./uploads/folder-import.js";
 
 const SESSION_COOKIE = "devkh_session";
 const CSRF_COOKIE = "devkh_csrf";
@@ -193,6 +200,10 @@ function sendError(reply: FastifyReply, statusCode: number, code: string, messag
   return reply.code(statusCode).send({ error: { code, message } });
 }
 
+async function rejectRetiredArchiveUpload(_request: FastifyRequest, reply: FastifyReply) {
+  return sendError(reply, 410, "ZIP_UPLOAD_RETIRED", "ZIP uploads are retired; select a project folder instead");
+}
+
 function repositoryDto(repository: RepositoryRecord) {
   const kind = (repository as { kind: string }).kind;
   return {
@@ -279,6 +290,26 @@ function requestedProjectId(request: FastifyRequest): string | undefined {
   return typeof value === "string" && z.uuid().safeParse(value).success ? value : undefined;
 }
 
+async function* directFolderParts(request: FastifyRequest): AsyncGenerator<FolderUploadFile> {
+  for await (const part of request.parts({
+    limits: {
+      files: MAX_FOLDER_UPLOAD_FILES,
+      fields: 0,
+      parts: MAX_FOLDER_UPLOAD_FILES,
+      fileSize: MAX_IMPORT_SOURCE_FILE_BYTES
+    }
+  })) {
+    if (part.type !== "file" || part.fieldname !== "files" || !part.filename) {
+      throw new FolderUploadError("UNSAFE_FOLDER_PATH", "Folder uploads require file parts named files");
+    }
+    const content = await part.toBuffer();
+    if (part.file.truncated) {
+      throw new FolderUploadError("FOLDER_SIZE_LIMIT", "Folder upload contains a file larger than 1 MiB");
+    }
+    yield { path: part.filename, content };
+  }
+}
+
 export function buildServer(options: ServerOptions): FastifyInstance {
   const server = Fastify({
     bodyLimit: MAX_REQUEST_BODY_BYTES,
@@ -322,6 +353,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
   void server.register(cookie);
   void server.register(multipart, {
+    preservePath: true,
     limits: {
       files: 1,
       fields: 0,
@@ -660,83 +692,20 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return reply.code(204).send();
   });
 
-  server.post("/api/uploads/resumable", { preHandler: requireContributor }, async (request, reply) => {
-    const parsed = z.object({
-      totalBytes: z.number().int().positive(),
-      chunkSize: z.number().int().positive()
-    }).safeParse(request.body);
-    if (!parsed.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload dimensions");
-    try {
-      const admin = (request as AuthenticatedRequest).sessionAdmin;
-      return reply.code(201).send(await resumableUploads.create({ ...parsed.data, ownerId: admin.id }));
-    } catch (error) {
-      if (error instanceof ResumableUploadError) {
-        return sendError(reply, 413, error.code, error.message);
-      }
-      request.log.error({ err: error }, "Resumable upload creation failed");
-      return sendError(reply, 500, "UPLOAD_FAILED", "Unable to create upload session");
-    }
-  });
-
-  server.get("/api/uploads/resumable/:id", { preHandler: requireContributor }, async (request, reply) => {
-    const parsed = z.object({ id: z.uuid() }).safeParse(request.params);
-    if (!parsed.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload session");
-    try {
-      const admin = (request as AuthenticatedRequest).sessionAdmin;
-      return await resumableUploads.status(parsed.data.id, admin.id);
-    } catch (error) {
-      if (error instanceof ResumableUploadError) {
-        return sendError(reply, 404, error.code, error.message);
-      }
-      request.log.error({ err: error }, "Resumable upload status failed");
-      return sendError(reply, 500, "UPLOAD_FAILED", "Unable to read upload session");
-    }
-  });
-
-  server.put(
-    "/api/uploads/resumable/:id/chunks/:index",
-    { preHandler: requireContributor, bodyLimit: 16 * 1024 * 1024 + 1024 },
-    async (request, reply) => {
-      const params = z.object({ id: z.uuid(), index: z.coerce.number().int().min(0) }).safeParse(request.params);
-      const declaredSize = z.coerce.number().int().positive().safeParse(request.headers["x-upload-chunk-size"]);
-      if (!params.success || !declaredSize.success || !Buffer.isBuffer(request.body)) {
-        return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload chunk");
-      }
-      try {
-        const admin = (request as AuthenticatedRequest).sessionAdmin;
-        return await resumableUploads.uploadChunk(
-          params.data.id,
-          params.data.index,
-          request.body,
-          declaredSize.data,
-          admin.id
-        );
-      } catch (error) {
-        if (error instanceof ResumableUploadError) {
-          const statusCode = error.code === "SESSION_NOT_FOUND" ? 404 : 409;
-          return sendError(reply, statusCode, error.code, error.message);
-        }
-        request.log.error({ err: error }, "Resumable upload chunk failed");
-        return sendError(reply, 500, "UPLOAD_FAILED", "Unable to save upload chunk");
-      }
-    }
-  );
-
   server.post(
-    "/api/projects/:projectId/uploads/resumable/:id/import",
+    "/api/projects/:projectId/folder-import",
     { preHandler: requireContributor },
     async (request, reply) => {
-      const params = z.object({ projectId: z.uuid(), id: z.uuid() }).safeParse(request.params);
-      if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload import");
+      const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+      if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid project folder upload");
       const admin = (request as AuthenticatedRequest).sessionAdmin;
       await requireProjectRole("member", params.data.projectId, request, reply);
       if (reply.sent) return;
       const repository = await options.store.currentRepository(admin.workspaceId, params.data.projectId);
       if (!repository || repository.kind !== "upload") {
-        return sendError(reply, 409, "UPLOAD_REPOSITORY_REQUIRED", "Project requires an upload source");
+        return sendError(reply, 409, "UPLOAD_REPOSITORY_REQUIRED", "Project requires a folder upload source");
       }
-      let finalizedPath: string | undefined;
-      const importReport = await options.store.createImportReport({
+      const report = await options.store.createImportReport({
         workspaceId: admin.workspaceId,
         projectId: params.data.projectId,
         repositoryId: repository.id,
@@ -744,17 +713,15 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         sourceKind: repository.kind
       });
       try {
-        const finalized = await resumableUploads.finalize(params.data.id, admin.id);
-        finalizedPath = finalized.path;
-        const summary = await importZipArchive({
-          archivePath: finalized.path,
+        const summary = await importFolderFiles({
+          files: directFolderParts(request),
           dataDir: options.dataDir,
           workspaceId: admin.workspaceId,
           repositoryId: repository.id,
           actorId: admin.id,
           store: options.store
         });
-        await options.store.finishImportReport(admin.workspaceId, importReport.id, {
+        await options.store.finishImportReport(admin.workspaceId, report.id, {
           status: "succeeded",
           collectedFileCount: summary.fileCount,
           collectedTextBytes: summary.textBytes,
@@ -762,36 +729,102 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           snapshotId: summary.snapshotId,
           failureCode: null
         });
-        reply.code(summary.unchanged ? 200 : 201);
-        return {
+        return reply.code(summary.unchanged ? 200 : 201).send({
           snapshotId: summary.snapshotId,
           sourceVersion: summary.sourceVersion,
           fileCount: summary.fileCount,
           unchanged: summary.unchanged,
           ignored: summary.ignored
-        };
+        });
       } catch (error) {
-        const failureCode = error instanceof ResumableUploadError || error instanceof UploadArchiveError
-          ? error.code
-          : "UPLOAD_FAILED";
-        await options.store.finishImportReport(admin.workspaceId, importReport.id, {
+        const code = error instanceof FolderUploadError ? error.code : "UPLOAD_FAILED";
+        await options.store.finishImportReport(admin.workspaceId, report.id, {
           status: "failed",
           collectedFileCount: 0,
           collectedTextBytes: 0,
           ignored: { total: 0, reasons: {} },
           snapshotId: null,
-          failureCode
+          failureCode: code
         }).catch(() => undefined);
-        if (error instanceof ResumableUploadError || error instanceof UploadArchiveError) {
-          const statusCode = error instanceof ResumableUploadError
-            ? (error.code === "SESSION_NOT_FOUND" ? 404 : 409)
-            : (error.code === "COMPRESSED_SIZE_LIMIT" ? 413 : 400);
+        if (error instanceof FolderUploadError) {
+          const statusCode = error.code === "FOLDER_SIZE_LIMIT" || error.code === "TOO_MANY_FILES" ? 413 : 400;
           return sendError(reply, statusCode, error.code, error.message);
         }
-        request.log.error({ err: error }, "Resumable ZIP import failed");
-        return sendError(reply, 500, "UPLOAD_FAILED", "Unable to import ZIP upload");
+        request.log.error({ err: error }, "Folder import failed");
+        return sendError(reply, 500, "UPLOAD_FAILED", "Unable to import project folder");
+      }
+    }
+  );
+
+  server.post(
+    "/api/repositories/:repositoryId/folder-import",
+    { preHandler: requireContributor },
+    async (request, reply) => {
+      const params = z.object({ repositoryId: z.uuid() }).safeParse(request.params);
+      if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid replacement folder upload");
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      const candidates = await options.store.listArchivedRepositories(admin.workspaceId);
+      const repository = candidates.find((candidate) => candidate.id === params.data.repositoryId && candidate.kind === "upload");
+      if (!repository || await options.store.latestSnapshot(admin.workspaceId, repository.id)) {
+        return sendError(reply, 404, "UPLOAD_REPLACEMENT_NOT_FOUND", "Folder upload replacement was not found");
+      }
+      await requireProjectRole("admin", repository.projectId, request, reply);
+      if (reply.sent) return;
+      const report = await options.store.createImportReport({
+        workspaceId: admin.workspaceId,
+        projectId: repository.projectId,
+        repositoryId: repository.id,
+        actorId: admin.id,
+        sourceKind: repository.kind
+      });
+      let activated = false;
+      try {
+        const summary = await importFolderFiles({
+          files: directFolderParts(request),
+          dataDir: options.dataDir,
+          workspaceId: admin.workspaceId,
+          repositoryId: repository.id,
+          actorId: admin.id,
+          store: options.store
+        });
+        const replacement = await options.store.activateUploadReplacementWithAudit(admin.workspaceId, repository.id, admin.id);
+        if (!replacement) return sendError(reply, 409, "UPLOAD_REPLACEMENT_NOT_FOUND", "Folder upload replacement was not found");
+        activated = true;
+        await options.store.finishImportReport(admin.workspaceId, report.id, {
+          status: "succeeded",
+          collectedFileCount: summary.fileCount,
+          collectedTextBytes: summary.textBytes,
+          ignored: summary.ignored,
+          snapshotId: summary.snapshotId,
+          failureCode: null
+        });
+        return reply.code(summary.unchanged ? 200 : 201).send({
+          snapshotId: summary.snapshotId,
+          sourceVersion: summary.sourceVersion,
+          fileCount: summary.fileCount,
+          unchanged: summary.unchanged,
+          ignored: summary.ignored
+        });
+      } catch (error) {
+        const code = error instanceof FolderUploadError ? error.code : "UPLOAD_FAILED";
+        await options.store.finishImportReport(admin.workspaceId, report.id, {
+          status: "failed",
+          collectedFileCount: 0,
+          collectedTextBytes: 0,
+          ignored: { total: 0, reasons: {} },
+          snapshotId: null,
+          failureCode: code
+        }).catch(() => undefined);
+        if (error instanceof FolderUploadError) {
+          const statusCode = error.code === "FOLDER_SIZE_LIMIT" || error.code === "TOO_MANY_FILES" ? 413 : 400;
+          return sendError(reply, statusCode, error.code, error.message);
+        }
+        request.log.error({ err: error }, "Folder replacement import failed");
+        return sendError(reply, 500, "UPLOAD_FAILED", "Unable to import replacement folder");
       } finally {
-        if (finalizedPath) await resumableUploads.discard(params.data.id, admin.id).catch(() => undefined);
+        if (!activated) {
+          await options.store.discardPendingUploadReplacement(admin.workspaceId, repository.id).catch(() => undefined);
+        }
       }
     }
   );
@@ -1390,7 +1423,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   server.post(
     "/api/repositories/current/uploads",
     {
-      preHandler: requireAdmin,
+      preHandler: [requireAdmin, rejectRetiredArchiveUpload],
       bodyLimit: MAX_UPLOAD_COMPRESSED_BYTES + 1024 * 1024
     },
     async (request, reply) => {
@@ -1489,7 +1522,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   server.post(
     "/api/repositories/:repositoryId/uploads",
     {
-      preHandler: requireAdmin,
+      preHandler: [requireAdmin, rejectRetiredArchiveUpload],
       bodyLimit: MAX_UPLOAD_COMPRESSED_BYTES + 1024 * 1024
     },
     async (request, reply) => {
@@ -1584,7 +1617,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.post(
     "/api/repositories/:repositoryId/uploads/resumable/:id/import",
-    { preHandler: requireContributor },
+    { preHandler: [requireContributor, rejectRetiredArchiveUpload] },
     async (request, reply) => {
       const params = z.object({ repositoryId: z.uuid(), id: z.uuid() }).safeParse(request.params);
       if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload replacement");
@@ -1658,7 +1691,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           reply,
           409,
           "UPLOAD_IMPORT_REQUIRED",
-          "Upload repositories receive new versions through ZIP import"
+          "Upload repositories receive new versions through folder import"
         );
       }
       const importReport = await options.store.createImportReport({

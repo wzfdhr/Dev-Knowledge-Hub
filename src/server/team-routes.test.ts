@@ -339,8 +339,13 @@ describe("team projects and members", () => {
     expect(denied.json()).toMatchObject({ error: { code: "FORBIDDEN" } });
   });
 
-  test("a read-only member cannot start an upload session", async () => {
+  test("a read-only member cannot start a folder import", async () => {
     const { app, cookie } = await authenticatedTeam();
+    const project = await app.inject({
+      method: "POST", url: "/api/projects", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { name: "受限项目", slug: "restricted-project" }
+    });
+    const projectId = project.json<{ project: { id: string } }>().project.id;
     await app.inject({
       method: "POST", url: "/api/members", headers: { cookie, ...csrfHeaders(cookie) },
       payload: { email: "reader@example.com", password: "a secure reader password", role: "reader" }
@@ -352,8 +357,8 @@ describe("team projects and members", () => {
     const readerCookie = authenticatedCookie(login);
 
     const upload = await app.inject({
-      method: "POST", url: "/api/uploads/resumable", headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) },
-      payload: { totalBytes: 8, chunkSize: 4 }
+      method: "POST", url: `/api/projects/${projectId}/folder-import`, headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) },
+      payload: {}
     });
 
     expect(upload.statusCode).toBe(403);

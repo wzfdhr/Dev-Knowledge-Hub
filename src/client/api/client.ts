@@ -6,7 +6,7 @@ import type {
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
-import type { ResumableUploadApi, ResumableUploadStatus } from "./resumable-upload";
+import type { FolderImportFile } from "./folder-import";
 
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly details?: ApiErrorShape["error"]) {
@@ -61,7 +61,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.status === 204 ? undefined as T : response.json() as Promise<T>;
 }
 
-export interface ApiClient extends ResumableUploadApi {
+export interface ApiClient {
   setupStatus(): Promise<{ setupRequired: boolean }>;
   setup(input: { email: string; password: string }): Promise<unknown>;
   login(input: { email: string; password: string; code?: string; recoveryCode?: string }): Promise<Session>;
@@ -87,8 +87,8 @@ export interface ApiClient extends ResumableUploadApi {
   connectRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository }>;
   replaceRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository; pendingUpload?: boolean }>;
   listArchivedRepositories(): Promise<{ repositories: ArchivedRepository[] }>;
-  uploadZip(file: File): Promise<UploadSnapshotSummary>;
-  uploadReplacementZip(repositoryId: string, file: File): Promise<UploadSnapshotSummary>;
+  uploadFolder(projectId: string, files: FolderImportFile[]): Promise<UploadSnapshotSummary>;
+  uploadReplacementFolder(repositoryId: string, files: FolderImportFile[]): Promise<UploadSnapshotSummary>;
   getRepository(): Promise<{ repository: Repository | null }>;
   getRepositoryStatus(): Promise<RepositoryStatus>;
   syncRepository(): Promise<SnapshotSummary>;
@@ -182,37 +182,16 @@ export const api: ApiClient = {
   },
   replaceRepository: (input) => request("/api/repositories/current/replace", { method: "POST", body: json(input) }),
   listArchivedRepositories: () => request("/api/repositories/archived"),
-  uploadZip: (file) => {
+  uploadFolder: (projectId, files) => {
     const data = new FormData();
-    data.append("file", file, file.name);
-    return request("/api/repositories/current/uploads", { method: "POST", body: data });
+    for (const item of files) data.append("files", item.file, item.path);
+    return request(`/api/projects/${encodeURIComponent(projectId)}/folder-import`, { method: "POST", body: data });
   },
-  uploadReplacementZip: (repositoryId, file) => {
+  uploadReplacementFolder: (repositoryId, files) => {
     const data = new FormData();
-    data.append("file", file, file.name);
-    return request(`/api/repositories/${encodeURIComponent(repositoryId)}/uploads`, { method: "POST", body: data });
+    for (const item of files) data.append("files", item.file, item.path);
+    return request(`/api/repositories/${encodeURIComponent(repositoryId)}/folder-import`, { method: "POST", body: data });
   },
-  createResumableUpload: (input) => request<ResumableUploadStatus>("/api/uploads/resumable", { method: "POST", body: json(input) }),
-  getResumableUpload: (id) => request<ResumableUploadStatus>(`/api/uploads/resumable/${encodeURIComponent(id)}`),
-  uploadResumableChunk: (id, index, content) => request<ResumableUploadStatus>(
-    `/api/uploads/resumable/${encodeURIComponent(id)}/chunks/${index}`,
-    {
-      method: "PUT",
-      body: content,
-      headers: {
-        "content-type": "application/octet-stream",
-        "x-upload-chunk-size": String(content.size)
-      }
-    }
-  ),
-  importResumableUpload: (projectId, id) => request(
-    `/api/projects/${encodeURIComponent(projectId)}/uploads/resumable/${encodeURIComponent(id)}/import`,
-    { method: "POST" }
-  ),
-  importResumableReplacementUpload: (repositoryId, id) => request(
-    `/api/repositories/${encodeURIComponent(repositoryId)}/uploads/resumable/${encodeURIComponent(id)}/import`,
-    { method: "POST" }
-  ),
   getRepository: () => request("/api/repositories/current"),
   getRepositoryStatus: () => request("/api/repositories/current/status"),
   syncRepository: () => request("/api/repositories/current/sync", { method: "POST" }),

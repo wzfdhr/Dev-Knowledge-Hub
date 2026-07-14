@@ -71,4 +71,13 @@ describe("delivery database isolation", () => {
     expect(compose.services.app.volumes).toContain("uploaded_sources:/var/lib/devkh/uploads");
     expect(compose.volumes).toHaveProperty("uploaded_sources");
   });
+
+  test("keeps content-addressed artifacts in their own durable volume", async () => {
+    const dockerfile = await readFile("Dockerfile", "utf8");
+    const compose = parse(await readFile("docker-compose.yml", "utf8"));
+
+    expect(dockerfile).toContain("/var/lib/devkh/artifacts");
+    expect(compose.services.app.volumes).toContain("artifact_data:/var/lib/devkh/artifacts");
+    expect(compose.volumes).toHaveProperty("artifact_data");
+  });
 });

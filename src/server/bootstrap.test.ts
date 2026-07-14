@@ -19,6 +19,7 @@ function dependencies(): BootstrapDependencies {
     createStore: vi.fn(() => store as never),
     createBuildQueue: vi.fn(() => queue as never),
     createBuildService: vi.fn(() => buildService as never),
+    createArtifactStore: vi.fn(() => ({ initialize: vi.fn(async () => {}) })),
     buildServer: vi.fn(() => server as never),
     createUploadStagingCleaner: vi.fn(() => ({ cleanupExpired: vi.fn(async () => ({ sessions: 0, completed: 0 })) })),
     setInterval: vi.fn(() => ({})),
@@ -38,6 +39,8 @@ describe("production bootstrap", () => {
 
   test("migrates and builds the server with the PostgreSQL store", async () => {
     const deps = dependencies();
+    const artifactStore = { initialize: vi.fn(async () => {}) };
+    (deps as BootstrapDependencies & { createArtifactStore: (directory: string) => typeof artifactStore }).createArtifactStore = vi.fn(() => artifactStore);
     const masterKey = Buffer.alloc(32, 7).toString("base64");
     const server = await bootstrapProductionServer({
       DATABASE_URL: "postgres://localhost/devkh",
@@ -55,6 +58,8 @@ describe("production bootstrap", () => {
     expect(deps.createStore).toHaveBeenCalledWith(database.pool);
     expect(deps.createBuildQueue).toHaveBeenCalledWith("postgres://localhost/devkh");
     expect(deps.createBuildService).toHaveBeenCalledWith(store, queue, expect.any(Function));
+    expect(deps.createArtifactStore).toHaveBeenCalledWith("/var/lib/devkh/artifacts", store);
+    expect(artifactStore.initialize).toHaveBeenCalledOnce();
     expect(buildService.start).toHaveBeenCalledOnce();
     expect(deps.buildServer).toHaveBeenCalledWith(expect.objectContaining({
       store,

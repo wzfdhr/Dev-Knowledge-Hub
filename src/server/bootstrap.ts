@@ -14,12 +14,18 @@ import { decryptSecret } from "./security/crypto.js";
 import { syncRepository } from "./git/snapshot.js";
 import { ResumableUploadSessionManager } from "./uploads/resumable-upload.js";
 import { PostgresSessionStore } from "./security/session-store.js";
+import { ArtifactStore } from "./knowledge/pipeline/artifact-store.js";
+import type { PipelineArtifactStore } from "./persistence/store.js";
 
 const UPLOAD_STAGING_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const IMPORT_REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 
 interface UploadStagingCleaner {
   cleanupExpired(): Promise<unknown>;
+}
+
+interface ArtifactStoreInitializer {
+  initialize(): Promise<void>;
 }
 
 export interface BootstrapDependencies {
@@ -32,6 +38,7 @@ export interface BootstrapDependencies {
     queue: BuildJobQueue,
     enhancerForWorkspace: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>
   ) => BuildService;
+  createArtifactStore: (directory: string, persistence: PipelineArtifactStore) => ArtifactStoreInitializer;
   buildServer: typeof buildServer;
   createUploadStagingCleaner?: (directory: string) => UploadStagingCleaner;
   setInterval?: (callback: () => void, delay: number) => unknown;
@@ -46,6 +53,7 @@ const defaultDependencies: BootstrapDependencies = {
   createBuildQueue: (connectionString) => new PgBossBuildJobQueue(connectionString),
   createBuildService: (store, queue, enhancerForWorkspace) =>
     new BuildService(store, queue, { enhancerForWorkspace }),
+  createArtifactStore: (directory, persistence) => new ArtifactStore(directory, persistence),
   buildServer
 };
 
@@ -64,6 +72,11 @@ export async function bootstrapServer(
   const database = dependencies.createDatabase(env.databaseUrl);
   await dependencies.runMigrations(database.pool);
   const store = dependencies.createStore(database.pool);
+  const artifactStore = dependencies.createArtifactStore(
+    path.join(env.dataDir, "artifacts"),
+    store as AppStore & PipelineArtifactStore
+  );
+  await artifactStore.initialize();
   const queue = dependencies.createBuildQueue(env.databaseUrl);
   const enhancerForWorkspace = async (workspaceId: string): Promise<KnowledgeEnhancer | undefined> => {
     const config = await store.getModelConfig(workspaceId);

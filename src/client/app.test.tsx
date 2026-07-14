@@ -81,7 +81,8 @@ describe("shared console copy", () => {
 
     renderAppAt(api, "/projects/project-1/collaboration");
 
-    expect(await screen.findByRole("heading", { name: "AHeart Admin" })).toBeVisible();
+    await waitFor(() => expect(api.listProjects).toHaveBeenCalledOnce(), { timeout: 5_000 });
+    expect(await screen.findByRole("heading", { name: "AHeart Admin" }, { timeout: 5_000 })).toBeVisible();
     expect(screen.getByRole("navigation", { name: "项目导航" })).toBeVisible();
     expect(screen.getByRole("link", { name: "项目概览" })).toHaveAttribute("href", "/projects/project-1/overview");
     expect(screen.getByRole("link", { name: "资料上传" })).toHaveAttribute("href", "/projects/project-1/imports");

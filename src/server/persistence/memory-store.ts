@@ -12,6 +12,8 @@ import {
 
 import type {
   AdminRecord,
+  AdminMfaRecord,
+  AdminMfaRecoveryCodeRecord,
   AgentFeedbackRecord,
   AgentFeedbackStatus,
   AppStore,
@@ -58,6 +60,8 @@ export class MemoryAppStore implements AppStore {
   private workspace: WorkspaceRecord | null = null;
   private admin: AdminRecord | null = null;
   private readonly members: TeamMemberRecord[] = [];
+  readonly adminMfa: AdminMfaRecord[] = [];
+  readonly adminMfaRecoveryCodes: Array<AdminMfaRecoveryCodeRecord & { workspaceId: string; userId: string }> = [];
   private readonly projects: ProjectRecord[] = [];
   private readonly projectMembers: Array<ProjectMemberRecord & { userId: string }> = [];
   private readonly repositories: RepositoryRecord[] = [];
@@ -159,6 +163,86 @@ export class MemoryAppStore implements AppStore {
       disabledAt: member.disabledAt,
       sessionVersion: member.sessionVersion
     } : null;
+  }
+
+  async getAdminMfa(workspaceId: string, userId: string): Promise<AdminMfaRecord | null> {
+    const record = this.adminMfa.find((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId);
+    return record ? { ...record } : null;
+  }
+
+  async savePendingAdminMfa(workspaceId: string, userId: string, encryptedSecret: string): Promise<AdminMfaRecord> {
+    const previous = this.adminMfa.find((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId);
+    const record: AdminMfaRecord = {
+      userId, workspaceId, encryptedSecret, enabledAt: null, failedAttempts: 0, lockedUntil: null
+    };
+    if (previous) this.adminMfa[this.adminMfa.indexOf(previous)] = record;
+    else this.adminMfa.push(record);
+    for (const candidate of this.adminMfaRecoveryCodes.filter((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId)) {
+      this.adminMfaRecoveryCodes.splice(this.adminMfaRecoveryCodes.indexOf(candidate), 1);
+    }
+    return { ...record };
+  }
+
+  async enableAdminMfa(
+    workspaceId: string, userId: string, recoveryCodeHashes: string[], actorId: string
+  ): Promise<AdminMfaRecord | null> {
+    const record = this.adminMfa.find((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId);
+    if (!record) return null;
+    record.enabledAt = new Date();
+    record.failedAttempts = 0;
+    record.lockedUntil = null;
+    const member = this.members.find((candidate) => candidate.workspaceId === workspaceId && candidate.id === userId);
+    if (!member) return null;
+    member.sessionVersion += 1;
+    this.adminMfaRecoveryCodes.push(...recoveryCodeHashes.map((codeHash) => ({
+      id: randomUUID(), workspaceId, userId, codeHash, usedAt: null
+    })));
+    await this.recordAudit({ workspaceId, actorId, action: "mfa.enabled", resourceType: "admin_mfa", resourceId: userId });
+    return { ...record };
+  }
+
+  async clearAdminMfaFailures(workspaceId: string, userId: string): Promise<void> {
+    const record = this.adminMfa.find((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId);
+    if (!record) return;
+    record.failedAttempts = 0;
+    record.lockedUntil = null;
+  }
+
+  async recordAdminMfaFailure(workspaceId: string, userId: string, now = new Date()): Promise<AdminMfaRecord | null> {
+    const record = this.adminMfa.find((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId);
+    if (!record) return null;
+    if (record.lockedUntil && record.lockedUntil > now) return { ...record };
+    record.failedAttempts += 1;
+    if (record.failedAttempts >= 5) record.lockedUntil = new Date(now.getTime() + 15 * 60 * 1_000);
+    return { ...record };
+  }
+
+  async listActiveAdminMfaRecoveryCodes(workspaceId: string, userId: string): Promise<AdminMfaRecoveryCodeRecord[]> {
+    return this.adminMfaRecoveryCodes.filter((candidate) =>
+      candidate.workspaceId === workspaceId && candidate.userId === userId && !candidate.usedAt
+    ).map(({ id, codeHash, usedAt }) => ({ id, codeHash, usedAt }));
+  }
+
+  async consumeAdminMfaRecoveryCode(workspaceId: string, userId: string, id: string): Promise<boolean> {
+    const record = this.adminMfaRecoveryCodes.find((candidate) =>
+      candidate.id === id && candidate.workspaceId === workspaceId && candidate.userId === userId && !candidate.usedAt
+    );
+    if (!record) return false;
+    record.usedAt = new Date();
+    return true;
+  }
+
+  async disableAdminMfa(workspaceId: string, userId: string, actorId: string): Promise<boolean> {
+    const record = this.adminMfa.find((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId);
+    const member = this.members.find((candidate) => candidate.workspaceId === workspaceId && candidate.id === userId);
+    if (!record || !record.enabledAt || !member) return false;
+    this.adminMfa.splice(this.adminMfa.indexOf(record), 1);
+    for (const candidate of this.adminMfaRecoveryCodes.filter((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId)) {
+      this.adminMfaRecoveryCodes.splice(this.adminMfaRecoveryCodes.indexOf(candidate), 1);
+    }
+    member.sessionVersion += 1;
+    await this.recordAudit({ workspaceId, actorId, action: "mfa.disabled", resourceType: "admin_mfa", resourceId: userId });
+    return true;
   }
 
   async listTeamMembers(workspaceId: string, pagination?: Pagination): Promise<TeamMemberRecord[]> {

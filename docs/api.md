@@ -14,6 +14,10 @@ The administration API uses JSON under `/api`. Except health, setup status, setu
 | POST | `/api/session` | `{email,password}`; set session cookie |
 | GET/DELETE | `/api/session` | Read or clear session |
 | GET/PUT | `/api/settings/model` | Sanitized config; PUT `{provider,model,apiKey?}` |
+| GET | `/api/settings/mfa` | Administrator MFA state: enabled, pending enrollment, and temporary lock |
+| POST | `/api/settings/mfa/enroll` | Verify `{currentPassword}` and issue a one-time TOTP enrollment secret |
+| POST | `/api/settings/mfa/verify` | Confirm pending `{code}` and return one-time recovery codes |
+| DELETE | `/api/settings/mfa` | Disable MFA using `{currentPassword,code}`; revokes all sessions |
 | GET/POST | `/api/projects` | List projects or create `{name,slug}` |
 | GET | `/api/projects/:projectId/summary` | Project source, latest snapshot/build, current release, and team count |
 | GET | `/api/projects/:projectId/activity` | Paginated project-isolated audit activity plus workspace members |

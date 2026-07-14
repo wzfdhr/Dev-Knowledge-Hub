@@ -33,6 +33,14 @@ import { decryptSecret, encryptSecret } from "./security/crypto.js";
 import { DirtyWorktreeError, syncRepository } from "./git/snapshot.js";
 import { hashPassword, verifyPassword } from "./security/password.js";
 import {
+  createRecoveryCodes,
+  createTotpSecret,
+  hashRecoveryCode,
+  totpUri,
+  verifyRecoveryCode,
+  verifyTotp
+} from "./security/mfa.js";
+import {
   createCsrfToken,
   createOpaqueSessionId,
   hashSessionId,
@@ -77,6 +85,13 @@ const credentialsSchema = z.object({
   email: z.email().transform((value) => value.toLowerCase()),
   password: z.string().min(12)
 });
+const loginSchema = credentialsSchema.extend({
+  code: z.string().regex(/^\d{6}$/).optional(),
+  recoveryCode: z.string().min(8).max(64).optional()
+}).refine((value) => !(value.code && value.recoveryCode), "Provide one MFA factor");
+const mfaEnrollmentSchema = z.object({ currentPassword: z.string().min(12) });
+const mfaCodeSchema = z.object({ code: z.string().regex(/^\d{6}$/) });
+const mfaDisableSchema = z.object({ currentPassword: z.string().min(12), code: z.string().regex(/^\d{6}$/) });
 
 const repositorySchema = z.discriminatedUnion("kind", [
   z.object({
@@ -501,23 +516,55 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
 
   server.post("/api/session", async (request, reply) => {
-    const parsed = credentialsSchema.safeParse(request.body);
+    const parsed = loginSchema.safeParse(request.body);
     const workspace = await options.store.defaultWorkspace();
-    const admin = parsed.success ? await options.store.findAdminByEmail(parsed.data.email) : null;
-    const valid = parsed.success && admin && !admin.disabledAt
-      ? await verifyPassword(admin.passwordHash, parsed.data.password)
+    const credentials = parsed.success && parsed.data ? parsed.data : null;
+    const admin = credentials ? await options.store.findAdminByEmail(credentials.email) : null;
+    const valid = credentials && admin && !admin.disabledAt
+      ? await verifyPassword(admin.passwordHash, credentials.password)
       : false;
 
-    if (!valid || !admin) {
+    if (!credentials || !valid || !admin) {
       if (workspace) {
         void options.store.recordAudit({
           workspaceId: workspace.id,
           action: "session.login_failed",
           resourceType: "session",
-          metadata: { email: parsed.success ? parsed.data.email : "invalid" }
+          metadata: { email: credentials?.email ?? "invalid" }
         }).catch(() => undefined);
       }
       return sendError(reply, 401, "INVALID_CREDENTIALS", "Invalid email or password");
+    }
+
+    const mfa = await options.store.getAdminMfa(admin.workspaceId, admin.id);
+    if (mfa?.enabledAt) {
+      if (mfa.lockedUntil && mfa.lockedUntil > new Date()) {
+        return sendError(reply, 429, "MFA_LOCKED", "MFA is temporarily locked after repeated failed attempts");
+      }
+      let mfaValid = false;
+      if (credentials.code) {
+        mfaValid = verifyTotp(credentials.code, decryptSecret(mfa.encryptedSecret, options.masterKey));
+      } else if (credentials.recoveryCode) {
+        const candidates = await options.store.listActiveAdminMfaRecoveryCodes(admin.workspaceId, admin.id);
+        for (const candidate of candidates) {
+          if (await verifyRecoveryCode(credentials.recoveryCode, candidate.codeHash)) {
+            mfaValid = await options.store.consumeAdminMfaRecoveryCode(admin.workspaceId, admin.id, candidate.id);
+            break;
+          }
+        }
+      } else {
+        return sendError(reply, 401, "MFA_REQUIRED", "MFA verification is required");
+      }
+      if (!mfaValid) {
+        const failure = await options.store.recordAdminMfaFailure(admin.workspaceId, admin.id);
+        return sendError(
+          reply,
+          failure?.lockedUntil && failure.lockedUntil > new Date() ? 429 : 401,
+          failure?.lockedUntil && failure.lockedUntil > new Date() ? "MFA_LOCKED" : "INVALID_MFA_CODE",
+          "Invalid MFA verification code"
+        );
+      }
+      await options.store.clearAdminMfaFailures(admin.workspaceId, admin.id);
     }
 
     const sessionId = createOpaqueSessionId();
@@ -548,6 +595,69 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   server.get("/api/session", { preHandler: requireAdmin }, async (request) => {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     return { authenticated: true, admin: { id: admin.id, email: admin.email, role: admin.role } };
+  });
+
+  server.post("/api/settings/mfa/enroll", { preHandler: requireAdministrator }, async (request, reply) => {
+    const parsed = mfaEnrollmentSchema.safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MFA enrollment request");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    if (!await verifyPassword(admin.passwordHash, parsed.data.currentPassword)) {
+      return sendError(reply, 401, "INVALID_CREDENTIALS", "Invalid credentials");
+    }
+    const secret = createTotpSecret();
+    await options.store.savePendingAdminMfa(admin.workspaceId, admin.id, encryptSecret(secret, options.masterKey));
+    await options.store.recordAudit({
+      workspaceId: admin.workspaceId, actorId: admin.id, action: "mfa.enrollment_started", resourceType: "admin_mfa", resourceId: admin.id
+    });
+    return reply.code(201).send({ enabled: false, secret, otpauthUri: totpUri(admin.email, secret) });
+  });
+
+  server.get("/api/settings/mfa", { preHandler: requireAdministrator }, async (request) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const mfa = await options.store.getAdminMfa(admin.workspaceId, admin.id);
+    return {
+      enabled: Boolean(mfa?.enabledAt),
+      pending: Boolean(mfa && !mfa.enabledAt),
+      lockedUntil: mfa?.lockedUntil?.toISOString() ?? null
+    };
+  });
+
+  server.post("/api/settings/mfa/verify", { preHandler: requireAdministrator }, async (request, reply) => {
+    const parsed = mfaCodeSchema.safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MFA verification code");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const mfa = await options.store.getAdminMfa(admin.workspaceId, admin.id);
+    if (!mfa || mfa.enabledAt) return sendError(reply, 409, "MFA_ENROLLMENT_NOT_FOUND", "No pending MFA enrollment was found");
+    if (!verifyTotp(parsed.data.code, decryptSecret(mfa.encryptedSecret, options.masterKey))) {
+      await options.store.recordAdminMfaFailure(admin.workspaceId, admin.id);
+      return sendError(reply, 401, "INVALID_MFA_CODE", "Invalid MFA verification code");
+    }
+    const recoveryCodes = createRecoveryCodes();
+    const enabled = await options.store.enableAdminMfa(
+      admin.workspaceId, admin.id, await Promise.all(recoveryCodes.map(hashRecoveryCode)), admin.id
+    );
+    if (!enabled) return sendError(reply, 409, "MFA_ENROLLMENT_NOT_FOUND", "No pending MFA enrollment was found");
+    reply.clearCookie(SESSION_COOKIE, { path: "/" });
+    reply.clearCookie(CSRF_COOKIE, { path: "/" });
+    return { enabled: true, recoveryCodes };
+  });
+
+  server.delete("/api/settings/mfa", { preHandler: requireAdministrator }, async (request, reply) => {
+    const parsed = mfaDisableSchema.safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MFA disable request");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const mfa = await options.store.getAdminMfa(admin.workspaceId, admin.id);
+    if (!mfa?.enabledAt) return sendError(reply, 404, "MFA_NOT_ENABLED", "MFA is not enabled");
+    if (!await verifyPassword(admin.passwordHash, parsed.data.currentPassword)
+      || !verifyTotp(parsed.data.code, decryptSecret(mfa.encryptedSecret, options.masterKey))) {
+      return sendError(reply, 401, "INVALID_MFA_CODE", "Invalid MFA verification code");
+    }
+    if (!await options.store.disableAdminMfa(admin.workspaceId, admin.id, admin.id)) {
+      return sendError(reply, 404, "MFA_NOT_ENABLED", "MFA is not enabled");
+    }
+    reply.clearCookie(SESSION_COOKIE, { path: "/" });
+    reply.clearCookie(CSRF_COOKIE, { path: "/" });
+    return reply.code(204).send();
   });
 
   server.post("/api/uploads/resumable", { preHandler: requireContributor }, async (request, reply) => {

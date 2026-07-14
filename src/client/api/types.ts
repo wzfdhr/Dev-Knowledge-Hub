@@ -3,6 +3,7 @@ import type { BuildStatus } from "../../server/knowledge/build-service";
 
 export interface Admin { id: string; email: string; role?: "admin" | "member" | "reader" }
 export interface Session { authenticated: true; admin: Admin }
+export interface MfaStatus { enabled: boolean; pending: boolean; lockedUntil: string | null }
 export interface TeamMember {
   id: string;
   email: string;

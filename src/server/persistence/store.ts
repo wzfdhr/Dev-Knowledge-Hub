@@ -38,6 +38,21 @@ export interface TeamMemberRecord {
   sessionVersion: number;
 }
 
+export interface AdminMfaRecord {
+  userId: string;
+  workspaceId: string;
+  encryptedSecret: string;
+  enabledAt: Date | null;
+  failedAttempts: number;
+  lockedUntil: Date | null;
+}
+
+export interface AdminMfaRecoveryCodeRecord {
+  id: string;
+  codeHash: string;
+  usedAt: Date | null;
+}
+
 export interface ProjectRecord {
   id: string;
   workspaceId: string;
@@ -430,6 +445,19 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   createInitialSetup(email: string, passwordHash: string): Promise<SetupResult | null>;
   findAdminByEmail(email: string): Promise<AdminRecord | null>;
   findAdminById(id: string, workspaceId: string): Promise<AdminRecord | null>;
+  getAdminMfa(workspaceId: string, userId: string): Promise<AdminMfaRecord | null>;
+  savePendingAdminMfa(workspaceId: string, userId: string, encryptedSecret: string): Promise<AdminMfaRecord>;
+  enableAdminMfa(
+    workspaceId: string,
+    userId: string,
+    recoveryCodeHashes: string[],
+    actorId: string
+  ): Promise<AdminMfaRecord | null>;
+  clearAdminMfaFailures(workspaceId: string, userId: string): Promise<void>;
+  recordAdminMfaFailure(workspaceId: string, userId: string, now?: Date): Promise<AdminMfaRecord | null>;
+  listActiveAdminMfaRecoveryCodes(workspaceId: string, userId: string): Promise<AdminMfaRecoveryCodeRecord[]>;
+  consumeAdminMfaRecoveryCode(workspaceId: string, userId: string, id: string): Promise<boolean>;
+  disableAdminMfa(workspaceId: string, userId: string, actorId: string): Promise<boolean>;
   listTeamMembers(workspaceId: string, pagination?: Pagination): Promise<TeamMemberRecord[]>;
   countTeamMembers(workspaceId: string): Promise<number>;
   createTeamMember(

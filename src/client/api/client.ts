@@ -2,7 +2,7 @@ import type {
   ApiErrorShape, Build, Feedback, McpConnection, McpToken, KnowledgePageRecord,
   ArchivedRepository, KnowledgeMetadata, ProjectKnowledgeQuality, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotChangeSummary, SnapshotSummary, SourceExcerpt,
   UploadSnapshotSummary, ImportReport, TeamMember, ProjectMember, Project, ProjectSummary, ProjectActivity, CodexConnectionPack,
-  WorkspaceOverview, WorkspaceSearchResult
+  WorkspaceOverview, WorkspaceSearchResult, MfaStatus
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
@@ -64,7 +64,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export interface ApiClient extends ResumableUploadApi {
   setupStatus(): Promise<{ setupRequired: boolean }>;
   setup(input: { email: string; password: string }): Promise<unknown>;
-  login(input: { email: string; password: string }): Promise<Session>;
+  login(input: { email: string; password: string; code?: string; recoveryCode?: string }): Promise<Session>;
   session(): Promise<Session>;
   logout(): Promise<void>;
   listMembers(): Promise<{ members: TeamMember[] }>;
@@ -121,6 +121,10 @@ export interface ApiClient extends ResumableUploadApi {
   rotateMcpToken(id: string): Promise<{ previous: McpToken; replacement: McpToken; token: string }>;
   getModelConfig(): Promise<{ config: ModelConfig | null }>;
   updateModelConfig(input: { provider: ModelProvider; model: string; apiKey: string }): Promise<{ config: ModelConfig }>;
+  getMfaStatus(): Promise<MfaStatus>;
+  enrollMfa(currentPassword: string): Promise<{ enabled: false; secret: string; otpauthUri: string }>;
+  verifyMfa(code: string): Promise<{ enabled: true; recoveryCodes: string[] }>;
+  disableMfa(input: { currentPassword: string; code: string }): Promise<void>;
 }
 
 const json = (value: unknown) => JSON.stringify(value);
@@ -250,7 +254,11 @@ export const api: ApiClient = {
   revokeMcpToken: (id) => request(`/api/mcp/tokens/${id}/revoke`, { method: "POST" }),
   rotateMcpToken: (id) => request(`/api/mcp/tokens/${encodeURIComponent(id)}/rotate`, { method: "POST" }),
   getModelConfig: () => request("/api/settings/model"),
-  updateModelConfig: (input) => request("/api/settings/model", { method: "PUT", body: json(input) })
+  updateModelConfig: (input) => request("/api/settings/model", { method: "PUT", body: json(input) }),
+  getMfaStatus: () => request("/api/settings/mfa"),
+  enrollMfa: (currentPassword) => request("/api/settings/mfa/enroll", { method: "POST", body: json({ currentPassword }) }),
+  verifyMfa: (code) => request("/api/settings/mfa/verify", { method: "POST", body: json({ code }) }),
+  disableMfa: (input) => request("/api/settings/mfa", { method: "DELETE", body: json(input) })
 };
 
 export function errorMessage(error: unknown): string {

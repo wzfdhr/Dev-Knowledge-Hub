@@ -12,6 +12,8 @@ import {
 
 import type {
   AdminRecord,
+  AdminMfaRecord,
+  AdminMfaRecoveryCodeRecord,
   AgentFeedbackRecord,
   AgentFeedbackStatus,
   AppStore,
@@ -209,6 +211,26 @@ interface AuditEventRow extends QueryResultRow {
   resource_id: string | null;
   metadata: Record<string, unknown>;
   created_at: Date;
+}
+
+interface AdminMfaRow extends QueryResultRow {
+  user_id: string;
+  workspace_id: string;
+  encrypted_secret: string;
+  enabled_at: Date | null;
+  failed_attempts: number;
+  locked_until: Date | null;
+}
+
+function adminMfaRecord(row: AdminMfaRow): AdminMfaRecord {
+  return {
+    userId: row.user_id,
+    workspaceId: row.workspace_id,
+    encryptedSecret: row.encrypted_secret,
+    enabledAt: row.enabled_at,
+    failedAttempts: row.failed_attempts,
+    lockedUntil: row.locked_until
+  };
 }
 
 function repositoryRecord(row: RepositoryRow): RepositoryRecord {
@@ -534,6 +556,110 @@ export class PostgresAppStore implements AppStore {
       disabledAt: row.disabled_at,
       sessionVersion: row.session_version
     } : null;
+  }
+
+  async getAdminMfa(workspaceId: string, userId: string): Promise<AdminMfaRecord | null> {
+    const { rows } = await this.pool.query<AdminMfaRow>(
+      `SELECT user_id, workspace_id, encrypted_secret, enabled_at, failed_attempts, locked_until
+       FROM admin_mfa WHERE workspace_id = $1 AND user_id = $2`,
+      [workspaceId, userId]
+    );
+    return rows[0] ? adminMfaRecord(rows[0]) : null;
+  }
+
+  async savePendingAdminMfa(workspaceId: string, userId: string, encryptedSecret: string): Promise<AdminMfaRecord> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<AdminMfaRow>(
+        `INSERT INTO admin_mfa (user_id, workspace_id, encrypted_secret, enabled_at, failed_attempts, locked_until)
+         VALUES ($1, $2, $3, NULL, 0, NULL)
+         ON CONFLICT (user_id) DO UPDATE SET encrypted_secret = EXCLUDED.encrypted_secret,
+           workspace_id = EXCLUDED.workspace_id, enabled_at = NULL, failed_attempts = 0, locked_until = NULL, updated_at = now()
+         RETURNING user_id, workspace_id, encrypted_secret, enabled_at, failed_attempts, locked_until`,
+        [userId, workspaceId, encryptedSecret]
+      );
+      await client.query("DELETE FROM admin_mfa_recovery_codes WHERE workspace_id = $1 AND user_id = $2", [workspaceId, userId]);
+      return adminMfaRecord(rows[0]);
+    });
+  }
+
+  async enableAdminMfa(
+    workspaceId: string, userId: string, recoveryCodeHashes: string[], actorId: string
+  ): Promise<AdminMfaRecord | null> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<AdminMfaRow>(
+        `UPDATE admin_mfa SET enabled_at = now(), failed_attempts = 0, locked_until = NULL, updated_at = now()
+         WHERE workspace_id = $1 AND user_id = $2 AND enabled_at IS NULL
+         RETURNING user_id, workspace_id, encrypted_secret, enabled_at, failed_attempts, locked_until`,
+        [workspaceId, userId]
+      );
+      if (!rows[0]) return null;
+      await client.query(
+        "UPDATE admin_users SET session_version = session_version + 1, updated_at = now() WHERE workspace_id = $1 AND id = $2",
+        [workspaceId, userId]
+      );
+      for (const codeHash of recoveryCodeHashes) {
+        await client.query(
+          "INSERT INTO admin_mfa_recovery_codes (user_id, workspace_id, code_hash) VALUES ($1, $2, $3)",
+          [userId, workspaceId, codeHash]
+        );
+      }
+      await this.insertAudit(client, { workspaceId, actorId, action: "mfa.enabled", resourceType: "admin_mfa", resourceId: userId });
+      return adminMfaRecord(rows[0]);
+    });
+  }
+
+  async clearAdminMfaFailures(workspaceId: string, userId: string): Promise<void> {
+    await this.pool.query(
+      "UPDATE admin_mfa SET failed_attempts = 0, locked_until = NULL, updated_at = now() WHERE workspace_id = $1 AND user_id = $2",
+      [workspaceId, userId]
+    );
+  }
+
+  async recordAdminMfaFailure(workspaceId: string, userId: string, now = new Date()): Promise<AdminMfaRecord | null> {
+    const { rows } = await this.pool.query<AdminMfaRow>(
+      `UPDATE admin_mfa
+       SET failed_attempts = CASE WHEN locked_until IS NOT NULL AND locked_until > $3 THEN failed_attempts ELSE failed_attempts + 1 END,
+           locked_until = CASE
+             WHEN locked_until IS NOT NULL AND locked_until > $3 THEN locked_until
+             WHEN failed_attempts + 1 >= 5 THEN $3 + interval '15 minutes'
+             ELSE NULL END,
+           updated_at = now()
+       WHERE workspace_id = $1 AND user_id = $2
+       RETURNING user_id, workspace_id, encrypted_secret, enabled_at, failed_attempts, locked_until`,
+      [workspaceId, userId, now]
+    );
+    return rows[0] ? adminMfaRecord(rows[0]) : null;
+  }
+
+  async listActiveAdminMfaRecoveryCodes(workspaceId: string, userId: string): Promise<AdminMfaRecoveryCodeRecord[]> {
+    const { rows } = await this.pool.query<{ id: string; code_hash: string; used_at: Date | null }>(
+      `SELECT id, code_hash, used_at FROM admin_mfa_recovery_codes
+       WHERE workspace_id = $1 AND user_id = $2 AND used_at IS NULL ORDER BY created_at ASC`,
+      [workspaceId, userId]
+    );
+    return rows.map((row) => ({ id: row.id, codeHash: row.code_hash, usedAt: row.used_at }));
+  }
+
+  async consumeAdminMfaRecoveryCode(workspaceId: string, userId: string, id: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `UPDATE admin_mfa_recovery_codes SET used_at = now()
+       WHERE id = $1 AND workspace_id = $2 AND user_id = $3 AND used_at IS NULL`,
+      [id, workspaceId, userId]
+    );
+    return (result.rowCount ?? 0) === 1;
+  }
+
+  async disableAdminMfa(workspaceId: string, userId: string, actorId: string): Promise<boolean> {
+    return this.transaction(async (client) => {
+      const deleted = await client.query(
+        "DELETE FROM admin_mfa WHERE workspace_id = $1 AND user_id = $2 AND enabled_at IS NOT NULL RETURNING user_id",
+        [workspaceId, userId]
+      );
+      if (!deleted.rows[0]) return false;
+      await client.query("UPDATE admin_users SET session_version = session_version + 1, updated_at = now() WHERE workspace_id = $1 AND id = $2", [workspaceId, userId]);
+      await this.insertAudit(client, { workspaceId, actorId, action: "mfa.disabled", resourceType: "admin_mfa", resourceId: userId });
+      return true;
+    });
   }
 
   async listTeamMembers(workspaceId: string, pagination?: Pagination): Promise<TeamMemberRecord[]> {

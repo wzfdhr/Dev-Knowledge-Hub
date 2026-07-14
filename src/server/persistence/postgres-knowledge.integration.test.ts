@@ -99,6 +99,33 @@ integration("PostgreSQL cited knowledge integration", () => {
   }, 30_000);
 
   test(databaseUrl
+    ? "persists encrypted MFA state, one-time recovery hashes, and the lockout counter"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("admin@example.com", "hash");
+    const pending = await store.savePendingAdminMfa(setup!.workspace.id, setup!.admin.id, "encrypted-secret");
+    expect(pending).toMatchObject({ enabledAt: null, failedAttempts: 0 });
+    const enabled = await store.enableAdminMfa(
+      setup!.workspace.id, setup!.admin.id, ["scrypt$test$hash"], setup!.admin.id
+    );
+    expect(enabled).toMatchObject({ enabledAt: expect.any(Date) });
+    expect(await store.listActiveAdminMfaRecoveryCodes(setup!.workspace.id, setup!.admin.id))
+      .toHaveLength(1);
+    let state = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      state = await store.recordAdminMfaFailure(setup!.workspace.id, setup!.admin.id, new Date("2026-07-14T00:00:00.000Z"));
+    }
+    expect(state).toMatchObject({ failedAttempts: 5, lockedUntil: expect.any(Date) });
+    const [recovery] = await store.listActiveAdminMfaRecoveryCodes(setup!.workspace.id, setup!.admin.id);
+    await expect(store.consumeAdminMfaRecoveryCode(setup!.workspace.id, setup!.admin.id, recovery.id)).resolves.toBe(true);
+    await expect(store.consumeAdminMfaRecoveryCode(setup!.workspace.id, setup!.admin.id, recovery.id)).resolves.toBe(false);
+  }, 30_000);
+
+  test(databaseUrl
     ? "persists project memberships, rejects cross-workspace users, and protects the final project administrator"
     : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
     if (!databaseUrl) return;

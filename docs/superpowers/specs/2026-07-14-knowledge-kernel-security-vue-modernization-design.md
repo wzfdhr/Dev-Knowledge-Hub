@@ -245,7 +245,7 @@ remediation 由成员创建或从 lint 转化；接受后只计算受影响 sour
 
 - 会话：opaque、HttpOnly、Secure、SameSite=Lax cookie；数据库存 SHA-256 session ID，并将 session 绑定用户、工作区和 `sessionVersion`；登录、密码重置、禁用、角色变更和 MFA 变更递增 `sessionVersion` 并撤销旧 session。部署迁移可通过一次性的 UTC 截止时间启用旧 JWT 只读窗口，最长 24 小时，旧 JWT 绝不允许写入。
 - CSRF：所有 cookie 鉴权的非 GET/HEAD/OPTIONS 请求要求浏览器回传 `devkh_csrf` cookie 同值的 `X-Devkh-Csrf`，该值含 session 绑定 HMAC 且数据库只留 nonce 哈希；MCP Bearer 请求不接受 cookie 且不走 CSRF。
-- MFA：仅 workspace admin 可启用 TOTP；使用 `otpauth` 兼容秘密、加密存储、一次性恢复码哈希；MFA challenge 5 分钟、5 次失败后 15 分钟锁定。
+- MFA：仅 workspace admin 可启用 TOTP；使用 20-byte Base32 secret、SHA-1 RFC 6238 30 秒步长和一个前后步长容差，secret 通过 AES-256-GCM 加密存储，恢复码只保存 scrypt 哈希。连续 5 次失败锁定 15 分钟；启用或停用 MFA 递增 `sessionVersion`，强制重新登录。普通停用 API 同时要求当前 password 与 TOTP，不接受恢复码。
 - MCP Token：project-scoped、scope 最小化、固定 90 天过期、撤销和轮换；hash 存储，比较使用 constant-time；每次调用检查项目未归档、Token 未撤销/过期。
 - SSRF/Git：仅 HTTPS，DNS 解析后拒绝 loopback、link-local、private、CGNAT、multicast、reserved IPv4/IPv6；禁止重定向、非 443 端口、URL 凭据和本地协议；clone 进程无 shell，`GIT_TERMINAL_PROMPT=0`，静态 askpass。
 - 上传/表格：沿用双重文件过滤与 ZIP 防炸弹；表格限制见第 8 节；临时文件位于受限目录并在 finally 删除。

@@ -129,7 +129,7 @@ CREATE TABLE auth_sessions (id_hash char(64) PRIMARY KEY, user_id uuid NOT NULL 
 ### Task 6: 管理员 MFA 与恢复码
 
 **依赖：** Task 5。
-**Files：** Create `drizzle/0016_admin_mfa.sql`, `src/server/security/mfa.ts`, `src/server/security/mfa.test.ts`; Modify `src/server/auth-routes.ts`, `src/server/auth-routes.test.ts`, `src/client/pages/settings-page.tsx`.
+**Files：** Create `drizzle/0016_admin_mfa.sql`, `src/server/security/mfa.ts`, `src/server/security/mfa.test.ts`, `docs/operations/mfa.md`; Modify `src/server/app.ts`, `src/server/auth-routes.test.ts`, `src/server/persistence/store.ts`, `src/server/persistence/memory-store.ts`, `src/server/persistence/postgres-store.ts`, `src/server/persistence/postgres-knowledge.integration.test.ts`, `src/client/app.tsx`, `src/client/api/client.ts`, `src/client/api/types.ts`, `src/client/pages/system-settings-page.tsx`.
 **输入：** admin session、TOTP challenge。
 **输出：** enrol/verify/disable MFA API 与恢复码一次性展示。
 

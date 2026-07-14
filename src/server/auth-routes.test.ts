@@ -6,6 +6,7 @@ import { buildServer, type ServerOptions } from "./app";
 import { MemoryAppStore } from "./persistence/memory-store";
 import { hashPassword } from "./security/password";
 import { createSessionToken } from "./security/session";
+import { generateTotp } from "./security/mfa";
 
 function options(overrides: Partial<ServerOptions> = {}): ServerOptions {
   return {
@@ -209,6 +210,121 @@ describe("setup and session routes", () => {
 
     expect((await app.inject({ method: "POST", url: "/mcp", headers: { cookie: sessionCookie(login) } })).statusCode)
       .toBe(401);
+  });
+
+  test("enrolls and verifies administrator MFA before requiring it at login", async () => {
+    const store = new MemoryAppStore();
+    const app = buildServer(options({ store }));
+    apps.push(app);
+    await app.inject({
+      method: "POST", url: "/api/setup",
+      payload: { email: "admin@example.com", password: "a secure admin password" }
+    });
+    const login = await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "admin@example.com", password: "a secure admin password" }
+    });
+    const session = sessionCookie(login);
+    const csrf = cookie(login, "devkh_csrf");
+    const cookieHeader = `${session}; ${csrf}`;
+    const enrolled = await app.inject({
+      method: "POST", url: "/api/settings/mfa/enroll",
+      headers: { cookie: cookieHeader, "x-devkh-csrf": csrf.split("=", 2)[1] },
+      payload: { currentPassword: "a secure admin password" }
+    });
+
+    expect(enrolled.statusCode).toBe(201);
+    expect(enrolled.json()).toMatchObject({ enabled: false, secret: expect.any(String), otpauthUri: expect.stringMatching(/^otpauth:\/\//) });
+    expect(store.adminMfa[0]?.encryptedSecret).not.toContain(enrolled.json<{ secret: string }>().secret);
+    const verified = await app.inject({
+      method: "POST", url: "/api/settings/mfa/verify",
+      headers: { cookie: cookieHeader, "x-devkh-csrf": csrf.split("=", 2)[1] },
+      payload: { code: generateTotp(enrolled.json().secret) }
+    });
+    expect(verified.statusCode).toBe(200);
+    expect(verified.json().recoveryCodes).toHaveLength(10);
+    const recoveryCode = verified.json<{ recoveryCodes: string[] }>().recoveryCodes[0];
+    expect((await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "admin@example.com", password: "a secure admin password", recoveryCode }
+    })).statusCode).toBe(200);
+    expect((await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "admin@example.com", password: "a secure admin password", recoveryCode }
+    })).statusCode).toBe(401);
+
+    expect((await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "admin@example.com", password: "a secure admin password" }
+    })).json()).toMatchObject({ error: { code: "MFA_REQUIRED" } });
+  });
+
+  test("locks repeated MFA failures and revokes existing sessions when MFA is disabled", async () => {
+    const app = buildServer(options());
+    apps.push(app);
+    await app.inject({ method: "POST", url: "/api/setup", payload: { email: "admin@example.com", password: "a secure admin password" } });
+    const initialLogin = await app.inject({ method: "POST", url: "/api/session", payload: { email: "admin@example.com", password: "a secure admin password" } });
+    const session = sessionCookie(initialLogin);
+    const csrf = cookie(initialLogin, "devkh_csrf");
+    const cookieHeader = `${session}; ${csrf}`;
+    const enrolled = await app.inject({
+      method: "POST", url: "/api/settings/mfa/enroll", headers: { cookie: cookieHeader, "x-devkh-csrf": csrf.split("=", 2)[1] },
+      payload: { currentPassword: "a secure admin password" }
+    });
+    const verified = await app.inject({
+      method: "POST", url: "/api/settings/mfa/verify", headers: { cookie: cookieHeader, "x-devkh-csrf": csrf.split("=", 2)[1] },
+      payload: { code: generateTotp(enrolled.json().secret) }
+    });
+    expect(verified.json<{ recoveryCodes: string[] }>().recoveryCodes).toHaveLength(10);
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await app.inject({
+        method: "POST", url: "/api/session",
+        payload: { email: "admin@example.com", password: "a secure admin password", code: "000000" }
+      });
+      expect(response.statusCode).toBe(attempt === 4 ? 429 : 401);
+    }
+
+    const appForDisable = buildServer(options());
+    apps.push(appForDisable);
+    await appForDisable.inject({ method: "POST", url: "/api/setup", payload: { email: "disable@example.com", password: "a secure admin password" } });
+    const disableSetupLogin = await appForDisable.inject({ method: "POST", url: "/api/session", payload: { email: "disable@example.com", password: "a secure admin password" } });
+    const disableSetupSession = sessionCookie(disableSetupLogin);
+    const disableSetupCsrf = cookie(disableSetupLogin, "devkh_csrf");
+    const disableEnrollment = await appForDisable.inject({
+      method: "POST", url: "/api/settings/mfa/enroll",
+      headers: { cookie: `${disableSetupSession}; ${disableSetupCsrf}`, "x-devkh-csrf": disableSetupCsrf.split("=", 2)[1] },
+      payload: { currentPassword: "a secure admin password" }
+    });
+    await appForDisable.inject({
+      method: "POST", url: "/api/settings/mfa/verify",
+      headers: { cookie: `${disableSetupSession}; ${disableSetupCsrf}`, "x-devkh-csrf": disableSetupCsrf.split("=", 2)[1] },
+      payload: { code: generateTotp(disableEnrollment.json<{ secret: string }>().secret) }
+    });
+    const activeMfaSession = await appForDisable.inject({
+      method: "POST", url: "/api/session",
+      payload: {
+        email: "disable@example.com",
+        password: "a secure admin password",
+        code: generateTotp(disableEnrollment.json<{ secret: string }>().secret)
+      }
+    });
+    const activeSession = sessionCookie(activeMfaSession);
+    const activeCsrf = cookie(activeMfaSession, "devkh_csrf");
+    const disabled = await appForDisable.inject({
+      method: "DELETE", url: "/api/settings/mfa",
+      headers: { cookie: `${activeSession}; ${activeCsrf}`, "x-devkh-csrf": activeCsrf.split("=", 2)[1] },
+      payload: {
+        currentPassword: "a secure admin password",
+        code: generateTotp(disableEnrollment.json<{ secret: string }>().secret)
+      }
+    });
+    expect(disabled.statusCode).toBe(204);
+    expect((await appForDisable.inject({ method: "GET", url: "/api/session", headers: { cookie: activeSession } })).statusCode).toBe(401);
+    expect((await appForDisable.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "disable@example.com", password: "a secure admin password" }
+    })).statusCode).toBe(200);
   });
 
   test("production session cookies are secure", async () => {

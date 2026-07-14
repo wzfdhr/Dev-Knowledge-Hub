@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly Dev Knowledge Hub restic integrity check
+
+[Timer]
+OnCalendar=Sun *-*-* 04:30:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=devkh-restic-check.service
+
+[Install]
+WantedBy=timers.target

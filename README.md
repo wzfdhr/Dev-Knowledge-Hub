@@ -148,30 +148,12 @@ Build before stdio use with `npm run build`. Both transports expose the same eig
 
 ## Backup and restore
 
-For a consistent backup, stop the app while leaving PostgreSQL running, then capture the database and all three app data volumes. Keep the generated `DEVKH_MASTER_KEY` available separately from the encrypted backup: it is required to decrypt stored provider and repository credentials.
-
-```bash
-docker compose stop app
-docker compose exec -T postgres pg_dump -U devkh -d dev_knowledge_hub -Fc > devkh.pgdump
-docker run --rm -v dev-knowledge-hub_snapshot_data:/source:ro -v "$PWD":/backup alpine tar czf /backup/snapshots.tgz -C /source .
-docker run --rm -v dev-knowledge-hub_repository_mirrors:/source:ro -v "$PWD":/backup alpine tar czf /backup/repositories.tgz -C /source .
-docker run --rm -v dev-knowledge-hub_upload_staging:/source:ro -v "$PWD":/backup alpine tar czf /backup/uploads.tgz -C /source .
-docker compose start app
-```
-
-Restore only into an empty deployment running the same application version. Start PostgreSQL, restore the database, unpack all three app volumes, then start the remaining services so forward migrations run:
-
-```bash
-docker compose up -d postgres
-cat devkh.pgdump | docker compose exec -T postgres pg_restore -U devkh -d dev_knowledge_hub --clean --if-exists
-docker run --rm -i -v dev-knowledge-hub_snapshot_data:/target alpine tar xzf - -C /target < snapshots.tgz
-docker run --rm -i -v dev-knowledge-hub_repository_mirrors:/target alpine tar xzf - -C /target < repositories.tgz
-docker run --rm -i -v dev-knowledge-hub_upload_staging:/target alpine tar xzf - -C /target < uploads.tgz
-docker compose up -d
-curl --fail "https://$DEVKH_DOMAIN/api/health"
-```
-
-Back up and restore the database and all app volumes as one set. Test restores regularly, encrypt backup media, and never put `.env`, database dumps, master keys, session secrets, tokens, or generated passwords in chat, tickets, or source control.
+Use the automated encrypted OSS backup and restore procedure in
+[encrypted offsite backups](docs/operations/encrypted-offsite-backups.md). Back up the
+database and all three app volumes as one set, test restores regularly, and keep
+`DEVKH_MASTER_KEY` separately from the restic repository: it is required to decrypt restored
+provider and repository credentials. Never put `.env`, database dumps, master keys, session
+secrets, tokens, or generated passwords in chat, tickets, or source control.
 
 ## Quality gates
 

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
+const projectRoot = join(scriptDirectory, "../..");
 const backupScript = join(scriptDirectory, "devkh-backup.sh");
 const restoreDrillScript = join(scriptDirectory, "devkh-restore-drill.sh");
 
@@ -137,4 +138,18 @@ test("restore drill never writes production Docker volumes", () => {
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
+});
+
+test("systemd backup timer keeps credentials outside its unit file", () => {
+  const timer = readFileSync(join(projectRoot, "deployment/backup/devkh-backup.timer"), "utf8");
+  const service = readFileSync(join(projectRoot, "deployment/backup/devkh-backup.service"), "utf8");
+  const environment = readFileSync(join(projectRoot, "deployment/backup/backup.env.example"), "utf8");
+
+  assert.match(timer, /OnCalendar=\*-\*-\* 03:30:00/);
+  assert.match(timer, /Persistent=true/);
+  assert.match(service, /EnvironmentFile=\/etc\/devkh-backup\/backup.env/);
+  assert.doesNotMatch(service, /AWS_SECRET_ACCESS_KEY|RESTIC_PASSWORD=/);
+  assert.match(service, /UMask=0077/);
+  assert.match(service, /ReadWritePaths=\/var\/lib\/devkh-backup/);
+  assert.match(environment, /RESTIC_CACHE_DIR=\/var\/lib\/devkh-backup\/restic-cache/);
 });

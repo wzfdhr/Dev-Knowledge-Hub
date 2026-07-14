@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Dev Knowledge Hub encrypted backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=devkh-backup.service
+
+[Install]
+WantedBy=timers.target

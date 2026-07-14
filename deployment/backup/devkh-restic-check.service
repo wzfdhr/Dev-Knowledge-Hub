@@ -1,0 +1,16 @@
+[Unit]
+Description=Dev Knowledge Hub restic repository integrity check
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/etc/devkh-backup/backup.env
+ExecStart=/usr/local/bin/restic check
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/devkh-backup

@@ -123,8 +123,16 @@ export const graphEdgeSchema = z.object({
   toNodeId: z.string().min(1),
   kind: z.enum(["imports", "exports", "calls", "contains", "documents", "reads", "writes", "depends_on"]),
   candidate: z.boolean(),
+  candidateReason: z.string().min(1).max(240).optional(),
   confidence: z.number().min(0).max(1),
   sourceRefs: z.array(sourceRefSchema)
+}).superRefine((value, context) => {
+  if (value.candidate && !value.candidateReason) {
+    context.addIssue({ code: "custom", message: "candidate GraphEdge requires candidateReason" });
+  }
+  if (!value.candidate && value.candidateReason) {
+    context.addIssue({ code: "custom", message: "fact GraphEdge cannot have candidateReason" });
+  }
 });
 
 export const lintIssueSchema = z.object({

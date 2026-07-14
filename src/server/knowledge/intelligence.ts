@@ -5,6 +5,11 @@ import path from "node:path";
 import ts from "typescript";
 import { parse as parseYaml } from "yaml";
 
+import type { KnowledgeIR, LintIssue } from "../../shared/api-contracts.js";
+import type { SourceFileRecord, SourceSnapshotRecord } from "../persistence/store.js";
+import { convertSnapshotSourceFile } from "./pipeline/convert.js";
+import { extractWebSource } from "./pipeline/extract-web.js";
+
 export type SymbolKind =
   | "module"
   | "class"
@@ -75,6 +80,35 @@ export class SnapshotIntegrityError extends Error {
 }
 
 const codeExtensions = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"]);
+
+export async function extractSnapshotWebKnowledgeIR({
+  snapshot,
+  files
+}: {
+  snapshot: Pick<SourceSnapshotRecord, "id" | "storagePath">;
+  files: readonly Pick<SourceFileRecord, "snapshotId" | "path" | "byteSize" | "contentHash">[];
+}): Promise<{ ir: KnowledgeIR; lintIssues: LintIssue[] }> {
+  const extracted = await Promise.all(
+    [...files]
+      .filter((file) => codeExtensions.has(path.posix.extname(file.path).toLowerCase()))
+      .sort((left, right) => Buffer.compare(Buffer.from(left.path, "utf8"), Buffer.from(right.path, "utf8")))
+      .map(async (file) => extractWebSource(await convertSnapshotSourceFile({ snapshot, file })))
+  );
+
+  return {
+    ir: {
+      schemaVersion: 1,
+      snapshotId: snapshot.id,
+      files: extracted.flatMap((result) => result.ir.files),
+      symbols: extracted.flatMap((result) => result.ir.symbols),
+      imports: extracted.flatMap((result) => result.ir.imports),
+      documents: [],
+      tables: [],
+      sourceRefs: extracted.flatMap((result) => result.ir.sourceRefs)
+    },
+    lintIssues: extracted.flatMap((result) => result.lintIssues)
+  };
+}
 
 function hash(content: Buffer): string {
   return createHash("sha256").update(content).digest("hex");

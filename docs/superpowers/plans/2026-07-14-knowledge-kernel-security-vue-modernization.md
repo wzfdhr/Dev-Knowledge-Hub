@@ -44,6 +44,8 @@ npm run licenses:check
 3. 最小实现：生成 replacement plaintext，在单事务中插入同项目同名称的新 Token、撤销旧 Token、写 `mcp_token.rotated` 审计；UI 在当前项目 Token 行展示轮换按钮，并用已有一次性密文弹窗显示 replacement。
 4. 再次运行同一命令，预期通过。
 
+**命令：** red 阶段执行 `npm test -- src/server/app.test.ts src/server/persistence/memory-store.test.ts src/client/app.test.tsx`，预期路由/控件断言失败；green 阶段重复并执行 `npm run typecheck`，预期退出码 `0`。
+
 ```ts
 const result = await api.rotateMcpToken("old-token-id");
 expect(result.previous.revokedAt).toEqual(expect.any(String));
@@ -63,6 +65,8 @@ expect(result.token).toMatch(/^dkh_/);
 
 **TDD：** 写两个项目、三个角色的失败矩阵：reader 只读授权项目；member 不能管理成员；project admin 能读活动；workspace admin 能读所有本工作区项目；跨项目 `403 PROJECT_ACCESS_DENIED`；手工写入的 `token`、`password` 等非 allowlist metadata 不能从 API 返回。运行 `npm test -- src/server/team-routes.test.ts`，在现有 `requireProjectRole` 与 offset 分页合同上补 API 出口过滤后重跑。
 
+**命令：** red 阶段执行 `npm test -- src/server/team-routes.test.ts`，预期项目活动 route 或 metadata allowlist 断言失败；green 阶段重复并执行 `npm run typecheck`，预期退出码 `0`。
+
 ```ts
 server.get("/api/projects/:projectId/activity", { preHandler: requireAdmin }, listProjectActivity);
 ```
@@ -80,6 +84,8 @@ server.get("/api/projects/:projectId/activity", { preHandler: requireAdmin }, li
 
 **TDD：** 先写 `vite.config.test.ts` 断言 Vue entry 不替换 React entry、CSP nonce 可传入 style injection；运行失败。最小加入依赖和 `/console-vue/health` 页面，锁定 lockfile，重跑 `npm run build` 与 `npm test -- src/client-vue/app.test.ts vite.config.test.ts`。
 
+**命令：** red 阶段执行 `npm test -- src/client-vue/app.test.ts vite.config.test.ts`，预期 Vue entry 或 nonce 断言失败；green 阶段执行 `npm run build && npm test -- src/client-vue/app.test.ts vite.config.test.ts`，预期退出码 `0`。
+
 ```ts
 export const tokens = { colorAccent: "#1677ff", radius: "6px", focusRing: "0 0 0 3px #91caff" } as const;
 ```
@@ -96,6 +102,8 @@ export const tokens = { colorAccent: "#1677ff", radius: "6px", focusRing: "0 0 0
 **输出：** 至少 100 条 case 与 `npm run evaluate:knowledge`。
 
 **TDD：** 先写统计测试，空集、重复 id、引用不合法、跨项目答案均失败。填入 40 条中文、40 条英文、20 条无结果/权限案例，运行脚本得到当前基线但不把阈值作为旧实现门禁。
+
+**命令：** red 阶段执行 `npm test -- src/server/knowledge/retrieval-evaluation-v2.test.ts`，预期 dataset/schema 断言失败；green 阶段执行 `npm test -- src/server/knowledge/retrieval-evaluation-v2.test.ts && npm run evaluate:knowledge`，预期至少 100 条 case 和四项指标输出。
 
 ```json
 {"id":"zh-symbol-001","query":"哪里定义 projectAccess？","project":"fixture-a","expectedPaths":["src/server/persistence/store.ts"],"expectEmpty":false}
@@ -118,6 +126,8 @@ export const tokens = { colorAccent: "#1677ff", radius: "6px", focusRing: "0 0 0
 
 **TDD：** 先测 POST 无 token、错误 token、过期 session、撤销 session 为 403/401；GET 不需要 CSRF；Bearer MCP 不接受 cookie。运行失败后实现 session ID hash、双提交 HMAC CSRF、`sessionVersion` 检查。
 
+**命令：** red 阶段执行 `npm test -- src/server/security/session-store.test.ts src/server/auth-routes.test.ts src/server/persistence/postgres-knowledge.integration.test.ts`，预期因缺少 `auth_sessions`/CSRF guard 失败；green 阶段重复该命令并执行 `npm run typecheck`，预期均以退出码 `0` 结束。
+
 ```sql
 CREATE TABLE auth_sessions (id_hash char(64) PRIMARY KEY, user_id uuid NOT NULL REFERENCES admin_users(id), workspace_id uuid NOT NULL REFERENCES workspaces(id), csrf_secret_hash char(64) NOT NULL, session_version integer NOT NULL, expires_at timestamptz NOT NULL, revoked_at timestamptz);
 ```
@@ -134,6 +144,8 @@ CREATE TABLE auth_sessions (id_hash char(64) PRIMARY KEY, user_id uuid NOT NULL 
 **输出：** enrol/verify/disable MFA API 与恢复码一次性展示。
 
 **TDD：** 写 secret 加密、六位码、时间窗口、恢复码一次性消费、5 次失败锁定、非 admin 拒绝等失败测试；实现后重跑。
+
+**命令：** red 阶段执行 `npm test -- src/server/security/mfa.test.ts src/server/auth-routes.test.ts`，预期 MFA route 或验证器断言失败；green 阶段重复并执行 `npm run typecheck`，预期退出码 `0`。
 
 ```ts
 const parsed = z.object({ code: z.string().regex(/^\d{6}$/) }).safeParse(request.body);
@@ -152,6 +164,8 @@ const parsed = z.object({ code: z.string().regex(/^\d{6}$/) }).safeParse(request
 
 **TDD：** 未过期读 scope、过期 401 `MCP_TOKEN_EXPIRED`、撤销、跨项目、轮换后旧 Token 均失败；新 Token 仅显示一次。最小实现使用 constant-time hash 比较。
 
+**命令：** red 阶段执行 `npm test -- src/server/mcp-access.test.ts src/server/app.test.ts`，预期过期/scoped Token 断言失败；green 阶段重复并执行 `npm run typecheck`，预期退出码 `0`。
+
 ```json
 {"name":"ci-agent","scopes":["search","source.read"],"expiresInDays":90}
 ```
@@ -169,6 +183,8 @@ const parsed = z.object({ code: z.string().regex(/^\d{6}$/) }).safeParse(request
 
 **TDD：** 对 `127.0.0.1`、`::1`、`169.254.169.254`、`10.0.0.0/8`、私网 DNS、非 443、用户名密码、`file://` 写失败测试。实现 `resolve4/resolve6`、CIDR 比较、禁止 redirect；clone 前和每个解析地址检查。
 
+**命令：** red 阶段执行 `npm test -- src/server/security/egress-policy.test.ts src/server/repository-routes.test.ts`，预期 URL/DNS policy 缺失；green 阶段重复并执行 `npm run typecheck`，预期退出码 `0`。
+
 ```ts
 await expect(assertAllowedGitUrl(new URL("https://127.0.0.1/repo.git"))).rejects.toThrow("GIT_EGRESS_DENIED");
 ```
@@ -185,6 +201,8 @@ await expect(assertAllowedGitUrl(new URL("https://127.0.0.1/repo.git"))).rejects
 **输出：** audit/license/secret/runtime/recovery CI evidence。
 
 **TDD：** 写脚本测试：lockfile 外依赖、high severity audit、secret、恢复写入生产卷均失败。运行 `node --test scripts/backup/backup.test.mjs` 失败后实现。
+
+**命令：** red 阶段执行 `node --test scripts/backup/backup.test.mjs` 与 `node --test scripts/security/verify-runtime.node-test.mjs`，预期新增供应链/恢复断言失败；green 阶段执行 `npm run test:backup && npm run runtime:verify && npm run secrets:scan && npm run licenses:check`，预期退出码 `0`。
 
 ```ts
 expect(report).toMatchObject({ productionVolumeTouched: false, restoredSnapshotCount: 1 });
@@ -207,6 +225,8 @@ expect(report).toMatchObject({ productionVolumeTouched: false, restoredSnapshotC
 
 **TDD：** 对未知 stage、重复 stage、非法状态转换、旧 build `ready/published/failed` 映射写失败测试。最小实现只导出纯函数和 Zod schema。
 
+**命令：** red 阶段执行 `npm test -- src/server/knowledge/pipeline/contracts.test.ts`，预期 contracts 或映射不存在；green 阶段重复并执行 `npm run typecheck`，预期退出码 `0`。
+
 ```ts
 export function legacyBuildStatus(runs: StageRun[]): "queued" | "running" | "ready" | "failed" | "published" { /* exhaustive switch */ }
 ```
@@ -223,6 +243,8 @@ export function legacyBuildStatus(runs: StageRun[]): "queued" | "running" | "rea
 **输出：** stage/artifact CRUD、cache lookup、transaction claim。
 
 **TDD：** PostgreSQL 集成测试先断言 unique cache key、跨项目拒绝、`FOR UPDATE SKIP LOCKED` 单领取、published artifact 不可删除；迁移不存在时失败。实现 SQL 后重跑 integration。
+
+**命令：** red 阶段执行 `npm run test:integration`，预期迁移/Store 方法缺失或断言失败；green 阶段执行 `npm run db:migrate && npm run test:integration`，预期退出码 `0` 且 PostgreSQL 断言全部通过。
 
 ```sql
 CREATE UNIQUE INDEX knowledge_artifact_cache_idx ON knowledge_artifacts(project_id, snapshot_id, stage, kind, input_digest);
@@ -241,6 +263,8 @@ CREATE UNIQUE INDEX knowledge_artifact_cache_idx ON knowledge_artifacts(project_
 
 **TDD：** 写 canonical key、相同 input 复用、不同 project 不复用、写入失败不创建 manifest、取消前不提交的失败测试。实现先写临时文件 `fsync` 再原子 rename。
 
+**命令：** red 阶段执行 `npm test -- src/server/knowledge/pipeline/artifact-store.test.ts`，预期 artifact store 不存在；green 阶段重复并执行 `npm run test:backup`，预期退出码 `0`。
+
 ```ts
 const storageKey = `${projectId}/${snapshotId}/${stage}/${contentDigest}.json`;
 ```
@@ -258,6 +282,8 @@ const storageKey = `${projectId}/${snapshotId}/${stage}/${contentDigest}.json`;
 
 **TDD：** 单文件更改仅失效该文件 convert/extract、依赖 graph、引用知识页；无变更全 reuse；取消不排下游。跑 `npm test -- src/server/knowledge/pipeline/*.test.ts` 失败后实现。
 
+**命令：** red 阶段执行 `npm test -- src/server/knowledge/pipeline/invalidation.test.ts src/server/knowledge/pipeline/worker.test.ts`，预期失效计划或 worker 调度断言失败；green 阶段重复并执行 `npm run test:integration`，预期退出码 `0`。
+
 ```ts
 expect(plan.rebuildStages.get("src/a.ts")).toEqual(["convert", "extract", "graph", "synthesize", "index", "lint", "viz", "validate", "package"]);
 ```
@@ -274,6 +300,8 @@ expect(plan.rebuildStages.get("src/a.ts")).toEqual(["convert", "extract", "graph
 **输出：** stages/events endpoint，旧 build 状态不变。
 
 **TDD：** 先测 `Last-Event-ID` 重连、跨项目 403、未知 build 404、旧客户端只收到五种状态。实现数据库 event cursor 后重跑。
+
+**命令：** red 阶段执行 `npm test -- src/server/knowledge/pipeline/events.test.ts src/server/app.test.ts`，预期 event cursor/SSE route 失败；green 阶段重复并执行 `npm run typecheck`，预期退出码 `0`。
 
 ```ts
 expect(event).toEqual({ id: "42", event: "stage.updated", data: expect.stringContaining('"stage":"extract"') });
@@ -296,6 +324,8 @@ expect(event).toEqual({ id: "42", event: "stage.updated", data: expect.stringCon
 
 **TDD：** 新夹具含 `.ts/.tsx/.js/.jsx`、动态 import、破损语法、1 MiB 边界；先断言 parser 不执行代码且引用行正确。实现 TypeScript AST visitor。
 
+**命令：** red 阶段执行 `npm test -- src/server/knowledge/pipeline/convert.test.ts src/server/knowledge/pipeline/extract-web.test.ts`，预期 IR adapter 不存在或断言失败；green 阶段重复并执行 `npm run typecheck`，预期退出码 `0`。
+
 ```ts
 type IRImport = { fromPath: string; specifier: string; kind: "static" | "dynamic"; sourceRef: SourceRef };
 ```
@@ -312,6 +342,8 @@ type IRImport = { fromPath: string; specifier: string; kind: "static" | "dynamic
 **输出：** SFC symbol、文档段落、配置路径。
 
 **TDD：** `.vue` 的 script setup、template 静态标签、custom block、remote src；YAML alias/tag、32 层嵌套、Markdown HTML 均先失败。实现 `@vue/compiler-sfc@3.5.13`、CommonMark、FAILSAFE YAML。
+
+**命令：** red 阶段执行 `npm test -- src/server/knowledge/pipeline/extract-vue.test.ts src/server/knowledge/pipeline/extract-documents.test.ts`，预期 adapter 或安全拒绝断言失败；green 阶段重复并执行 `npm run typecheck`，预期退出码 `0`。
 
 ```ts
 expect(extractVueSfc("<script setup>const count = 0</script>", ref).symbols[0]?.name).toBe("count");
@@ -330,6 +362,8 @@ expect(extractVueSfc("<script setup>const count = 0</script>", ref).symbols[0]?.
 
 **TDD：** 公式、VBA、externalLink、ZIP bomb、100001 行、257 列、50 MiB、30 秒 watchdog 先失败。实现流式 CSV 与 XML-only XLSX reader。
 
+**命令：** red 阶段执行 `npm test -- src/server/knowledge/pipeline/tables.test.ts src/shared/import-filter.test.ts`，预期表格解析或资源边界断言失败；green 阶段重复并执行 `npm run typecheck`，预期退出码 `0`。
+
 ```ts
 expect(schema.columns[0]).toMatchObject({ name: "email", type: "string", sensitive: true });
 ```
@@ -346,6 +380,8 @@ expect(schema.columns[0]).toMatchObject({ name: "email", type: "string", sensiti
 **输出：** schema-validated summary/aliases 或 deterministic fallback。
 
 **TDD：** provider timeout、无效 JSON、越界引用、幻觉文件、缓存命中先失败。最小实现 Zod schema 与 citation verifier；禁止在 parse/graph/tables 调用模型。
+
+**命令：** red 阶段执行 `npm test -- src/server/knowledge/pipeline/llm-enhancement.test.ts`，预期 enhancer contract 缺失；green 阶段重复并执行 `npm run typecheck`，预期退出码 `0`。
 
 ```ts
 await expect(enhance(invalidCitationPayload, context)).resolves.toMatchObject({ mode: "fallback", warning: "CITATION_INVALID" });
@@ -368,6 +404,8 @@ await expect(enhance(invalidCitationPayload, context)).resolves.toMatchObject({ 
 
 **TDD：** 先测 imports/contains/reads/writes、candidate reason、dangling fact edge、跨项目节点、循环；实现 transactional node/edge writer。
 
+**命令：** red 阶段执行 `npm test -- src/server/knowledge/pipeline/graph.test.ts src/server/persistence/postgres-knowledge.integration.test.ts`，预期 Graph schema/事务断言失败；green 阶段执行 `npm run test:integration && npm test -- src/server/knowledge/pipeline/graph.test.ts`，预期退出码 `0`。
+
 ```sql
 CHECK ((candidate = true AND candidate_reason IS NOT NULL) OR (candidate = false AND jsonb_array_length(source_refs) > 0))
 ```
@@ -385,6 +423,8 @@ CHECK ((candidate = true AND candidate_reason IS NOT NULL) OR (candidate = false
 
 **TDD：** depth >2、100 节点以上、其他项目/未发布 release、Mermaid 注入、循环 tree 各失败。实现 release scoped query 与 escaping。
 
+**命令：** red 阶段执行 `npm test -- src/server/knowledge/pipeline/viz.test.ts src/server/mcp-access.test.ts src/server/app.test.ts`，预期 Graph API/MCP 或转义断言失败；green 阶段重复并执行 `npm run typecheck`，预期退出码 `0`。
+
 ```ts
 expect(await graphQuery(projectId, releaseId, rootNodeId, 3)).toEqual({ error: { code: "GRAPH_DEPTH_INVALID" } });
 ```
@@ -401,6 +441,8 @@ expect(await graphQuery(projectId, releaseId, rootNodeId, 3)).toEqual({ error: {
 **输出：** impact tree、suggested tests、crossLinks。
 
 **TDD：** 重命名、删除、循环、candidate edge、无变更先失败；实现从事实 `contains` 根树与一跳依赖影响。
+
+**命令：** red 阶段执行 `npm test -- src/server/knowledge/change-impact.test.ts src/server/knowledge/pipeline/invalidation.test.ts`，预期树化或候选边隔离断言失败；green 阶段重复并执行 `npm run typecheck`，预期退出码 `0`。
 
 ```ts
 expect(result.crossLinks).toEqual(expect.not.arrayContaining([expect.objectContaining({ candidate: true })]));
@@ -423,6 +465,8 @@ expect(result.crossLinks).toEqual(expect.not.arrayContaining([expect.objectConta
 
 **TDD：** 符号、路径、命令、中文、表字段、邻居、无结果、跨项目先失败；实现 NFKC tokenization 与固定权重。
 
+**命令：** red 阶段执行 `npm test -- src/server/knowledge/search-v2.test.ts src/server/knowledge/retrieval-evaluation-v2.test.ts`，预期索引/重排断言失败；green 阶段重复并执行 `npm run evaluate:knowledge`，预期报告存在全部指标且退出码 `0`。
+
 ```ts
 expect(result.matchReasons).toContain("exact_symbol");
 expect(result.releaseId).toBe(release.id);
@@ -441,6 +485,8 @@ expect(result.releaseId).toBe(release.id);
 
 **TDD：** 逐条写 missing citation、out of range、graph dangling、table sensitive、low coverage、错误状态迁移的失败测试。实现 lint rules 后运行全量。
 
+**命令：** red 阶段执行 `npm test -- src/server/knowledge/lint.test.ts src/server/knowledge/trust.test.ts src/server/knowledge/remediation.test.ts`，预期规则/状态机断言失败；green 阶段执行 `npm test && npm run typecheck`，预期退出码 `0`。
+
 ```ts
 await expect(store.acceptRemediation(projectId, issueId, actorId)).resolves.toMatchObject({ state: "rebuilding" });
 ```
@@ -457,6 +503,8 @@ await expect(store.acceptRemediation(projectId, issueId, actorId)).resolves.toMa
 **输出：** 可比较 JSON report 与 required CI thresholds。
 
 **TDD：** 对低 Recall/MRR、无效 citation、空结果误命中写失败 fixture；实现报告计算和阈值断言。
+
+**命令：** red 阶段执行 `npm test -- src/server/knowledge/retrieval-evaluation-v2.test.ts`，预期阈值守卫失败；green 阶段执行 `npm run evaluate:knowledge`，预期 `Recall@5 >= 0.90`、`MRR >= 0.75`、`citationValidity = 1`、`falsePositiveEmptyRate <= 0.05`。
 
 ```json
 {"recallAt5":0.90,"mrr":0.75,"citationValidity":1,"falsePositiveEmpty":0.05}
@@ -478,6 +526,8 @@ await expect(store.acceptRemediation(projectId, issueId, actorId)).resolves.toMa
 **输出：** `/console-vue/*` 全路由、`CONSOLE_IMPLEMENTATION` 切换、`/console-react/*` 回退。
 
 **TDD：** 按路由顺序写失败 Playwright：登录、projects、imports、versions、knowledge、graph、quality、collaboration、codex、feedback、members、settings；每个覆盖 admin/member/reader 与 1440/390。先确认 Vue shell 失败，再逐页最小对等实现。
+
+**命令：** red 阶段执行 `npm run test:e2e -- --project=chromium`，预期 `/console-vue/*` 路由或功能对等断言失败；green 阶段执行 `npm run build && npm run test:e2e -- --project=chromium`，预期 1440px/390px 和三角色场景全部通过。
 
 ```ts
 test("reader cannot see member management in Vue", async ({ page }) => {
@@ -504,6 +554,8 @@ test("reader cannot see member management in Vue", async ({ page }) => {
 
 **TDD：** 相同 snapshot、取消、V2 失败、差异超过阈值先失败；shadow 不得创建 release。实现只读 artifacts 和审计。
 
+**命令：** red 阶段执行 `npm test -- src/server/knowledge/pipeline/shadow.test.ts`，预期 shadow runner 或 release 不变量断言失败；green 阶段重复并执行 `node --import tsx scripts/run-shadow-build.mjs --fixture fixture-a`，预期 `releaseCreated=false` 且输出 comparison artifact ID。
+
 ```ts
 expect(await runShadowBuild(snapshotId)).toMatchObject({ releaseCreated: false, comparisonArtifactId: expect.any(String) });
 ```
@@ -520,6 +572,8 @@ expect(await runShadowBuild(snapshotId)).toMatchObject({ releaseCreated: false, 
 **输出：** 10%/50%/100% rollout evidence、回退演练、生产验收报告。
 
 **TDD：** 用本地 Compose 压测 10 并发 build、取消、worker restart、SSE reconnect；测试脚本在错误率/队列延迟超过阈值时失败。先失败后实现指标读取和报告。
+
+**命令：** red 阶段执行 `node scripts/load/pipeline-load.mjs --concurrency 10 --expect-failure`，预期缺少指标/阈值检查而失败；green 阶段执行 `docker compose --profile integration up -d && node scripts/load/pipeline-load.mjs --concurrency 10 && node scripts/release/verify-production.mjs --base-url https://hub.starking.icu`，预期三条命令退出码 `0` 并产出 rollout report。
 
 ```ts
 expect(summary).toMatchObject({ concurrentBuilds: 10, errorRate: 0, p95QueueDelayMs: expect.any(Number) });

@@ -17,6 +17,7 @@ import { APP_VERSION, SERVICE_NAME } from "../../shared/contracts.js";
 import type { Citation } from "../knowledge/intelligence.js";
 import type {
   AppStore,
+  KnowledgeGraphRecord,
   KnowledgePageRecord,
   KnowledgeSearchResult,
   ReleaseRecord
@@ -27,6 +28,7 @@ import {
   MAX_KNOWLEDGE_PAGE_BODY_CHARACTERS,
   MAX_KNOWLEDGE_PAGE_CHUNKS
 } from "../persistence/store.js";
+import { exportKnowledgeGraph } from "../knowledge/pipeline/viz.js";
 
 export const MCP_TOOL_NAMES = [
   "dkh_search",
@@ -34,6 +36,7 @@ export const MCP_TOOL_NAMES = [
   "dkh_get_module",
   "dkh_get_symbol",
   "dkh_get_change_context",
+  "dkh_get_graph",
   "dkh_get_source",
   "dkh_get_release",
   "dkh_report_gap"
@@ -76,6 +79,16 @@ function uniqueCitations(citations: Citation[]): Citation[] {
 
 function pageCitations(page: KnowledgePageRecord): Citation[] {
   return uniqueCitations(page.chunks.flatMap((chunk) => chunk.citations));
+}
+
+function graphCitations(
+  graph: KnowledgeGraphRecord,
+  commitSha: string
+): Citation[] {
+  return uniqueCitations([...graph.nodes, ...graph.edges].flatMap((item) => item.sourceRefs.map((sourceRef) => ({
+    ...sourceRef,
+    commitSha
+  }))));
 }
 
 function boundedPage(page: KnowledgePageRecord): KnowledgePageRecord {
@@ -449,6 +462,40 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     } catch (error) {
       return failed(error);
     }
+    }
+  );
+
+  register(
+    "dkh_get_graph",
+    "Get the current published knowledge graph as JSON, tree, Mermaid, or Markmap",
+    z.strictObject({ format: z.enum(["json", "tree", "mermaid", "markmap"]).default("json") }),
+    readOnly,
+    async ({ format }) => {
+      try {
+        const selected = await published(context);
+        const graph = await selected.context.store.getKnowledgeGraph(
+          selected.context.workspaceId,
+          selected.repository.projectId,
+          selected.release.buildId
+        );
+        if (!graph) throw new McpToolError("NOT_FOUND", "Published knowledge graph was not found");
+        const exported = exportKnowledgeGraph(graph);
+        const result = format === "mermaid"
+          ? exported.mermaid
+          : format === "markmap"
+            ? exported.markmap
+            : format === "tree"
+              ? exported.tree
+              : exported.graph;
+        return successful(
+          selected.release,
+          selected.snapshot.commitSha,
+          { format, data: result },
+          graphCitations(graph, selected.snapshot.commitSha)
+        );
+      } catch (error) {
+        return failed(error);
+      }
     }
   );
 

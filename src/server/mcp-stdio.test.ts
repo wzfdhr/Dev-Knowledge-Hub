@@ -13,7 +13,7 @@ afterEach(async () => {
 });
 
 describe("createMcpServer", () => {
-  test("registers exactly the approved eight tools", async () => {
+  test("registers exactly the approved nine tools", async () => {
     const server = createMcpServer();
     const client = new Client({ name: "devkh-test-client", version: "0.0.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -26,6 +26,7 @@ describe("createMcpServer", () => {
     expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
       "dkh_get_architecture",
       "dkh_get_change_context",
+      "dkh_get_graph",
       "dkh_get_module",
       "dkh_get_release",
       "dkh_get_source",

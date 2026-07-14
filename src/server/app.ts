@@ -53,6 +53,8 @@ import { MemorySessionStore, type SessionStore } from "./security/session-store.
 import { createCodexConnectionPack } from "./codex/connection-pack.js";
 import type { BuildEvent, BuildService } from "./knowledge/build-service.js";
 import { deriveChangeImpact } from "./knowledge/change-impact.js";
+import { loadPublishedKnowledgeGraph } from "./knowledge/pipeline/graph-query.js";
+import { exportKnowledgeGraph } from "./knowledge/pipeline/viz.js";
 import { legacyBuildStatus } from "./knowledge/pipeline/contracts.js";
 import {
   InvalidStageEventCursorError,
@@ -989,6 +991,37 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         ? deriveChangeImpact(change, await options.store.knowledgeMetadata(admin.workspaceId, release.id))
         : change
     };
+  });
+
+  server.get("/api/projects/:projectId/graph", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    const query = z.object({
+      releaseId: z.uuid().optional(),
+      format: z.enum(["json", "tree", "mermaid", "markmap"]).default("json")
+    }).safeParse(request.query);
+    if (!params.success || !query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid graph query");
+    await requireProjectRole("reader", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repository = await options.store.currentRepository(admin.workspaceId, params.data.projectId);
+    if (!repository) return { release: null, format: query.data.format, data: null };
+    const selected = await loadPublishedKnowledgeGraph({
+      store: options.store,
+      workspaceId: admin.workspaceId,
+      projectId: params.data.projectId,
+      repositoryId: repository.id,
+      releaseId: query.data.releaseId
+    });
+    if (!selected) return { release: null, format: query.data.format, data: null };
+    const graph = exportKnowledgeGraph(selected.graph);
+    const data = query.data.format === "mermaid"
+      ? graph.mermaid
+      : query.data.format === "markmap"
+        ? graph.markmap
+        : query.data.format === "tree"
+          ? graph.tree
+          : graph.graph;
+    return { release: selected.release, format: query.data.format, data };
   });
 
   server.get("/api/projects/:projectId/knowledge-quality", { preHandler: requireAdmin }, async (request, reply) => {

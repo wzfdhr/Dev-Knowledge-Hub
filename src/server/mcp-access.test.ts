@@ -92,6 +92,38 @@ async function publishedContext(root = fixtureRoot) {
     commitSha: index.commitSha
   })).build;
   await context.store.saveKnowledge({ build, index, output: await generateKnowledge(index) });
+  const source = index.files[0]!;
+  const sourceRef = {
+    snapshotId,
+    path: source.path,
+    startLine: source.startLine,
+    endLine: source.endLine,
+    blobHash: source.blobHash
+  };
+  await context.store.saveKnowledgeGraph({
+    workspaceId: context.workspaceId,
+    projectId: repository.projectId,
+    snapshotId,
+    buildId: build.id,
+    graph: {
+      nodes: [
+        {
+          id: "a".repeat(64), projectId: repository.projectId, snapshotId, kind: "module",
+          name: source.path, qualifiedName: source.path, candidate: false,
+          sourceRefs: [sourceRef], attributes: {}
+        },
+        {
+          id: "b".repeat(64), projectId: repository.projectId, snapshotId, kind: "symbol",
+          name: "fixture", qualifiedName: `${source.path}:fixture`, candidate: false,
+          sourceRefs: [sourceRef], attributes: {}
+        }
+      ],
+      edges: [{
+        id: "c".repeat(64), fromNodeId: "a".repeat(64), toNodeId: "b".repeat(64),
+        kind: "contains", candidate: false, confidence: 1, sourceRefs: [sourceRef]
+      }]
+    }
+  });
   await context.store.transitionBuild(build.id, "queued", "ready");
   const release = await context.store.createReleaseDraft(
     context.workspaceId, repository.id, build.id, "1.0.0"
@@ -146,6 +178,7 @@ describe("MCP bearer tokens", () => {
     expect((await httpClient.listTools()).tools.map((tool) => tool.name).sort()).toEqual([
       "dkh_get_architecture",
       "dkh_get_change_context",
+      "dkh_get_graph",
       "dkh_get_module",
       "dkh_get_release",
       "dkh_get_source",
@@ -226,7 +259,67 @@ describe("MCP bearer tokens", () => {
 });
 
 describe("MCP tool contract", () => {
-  test("returns the exact common release envelope from all eight tools", async () => {
+  test("returns a published graph only through the authorized project route", async () => {
+    const { app, cookie, repository, release } = await publishedContext();
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/projects/${repository.projectId}/graph?format=json`,
+      headers: { cookie }
+    });
+
+    expect(response.statusCode).toBe(200);
+    const graphResponse = response.json<{
+      release: { id: string };
+      format: string;
+      data: { nodes: Array<{ qualifiedName: string }>; edges: Array<{ kind: string; sourceRefs: unknown[] }> };
+    }>();
+    expect(graphResponse.release.id).toBe(release.id);
+    expect(graphResponse.format).toBe("json");
+    expect(graphResponse.data.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ qualifiedName: expect.any(String) })
+    ]));
+    expect(graphResponse.data.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "contains", sourceRefs: expect.any(Array) })
+    ]));
+    const mermaid = await app.inject({
+      method: "GET",
+      url: `/api/projects/${repository.projectId}/graph?format=mermaid`,
+      headers: { cookie }
+    });
+    expect(mermaid.statusCode).toBe(200);
+    expect(mermaid.json()).toMatchObject({ release: { id: release.id }, format: "mermaid" });
+    expect(mermaid.json().data).toContain("flowchart TD");
+    const tree = await app.inject({
+      method: "GET",
+      url: `/api/projects/${repository.projectId}/graph?format=tree`,
+      headers: { cookie }
+    });
+    expect(tree.statusCode).toBe(200);
+    expect(tree.json()).toMatchObject({
+      release: { id: release.id },
+      format: "tree",
+      data: { roots: expect.any(Array), crossLinks: expect.any(Array) }
+    });
+    await app.close();
+  });
+
+  test("does not expose unpublished graph state from the project route", async () => {
+    const { app, cookie, workspaceId, store } = await adminContext();
+    const project = (await store.listProjects(workspaceId))[0]!;
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/projects/${project.id}/graph`,
+      headers: { cookie }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ release: null, format: "json", data: null });
+    await app.close();
+  });
+
+  test("returns the exact common release envelope from all nine tools", async () => {
     const { store, workspaceId, release, index, app } = await publishedContext();
     const client = await connectMcp(store, workspaceId);
     const calls: Array<[string, Record<string, unknown>]> = [
@@ -235,6 +328,7 @@ describe("MCP tool contract", () => {
       ["dkh_get_module", { moduleId: "src/math.ts" }],
       ["dkh_get_symbol", { name: "add", path: "src/math.ts" }],
       ["dkh_get_change_context", { task: "change add", paths: ["src/math.ts"] }],
+      ["dkh_get_graph", {}],
       ["dkh_get_source", { path: "src/math.ts", startLine: 16, endLine: 18 }],
       ["dkh_get_release", {}],
       ["dkh_report_gap", {
@@ -540,7 +634,7 @@ describe("MCP tool contract", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  test("keeps seven tools read-only and lets only report-gap create feedback", async () => {
+  test("keeps graph and knowledge reads read-only while report-gap creates feedback", async () => {
     const { store, workspaceId, app } = await publishedContext();
     const client = await connectMcp(store, workspaceId);
     const before = JSON.stringify({
@@ -554,6 +648,7 @@ describe("MCP tool contract", () => {
       ["dkh_get_module", { moduleId: "src/math.ts" }],
       ["dkh_get_symbol", { name: "add" }],
       ["dkh_get_change_context", { task: "change add" }],
+      ["dkh_get_graph", {}],
       ["dkh_get_source", { path: "src/math.ts" }],
       ["dkh_get_release", {}]
     ] as Array<[string, Record<string, unknown>]>) {

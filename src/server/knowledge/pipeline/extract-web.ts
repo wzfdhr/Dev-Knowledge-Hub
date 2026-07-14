@@ -11,6 +11,7 @@ export interface WebSourceInput {
   path: string;
   content: string;
   blobHash: string;
+  lineOffset?: number;
 }
 
 export interface WebExtractionResult {
@@ -38,8 +39,9 @@ function ref(input: WebSourceInput, source: ts.SourceFile, node: ts.Node): Sourc
 }
 
 function refAt(input: WebSourceInput, source: ts.SourceFile, startPosition: number, endPosition: number): SourceRef {
-  const start = source.getLineAndCharacterOfPosition(startPosition).line + 1;
-  const end = source.getLineAndCharacterOfPosition(Math.max(startPosition, endPosition - 1)).line + 1;
+  const offset = input.lineOffset ?? 0;
+  const start = source.getLineAndCharacterOfPosition(startPosition).line + 1 + offset;
+  const end = source.getLineAndCharacterOfPosition(Math.max(startPosition, endPosition - 1)).line + 1 + offset;
   return { snapshotId: input.snapshotId, path: input.path, startLine: start, endLine: end, blobHash: input.blobHash };
 }
 
@@ -55,7 +57,7 @@ export function extractWebSource(input: WebSourceInput): WebExtractionResult {
   const source = ts.createSourceFile(input.path, input.content, ts.ScriptTarget.Latest, true, scriptKind(input.path));
   const sourceRef: SourceRef = {
     snapshotId: input.snapshotId, path: input.path, startLine: 1,
-    endLine: Math.max(1, input.content.split(/\r?\n/).length - (input.content.endsWith("\n") ? 1 : 0)),
+    endLine: Math.max(1, input.content.split(/\r?\n/).length - (input.content.endsWith("\n") ? 1 : 0)) + (input.lineOffset ?? 0),
     blobHash: input.blobHash
   };
   const ir: KnowledgeIR = {

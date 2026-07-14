@@ -8,7 +8,9 @@ import { parse as parseYaml } from "yaml";
 import type { KnowledgeIR, LintIssue } from "../../shared/api-contracts.js";
 import type { SourceFileRecord, SourceSnapshotRecord } from "../persistence/store.js";
 import { convertSnapshotSourceFile } from "./pipeline/convert.js";
+import { extractDocumentSource } from "./pipeline/extract-documents.js";
 import { extractWebSource } from "./pipeline/extract-web.js";
+import { extractVueSfc } from "./pipeline/extract-vue.js";
 
 export type SymbolKind =
   | "module"
@@ -80,6 +82,7 @@ export class SnapshotIntegrityError extends Error {
 }
 
 const codeExtensions = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"]);
+const documentExtensions = new Set([".md", ".json", ".yaml", ".yml"]);
 
 export async function extractSnapshotWebKnowledgeIR({
   snapshot,
@@ -105,6 +108,41 @@ export async function extractSnapshotWebKnowledgeIR({
       documents: [],
       tables: [],
       sourceRefs: extracted.flatMap((result) => result.ir.sourceRefs)
+    },
+    lintIssues: extracted.flatMap((result) => result.lintIssues)
+  };
+}
+
+export async function extractSnapshotKnowledgeIR({
+  snapshot,
+  files
+}: {
+  snapshot: Pick<SourceSnapshotRecord, "id" | "storagePath">;
+  files: readonly Pick<SourceFileRecord, "snapshotId" | "path" | "byteSize" | "contentHash">[];
+}): Promise<{ ir: KnowledgeIR; lintIssues: LintIssue[] }> {
+  const extracted = await Promise.all(
+    [...files]
+      .filter((file) => {
+        const extension = path.posix.extname(file.path).toLowerCase();
+        return codeExtensions.has(extension) || extension === ".vue" || documentExtensions.has(extension);
+      })
+      .sort((left, right) => Buffer.compare(Buffer.from(left.path, "utf8"), Buffer.from(right.path, "utf8")))
+      .map(async (file) => {
+        const input = await convertSnapshotSourceFile({ snapshot, file });
+        const extension = path.posix.extname(file.path).toLowerCase();
+        if (extension === ".vue") return extractVueSfc(input);
+        if (documentExtensions.has(extension)) return extractDocumentSource(input);
+        return extractWebSource(input);
+      })
+  );
+  return {
+    ir: {
+      schemaVersion: 1, snapshotId: snapshot.id,
+      files: extracted.flatMap((result) => result.ir.files),
+      symbols: extracted.flatMap((result) => result.ir.symbols),
+      imports: extracted.flatMap((result) => result.ir.imports),
+      documents: extracted.flatMap((result) => result.ir.documents),
+      tables: [], sourceRefs: extracted.flatMap((result) => result.ir.sourceRefs)
     },
     lintIssues: extracted.flatMap((result) => result.lintIssues)
   };

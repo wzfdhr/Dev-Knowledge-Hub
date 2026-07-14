@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
-import { extractSnapshotWebKnowledgeIR } from "../intelligence";
+import { extractSnapshotKnowledgeIR, extractSnapshotWebKnowledgeIR } from "../intelligence";
 
 const temporaryDirectories: string[] = [];
 
@@ -40,5 +40,25 @@ describe("extractSnapshotWebKnowledgeIR", () => {
     expect(result.ir.imports).toEqual([expect.objectContaining({ specifier: "./not-resolved", kind: "dynamic" })]);
     await expect(extractSnapshotWebKnowledgeIR({ snapshot: { id: "snapshot-1", storagePath: root }, files }))
       .resolves.toEqual(result);
+  });
+
+  test("combines Vue and Markdown snapshot sources with the Web IR", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-full-ir-"));
+    temporaryDirectories.push(root);
+    await mkdir(path.join(root, "src"));
+    const vue = "<script setup>const name = 'DevKH'</script><template><main/></template>";
+    const markdown = "# Guide\n\nRun npm test.";
+    await writeFile(path.join(root, "src", "App.vue"), vue);
+    await writeFile(path.join(root, "README.md"), markdown);
+    const files = [
+      { snapshotId: "snapshot-1", path: "src/App.vue", byteSize: Buffer.byteLength(vue), contentHash: createHash("sha256").update(vue).digest("hex") },
+      { snapshotId: "snapshot-1", path: "README.md", byteSize: Buffer.byteLength(markdown), contentHash: createHash("sha256").update(markdown).digest("hex") }
+    ];
+
+    const result = await extractSnapshotKnowledgeIR({ snapshot: { id: "snapshot-1", storagePath: root }, files });
+
+    expect(result.ir.files.map((file) => file.path)).toEqual(["README.md", "src/App.vue"]);
+    expect(result.ir.symbols).toEqual(expect.arrayContaining([expect.objectContaining({ name: "App", kind: "component" })]));
+    expect(result.ir.documents).toEqual(expect.arrayContaining([expect.objectContaining({ title: "Guide", text: "Run npm test." })]));
   });
 });

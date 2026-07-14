@@ -93,6 +93,7 @@ export interface ApiClient {
   getRepositoryStatus(): Promise<RepositoryStatus>;
   syncRepository(): Promise<SnapshotSummary>;
   getProjectChanges(projectId: string): Promise<{ change: SnapshotChangeSummary | null }>;
+  getProjectGraph(projectId: string): Promise<{ release: { id: string; version: string } | null; format: "tree"; data: { roots: unknown[]; crossLinks: unknown[] } | null }>;
   getProjectKnowledgeQuality(projectId: string): Promise<ProjectKnowledgeQuality>;
   listBuilds(pagination: PaginationParams): Promise<{ builds: Build[] } & PaginatedResponse>;
   getBuildStages(id: string): Promise<{ buildId: string; legacyStatus: Build["status"]; stages: PipelineStageRun[] }>;
@@ -197,6 +198,7 @@ export const api: ApiClient = {
   getRepositoryStatus: () => request("/api/repositories/current/status"),
   syncRepository: () => request("/api/repositories/current/sync", { method: "POST" }),
   getProjectChanges: (projectId) => request(`/api/projects/${projectId}/changes`),
+  getProjectGraph: (projectId) => request(`/api/projects/${encodeURIComponent(projectId)}/graph?format=tree`),
   getProjectKnowledgeQuality: (projectId) => request(`/api/projects/${projectId}/knowledge-quality`),
   listBuilds: (pagination) => request(listPath("/api/builds", pagination)),
   getBuildStages: (id) => request(`/api/builds/${encodeURIComponent(id)}/stages`),

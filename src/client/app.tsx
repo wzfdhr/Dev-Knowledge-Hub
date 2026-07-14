@@ -17,6 +17,7 @@ import { ProjectImportsPage } from "./pages/project-imports-page";
 import { ProjectCodexPage } from "./pages/project-codex-page";
 import { ProjectCollaborationPage } from "./pages/project-collaboration-page";
 import { ProjectVersionsPage } from "./pages/project-versions-page";
+import { ProjectGraphPage } from "./pages/project-graph-page";
 import { SystemSettingsPage } from "./pages/system-settings-page";
 
 function LegacyProjectRedirect({ section }: { section: string }) {
@@ -58,6 +59,7 @@ export function App({ api = defaultApi }: { api?: ApiClient }) {
       <Route path="imports" element={<ProjectImportsPage api={api} />} />
       <Route path="versions" element={<ProjectVersionsPage api={api} />} />
       <Route path="knowledge" element={<KnowledgePage api={api} />} />
+      <Route path="graph" element={<ProjectGraphPage api={api} />} />
       <Route path="collaboration" element={<ProjectCollaborationPage api={api} />} />
       <Route path="codex" element={<ProjectCodexPage api={api} />} />
     </Route>

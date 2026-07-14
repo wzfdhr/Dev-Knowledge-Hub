@@ -17,6 +17,7 @@ const sections = [
   ["overview", "项目概览"],
   ["imports", "资料上传"],
   ["knowledge", "知识浏览"],
+  ["graph", "知识图谱"],
   ["versions", "知识版本"],
   ["collaboration", "团队协作"],
   ["codex", "Codex 接入"]

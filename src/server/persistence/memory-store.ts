@@ -30,6 +30,7 @@ import type {
   ModelConfigRecord,
   ModelProvider,
   McpTokenRecord,
+  CreateMcpTokenInput,
   Pagination,
   ReleaseRecord,
   RepositoryConnectionInput,
@@ -606,13 +607,14 @@ export class MemoryAppStore implements AppStore {
     return before - retained.length;
   }
 
-  async createMcpToken(
-    input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">
-  ): Promise<McpTokenRecord> {
+  async createMcpToken(input: CreateMcpTokenInput): Promise<McpTokenRecord> {
+    const now = new Date();
     const record: McpTokenRecord = {
       ...input,
       id: randomUUID(),
-      createdAt: new Date(),
+      scopes: input.scopes ?? ["search", "source.read"],
+      expiresAt: input.expiresAt ?? new Date(now.getTime() + 90 * 24 * 60 * 60 * 1_000),
+      createdAt: now,
       lastUsedAt: null,
       revokedAt: null
     };
@@ -621,7 +623,7 @@ export class MemoryAppStore implements AppStore {
   }
 
   async createMcpTokenWithAudit(
-    input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">,
+    input: CreateMcpTokenInput,
     actorId: string
   ): Promise<McpTokenRecord> {
     const tokenLength = this.mcpTokens.length;
@@ -708,7 +710,7 @@ export class MemoryAppStore implements AppStore {
   async rotateMcpTokenWithAudit(
     workspaceId: string,
     tokenId: string,
-    replacement: Pick<McpTokenRecord, "tokenHash" | "tokenPrefix">,
+    replacement: Pick<McpTokenRecord, "tokenHash" | "tokenPrefix"> & { scopes?: McpTokenRecord["scopes"] },
     actorId: string
   ): Promise<{ previous: McpTokenRecord; replacement: McpTokenRecord } | null> {
     const previous = this.mcpTokens.find((candidate) =>
@@ -724,7 +726,8 @@ export class MemoryAppStore implements AppStore {
         projectId: previous.projectId,
         name: previous.name,
         tokenHash: replacement.tokenHash,
-        tokenPrefix: replacement.tokenPrefix
+        tokenPrefix: replacement.tokenPrefix,
+        scopes: replacement.scopes ?? previous.scopes
       });
       previous.revokedAt = new Date();
       await this.recordAudit({

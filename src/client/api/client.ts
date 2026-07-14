@@ -116,7 +116,7 @@ export interface ApiClient {
   listMcpTokens(pagination: PaginationParams): Promise<{ tokens: McpToken[] } & PaginatedResponse>;
   listProjectMcpTokens(projectId: string, pagination: PaginationParams): Promise<{ tokens: McpToken[] } & PaginatedResponse>;
   getProjectCodexConnection(projectId: string): Promise<CodexConnectionPack>;
-  createMcpToken(name: string, projectId: string): Promise<McpToken & { token: string }>;
+  createMcpToken(name: string, projectId: string, scopes?: McpToken["scopes"]): Promise<McpToken & { token: string }>;
   revokeMcpToken(id: string): Promise<{ token: McpToken }>;
   rotateMcpToken(id: string): Promise<{ previous: McpToken; replacement: McpToken; token: string }>;
   getModelConfig(): Promise<{ config: ModelConfig | null }>;
@@ -229,7 +229,7 @@ export const api: ApiClient = {
   listMcpTokens: (pagination) => request(listPath("/api/mcp/tokens", pagination)),
   listProjectMcpTokens: (projectId, pagination) => request(listPath("/api/mcp/tokens", pagination, { projectId })),
   getProjectCodexConnection: (projectId) => request(`/api/projects/${encodeURIComponent(projectId)}/codex-connection`),
-  createMcpToken: (name, projectId) => request("/api/mcp/tokens", { method: "POST", body: json({ name, projectId }) }),
+  createMcpToken: (name, projectId, scopes) => request("/api/mcp/tokens", { method: "POST", body: json({ name, projectId, ...(scopes ? { scopes } : {}) }) }),
   revokeMcpToken: (id) => request(`/api/mcp/tokens/${id}/revoke`, { method: "POST" }),
   rotateMcpToken: (id) => request(`/api/mcp/tokens/${encodeURIComponent(id)}/rotate`, { method: "POST" }),
   getModelConfig: () => request("/api/settings/model"),

@@ -43,6 +43,7 @@ export interface McpToolContext {
   store: AppStore;
   workspaceId: string;
   projectId: string;
+  scopes?: readonly ("search" | "source.read")[];
   authorize?: () => Promise<boolean>;
   onUnauthorized?: () => Promise<void> | void;
 }
@@ -248,6 +249,7 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     description: string;
     schema: z.ZodType;
     annotations: ToolAnnotations;
+    scope: "search" | "source.read" | null;
     callback: (input: unknown) => Promise<CallToolResult>;
   }
   const tools: ToolDefinition[] = [];
@@ -256,13 +258,15 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     description: string,
     schema: T,
     annotations: ToolAnnotations,
-    callback: (input: z.infer<T>) => Promise<CallToolResult>
+    callback: (input: z.infer<T>) => Promise<CallToolResult>,
+    scope: "search" | "source.read" | null = "search"
   ) {
     tools.push({
       name,
       description,
       schema,
       annotations,
+      scope,
       callback: (input) => callback(input as z.infer<T>)
     });
   }
@@ -474,7 +478,8 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     } catch (error) {
       return failed(error);
     }
-    }
+    },
+    "source.read"
   );
 
   register(
@@ -570,12 +575,17 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     } catch (error) {
       return failed(error);
     }
-    }
+    },
+    null
   );
 
+  const allowedScopes = context?.scopes ? new Set(context.scopes) : null;
+  const visibleTools = allowedScopes
+    ? tools.filter((tool) => tool.scope !== null && allowedScopes.has(tool.scope))
+    : tools;
   server.server.registerCapabilities({ tools: {} });
   server.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: tools.map((tool) => ({
+    tools: visibleTools.map((tool) => ({
       name: tool.name,
       description: tool.description,
       inputSchema: z.toJSONSchema(tool.schema) as { type: "object" },
@@ -583,7 +593,7 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     }))
   }));
   server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const tool = tools.find((candidate) => candidate.name === request.params.name);
+    const tool = visibleTools.find((candidate) => candidate.name === request.params.name);
     if (!tool) throw new McpError(ErrorCode.MethodNotFound, "Unknown MCP tool");
     if (context?.authorize && !await context.authorize()) {
       void context.onUnauthorized?.();

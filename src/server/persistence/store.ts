@@ -128,9 +128,19 @@ export interface McpTokenRecord {
   name: string;
   tokenHash: string;
   tokenPrefix: string;
+  scopes: McpTokenScope[];
+  expiresAt: Date;
   createdAt: Date;
   lastUsedAt: Date | null;
   revokedAt: Date | null;
+}
+
+export const MCP_TOKEN_SCOPES = ["search", "source.read"] as const;
+export type McpTokenScope = (typeof MCP_TOKEN_SCOPES)[number];
+
+export interface CreateMcpTokenInput extends Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt" | "scopes" | "expiresAt"> {
+  scopes?: McpTokenScope[];
+  expiresAt?: Date;
 }
 
 export interface McpTokenRotation {
@@ -541,10 +551,10 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   listImportReports(workspaceId: string, projectId: string, pagination?: Pagination): Promise<ImportReportRecord[]>;
   countImportReports(workspaceId: string, projectId: string): Promise<number>;
   deleteExpiredImportReports(cutoff: Date): Promise<number>;
-  createMcpToken(input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">):
+  createMcpToken(input: CreateMcpTokenInput):
     Promise<McpTokenRecord>;
   createMcpTokenWithAudit(
-    input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">,
+    input: CreateMcpTokenInput,
     actorId: string
   ): Promise<McpTokenRecord>;
   listMcpTokens(workspaceId: string, pagination?: Pagination, projectId?: string): Promise<McpTokenRecord[]>;
@@ -560,7 +570,7 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   rotateMcpTokenWithAudit(
     workspaceId: string,
     tokenId: string,
-    replacement: Pick<McpTokenRecord, "tokenHash" | "tokenPrefix">,
+    replacement: Pick<McpTokenRecord, "tokenHash" | "tokenPrefix"> & { scopes?: McpTokenScope[] },
     actorId: string
   ): Promise<McpTokenRotation | null>;
   createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord>;

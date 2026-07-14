@@ -150,7 +150,6 @@ describe("MCP bearer tokens", () => {
       "dkh_get_release",
       "dkh_get_source",
       "dkh_get_symbol",
-      "dkh_report_gap",
       "dkh_search"
     ]);
     await httpClient.close();
@@ -172,6 +171,30 @@ describe("MCP bearer tokens", () => {
       method: "POST", url: `/api/mcp/tokens/${tokenId}/revoke`, headers: { cookie, ...csrfHeaders(cookie) }
     })).statusCode).toBe(200);
     expect((await mcpRequest(plaintext, 2)).status).toBe(401);
+    await app.close();
+  });
+
+  test("enforces the read-only scope allowlist and rejects expired tokens explicitly", async () => {
+    const { app, store, cookie } = await adminContext();
+    const created = await app.inject({
+      method: "POST", url: "/api/mcp/tokens", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { name: "Search only", scopes: ["search"] }
+    });
+    const plaintext = created.json<{ token: string }>().token;
+    expect(created.json()).toMatchObject({ scopes: ["search"], expiresAt: expect.any(String) });
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const mcpRequest = (method: string, id: number) => fetch(`${address}/mcp`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${plaintext}`, accept: "application/json, text/event-stream", "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id, method, params: {} })
+    });
+    const tools = await mcpRequest("tools/list", 1).then((response) => response.json()) as { result: { tools: Array<{ name: string }> } };
+    expect(tools.result.tools.map((tool) => tool.name)).not.toContain("dkh_get_source");
+    expect(tools.result.tools.map((tool) => tool.name)).not.toContain("dkh_report_gap");
+    (store as unknown as { mcpTokens: Array<{ expiresAt: Date }> }).mcpTokens[0].expiresAt = new Date(Date.now() - 1_000);
+    const expired = await mcpRequest("tools/list", 2);
+    expect(expired.status).toBe(401);
+    expect(await expired.json()).toMatchObject({ error: { code: "MCP_TOKEN_EXPIRED" } });
     await app.close();
   });
 

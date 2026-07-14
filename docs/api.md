@@ -24,7 +24,7 @@ The administration API uses JSON under `/api`. Except health, setup status, setu
 | POST | `/api/projects/:projectId/repositories` | Attach the project's initial upload, Git HTTPS, or server-local source |
 | GET | `/api/projects/:projectId/codex-connection` | Generated project-scoped Codex config and `AGENTS.md` templates |
 | GET/POST | `/api/members` | List workspace members or create `{email,password,role}` as administrator |
-| GET/POST | `/api/mcp/tokens` | List sanitized tokens, optionally by `projectId`; create `{name,projectId}` with one-time plaintext |
+| GET/POST | `/api/mcp/tokens` | List sanitized tokens, optionally by `projectId`; create `{name,projectId,scopes?}` with one-time plaintext, fixed 90-day expiry, and only `search` / `source.read` scopes |
 | POST | `/api/mcp/tokens/:id/revoke` | Revoke token |
 | GET | `/api/mcp/connection` | Transport/tool metadata |
 | POST | `/api/repositories` | Local `{kind,path,name}`, Git `{kind,url,name,token?}`, or upload `{kind:"upload",name}` |

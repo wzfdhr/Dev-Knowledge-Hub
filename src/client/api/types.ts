@@ -216,6 +216,8 @@ export interface McpToken {
   projectId: string;
   name: string;
   tokenPrefix: string;
+  scopes: Array<"search" | "source.read">;
+  expiresAt: string;
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;

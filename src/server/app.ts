@@ -54,12 +54,13 @@ import { createCodexConnectionPack } from "./codex/connection-pack.js";
 import type { BuildEvent, BuildService } from "./knowledge/build-service.js";
 import { deriveChangeImpact } from "./knowledge/change-impact.js";
 import {
-  authenticateMcpToken,
+  authenticateMcpTokenDetailed,
   createMcpAuthorizationGuard,
   generateMcpToken,
   hashMcpToken,
   sanitizedMcpToken
 } from "./mcp/auth.js";
+import { MCP_TOKEN_SCOPES } from "./persistence/store.js";
 import { createRegisteredMcpServer, MCP_TOOL_NAMES } from "./mcp/tools.js";
 import {
   DEFAULT_RATE_LIMITS,
@@ -1246,7 +1247,11 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
 
   server.post("/api/mcp/tokens", { preHandler: requireAdmin }, async (request, reply) => {
-    const parsed = z.object({ name: z.string().trim().min(1).max(100), projectId: z.uuid().optional() }).safeParse(request.body);
+    const parsed = z.object({
+      name: z.string().trim().min(1).max(100),
+      projectId: z.uuid().optional(),
+      scopes: z.array(z.enum(MCP_TOKEN_SCOPES)).min(1).max(MCP_TOKEN_SCOPES.length).optional()
+    }).safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MCP token");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const projects = await options.store.listAccessibleProjects(admin.workspaceId, admin.id, { limit: 100 });
@@ -1263,7 +1268,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         projectId: project.id,
         name: parsed.data.name,
         tokenHash: hashMcpToken(plaintext),
-        tokenPrefix: plaintext.slice(0, 12)
+        tokenPrefix: plaintext.slice(0, 12),
+        scopes: parsed.data.scopes ?? [...MCP_TOKEN_SCOPES]
       }, admin.id);
       return reply.code(201).send({ ...sanitizedMcpToken(token), token: plaintext });
     } catch {
@@ -1326,7 +1332,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       const rotation = await options.store.rotateMcpTokenWithAudit(
         admin.workspaceId,
         candidate.id,
-        { tokenHash: hashMcpToken(plaintext), tokenPrefix: plaintext.slice(0, 12) },
+        { tokenHash: hashMcpToken(plaintext), tokenPrefix: plaintext.slice(0, 12), scopes: candidate.scopes },
         admin.id
       );
       if (!rotation) return sendError(reply, 409, "TOKEN_NOT_ACTIVE", "MCP token is already revoked");
@@ -2195,12 +2201,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   server.all("/mcp", async (request, reply) => {
     const authorization = request.headers.authorization;
     const match = /^Bearer (\S+)$/i.exec(authorization ?? "");
-    const token = match ? await authenticateMcpToken(options.store, match[1]) : null;
-    if (!token) return sendError(reply, 401, "UNAUTHORIZED", "Invalid or revoked MCP token");
+    const authentication = match ? await authenticateMcpTokenDetailed(options.store, match[1]) : { token: null, expired: false };
+    const token = authentication.token;
+    if (!token) return sendError(reply, 401, authentication.expired ? "MCP_TOKEN_EXPIRED" : "UNAUTHORIZED", authentication.expired ? "MCP token has expired" : "Invalid or revoked MCP token");
     const mcp = createRegisteredMcpServer({
       store: options.store,
       workspaceId: token.workspaceId,
       projectId: token.projectId,
+      scopes: token.scopes,
       authorize: createMcpAuthorizationGuard(options.store, match![1]),
       onUnauthorized: () => {
         setImmediate(() => void mcp.close());

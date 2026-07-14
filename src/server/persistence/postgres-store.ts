@@ -29,6 +29,7 @@ import type {
   ModelConfigRecord,
   ModelProvider,
   McpTokenRecord,
+  CreateMcpTokenInput,
   Pagination,
   ReleaseRecord,
   RepositoryConnectionInput,
@@ -129,6 +130,8 @@ interface McpTokenRow extends QueryResultRow {
   name: string;
   token_hash: string;
   token_prefix: string;
+  scopes: string[];
+  expires_at: Date;
   created_at: Date;
   last_used_at: Date | null;
   revoked_at: Date | null;
@@ -318,6 +321,8 @@ function mcpTokenRecord(row: McpTokenRow): McpTokenRecord {
     name: row.name,
     tokenHash: row.token_hash,
     tokenPrefix: row.token_prefix,
+    scopes: (row.scopes ?? ["search", "source.read"]) as McpTokenRecord["scopes"],
+    expiresAt: row.expires_at ?? new Date(row.created_at.getTime() + 90 * 24 * 60 * 60 * 1_000),
     createdAt: row.created_at,
     lastUsedAt: row.last_used_at,
     revokedAt: row.revoked_at
@@ -1308,29 +1313,29 @@ export class PostgresAppStore implements AppStore {
   }
 
   async createMcpToken(
-    input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">
+    input: CreateMcpTokenInput
   ): Promise<McpTokenRecord> {
     const { rows } = await this.pool.query<McpTokenRow>(
-      `INSERT INTO mcp_tokens (workspace_id, project_id, name, token_hash, token_prefix)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, workspace_id, project_id, name, token_hash, token_prefix,
+      `INSERT INTO mcp_tokens (workspace_id, project_id, name, token_hash, token_prefix, scopes, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, now() + interval '90 days'))
+       RETURNING id, workspace_id, project_id, name, token_hash, token_prefix, scopes, expires_at,
                created_at, last_used_at, revoked_at`,
-      [input.workspaceId, input.projectId, input.name, input.tokenHash, input.tokenPrefix]
+      [input.workspaceId, input.projectId, input.name, input.tokenHash, input.tokenPrefix, input.scopes ?? ["search", "source.read"], input.expiresAt ?? null]
     );
     return mcpTokenRecord(rows[0]);
   }
 
   async createMcpTokenWithAudit(
-    input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">,
+    input: CreateMcpTokenInput,
     actorId: string
   ): Promise<McpTokenRecord> {
     return this.transaction(async (client) => {
       const { rows } = await client.query<McpTokenRow>(
-        `INSERT INTO mcp_tokens (workspace_id, project_id, name, token_hash, token_prefix)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, workspace_id, project_id, name, token_hash, token_prefix,
+        `INSERT INTO mcp_tokens (workspace_id, project_id, name, token_hash, token_prefix, scopes, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, now() + interval '90 days'))
+         RETURNING id, workspace_id, project_id, name, token_hash, token_prefix, scopes, expires_at,
                  created_at, last_used_at, revoked_at`,
-        [input.workspaceId, input.projectId, input.name, input.tokenHash, input.tokenPrefix]
+        [input.workspaceId, input.projectId, input.name, input.tokenHash, input.tokenPrefix, input.scopes ?? ["search", "source.read"], input.expiresAt ?? null]
       );
       const token = mcpTokenRecord(rows[0]);
       await this.insertAudit(client, {
@@ -1347,7 +1352,7 @@ export class PostgresAppStore implements AppStore {
   async listMcpTokens(workspaceId: string, pagination?: Pagination, projectId?: string): Promise<McpTokenRecord[]> {
     const { limit, offset } = normalizePagination(pagination);
     const { rows } = await this.pool.query<McpTokenRow>(
-      `SELECT id, workspace_id, project_id, name, token_hash, token_prefix,
+      `SELECT id, workspace_id, project_id, name, token_hash, token_prefix, scopes, expires_at,
               created_at, last_used_at, revoked_at
        FROM mcp_tokens WHERE workspace_id = $1 AND ($2::uuid IS NULL OR project_id = $2)
        ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`,
@@ -1366,7 +1371,7 @@ export class PostgresAppStore implements AppStore {
 
   async findActiveMcpToken(tokenHash: string): Promise<McpTokenRecord | null> {
     const { rows } = await this.pool.query<McpTokenRow>(
-      `SELECT id, workspace_id, project_id, name, token_hash, token_prefix,
+      `SELECT id, workspace_id, project_id, name, token_hash, token_prefix, scopes, expires_at,
               created_at, last_used_at, revoked_at
        FROM mcp_tokens WHERE token_hash = $1 AND revoked_at IS NULL AND project_id IS NOT NULL LIMIT 1`,
       [tokenHash]
@@ -1385,7 +1390,7 @@ export class PostgresAppStore implements AppStore {
     const { rows } = await this.pool.query<McpTokenRow>(
       `UPDATE mcp_tokens SET revoked_at = COALESCE(revoked_at, now()), updated_at = now()
        WHERE workspace_id = $1 AND id = $2
-       RETURNING id, workspace_id, project_id, name, token_hash, token_prefix,
+       RETURNING id, workspace_id, project_id, name, token_hash, token_prefix, scopes, expires_at,
                  created_at, last_used_at, revoked_at`,
       [workspaceId, tokenId]
     );
@@ -1401,7 +1406,7 @@ export class PostgresAppStore implements AppStore {
       const { rows } = await client.query<McpTokenRow>(
         `UPDATE mcp_tokens SET revoked_at = COALESCE(revoked_at, now()), updated_at = now()
          WHERE workspace_id = $1 AND id = $2
-         RETURNING id, workspace_id, project_id, name, token_hash, token_prefix,
+         RETURNING id, workspace_id, project_id, name, token_hash, token_prefix, scopes, expires_at,
                    created_at, last_used_at, revoked_at`,
         [workspaceId, tokenId]
       );
@@ -1421,12 +1426,12 @@ export class PostgresAppStore implements AppStore {
   async rotateMcpTokenWithAudit(
     workspaceId: string,
     tokenId: string,
-    replacement: Pick<McpTokenRecord, "tokenHash" | "tokenPrefix">,
+    replacement: Pick<McpTokenRecord, "tokenHash" | "tokenPrefix"> & { scopes?: McpTokenRecord["scopes"] },
     actorId: string
   ): Promise<{ previous: McpTokenRecord; replacement: McpTokenRecord } | null> {
     return this.transaction(async (client) => {
       const previousResult = await client.query<McpTokenRow>(
-        `SELECT id, workspace_id, project_id, name, token_hash, token_prefix,
+        `SELECT id, workspace_id, project_id, name, token_hash, token_prefix, scopes, expires_at,
                 created_at, last_used_at, revoked_at
          FROM mcp_tokens
          WHERE workspace_id = $1 AND id = $2 AND revoked_at IS NULL
@@ -1437,17 +1442,17 @@ export class PostgresAppStore implements AppStore {
       if (!previousRow) return null;
       const previous = mcpTokenRecord(previousRow);
       const replacementResult = await client.query<McpTokenRow>(
-        `INSERT INTO mcp_tokens (workspace_id, project_id, name, token_hash, token_prefix)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, workspace_id, project_id, name, token_hash, token_prefix,
+        `INSERT INTO mcp_tokens (workspace_id, project_id, name, token_hash, token_prefix, scopes, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, now() + interval '90 days')
+         RETURNING id, workspace_id, project_id, name, token_hash, token_prefix, scopes, expires_at,
                    created_at, last_used_at, revoked_at`,
-        [workspaceId, previous.projectId, previous.name, replacement.tokenHash, replacement.tokenPrefix]
+        [workspaceId, previous.projectId, previous.name, replacement.tokenHash, replacement.tokenPrefix, replacement.scopes ?? previous.scopes]
       );
       const replacementToken = mcpTokenRecord(replacementResult.rows[0]);
       const revokedResult = await client.query<McpTokenRow>(
         `UPDATE mcp_tokens SET revoked_at = now(), updated_at = now()
          WHERE workspace_id = $1 AND id = $2 AND revoked_at IS NULL
-         RETURNING id, workspace_id, project_id, name, token_hash, token_prefix,
+         RETURNING id, workspace_id, project_id, name, token_hash, token_prefix, scopes, expires_at,
                    created_at, last_used_at, revoked_at`,
         [workspaceId, tokenId]
       );

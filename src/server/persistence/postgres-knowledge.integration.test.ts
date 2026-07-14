@@ -217,7 +217,6 @@ integration("PostgreSQL cited knowledge integration", () => {
     if (!databaseUrl) return;
     pool ??= new Pool({ connectionString: databaseUrl });
     await runMigrations(pool);
-    await pool.query("DELETE FROM pgboss.job WHERE name = $1", ["knowledge-build"]);
     await pool.query("TRUNCATE workspaces CASCADE");
     const store = new PostgresAppStore(pool);
 
@@ -261,6 +260,7 @@ integration("PostgreSQL cited knowledge integration", () => {
     let mcpClient: Client | null = null;
     await service.start();
     try {
+      await pool.query("DELETE FROM pgboss.job WHERE name = $1", ["knowledge-build"]);
       const undispatched = await store.createBuild({
         workspaceId: setup!.workspace.id,
         repositoryId: repository!.id,

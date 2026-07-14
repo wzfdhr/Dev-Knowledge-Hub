@@ -48,11 +48,15 @@ describe("extractSnapshotWebKnowledgeIR", () => {
     await mkdir(path.join(root, "src"));
     const vue = "<script setup>const name = 'DevKH'</script><template><main/></template>";
     const markdown = "# Guide\n\nRun npm test.";
+    const csv = "name,count\nworkers,2\n";
     await writeFile(path.join(root, "src", "App.vue"), vue);
     await writeFile(path.join(root, "README.md"), markdown);
+    await mkdir(path.join(root, "data"));
+    await writeFile(path.join(root, "data", "usage.csv"), csv);
     const files = [
       { snapshotId: "snapshot-1", path: "src/App.vue", byteSize: Buffer.byteLength(vue), contentHash: createHash("sha256").update(vue).digest("hex") },
-      { snapshotId: "snapshot-1", path: "README.md", byteSize: Buffer.byteLength(markdown), contentHash: createHash("sha256").update(markdown).digest("hex") }
+      { snapshotId: "snapshot-1", path: "README.md", byteSize: Buffer.byteLength(markdown), contentHash: createHash("sha256").update(markdown).digest("hex") },
+      { snapshotId: "snapshot-1", path: "data/usage.csv", byteSize: Buffer.byteLength(csv), contentHash: createHash("sha256").update(csv).digest("hex") }
     ];
 
     const result = await extractSnapshotKnowledgeIR({ snapshot: { id: "snapshot-1", storagePath: root }, files });
@@ -60,5 +64,6 @@ describe("extractSnapshotWebKnowledgeIR", () => {
     expect(result.ir.files.map((file) => file.path)).toEqual(["README.md", "src/App.vue"]);
     expect(result.ir.symbols).toEqual(expect.arrayContaining([expect.objectContaining({ name: "App", kind: "component" })]));
     expect(result.ir.documents).toEqual(expect.arrayContaining([expect.objectContaining({ title: "Guide", text: "Run npm test." })]));
+    expect(result.ir.tables).toEqual([expect.objectContaining({ sourcePath: "data/usage.csv", rowCount: 1 })]);
   });
 });

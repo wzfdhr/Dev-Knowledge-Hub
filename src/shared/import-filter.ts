@@ -1,4 +1,5 @@
 export const MAX_IMPORT_SOURCE_FILE_BYTES = 1024 * 1024;
+export const MAX_IMPORT_TABLE_WORKBOOK_BYTES = 50 * 1024 * 1024;
 
 export type ImportIgnoreReason =
   | "binary"
@@ -61,7 +62,8 @@ function isGenerated(content: Uint8Array): boolean {
 }
 
 export function filterImportFile(input: ImportFilterInput): ImportFilterResult {
-  if (input.byteSize > MAX_IMPORT_SOURCE_FILE_BYTES) return { accepted: false, reason: "file_too_large" };
+  const maximumBytes = isTableWorkbook(input.path) ? MAX_IMPORT_TABLE_WORKBOOK_BYTES : MAX_IMPORT_SOURCE_FILE_BYTES;
+  if (input.byteSize > maximumBytes) return { accepted: false, reason: "file_too_large" };
   if (input.path.split("/").some(isExcludedImportDirectory)) {
     return { accepted: false, reason: "excluded_directory" };
   }

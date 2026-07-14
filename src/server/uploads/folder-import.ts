@@ -74,7 +74,9 @@ function languageFor(filePath: string): string | null {
     ".md": "markdown",
     ".json": "json",
     ".yaml": "yaml",
-    ".yml": "yaml"
+    ".yml": "yaml",
+    ".csv": "csv",
+    ".xlsx": "xlsx"
   } as Record<string, string>)[extension] ?? null;
 }
 

@@ -14,7 +14,7 @@ import Fastify, {
 import { z } from "zod";
 
 import { AGENT_FEEDBACK_STATUSES, SERVICE_NAME } from "../shared/contracts.js";
-import { MAX_IMPORT_SOURCE_FILE_BYTES } from "../shared/import-filter.js";
+import { MAX_IMPORT_TABLE_WORKBOOK_BYTES } from "../shared/import-filter.js";
 import {
   FeedbackNotAcknowledgedError,
   InvalidFeedbackTransitionError,
@@ -291,7 +291,7 @@ async function* directFolderParts(request: FastifyRequest): AsyncGenerator<Folde
       files: MAX_FOLDER_UPLOAD_FILES,
       fields: 0,
       parts: MAX_FOLDER_UPLOAD_FILES,
-      fileSize: MAX_IMPORT_SOURCE_FILE_BYTES
+      fileSize: MAX_IMPORT_TABLE_WORKBOOK_BYTES
     }
   })) {
     if (part.type !== "file" || part.fieldname !== "files" || !part.filename) {
@@ -299,7 +299,7 @@ async function* directFolderParts(request: FastifyRequest): AsyncGenerator<Folde
     }
     const content = await part.toBuffer();
     if (part.file.truncated) {
-      throw new FolderUploadError("FOLDER_SIZE_LIMIT", "Folder upload contains a file larger than 1 MiB");
+      throw new FolderUploadError("FOLDER_SIZE_LIMIT", "Folder upload contains a file larger than 50 MiB");
     }
     yield { path: part.filename, content };
   }
@@ -346,7 +346,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       files: MAX_FOLDER_UPLOAD_FILES,
       fields: 0,
       parts: MAX_FOLDER_UPLOAD_FILES,
-      fileSize: MAX_IMPORT_SOURCE_FILE_BYTES
+      fileSize: MAX_IMPORT_TABLE_WORKBOOK_BYTES
     }
   });
   if (options.clientDir) {

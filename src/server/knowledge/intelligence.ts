@@ -7,10 +7,11 @@ import { parse as parseYaml } from "yaml";
 
 import type { KnowledgeIR, LintIssue } from "../../shared/api-contracts.js";
 import type { SourceFileRecord, SourceSnapshotRecord } from "../persistence/store.js";
-import { convertSnapshotSourceFile } from "./pipeline/convert.js";
+import { convertSnapshotSourceFile, convertSnapshotTableFile } from "./pipeline/convert.js";
 import { extractDocumentSource } from "./pipeline/extract-documents.js";
 import { extractWebSource } from "./pipeline/extract-web.js";
 import { extractVueSfc } from "./pipeline/extract-vue.js";
+import { extractCsvTable, extractXlsxTables } from "./pipeline/tables.js";
 
 export type SymbolKind =
   | "module"
@@ -83,6 +84,8 @@ export class SnapshotIntegrityError extends Error {
 
 const codeExtensions = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"]);
 const documentExtensions = new Set([".md", ".json", ".yaml", ".yml"]);
+const binaryTableExtensions = new Set([".xlsx"]);
+const tableExtensions = new Set([".csv", ".xlsx"]);
 
 export async function extractSnapshotWebKnowledgeIR({
   snapshot,
@@ -135,6 +138,17 @@ export async function extractSnapshotKnowledgeIR({
         return extractWebSource(input);
       })
   );
+  const tables = (await Promise.all(
+    [...files]
+      .filter((file) => tableExtensions.has(path.posix.extname(file.path).toLowerCase()))
+      .sort((left, right) => Buffer.compare(Buffer.from(left.path, "utf8"), Buffer.from(right.path, "utf8")))
+      .map(async (file) => {
+        if (path.posix.extname(file.path).toLowerCase() === ".csv") {
+          return [extractCsvTable(await convertSnapshotSourceFile({ snapshot, file }))];
+        }
+        return extractXlsxTables(await convertSnapshotTableFile({ snapshot, file }));
+      })
+  )).flat();
   return {
     ir: {
       schemaVersion: 1, snapshotId: snapshot.id,
@@ -142,7 +156,10 @@ export async function extractSnapshotKnowledgeIR({
       symbols: extracted.flatMap((result) => result.ir.symbols),
       imports: extracted.flatMap((result) => result.ir.imports),
       documents: extracted.flatMap((result) => result.ir.documents),
-      tables: [], sourceRefs: extracted.flatMap((result) => result.ir.sourceRefs)
+      tables: tables.map((result) => result.table), sourceRefs: [
+        ...extracted.flatMap((result) => result.ir.sourceRefs),
+        ...tables.flatMap((result) => result.table.sourceRefs)
+      ]
     },
     lintIssues: extracted.flatMap((result) => result.lintIssues)
   };
@@ -485,10 +502,10 @@ export async function analyzeSnapshot(
         blobHash: actualHash
       });
     } catch {
-      if (strictIntegrity) {
+      if (strictIntegrity && !binaryTableExtensions.has(path.extname(relativePath).toLowerCase())) {
         throw new SnapshotIntegrityError(`invalid UTF-8 for ${relativePath}`);
       }
-      // Invalid UTF-8 is not text knowledge and is excluded from the index.
+      // Binary tables are hash-verified above and handled by the dedicated table stage.
     }
   }
   const relativePaths = [...decoded.keys()];

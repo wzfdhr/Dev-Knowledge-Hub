@@ -24,6 +24,10 @@ describe("filterImportFile", () => {
       .toEqual({ accepted: false, reason: "binary" });
     expect(filterImportFile({ path: "src/large.ts", byteSize: 1024 * 1024 + 1 }))
       .toEqual({ accepted: false, reason: "file_too_large" });
+    expect(filterImportFile({ path: "data/large.xlsx", byteSize: 1024 * 1024 + 1 }))
+      .toEqual({ accepted: true });
+    expect(filterImportFile({ path: "data/too-large.xlsx", byteSize: 50 * 1024 * 1024 + 1 }))
+      .toEqual({ accepted: false, reason: "file_too_large" });
   });
 
   test("recognizes common dependency and generated-output directories before file scanning", () => {

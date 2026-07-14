@@ -22,6 +22,7 @@ import type {
   CreateSnapshotInput,
   CreateStageRunInput,
   CreateFeedbackInput,
+  CreateRemediationInput,
   EncryptedCredentialRecord,
   FeedbackRebuildInput,
   ImportReportRecord,
@@ -47,6 +48,9 @@ import type {
   ProjectMemberRecord,
   ProjectRole,
   ProjectRecord,
+  RemediationBuildInput,
+  RemediationEventRecord,
+  RemediationRecord,
   WorkspaceKnowledgeSearchRecord,
   WorkspaceProjectOverviewRecord,
   WorkspaceRecord
@@ -61,6 +65,8 @@ import type {
   PersistedKnowledge
 } from "../knowledge/build-service.js";
 import { standardBuildPurpose } from "../knowledge/build-service.js";
+import { transitionRemediation } from "../knowledge/remediation.js";
+import type { RemediationState } from "../knowledge/remediation.js";
 import type { CodeIndex } from "../knowledge/intelligence.js";
 import { validateKnowledgeGraph } from "../knowledge/pipeline/graph.js";
 
@@ -76,6 +82,8 @@ export class MemoryAppStore implements AppStore {
   readonly auditEvents: AuditEventRecord[] = [];
   readonly mcpTokens: McpTokenRecord[] = [];
   readonly feedback: AgentFeedbackRecord[] = [];
+  readonly remediations: RemediationRecord[] = [];
+  readonly remediationEvents: RemediationEventRecord[] = [];
   readonly encryptedCredentials: EncryptedCredentialRecord[] = [];
   readonly sourceSnapshots: SourceSnapshotRecord[] = [];
   readonly sourceFiles: SourceFileRecord[] = [];
@@ -939,6 +947,152 @@ export class MemoryAppStore implements AppStore {
     }
   }
 
+  async createRemediation(input: CreateRemediationInput): Promise<RemediationRecord> {
+    const repository = this.repositories.find((candidate) =>
+      candidate.id === input.repositoryId
+      && candidate.workspaceId === input.workspaceId
+      && candidate.projectId === input.projectId
+    );
+    if (!repository) throw new Error("Remediation source does not match project");
+    const sourceBuild = this.builds.find((build) =>
+      build.id === input.sourceBuildId
+      && build.workspaceId === input.workspaceId
+      && build.repositoryId === input.repositoryId
+    );
+    if (!sourceBuild) throw new Error("Remediation source does not match project");
+    const now = new Date();
+    const remediation: RemediationRecord = {
+      id: randomUUID(),
+      workspaceId: input.workspaceId,
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      sourceBuildId: input.sourceBuildId,
+      issue: input.issue,
+      state: "open",
+      rebuildBuildId: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    this.remediations.push(remediation);
+    return remediation;
+  }
+
+  async getRemediation(workspaceId: string, remediationId: string): Promise<RemediationRecord | null> {
+    return this.remediations.find((record) =>
+      record.workspaceId === workspaceId && record.id === remediationId
+    ) ?? null;
+  }
+
+  async listRemediations(
+    workspaceId: string,
+    projectId: string,
+    pagination?: Pagination
+  ): Promise<RemediationRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    return this.remediations.filter((record) =>
+      record.workspaceId === workspaceId && record.projectId === projectId
+    ).sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()
+      || right.id.localeCompare(left.id)).slice(offset, offset + limit);
+  }
+
+  async listRemediationEvents(workspaceId: string, remediationId: string): Promise<RemediationEventRecord[]> {
+    return this.remediationEvents.filter((event) =>
+      event.workspaceId === workspaceId && event.remediationId === remediationId
+    );
+  }
+
+  private transitionRemediation(
+    workspaceId: string,
+    remediationId: string,
+    state: RemediationState,
+    actorId: string | null
+  ): RemediationRecord | null {
+    const remediation = this.remediations.find((record) =>
+      record.workspaceId === workspaceId && record.id === remediationId
+    );
+    if (!remediation) return null;
+    const fromState = remediation.state;
+    transitionRemediation(fromState, state);
+    remediation.state = state;
+    remediation.updatedAt = new Date();
+    this.remediationEvents.push({
+      id: randomUUID(), workspaceId, remediationId, fromState, toState: state, actorId,
+      createdAt: remediation.updatedAt
+    });
+    return remediation;
+  }
+
+  async transitionRemediationWithAudit(
+    workspaceId: string,
+    remediationId: string,
+    state: RemediationState,
+    actorId: string
+  ): Promise<RemediationRecord | null> {
+    const remediation = await this.getRemediation(workspaceId, remediationId);
+    if (!remediation) return null;
+    const previous = { state: remediation.state, updatedAt: remediation.updatedAt };
+    const eventLength = this.remediationEvents.length;
+    const auditLength = this.auditEvents.length;
+    try {
+      const updated = this.transitionRemediation(workspaceId, remediationId, state, actorId)!;
+      await this.recordAudit({
+        workspaceId, actorId, action: "remediation.transitioned", resourceType: "remediation",
+        resourceId: remediationId, metadata: { fromState: previous.state, toState: state }
+      });
+      return updated;
+    } catch (error) {
+      remediation.state = previous.state;
+      remediation.updatedAt = previous.updatedAt;
+      this.remediationEvents.splice(eventLength);
+      this.auditEvents.splice(auditLength);
+      throw error;
+    }
+  }
+
+  async requestRemediationBuildWithAudit(
+    input: RemediationBuildInput
+  ): Promise<{ build: BuildRecord; created: boolean }> {
+    const remediation = await this.getRemediation(input.workspaceId, input.remediationId);
+    if (!remediation || remediation.state !== "accepted") throw new Error("Remediation must be accepted first");
+    const buildLength = this.builds.length;
+    const buildEventLength = this.buildEvents.length;
+    const remediationEventLength = this.remediationEvents.length;
+    const auditLength = this.auditEvents.length;
+    const previousSequence = this.nextBuildEventSequence;
+    const previous = { state: remediation.state, rebuildBuildId: remediation.rebuildBuildId, updatedAt: remediation.updatedAt };
+    try {
+      const purpose = {
+        kind: "remediation" as const,
+        feedbackIds: [] as [],
+        feedbackContext: [] as [],
+        remediationContext: [{
+          remediationId: remediation.id,
+          issueId: remediation.issue.id,
+          sourceRefs: remediation.issue.sourceRefs
+        }]
+      };
+      const result = await this.createBuild({ ...input.build, purpose });
+      remediation.rebuildBuildId = result.build.id;
+      this.transitionRemediation(input.workspaceId, remediation.id, "rebuilding", input.actorId);
+      await this.recordAudit({
+        workspaceId: input.workspaceId, actorId: input.actorId,
+        action: "remediation.rebuild_requested", resourceType: "remediation",
+        resourceId: remediation.id, metadata: { buildId: result.build.id, issueId: remediation.issue.id }
+      });
+      return result;
+    } catch (error) {
+      this.builds.splice(buildLength);
+      this.buildEvents.splice(buildEventLength);
+      this.remediationEvents.splice(remediationEventLength);
+      this.auditEvents.splice(auditLength);
+      this.nextBuildEventSequence = previousSequence;
+      remediation.state = previous.state;
+      remediation.rebuildBuildId = previous.rebuildBuildId;
+      remediation.updatedAt = previous.updatedAt;
+      throw error;
+    }
+  }
+
   async createRepository(
     workspaceId: string,
     input: RepositoryConnectionInput,
@@ -1333,6 +1487,7 @@ export class MemoryAppStore implements AppStore {
       && build.snapshotId === input.snapshotId
       && build.purpose.kind === purpose.kind
       && JSON.stringify(build.purpose.feedbackIds) === JSON.stringify(purpose.feedbackIds)
+      && JSON.stringify(build.purpose.remediationContext ?? []) === JSON.stringify(purpose.remediationContext ?? [])
       && !["ready", "published", "failed"].includes(build.status)
     );
     if (active) return { build: active, created: false };

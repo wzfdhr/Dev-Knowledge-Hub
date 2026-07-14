@@ -5,6 +5,7 @@ import type { LegacyBuildStatus } from "./pipeline/contracts.js";
 import { generateKnowledge, type KnowledgeOutput, validateKnowledge } from "./generator.js";
 import type { KnowledgeEnhancer } from "./enhancer.js";
 import { analyzeSnapshot, type Citation, type CodeIndex } from "./intelligence.js";
+import type { SourceRef } from "../../shared/api-contracts.js";
 
 export type BuildStatus = LegacyBuildStatus;
 
@@ -17,18 +18,32 @@ export interface FeedbackGenerationContext {
   citations: Citation[];
 }
 
+export interface RemediationGenerationContext {
+  remediationId: string;
+  issueId: string;
+  sourceRefs: SourceRef[];
+}
+
 export type BuildPurpose =
-  | { kind: "standard"; feedbackIds: []; feedbackContext: [] }
+  | { kind: "standard"; feedbackIds: []; feedbackContext: []; remediationContext?: [] }
   | {
       kind: "feedback";
       feedbackIds: string[];
       feedbackContext: FeedbackGenerationContext[];
+      remediationContext?: [];
+    }
+  | {
+      kind: "remediation";
+      feedbackIds: [];
+      feedbackContext: [];
+      remediationContext: RemediationGenerationContext[];
     };
 
 export const standardBuildPurpose = (): BuildPurpose => ({
   kind: "standard",
   feedbackIds: [],
-  feedbackContext: []
+  feedbackContext: [],
+  remediationContext: []
 });
 
 export interface BuildInput {

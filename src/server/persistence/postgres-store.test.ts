@@ -666,6 +666,22 @@ describe("PostgresAppStore audited mutations", () => {
     commit_timestamp: new Date(),
     storage_path: "/snapshot"
   };
+  const remediationRow = {
+    id: "remediation-1",
+    workspace_id: "workspace-1",
+    project_id: "project-1",
+    repository_id: "repo-1",
+    source_build_id: "source-build-1",
+    issue: {
+      id: "lint-1", buildId: "source-build-1", rule: "KNOWLEDGE_LOW_COVERAGE",
+      severity: "warning", targetKind: "knowledge", targetId: "overview",
+      message: "Coverage is low", sourceRefs: [], remediationState: "open"
+    },
+    state: "accepted",
+    rebuild_build_id: null,
+    created_at: new Date(),
+    updated_at: new Date()
+  };
 
   test.each([
     ["initial setup", (store: PostgresAppStore) =>
@@ -751,6 +767,30 @@ describe("PostgresAppStore audited mutations", () => {
     await expect(invoke(store)).rejects.toThrow("audit unavailable");
 
     expect(query.mock.calls[0][0]).toBe("BEGIN");
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+    expect(query.mock.calls.some(([sql]) => sql === "COMMIT")).toBe(false);
+  });
+
+  test("rolls back remediation build association and event when its audit insert fails", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("INSERT INTO audit_events")) throw new Error("audit unavailable");
+      if (sql.includes("FROM remediation_cases") && sql.includes("FOR UPDATE")) return { rows: [remediationRow] };
+      if (sql.includes("FROM build_jobs")) return { rows: [buildRow] };
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+
+    await expect(store.requestRemediationBuildWithAudit({
+      workspaceId: "workspace-1", remediationId: "remediation-1", actorId: "admin-1",
+      build: {
+        workspaceId: "workspace-1", repositoryId: "repo-1", snapshotId: "snapshot-1",
+        snapshotPath: "/snapshot", commitSha: "b".repeat(40)
+      }
+    })).rejects.toThrow("audit unavailable");
+
+    expect(query.mock.calls[0][0]).toBe("BEGIN");
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO remediation_events"))).toBe(true);
     expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
     expect(query.mock.calls.some(([sql]) => sql === "COMMIT")).toBe(false);
   });

@@ -53,10 +53,10 @@ integration("PostgreSQL cited knowledge integration", () => {
       `SELECT json_agg(table_name ORDER BY table_name) AS names
        FROM information_schema.tables
        WHERE table_schema = 'public'
-         AND table_name IN ('auth_sessions', 'build_events', 'build_jobs', 'build_stage_runs', 'import_reports', 'knowledge_artifacts', 'knowledge_chunks', 'knowledge_graph_edges', 'knowledge_graph_nodes', 'project_members', 'releases')`
+         AND table_name IN ('auth_sessions', 'build_events', 'build_jobs', 'build_stage_runs', 'import_reports', 'knowledge_artifacts', 'knowledge_chunks', 'knowledge_graph_edges', 'knowledge_graph_nodes', 'project_members', 'releases', 'remediation_cases', 'remediation_events')`
     );
     expect(rows[0].names).toEqual([
-      "auth_sessions", "build_events", "build_jobs", "build_stage_runs", "import_reports", "knowledge_artifacts", "knowledge_chunks", "knowledge_graph_edges", "knowledge_graph_nodes", "project_members", "releases"
+      "auth_sessions", "build_events", "build_jobs", "build_stage_runs", "import_reports", "knowledge_artifacts", "knowledge_chunks", "knowledge_graph_edges", "knowledge_graph_nodes", "project_members", "releases", "remediation_cases", "remediation_events"
     ]);
     const extension = await pool.query(
       "SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'"
@@ -615,6 +615,68 @@ integration("PostgreSQL cited knowledge integration", () => {
     } finally {
       await app.close();
     }
+  }, 30_000);
+
+  test(databaseUrl
+    ? "persists an accepted remediation build without changing the published release"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("remediation@example.com", "hash");
+    const project = (await store.listProjects(setup!.workspace.id))[0];
+    const repository = await store.createRepository(
+      setup!.workspace.id, { kind: "upload", name: "Remediation source" }, project.id
+    );
+    const snapshotId = randomUUID();
+    await store.createSnapshot({
+      snapshot: {
+        id: snapshotId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+        commitSha: "a".repeat(40), ref: "upload", remoteUrl: null,
+        commitTimestamp: new Date("2026-07-15T00:00:00.000Z"), storagePath: "/tmp/remediation-snapshot"
+      },
+      files: []
+    });
+    const sourceBuild = await store.createBuild({
+      workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId,
+      snapshotPath: "/tmp/remediation-snapshot", commitSha: "a".repeat(40)
+    });
+    const remediation = await store.createRemediation({
+      workspaceId: setup!.workspace.id, projectId: project.id, repositoryId: repository!.id,
+      sourceBuildId: sourceBuild.build.id,
+      issue: {
+        id: "lint-coverage", buildId: sourceBuild.build.id, rule: "KNOWLEDGE_LOW_COVERAGE",
+        severity: "warning", targetKind: "knowledge", targetId: "overview",
+        message: "Knowledge coverage is low", sourceRefs: [], remediationState: "open"
+      }
+    });
+    await store.transitionRemediationWithAudit(
+      setup!.workspace.id, remediation.id, "accepted", setup!.admin.id
+    );
+    const rebuild = await store.requestRemediationBuildWithAudit({
+      workspaceId: setup!.workspace.id, remediationId: remediation.id, actorId: setup!.admin.id,
+      build: {
+        workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId,
+        snapshotPath: "/tmp/remediation-snapshot", commitSha: "a".repeat(40)
+      }
+    });
+
+    expect(rebuild.build.purpose).toMatchObject({
+      kind: "remediation",
+      remediationContext: [expect.objectContaining({ remediationId: remediation.id, issueId: "lint-coverage" })]
+    });
+    await expect(store.getRemediation(setup!.workspace.id, remediation.id)).resolves.toMatchObject({
+      state: "rebuilding", rebuildBuildId: rebuild.build.id
+    });
+    await expect(store.listRemediationEvents(setup!.workspace.id, remediation.id)).resolves.toEqual([
+      expect.objectContaining({ fromState: "open", toState: "accepted" }),
+      expect.objectContaining({ fromState: "accepted", toState: "rebuilding" })
+    ]);
+    await expect(store.currentRelease(setup!.workspace.id, repository!.id)).resolves.toBeNull();
+    await expect(store.getRemediation("00000000-0000-4000-8000-000000000000", remediation.id))
+      .resolves.toBeNull();
   }, 30_000);
 });
 

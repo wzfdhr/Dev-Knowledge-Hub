@@ -20,6 +20,7 @@ import type {
   AuditEventInput,
   AuditEventRecord,
   CreateFeedbackInput,
+  CreateRemediationInput,
   CreateSnapshotInput,
   FeedbackRebuildInput,
   ImportReportRecord,
@@ -43,6 +44,9 @@ import type {
   ProjectAccess,
   ProjectMemberRecord,
   ProjectRole,
+  RemediationBuildInput,
+  RemediationEventRecord,
+  RemediationRecord,
   WorkspaceKnowledgeSearchRecord,
   WorkspaceProjectOverviewRecord,
   SetupResult,
@@ -59,6 +63,8 @@ import type {
   PersistedKnowledge
 } from "../knowledge/build-service.js";
 import { standardBuildPurpose } from "../knowledge/build-service.js";
+import { transitionRemediation } from "../knowledge/remediation.js";
+import type { RemediationState } from "../knowledge/remediation.js";
 import type { Citation } from "../knowledge/intelligence.js";
 import {
   artifactManifestSchema,
@@ -112,9 +118,33 @@ interface BuildRow extends QueryResultRow {
   warnings: BuildRecord["warnings"];
   cancel_requested: boolean;
   error_message: string | null;
-  purpose: "standard" | "feedback";
+  purpose: "standard" | "feedback" | "remediation";
   feedback_ids: string[];
   feedback_context: BuildRecord["purpose"]["feedbackContext"];
+  remediation_context: Extract<BuildRecord["purpose"], { kind: "remediation" }>["remediationContext"];
+}
+
+interface RemediationRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  repository_id: string;
+  source_build_id: string;
+  issue: RemediationRecord["issue"];
+  state: RemediationState;
+  rebuild_build_id: string | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface RemediationEventRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  remediation_id: string;
+  from_state: RemediationState;
+  to_state: RemediationState;
+  actor_id: string | null;
+  created_at: Date;
 }
 
 interface StageRunRow extends QueryResultRow {
@@ -355,6 +385,13 @@ function buildRecord(row: BuildRow): BuildRecord {
         feedbackIds: row.feedback_ids ?? [],
         feedbackContext: row.feedback_context ?? []
       }
+    : row.purpose === "remediation"
+      ? {
+          kind: "remediation" as const,
+          feedbackIds: [] as [],
+          feedbackContext: [] as [],
+          remediationContext: row.remediation_context ?? []
+        }
     : standardBuildPurpose();
   return {
     id: row.id,
@@ -368,6 +405,33 @@ function buildRecord(row: BuildRow): BuildRecord {
     cancelRequested: row.cancel_requested,
     purpose,
     ...(row.error_message ? { errorMessage: row.error_message } : {})
+  };
+}
+
+function remediationRecord(row: RemediationRow): RemediationRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    projectId: row.project_id,
+    repositoryId: row.repository_id,
+    sourceBuildId: row.source_build_id,
+    issue: row.issue,
+    state: row.state,
+    rebuildBuildId: row.rebuild_build_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function remediationEventRecord(row: RemediationEventRow): RemediationEventRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    remediationId: row.remediation_id,
+    fromState: row.from_state,
+    toState: row.to_state,
+    actorId: row.actor_id,
+    createdAt: row.created_at
   };
 }
 
@@ -1369,7 +1433,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            'snapshot_id', b.snapshot_id, 'snapshot_path', b.snapshot_path, 'commit_sha', b.commit_sha,
            'status', b.status, 'warnings', b.warnings, 'cancel_requested', b.cancel_requested,
            'error_message', b.error_message, 'purpose', b.purpose, 'feedback_ids', b.feedback_ids,
-           'feedback_context', b.feedback_context
+           'feedback_context', b.feedback_context, 'remediation_context', b.remediation_context
          ) AS value
          FROM build_jobs b WHERE b.workspace_id = p.workspace_id AND b.repository_id = repo.id
          ORDER BY b.created_at DESC, b.id DESC LIMIT 1
@@ -1427,6 +1491,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           purpose: build.purpose === "feedback" ? {
             kind: "feedback", feedbackIds: (build.feedback_ids ?? []) as string[],
             feedbackContext: (build.feedback_context ?? []) as BuildRecord["purpose"]["feedbackContext"]
+          } : build.purpose === "remediation" ? {
+            kind: "remediation", feedbackIds: [], feedbackContext: [],
+            remediationContext: (build.remediation_context ?? []) as Extract<BuildRecord["purpose"], { kind: "remediation" }>["remediationContext"]
           } : standardBuildPurpose(),
           ...(build.error_message ? { errorMessage: String(build.error_message) } : {})
         } : null,
@@ -2101,7 +2168,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       const active = await client.query<BuildRow>(
         `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                 status, warnings, cancel_requested, error_message,
-                purpose, feedback_ids, feedback_context
+                purpose, feedback_ids, feedback_context, remediation_context
          FROM build_jobs
          WHERE workspace_id = $1 AND repository_id = $2
            AND snapshot_id = $3 AND purpose = 'feedback' AND feedback_ids = $4::uuid[]
@@ -2121,7 +2188,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            VALUES ($1, $2, $3, $4, $5, 'queued', 'feedback', $6::uuid[], $7::jsonb)
            RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                      status, warnings, cancel_requested, error_message,
-                     purpose, feedback_ids, feedback_context`,
+                     purpose, feedback_ids, feedback_context, remediation_context`,
           [
             input.build.workspaceId,
             input.build.repositoryId,
@@ -2152,6 +2219,193 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         resourceType: "agent_feedback",
         resourceId: input.feedbackId,
         metadata: { buildId: build.id, releaseId: input.releaseId }
+      });
+      return { build, created };
+    });
+  }
+
+  async createRemediation(input: CreateRemediationInput): Promise<RemediationRecord> {
+    const { rows } = await this.pool.query<RemediationRow>(
+      `INSERT INTO remediation_cases
+       (workspace_id, project_id, repository_id, source_build_id, issue, state)
+       SELECT $1, $2, $3, $4, $5::jsonb, 'open'
+       FROM build_jobs build
+       JOIN repositories repository
+         ON repository.id = build.repository_id AND repository.workspace_id = build.workspace_id
+       WHERE build.workspace_id = $1 AND build.id = $4
+         AND repository.id = $3 AND repository.project_id = $2
+       RETURNING id, workspace_id, project_id, repository_id, source_build_id, issue, state,
+                 rebuild_build_id, created_at, updated_at`,
+      [
+        input.workspaceId,
+        input.projectId,
+        input.repositoryId,
+        input.sourceBuildId,
+        JSON.stringify(input.issue)
+      ]
+    );
+    if (!rows[0]) throw new Error("Remediation source does not match project");
+    return remediationRecord(rows[0]);
+  }
+
+  async getRemediation(workspaceId: string, remediationId: string): Promise<RemediationRecord | null> {
+    const { rows } = await this.pool.query<RemediationRow>(
+      `SELECT id, workspace_id, project_id, repository_id, source_build_id, issue, state,
+              rebuild_build_id, created_at, updated_at
+       FROM remediation_cases WHERE workspace_id = $1 AND id = $2 LIMIT 1`,
+      [workspaceId, remediationId]
+    );
+    return rows[0] ? remediationRecord(rows[0]) : null;
+  }
+
+  async listRemediations(
+    workspaceId: string,
+    projectId: string,
+    pagination?: Pagination
+  ): Promise<RemediationRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    const { rows } = await this.pool.query<RemediationRow>(
+      `SELECT id, workspace_id, project_id, repository_id, source_build_id, issue, state,
+              rebuild_build_id, created_at, updated_at
+       FROM remediation_cases
+       WHERE workspace_id = $1 AND project_id = $2
+       ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`,
+      [workspaceId, projectId, limit, offset]
+    );
+    return rows.map(remediationRecord);
+  }
+
+  async listRemediationEvents(workspaceId: string, remediationId: string): Promise<RemediationEventRecord[]> {
+    const { rows } = await this.pool.query<RemediationEventRow>(
+      `SELECT id, workspace_id, remediation_id, from_state, to_state, actor_id, created_at
+       FROM remediation_events
+       WHERE workspace_id = $1 AND remediation_id = $2
+       ORDER BY sequence ASC`,
+      [workspaceId, remediationId]
+    );
+    return rows.map(remediationEventRecord);
+  }
+
+  async transitionRemediationWithAudit(
+    workspaceId: string,
+    remediationId: string,
+    state: RemediationState,
+    actorId: string
+  ): Promise<RemediationRecord | null> {
+    return this.transaction(async (client) => {
+      const selected = await client.query<RemediationRow>(
+        `SELECT id, workspace_id, project_id, repository_id, source_build_id, issue, state,
+                rebuild_build_id, created_at, updated_at
+         FROM remediation_cases WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+        [workspaceId, remediationId]
+      );
+      const existing = selected.rows[0];
+      if (!existing) return null;
+      transitionRemediation(existing.state, state);
+      const updated = await client.query<RemediationRow>(
+        `UPDATE remediation_cases SET state = $3, updated_at = now()
+         WHERE workspace_id = $1 AND id = $2
+         RETURNING id, workspace_id, project_id, repository_id, source_build_id, issue, state,
+                   rebuild_build_id, created_at, updated_at`,
+        [workspaceId, remediationId, state]
+      );
+      const remediation = remediationRecord(updated.rows[0]);
+      await client.query(
+        `INSERT INTO remediation_events (workspace_id, remediation_id, from_state, to_state, actor_id)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [workspaceId, remediationId, existing.state, state, actorId]
+      );
+      await this.insertAudit(client, {
+        workspaceId, actorId, action: "remediation.transitioned", resourceType: "remediation",
+        resourceId: remediationId, metadata: { fromState: existing.state, toState: state }
+      });
+      return remediation;
+    });
+  }
+
+  async requestRemediationBuildWithAudit(
+    input: RemediationBuildInput
+  ): Promise<{ build: BuildRecord; created: boolean }> {
+    return this.transaction(async (client) => {
+      const selected = await client.query<RemediationRow>(
+        `SELECT id, workspace_id, project_id, repository_id, source_build_id, issue, state,
+                rebuild_build_id, created_at, updated_at
+         FROM remediation_cases WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+        [input.workspaceId, input.remediationId]
+      );
+      const selectedRow = selected.rows[0];
+      if (!selectedRow || selectedRow.state !== "accepted") throw new Error("Remediation must be accepted first");
+      const remediation = remediationRecord(selectedRow);
+      if (input.build.workspaceId !== remediation.workspaceId || input.build.repositoryId !== remediation.repositoryId) {
+        throw new Error("Remediation build does not match source project");
+      }
+      const purpose = {
+        kind: "remediation" as const,
+        feedbackIds: [] as [],
+        feedbackContext: [] as [],
+        remediationContext: [{
+          remediationId: remediation.id,
+          issueId: remediation.issue.id,
+          sourceRefs: remediation.issue.sourceRefs
+        }]
+      };
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [input.build.repositoryId]);
+      const active = await client.query<BuildRow>(
+        `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
+                status, warnings, cancel_requested, error_message,
+                purpose, feedback_ids, feedback_context, remediation_context
+         FROM build_jobs
+         WHERE workspace_id = $1 AND repository_id = $2 AND snapshot_id = $3
+           AND purpose = 'remediation' AND remediation_context = $4::jsonb
+           AND status NOT IN ('ready', 'published', 'failed')
+         ORDER BY created_at DESC LIMIT 1`,
+        [input.workspaceId, input.build.repositoryId, input.build.snapshotId, JSON.stringify(purpose.remediationContext)]
+      );
+      let build: BuildRecord;
+      let created = false;
+      if (active.rows[0]) {
+        build = buildRecord(active.rows[0]);
+      } else {
+        const inserted = await client.query<BuildRow>(
+          `INSERT INTO build_jobs
+           (workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha, status,
+            purpose, feedback_ids, feedback_context, remediation_context)
+           VALUES ($1, $2, $3, $4, $5, 'queued', 'remediation', '{}'::uuid[], '[]'::jsonb, $6::jsonb)
+           RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
+                     status, warnings, cancel_requested, error_message,
+                     purpose, feedback_ids, feedback_context, remediation_context`,
+          [
+            input.build.workspaceId,
+            input.build.repositoryId,
+            input.build.snapshotId,
+            input.build.snapshotPath,
+            input.build.commitSha,
+            JSON.stringify(purpose.remediationContext)
+          ]
+        );
+        build = buildRecord(inserted.rows[0]);
+        created = true;
+        await client.query(
+          `INSERT INTO build_events (workspace_id, build_job_id, status)
+           VALUES ($1, $2, 'queued')`,
+          [build.workspaceId, build.id]
+        );
+      }
+      await client.query(
+        `UPDATE remediation_cases
+         SET state = 'rebuilding', rebuild_build_id = $3, updated_at = now()
+         WHERE workspace_id = $1 AND id = $2`,
+        [input.workspaceId, remediation.id, build.id]
+      );
+      await client.query(
+        `INSERT INTO remediation_events (workspace_id, remediation_id, from_state, to_state, actor_id)
+         VALUES ($1, $2, 'accepted', 'rebuilding', $3)`,
+        [input.workspaceId, remediation.id, input.actorId]
+      );
+      await this.insertAudit(client, {
+        workspaceId: input.workspaceId, actorId: input.actorId,
+        action: "remediation.rebuild_requested", resourceType: "remediation",
+        resourceId: remediation.id, metadata: { buildId: build.id, issueId: remediation.issue.id }
       });
       return { build, created };
     });
@@ -2695,13 +2949,21 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       const active = await client.query<BuildRow>(
         `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                 status, warnings, cancel_requested, error_message,
-                purpose, feedback_ids, feedback_context
+                purpose, feedback_ids, feedback_context, remediation_context
          FROM build_jobs
          WHERE workspace_id = $1 AND repository_id = $2
            AND snapshot_id = $3 AND purpose = $4 AND feedback_ids = $5::uuid[]
+           AND remediation_context = $6::jsonb
            AND status NOT IN ('ready', 'published', 'failed')
          ORDER BY created_at DESC LIMIT 1`,
-        [input.workspaceId, input.repositoryId, input.snapshotId, purpose.kind, purpose.feedbackIds]
+        [
+          input.workspaceId,
+          input.repositoryId,
+          input.snapshotId,
+          purpose.kind,
+          purpose.feedbackIds,
+          JSON.stringify(purpose.remediationContext ?? [])
+        ]
       );
       if (active.rows[0]) {
         await client.query("COMMIT");
@@ -2710,11 +2972,11 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       const inserted = await client.query<BuildRow>(
         `INSERT INTO build_jobs
          (workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha, status,
-          purpose, feedback_ids, feedback_context)
-         VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7::uuid[], $8::jsonb)
+          purpose, feedback_ids, feedback_context, remediation_context)
+         VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7::uuid[], $8::jsonb, $9::jsonb)
          RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                    status, warnings, cancel_requested, error_message,
-                   purpose, feedback_ids, feedback_context`,
+                     purpose, feedback_ids, feedback_context, remediation_context`,
         [
           input.workspaceId,
           input.repositoryId,
@@ -2723,7 +2985,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           input.commitSha,
           purpose.kind,
           purpose.feedbackIds,
-          JSON.stringify(purpose.feedbackContext)
+          JSON.stringify(purpose.feedbackContext),
+          JSON.stringify(purpose.remediationContext ?? [])
         ]
       );
       const build = buildRecord(inserted.rows[0]);
@@ -2746,7 +3009,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     const { rows } = await this.pool.query<BuildRow>(
       `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
               status, warnings, cancel_requested, error_message,
-              purpose, feedback_ids, feedback_context
+                purpose, feedback_ids, feedback_context, remediation_context
        FROM build_jobs WHERE workspace_id = $1 AND id = $2`,
       [workspaceId, buildId]
     );
@@ -2783,7 +3046,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
                    candidate.snapshot_id, candidate.snapshot_path, candidate.commit_sha,
                    candidate.status, candidate.warnings, candidate.cancel_requested,
                    candidate.error_message, candidate.purpose, candidate.feedback_ids,
-                   candidate.feedback_context`,
+                   candidate.feedback_context, candidate.remediation_context`,
         [buildId]
       );
       if (!rows[0]) return null;
@@ -2814,7 +3077,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          WHERE id = $1 AND status = $2 AND ($7::boolean = false OR cancel_requested = false)
          RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                    status, warnings, cancel_requested, error_message,
-                   purpose, feedback_ids, feedback_context
+                   purpose, feedback_ids, feedback_context, remediation_context
        ), event AS (
          INSERT INTO build_events (workspace_id, build_job_id, status, payload)
          SELECT workspace_id, id, status, $6::jsonb FROM updated RETURNING id
@@ -2843,7 +3106,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          AND status NOT IN ('ready', 'published', 'failed')
        RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                  status, warnings, cancel_requested, error_message,
-                 purpose, feedback_ids, feedback_context`,
+                 purpose, feedback_ids, feedback_context, remediation_context`,
       [workspaceId, buildId]
     );
     return rows[0] ? buildRecord(rows[0]) : this.getBuild(workspaceId, buildId);
@@ -2853,7 +3116,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     const { rows } = await this.pool.query<BuildRow>(
       `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
               status, warnings, cancel_requested, error_message,
-              purpose, feedback_ids, feedback_context
+              purpose, feedback_ids, feedback_context, remediation_context
        FROM build_jobs WHERE status NOT IN ('ready', 'published', 'failed')
        ORDER BY created_at ASC`
     );
@@ -2869,7 +3132,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     const { rows } = await this.pool.query<BuildRow>(
       `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
               status, warnings, cancel_requested, error_message,
-              purpose, feedback_ids, feedback_context
+              purpose, feedback_ids, feedback_context, remediation_context
        FROM build_jobs WHERE workspace_id = $1 AND repository_id = $2
        ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`,
       [workspaceId, repositoryId, limit, offset]

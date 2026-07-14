@@ -17,6 +17,8 @@ import type {
 import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
 import type { ImpactMindmap } from "../knowledge/pipeline/mindmap.js";
 import type { AGENT_FEEDBACK_STATUSES } from "../../shared/contracts.js";
+import type { LintIssue } from "../../shared/api-contracts.js";
+import type { RemediationState } from "../knowledge/remediation.js";
 
 export interface WorkspaceRecord {
   id: string;
@@ -262,6 +264,44 @@ export interface FeedbackRebuildInput {
   workspaceId: string;
   feedbackId: string;
   releaseId: string;
+  actorId: string;
+  build: BuildInput;
+}
+
+export interface RemediationRecord {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  repositoryId: string;
+  sourceBuildId: string;
+  issue: LintIssue;
+  state: RemediationState;
+  rebuildBuildId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface RemediationEventRecord {
+  id: string;
+  workspaceId: string;
+  remediationId: string;
+  fromState: RemediationState;
+  toState: RemediationState;
+  actorId: string | null;
+  createdAt: Date;
+}
+
+export interface CreateRemediationInput {
+  workspaceId: string;
+  projectId: string;
+  repositoryId: string;
+  sourceBuildId: string;
+  issue: LintIssue;
+}
+
+export interface RemediationBuildInput {
+  workspaceId: string;
+  remediationId: string;
   actorId: string;
   build: BuildInput;
 }
@@ -684,6 +724,23 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore {
   ): Promise<AgentFeedbackRecord | null>;
   requestFeedbackRebuildWithAudit(
     input: FeedbackRebuildInput
+  ): Promise<{ build: BuildRecord; created: boolean }>;
+  createRemediation(input: CreateRemediationInput): Promise<RemediationRecord>;
+  getRemediation(workspaceId: string, remediationId: string): Promise<RemediationRecord | null>;
+  listRemediations(
+    workspaceId: string,
+    projectId: string,
+    pagination?: Pagination
+  ): Promise<RemediationRecord[]>;
+  listRemediationEvents(workspaceId: string, remediationId: string): Promise<RemediationEventRecord[]>;
+  transitionRemediationWithAudit(
+    workspaceId: string,
+    remediationId: string,
+    state: RemediationState,
+    actorId: string
+  ): Promise<RemediationRecord | null>;
+  requestRemediationBuildWithAudit(
+    input: RemediationBuildInput
   ): Promise<{ build: BuildRecord; created: boolean }>;
   createRepository(
     workspaceId: string,

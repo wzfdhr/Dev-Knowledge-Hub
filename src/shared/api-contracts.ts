@@ -65,6 +65,15 @@ export const stageRunSchema = z.object({
   if (value.status !== "failed" && (value.errorCode !== null || value.errorDetail !== null)) context.addIssue({ code: "custom", message: "only failed runs contain error details" });
 });
 
+export const pipelineStageEventSchema = z.object({
+  sequence: z.number().int().positive(),
+  buildId: z.string().min(1),
+  stageRunId: z.string().min(1),
+  stage: buildStageSchema,
+  status: stageStatusSchema,
+  occurredAt: isoTimestampSchema
+});
+
 export const tableColumnSchema = z.object({
   name: z.string().min(1),
   type: z.enum(["string", "number", "boolean", "date", "unknown"]),
@@ -148,6 +157,7 @@ export type SourceKind = z.infer<typeof sourceKindSchema>;
 export type SourceRef = z.infer<typeof sourceRefSchema>;
 export type ArtifactManifest = z.infer<typeof artifactManifestSchema>;
 export type StageRun = z.infer<typeof stageRunSchema>;
+export type PipelineStageEvent = z.infer<typeof pipelineStageEventSchema>;
 export type KnowledgeIR = z.infer<typeof knowledgeIrSchema>;
 export type TableSchema = z.infer<typeof tableSchemaSchema>;
 export type GraphNode = z.infer<typeof graphNodeSchema>;

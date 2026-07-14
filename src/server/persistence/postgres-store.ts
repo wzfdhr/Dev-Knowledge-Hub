@@ -66,6 +66,7 @@ import {
   type BuildStage,
   type StageStatus
 } from "../knowledge/pipeline/contracts.js";
+import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
 
 interface Queryable {
   query<T extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]): Promise<{ rows: T[] }>;
@@ -126,6 +127,15 @@ interface StageRunRow extends QueryResultRow {
   finished_at: Date | null;
   error_code: string | null;
   error_detail: string | null;
+}
+
+interface StageEventRow extends QueryResultRow {
+  sequence: string;
+  build_job_id: string;
+  stage_run_id: string;
+  stage: BuildStage;
+  status: StageStatus;
+  created_at: Date;
 }
 
 interface ArtifactRow extends QueryResultRow {
@@ -354,6 +364,17 @@ function stageRunRecord(row: StageRunRow): PipelineStageRunRecord {
   };
 }
 
+function pipelineStageEvent(row: StageEventRow): PipelineStageEvent {
+  return {
+    sequence: Number(row.sequence),
+    buildId: row.build_job_id,
+    stageRunId: row.stage_run_id,
+    stage: row.stage,
+    status: row.status,
+    occurredAt: row.created_at.toISOString()
+  };
+}
+
 function artifactManifest(row: ArtifactRow): ArtifactManifest {
   return artifactManifestSchema.parse({
     id: row.id,
@@ -547,7 +568,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       errorDetail: null
     });
     const { rows } = await this.pool.query<StageRunRow>(
-      `INSERT INTO build_stage_runs
+      `WITH run AS (
+       INSERT INTO build_stage_runs
        (workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status, input_digest)
        SELECT $1, $2, $3, $4, $5, $6, $7, $8
        FROM build_jobs build
@@ -560,7 +582,14 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
        ON CONFLICT (build_job_id, stage, attempt) DO UPDATE
        SET updated_at = build_stage_runs.updated_at
        RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
-                 input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
+                 input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail
+       ), event AS (
+         INSERT INTO build_stage_events
+           (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+         SELECT workspace_id, project_id, build_job_id, id, stage, status FROM run
+         ON CONFLICT (stage_run_id, status) DO NOTHING
+       )
+       SELECT * FROM run`,
       [input.workspaceId, input.projectId, input.snapshotId, input.buildId, queued.stage, queued.attempt, queued.status, queued.inputDigest]
     );
     if (!rows[0]) throw new Error("Stage run does not match the project build and snapshot");
@@ -582,14 +611,21 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            ORDER BY created_at, id
            FOR UPDATE SKIP LOCKED
            LIMIT 1
-         )
+         ), updated AS (
          UPDATE build_stage_runs AS run
          SET status = 'running', started_at = now(), updated_at = now()
          FROM candidate
          WHERE run.id = candidate.id AND run.workspace_id = $1 AND run.project_id = $2
          RETURNING run.id, run.workspace_id, run.project_id, run.snapshot_id, run.build_job_id,
                    run.stage, run.attempt, run.status, run.input_digest, run.output_manifest_ids,
-                   run.started_at, run.finished_at, run.error_code, run.error_detail`,
+                   run.started_at, run.finished_at, run.error_code, run.error_detail
+         ), event AS (
+           INSERT INTO build_stage_events
+             (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+           SELECT workspace_id, project_id, build_job_id, id, stage, status FROM updated
+           ON CONFLICT (stage_run_id, status) DO NOTHING
+         )
+         SELECT * FROM updated`,
         [workspaceId, projectId, scope.buildId ?? null, scope.stage ?? null]
       );
       return rows[0] ? stageRunRecord(rows[0]) : null;
@@ -611,7 +647,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     if (status !== "failed" && (details.errorCode || details.errorDetail)) throw new Error("Only failed stage runs include errors");
     const terminal = ["succeeded", "failed", "cancelled", "reused", "skipped"].includes(status);
     const { rows } = await this.pool.query<StageRunRow>(
-      `UPDATE build_stage_runs
+      `WITH updated AS (
+       UPDATE build_stage_runs
        SET status = $5,
            output_manifest_ids = COALESCE($6::uuid[], output_manifest_ids),
            started_at = COALESCE(started_at, now()),
@@ -621,7 +658,14 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            updated_at = now()
        WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND status = $4
        RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
-                 input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
+                 input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail
+       ), event AS (
+         INSERT INTO build_stage_events
+           (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+         SELECT workspace_id, project_id, build_job_id, id, stage, status FROM updated
+         ON CONFLICT (stage_run_id, status) DO NOTHING
+       )
+       SELECT * FROM updated`,
       [
         workspaceId, projectId, stageRunId, expectedStatus, status,
         details.outputManifestIds ?? null, terminal,
@@ -630,6 +674,39 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       ]
     );
     return rows[0] ? stageRunRecord(rows[0]) : null;
+  }
+
+  async listPipelineStageRuns(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineStageRunRecord[]> {
+    const { rows } = await this.pool.query<StageRunRow>(
+      `SELECT id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+              input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail
+       FROM build_stage_runs
+       WHERE workspace_id = $1 AND project_id = $2 AND build_job_id = $3
+       ORDER BY created_at, id`,
+      [workspaceId, projectId, buildId]
+    );
+    return rows.map(stageRunRecord);
+  }
+
+  async listPipelineStageEvents(
+    workspaceId: string,
+    projectId: string,
+    buildId: string,
+    afterSequence: number,
+    limit = 100
+  ): Promise<PipelineStageEvent[]> {
+    const { rows } = await this.pool.query<StageEventRow>(
+      `SELECT sequence, build_job_id, stage_run_id, stage, status, created_at
+       FROM build_stage_events
+       WHERE workspace_id = $1 AND project_id = $2 AND build_job_id = $3 AND sequence > $4
+       ORDER BY sequence LIMIT $5`,
+      [workspaceId, projectId, buildId, afterSequence, limit]
+    );
+    return rows.map(pipelineStageEvent);
   }
 
   async createArtifactWithAudit(manifestInput: ArtifactManifest, actorId?: string): Promise<ArtifactManifest> {

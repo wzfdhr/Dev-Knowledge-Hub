@@ -12,6 +12,7 @@ import type {
   StageRun,
   StageStatus
 } from "../knowledge/pipeline/contracts.js";
+import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
 import type { AGENT_FEEDBACK_STATUSES } from "../../shared/contracts.js";
 
 export interface WorkspaceRecord {
@@ -499,6 +500,18 @@ export interface KnowledgeStore {
 }
 
 export interface AppStore extends BuildPersistence, KnowledgeStore {
+  listPipelineStageRuns(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineStageRunRecord[]>;
+  listPipelineStageEvents(
+    workspaceId: string,
+    projectId: string,
+    buildId: string,
+    afterSequence: number,
+    limit?: number
+  ): Promise<PipelineStageEvent[]>;
   isSetupComplete(): Promise<boolean>;
   createInitialSetup(email: string, passwordHash: string): Promise<SetupResult | null>;
   findAdminByEmail(email: string): Promise<AdminRecord | null>;

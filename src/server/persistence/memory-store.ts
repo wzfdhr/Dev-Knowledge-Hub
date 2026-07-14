@@ -20,6 +20,7 @@ import type {
   AuditEventInput,
   AuditEventRecord,
   CreateSnapshotInput,
+  CreateStageRunInput,
   CreateFeedbackInput,
   EncryptedCredentialRecord,
   FeedbackRebuildInput,
@@ -48,6 +49,9 @@ import type {
   WorkspaceProjectOverviewRecord,
   WorkspaceRecord
 } from "./store.js";
+import type { PipelineStageRunRecord } from "./store.js";
+import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
+import type { StageStatus } from "../knowledge/pipeline/contracts.js";
 import type {
   BuildInput,
   BuildEvent,
@@ -76,6 +80,9 @@ export class MemoryAppStore implements AppStore {
   readonly builds: BuildRecord[] = [];
   readonly buildEvents: BuildEvent[] = [];
   private nextBuildEventSequence = 1;
+  readonly pipelineStageRuns: PipelineStageRunRecord[] = [];
+  readonly pipelineStageEvents: PipelineStageEvent[] = [];
+  private nextPipelineStageEventSequence = 1;
   readonly knowledgePages: KnowledgePageRecord[] = [];
   readonly releases: ReleaseRecord[] = [];
   private readonly indexes = new Map<string, CodeIndex>();
@@ -1426,6 +1433,91 @@ export class MemoryAppStore implements AppStore {
     const { limit, offset } = normalizePagination(pagination);
     return build ? this.buildEvents.filter((event) => event.buildId === buildId)
       .slice(offset, offset + limit) : [];
+  }
+
+  async createStageRun(input: CreateStageRunInput): Promise<PipelineStageRunRecord> {
+    const existing = this.pipelineStageRuns.find((run) =>
+      run.buildId === input.buildId && run.stage === input.stage && run.attempt === input.attempt
+    );
+    if (existing) return existing;
+    const run: PipelineStageRunRecord = {
+      id: randomUUID(),
+      workspaceId: input.workspaceId,
+      projectId: input.projectId,
+      snapshotId: input.snapshotId,
+      buildId: input.buildId,
+      stage: input.stage,
+      attempt: input.attempt,
+      status: "queued",
+      inputDigest: input.inputDigest,
+      outputManifestIds: [],
+      startedAt: null,
+      finishedAt: null,
+      errorCode: null,
+      errorDetail: null
+    };
+    this.pipelineStageRuns.push(run);
+    this.recordPipelineStageEvent(run);
+    return run;
+  }
+
+  async transitionStageRun(
+    workspaceId: string,
+    projectId: string,
+    stageRunId: string,
+    expectedStatus: StageStatus,
+    status: StageStatus,
+    details: { outputManifestIds?: string[]; errorCode?: string; errorDetail?: string } = {}
+  ): Promise<PipelineStageRunRecord | null> {
+    const run = this.pipelineStageRuns.find((candidate) =>
+      candidate.id === stageRunId && candidate.workspaceId === workspaceId
+      && candidate.projectId === projectId && candidate.status === expectedStatus
+    );
+    if (!run) return null;
+    const now = new Date().toISOString();
+    run.status = status;
+    run.startedAt ??= now;
+    run.finishedAt = ["succeeded", "failed", "cancelled", "reused", "skipped"].includes(status) ? now : null;
+    run.outputManifestIds = details.outputManifestIds ?? run.outputManifestIds;
+    run.errorCode = status === "failed" ? details.errorCode ?? null : null;
+    run.errorDetail = status === "failed" ? details.errorDetail ?? null : null;
+    this.recordPipelineStageEvent(run);
+    return run;
+  }
+
+  async listPipelineStageRuns(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineStageRunRecord[]> {
+    return this.pipelineStageRuns.filter((run) =>
+      run.workspaceId === workspaceId && run.projectId === projectId && run.buildId === buildId
+    );
+  }
+
+  async listPipelineStageEvents(
+    workspaceId: string,
+    projectId: string,
+    buildId: string,
+    afterSequence: number,
+    limit = 100
+  ): Promise<PipelineStageEvent[]> {
+    return this.pipelineStageEvents.filter((event) =>
+      event.buildId === buildId && event.sequence > afterSequence
+      && this.pipelineStageRuns.some((run) => run.id === event.stageRunId
+        && run.workspaceId === workspaceId && run.projectId === projectId)
+    ).slice(0, limit);
+  }
+
+  private recordPipelineStageEvent(run: PipelineStageRunRecord): void {
+    this.pipelineStageEvents.push({
+      sequence: this.nextPipelineStageEventSequence++,
+      buildId: run.buildId,
+      stageRunId: run.id,
+      stage: run.stage,
+      status: run.status,
+      occurredAt: new Date().toISOString()
+    });
   }
 
   async saveKnowledge({ build, index, output }: PersistedKnowledge): Promise<void> {

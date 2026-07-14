@@ -1,5 +1,5 @@
 import type {
-  ApiErrorShape, Build, Feedback, McpConnection, McpToken, KnowledgePageRecord,
+  ApiErrorShape, Build, PipelineStageRun, Feedback, McpConnection, McpToken, KnowledgePageRecord,
   ArchivedRepository, KnowledgeMetadata, ProjectKnowledgeQuality, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotChangeSummary, SnapshotSummary, SourceExcerpt,
   UploadSnapshotSummary, ImportReport, TeamMember, ProjectMember, Project, ProjectSummary, ProjectActivity, CodexConnectionPack,
   WorkspaceOverview, WorkspaceSearchResult, MfaStatus
@@ -95,6 +95,7 @@ export interface ApiClient {
   getProjectChanges(projectId: string): Promise<{ change: SnapshotChangeSummary | null }>;
   getProjectKnowledgeQuality(projectId: string): Promise<ProjectKnowledgeQuality>;
   listBuilds(pagination: PaginationParams): Promise<{ builds: Build[] } & PaginatedResponse>;
+  getBuildStages(id: string): Promise<{ buildId: string; legacyStatus: Build["status"]; stages: PipelineStageRun[] }>;
   startBuild(snapshotId: string): Promise<{ build: Build; created: boolean }>;
   cancelBuild(id: string): Promise<{ build: Build }>;
   listReleases(pagination: PaginationParams): Promise<{ releases: Release[] } & PaginatedResponse>;
@@ -198,6 +199,7 @@ export const api: ApiClient = {
   getProjectChanges: (projectId) => request(`/api/projects/${projectId}/changes`),
   getProjectKnowledgeQuality: (projectId) => request(`/api/projects/${projectId}/knowledge-quality`),
   listBuilds: (pagination) => request(listPath("/api/builds", pagination)),
+  getBuildStages: (id) => request(`/api/builds/${encodeURIComponent(id)}/stages`),
   startBuild: (snapshotId) => request("/api/builds", { method: "POST", body: json({ snapshotId }) }),
   cancelBuild: (id) => request(`/api/builds/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   listReleases: (pagination) => request(listPath("/api/releases", pagination)),

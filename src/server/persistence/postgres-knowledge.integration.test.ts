@@ -156,6 +156,11 @@ integration("PostgreSQL cited knowledge integration", () => {
     const replayedConvert = await store.createStageRun({ ...baseStage, stage: "convert" });
     expect(replayedConvert.id).toBe(convert.id);
     await store.createStageRun({ ...baseStage, stage: "extract" });
+    await expect(store.listPipelineStageEvents(
+      setup!.workspace.id, repository!.projectId, build.build.id, 0
+    )).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ stageRunId: convert.id, stage: "convert", status: "queued" })
+    ]));
     const [firstClaim, secondClaim] = await Promise.all([
       store.claimNextStageRun(setup!.workspace.id, repository!.projectId, {
         buildId: build.build.id,
@@ -166,6 +171,14 @@ integration("PostgreSQL cited knowledge integration", () => {
     expect(firstClaim).toMatchObject({ status: "running" });
     expect(secondClaim).toMatchObject({ status: "running" });
     expect(firstClaim?.id).not.toBe(secondClaim?.id);
+    const stageEvents = await store.listPipelineStageEvents(
+      setup!.workspace.id, repository!.projectId, build.build.id, 0
+    );
+    expect(stageEvents.map((event) => event.sequence)).toEqual([...stageEvents]
+      .map((event) => event.sequence).sort((left, right) => left - right));
+    expect(stageEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stageRunId: convert.id, status: "running" })
+    ]));
 
     const artifact = {
       id: randomUUID(), workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId, buildId: build.build.id,

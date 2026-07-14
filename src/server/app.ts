@@ -54,6 +54,12 @@ import { MemorySessionStore, type SessionStore } from "./security/session-store.
 import { createCodexConnectionPack } from "./codex/connection-pack.js";
 import type { BuildEvent, BuildService } from "./knowledge/build-service.js";
 import { deriveChangeImpact } from "./knowledge/change-impact.js";
+import { legacyBuildStatus } from "./knowledge/pipeline/contracts.js";
+import {
+  InvalidStageEventCursorError,
+  parseLastStageEventId,
+  stageSseEvent
+} from "./knowledge/pipeline/events.js";
 import {
   authenticateMcpTokenDetailed,
   createMcpAuthorizationGuard,
@@ -89,6 +95,7 @@ const SESSION_COOKIE = "devkh_session";
 const CSRF_COOKIE = "devkh_csrf";
 const SESSION_MAX_AGE = 8 * 60 * 60;
 const CSP_NONCE_PLACEHOLDER = "<!-- devkh:csp-nonce -->";
+const MAX_STAGE_SSE_CONNECTIONS_PER_USER = 3;
 
 const credentialsSchema = z.object({
   email: z.email().transform((value) => value.toLowerCase()),
@@ -333,6 +340,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     path.join(options.dataDir, "upload-staging")
   );
   const sessionStore = options.sessionStore ?? new MemorySessionStore();
+  const stageSseConnections = new Map<string, number>();
   registerHttpSecurity(server, options.rateLimits ?? DEFAULT_RATE_LIMITS);
   server.addContentTypeParser(
     "application/octet-stream",
@@ -1893,6 +1901,105 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       closed = true;
       unsubscribe();
     });
+  });
+
+  server.get("/api/builds/:id/stages", { preHandler: requireAdmin }, async (request, reply) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const params = z.object({ id: z.string().min(1) }).safeParse(request.params);
+    const build = params.success ? await options.store.getBuild(admin.workspaceId, params.data.id) : null;
+    if (!build) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    const repository = await options.store.getRepository(admin.workspaceId, build.repositoryId);
+    if (!repository) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    await requireProjectRole("reader", repository.projectId, request, reply);
+    if (reply.sent) return;
+    const stages = await options.store.listPipelineStageRuns(
+      admin.workspaceId,
+      repository.projectId,
+      build.id
+    );
+    return {
+      buildId: build.id,
+      legacyStatus: stages.length > 0
+        ? legacyBuildStatus(stages, { published: build.status === "published" })
+        : build.status,
+      stages
+    };
+  });
+
+  server.get("/api/builds/:id/stages/events", { preHandler: requireAdmin }, async (request, reply) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const params = z.object({ id: z.string().min(1) }).safeParse(request.params);
+    const query = z.object({ once: z.string().optional() }).safeParse(request.query);
+    if (!params.success || !query.success) {
+      return sendError(reply, 400, "INVALID_REQUEST", "Invalid stage event request");
+    }
+    const rawCursor = request.headers["last-event-id"];
+    let afterSequence: number;
+    try {
+      afterSequence = parseLastStageEventId(typeof rawCursor === "string" ? rawCursor : undefined);
+    } catch (error) {
+      if (error instanceof InvalidStageEventCursorError) {
+        return sendError(reply, 400, "INVALID_EVENT_CURSOR", error.message);
+      }
+      throw error;
+    }
+    const build = await options.store.getBuild(admin.workspaceId, params.data.id);
+    if (!build) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    const repository = await options.store.getRepository(admin.workspaceId, build.repositoryId);
+    if (!repository) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    await requireProjectRole("reader", repository.projectId, request, reply);
+    if (reply.sent) return;
+
+    const replay = await options.store.listPipelineStageEvents(
+      admin.workspaceId,
+      repository.projectId,
+      build.id,
+      afterSequence
+    );
+    reply.header("content-type", "text/event-stream; charset=utf-8");
+    reply.header("cache-control", "no-cache");
+    if (query.data.once === "true") return reply.send(replay.map(stageSseEvent).join(""));
+
+    const connectionCount = stageSseConnections.get(admin.id) ?? 0;
+    if (connectionCount >= MAX_STAGE_SSE_CONNECTIONS_PER_USER) {
+      return sendError(reply, 429, "SSE_CONNECTION_LIMIT", "Too many stage event connections");
+    }
+    stageSseConnections.set(admin.id, connectionCount + 1);
+    let closed = false;
+    let lastSequence = replay.at(-1)?.sequence ?? afterSequence;
+    const release = () => {
+      if (closed) return;
+      closed = true;
+      const remaining = (stageSseConnections.get(admin.id) ?? 1) - 1;
+      if (remaining > 0) stageSseConnections.set(admin.id, remaining);
+      else stageSseConnections.delete(admin.id);
+      clearInterval(poll);
+    };
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache",
+      connection: "keep-alive"
+    });
+    for (const event of replay) reply.raw.write(stageSseEvent(event));
+    const poll = setInterval(() => {
+      void options.store.listPipelineStageEvents(
+        admin.workspaceId,
+        repository.projectId,
+        build.id,
+        lastSequence
+      ).then((events) => {
+        for (const event of events) {
+          if (closed || event.sequence <= lastSequence) continue;
+          lastSequence = event.sequence;
+          reply.raw.write(stageSseEvent(event));
+        }
+      }).catch(() => {
+        release();
+        reply.raw.end();
+      });
+    }, 1_000);
+    request.raw.on("close", release);
   });
 
   server.get("/api/knowledge/search", { preHandler: requireAdmin }, async (request, reply) => {

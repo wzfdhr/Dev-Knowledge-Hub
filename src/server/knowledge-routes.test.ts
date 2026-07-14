@@ -151,6 +151,89 @@ describe("knowledge API contracts", () => {
     await app.close();
   });
 
+  test("returns persisted stage snapshots and reconnectable stage events for the build project", async () => {
+    const { app, store, cookie, repositoryId, workspaceId } = await authenticatedApp();
+    const started = await app.inject({
+      method: "POST", url: "/api/builds", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { snapshotId: "11111111-1111-4111-8111-111111111111" }
+    });
+    const buildId = started.json().build.id as string;
+    const repository = await store.getRepository(workspaceId, repositoryId);
+    const stage = await store.createStageRun({
+      workspaceId,
+      projectId: repository!.projectId,
+      snapshotId: "11111111-1111-4111-8111-111111111111",
+      buildId,
+      stage: "convert",
+      attempt: 1,
+      inputDigest: "a".repeat(64)
+    });
+    await store.transitionStageRun(
+      workspaceId,
+      repository!.projectId,
+      stage.id,
+      "queued",
+      "running"
+    );
+
+    const stages = await app.inject({
+      method: "GET", url: `/api/builds/${buildId}/stages`, headers: { cookie }
+    });
+    expect(stages.statusCode).toBe(200);
+    expect(stages.json()).toMatchObject({
+      buildId,
+      stages: [expect.objectContaining({ stage: "convert", status: "running" })]
+    });
+
+    const events = await app.inject({
+      method: "GET",
+      url: `/api/builds/${buildId}/stages/events?once=true`,
+      headers: { cookie, "last-event-id": "1" }
+    });
+    expect(events.statusCode).toBe(200);
+    expect(events.headers["content-type"]).toContain("text/event-stream");
+    expect(events.body).not.toContain("id: 1");
+    expect(events.body).toContain("id: 2");
+    expect(events.body).toContain("event: stage.updated");
+    await app.close();
+  });
+
+  test("rejects invalid stage cursors and users without access to the build project", async () => {
+    const { app, store, cookie, repositoryId, workspaceId } = await authenticatedApp();
+    const started = await app.inject({
+      method: "POST", url: "/api/builds", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { snapshotId: "11111111-1111-4111-8111-111111111111" }
+    });
+    const buildId = started.json().build.id as string;
+    const repository = await store.getRepository(workspaceId, repositoryId);
+    await store.createStageRun({
+      workspaceId, projectId: repository!.projectId, snapshotId: "11111111-1111-4111-8111-111111111111",
+      buildId, stage: "convert", attempt: 1, inputDigest: "a".repeat(64)
+    });
+    const invalidCursor = await app.inject({
+      method: "GET", url: `/api/builds/${buildId}/stages/events?once=true`,
+      headers: { cookie, "last-event-id": "not-a-cursor" }
+    });
+    expect(invalidCursor.statusCode).toBe(400);
+    expect(invalidCursor.json().error.code).toBe("INVALID_EVENT_CURSOR");
+
+    const created = await app.inject({
+      method: "POST", url: "/api/members", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { email: "reader@example.com", password: "another correct horse battery", role: "reader" }
+    });
+    expect(created.statusCode).toBe(201);
+    const memberLogin = await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "reader@example.com", password: "another correct horse battery" }
+    });
+    const denied = await app.inject({
+      method: "GET", url: `/api/builds/${buildId}/stages`, headers: { cookie: authenticatedCookie(memberLogin) }
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().error.code).toBe("PROJECT_ACCESS_DENIED");
+    await app.close();
+  });
+
   test("drafts and manually publishes a release, then serves pages, search, and source", async () => {
     const { app, store, cookie, repositoryId, workspaceId, index } = await authenticatedApp();
     const build = (await store.createBuild({

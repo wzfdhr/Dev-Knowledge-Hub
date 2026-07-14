@@ -134,6 +134,21 @@ export interface Build {
   cancelRequested: boolean;
   errorMessage?: string;
 }
+export type PipelineBuildStage = "convert" | "extract" | "tables" | "graph" | "synthesize" | "index" | "lint" | "viz" | "validate" | "package";
+export type PipelineStageStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "reused" | "skipped";
+export interface PipelineStageRun {
+  id: string;
+  buildId: string;
+  stage: PipelineBuildStage;
+  attempt: number;
+  status: PipelineStageStatus;
+  inputDigest: string;
+  outputManifestIds: string[];
+  startedAt: string | null;
+  finishedAt: string | null;
+  errorCode: string | null;
+  errorDetail: string | null;
+}
 export interface Release {
   id: string;
   buildId: string;

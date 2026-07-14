@@ -986,9 +986,13 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       : null;
     if (!change) return { change: null };
     const release = await options.store.currentRelease(admin.workspaceId, repository.id);
+    const metadata = release ? await options.store.knowledgeMetadata(admin.workspaceId, release.id) : null;
+    const graph = release
+      ? await options.store.getKnowledgeGraph(admin.workspaceId, params.data.projectId, release.buildId)
+      : null;
     return {
       change: release
-        ? deriveChangeImpact(change, await options.store.knowledgeMetadata(admin.workspaceId, release.id))
+        ? deriveChangeImpact(change, metadata!, graph)
         : change
     };
   });
@@ -1042,7 +1046,10 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const metadata = release
       ? await options.store.knowledgeMetadata(admin.workspaceId, release.id)
       : null;
-    const enrichedChange = change && metadata ? deriveChangeImpact(change, metadata) : change;
+    const graph = release
+      ? await options.store.getKnowledgeGraph(admin.workspaceId, params.data.projectId, release.buildId)
+      : null;
+    const enrichedChange = change && metadata ? deriveChangeImpact(change, metadata, graph) : change;
     const knowledge = release
       ? await options.store.knowledgeReleaseSummary(admin.workspaceId, release.id)
       : { pageCount: 0, chunkCount: 0, citationCount: 0 };

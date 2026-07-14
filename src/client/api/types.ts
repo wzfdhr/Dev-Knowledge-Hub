@@ -124,6 +124,12 @@ export interface SnapshotChangeSummary {
   requiresBuild: boolean;
   affectedModules: string[];
   suggestedTests: string[];
+  impact?: {
+    roots: Array<{ id: string; path: string; kind: string; changed: boolean; children: unknown[] }>;
+    crossLinks: Array<{ id: string; kind: string; candidate: boolean }>;
+    affectedModulePaths: string[];
+    deletedPaths: string[];
+  };
 }
 export interface Build {
   id: string;

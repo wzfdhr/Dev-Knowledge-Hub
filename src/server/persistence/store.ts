@@ -15,6 +15,7 @@ import type {
   StageStatus
 } from "../knowledge/pipeline/contracts.js";
 import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
+import type { ImpactMindmap } from "../knowledge/pipeline/mindmap.js";
 import type { AGENT_FEEDBACK_STATUSES } from "../../shared/contracts.js";
 
 export interface WorkspaceRecord {
@@ -333,6 +334,7 @@ export interface SnapshotChangeSummary {
   requiresBuild: boolean;
   affectedModules: string[];
   suggestedTests: string[];
+  impact?: ImpactMindmap;
 }
 
 export type ImportReportStatus = "running" | "succeeded" | "failed" | "cancelled";

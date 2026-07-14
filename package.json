@@ -21,6 +21,7 @@
     "db:migrate": "node --env-file-if-exists=.env --import tsx src/db/migrate.ts",
     "mcp:stdio": "node --env-file-if-exists=.env --import tsx src/server/mcp-stdio.ts",
     "test:e2e": "playwright test",
+    "test:backup": "node --test scripts/backup/backup.test.mjs",
     "test:integration": "vitest run src/server/persistence/postgres-knowledge.integration.test.ts",
     "acceptance": "vitest run acceptance/real-query.acceptance.test.ts",
     "delivery:verify": "node scripts/verify-delivery.mjs",

@@ -1,0 +1,100 @@
+{"id":"en-symbol-001","query":"test","project":"fixture-a","expectedTitles":["test"]}
+{"id":"en-symbol-002","query":"e2e","project":"fixture-a","expectedTitles":["e2e"]}
+{"id":"en-symbol-003","query":"default","project":"fixture-a","expectedTitles":["default"]}
+{"id":"en-symbol-004","query":"original","project":"fixture-a","expectedTitles":["original"]}
+{"id":"en-symbol-005","query":"toolkit","project":"fixture-a","expectedTitles":["toolkit"]}
+{"id":"en-symbol-006","query":"Worker","project":"fixture-a","expectedTitles":["Worker","worker"]}
+{"id":"en-symbol-007","query":"DeclaredCallable","project":"fixture-a","expectedTitles":["DeclaredCallable"]}
+{"id":"en-symbol-008","query":"declaredOnly","project":"fixture-a","expectedTitles":["declaredOnly"]}
+{"id":"en-symbol-009","query":"exercise","project":"fixture-a","expectedTitles":["exercise"]}
+{"id":"en-symbol-010","query":"directLocal","project":"fixture-a","expectedTitles":["directLocal"]}
+{"id":"en-symbol-011","query":"worker","project":"fixture-a","expectedTitles":["worker"]}
+{"id":"en-symbol-012","query":"localObject","project":"fixture-a","expectedTitles":["localObject"]}
+{"id":"en-symbol-013","query":"add","project":"fixture-a","expectedTitles":["add"]}
+{"id":"en-symbol-014","query":"Calculator","project":"fixture-a","expectedTitles":["Calculator"]}
+{"id":"en-symbol-015","query":"VERSION","project":"fixture-a","expectedTitles":["VERSION"]}
+{"id":"en-symbol-016","query":"Range","project":"fixture-a","expectedTitles":["Range"]}
+{"id":"en-symbol-017","query":"Operation","project":"fixture-a","expectedTitles":["Operation"]}
+{"id":"en-symbol-018","query":"format","project":"fixture-a","expectedTitles":["format"]}
+{"id":"en-symbol-019","query":"clamp","project":"fixture-a","expectedTitles":["clamp"]}
+{"id":"en-symbol-020","query":"execute","project":"fixture-a","expectedTitles":["src/calls.ts"]}
+{"id":"en-path-001","query":"playwright.config.ts","project":"fixture-a","expectedTitles":["playwright.config.ts"]}
+{"id":"en-path-002","query":"src/call-targets.ts","project":"fixture-a","expectedTitles":["src/call-targets.ts"]}
+{"id":"en-path-003","query":"src/calls.ts","project":"fixture-a","expectedTitles":["src/calls.ts"]}
+{"id":"en-path-004","query":"src/index.ts","project":"fixture-a","expectedTitles":["src/index.ts"]}
+{"id":"en-path-005","query":"src/math.ts","project":"fixture-a","expectedTitles":["src/math.ts"]}
+{"id":"en-path-006","query":"src/overloads.ts","project":"fixture-a","expectedTitles":["src/overloads.ts"]}
+{"id":"en-path-007","query":"src/util.d.ts","project":"fixture-a","expectedTitles":["src/util.d.ts"]}
+{"id":"en-path-008","query":"src/util.js","project":"fixture-a","expectedTitles":["src/util.js"]}
+{"id":"en-path-009","query":"test/math.test.ts","project":"fixture-a","expectedTitles":["test/math.test.ts"]}
+{"id":"en-path-010","query":"vitest.config.ts","project":"fixture-a","expectedTitles":["vitest.config.ts"]}
+{"id":"en-path-011","query":"PLAYWRIGHT.CONFIG.TS","project":"fixture-a","expectedTitles":["playwright.config.ts"]}
+{"id":"en-path-012","query":"SRC/CALL-TARGETS.TS","project":"fixture-a","expectedTitles":["src/call-targets.ts"]}
+{"id":"en-path-013","query":"SRC/CALLS.TS","project":"fixture-a","expectedTitles":["src/calls.ts"]}
+{"id":"en-path-014","query":"SRC/INDEX.TS","project":"fixture-a","expectedTitles":["src/index.ts"]}
+{"id":"en-path-015","query":"SRC/MATH.TS","project":"fixture-a","expectedTitles":["src/math.ts"]}
+{"id":"en-path-016","query":"SRC/OVERLOADS.TS","project":"fixture-a","expectedTitles":["src/overloads.ts"]}
+{"id":"en-path-017","query":"SRC/UTIL.D.TS","project":"fixture-a","expectedTitles":["src/util.d.ts"]}
+{"id":"en-path-018","query":"SRC/UTIL.JS","project":"fixture-a","expectedTitles":["src/util.js"]}
+{"id":"en-path-019","query":"TEST/MATH.TEST.TS","project":"fixture-a","expectedTitles":["test/math.test.ts"]}
+{"id":"en-path-020","query":"VITEST.CONFIG.TS","project":"fixture-a","expectedTitles":["vitest.config.ts"]}
+{"id":"en-case-001","query":"TEST","project":"fixture-a","expectedTitles":["test"]}
+{"id":"en-case-002","query":"E2E","project":"fixture-a","expectedTitles":["e2e"]}
+{"id":"en-case-003","query":"DEFAULT","project":"fixture-a","expectedTitles":["default"]}
+{"id":"en-case-004","query":"ORIGINAL","project":"fixture-a","expectedTitles":["original"]}
+{"id":"en-case-005","query":"TOOLKIT","project":"fixture-a","expectedTitles":["toolkit"]}
+{"id":"en-case-006","query":"WORKER","project":"fixture-a","expectedTitles":["Worker","worker"]}
+{"id":"en-case-007","query":"DECLAREDCALLABLE","project":"fixture-a","expectedTitles":["DeclaredCallable"]}
+{"id":"en-case-008","query":"DECLAREDONLY","project":"fixture-a","expectedTitles":["declaredOnly"]}
+{"id":"en-case-009","query":"EXERCISE","project":"fixture-a","expectedTitles":["exercise"]}
+{"id":"en-case-010","query":"DIRECTLOCAL","project":"fixture-a","expectedTitles":["directLocal"]}
+{"id":"en-case-011","query":"LOCALOBJECT","project":"fixture-a","expectedTitles":["localObject"]}
+{"id":"en-case-012","query":"ADD","project":"fixture-a","expectedTitles":["add"]}
+{"id":"en-case-013","query":"CALCULATOR","project":"fixture-a","expectedTitles":["Calculator"]}
+{"id":"en-case-014","query":"VERSION","project":"fixture-a","expectedTitles":["VERSION"]}
+{"id":"en-case-015","query":"RANGE","project":"fixture-a","expectedTitles":["Range"]}
+{"id":"en-case-016","query":"OPERATION","project":"fixture-a","expectedTitles":["Operation"]}
+{"id":"en-case-017","query":"FORMAT","project":"fixture-a","expectedTitles":["format"]}
+{"id":"en-case-018","query":"CLAMP","project":"fixture-a","expectedTitles":["clamp"]}
+{"id":"en-case-019","query":"worker ","project":"fixture-a","expectedTitles":["worker"]}
+{"id":"en-case-020","query":"add ","project":"fixture-a","expectedTitles":["add"]}
+{"id":"zh-page-001","query":"架构概览","project":"fixture-a","expectedTitles":["架构概览"]}
+{"id":"zh-page-002","query":"开发约定","project":"fixture-a","expectedTitles":["开发约定"]}
+{"id":"zh-page-003","query":"运行与测试指南","project":"fixture-a","expectedTitles":["运行与测试指南"]}
+{"id":"zh-page-004","query":"依赖摘要","project":"fixture-a","expectedTitles":["依赖摘要"]}
+{"id":"zh-page-005","query":" 架构概览","project":"fixture-a","expectedTitles":["架构概览"]}
+{"id":"zh-page-006","query":" 开发约定","project":"fixture-a","expectedTitles":["开发约定"]}
+{"id":"zh-page-007","query":" 运行与测试指南","project":"fixture-a","expectedTitles":["运行与测试指南"]}
+{"id":"zh-page-008","query":" 依赖摘要","project":"fixture-a","expectedTitles":["依赖摘要"]}
+{"id":"zh-page-009","query":"架构概览 ","project":"fixture-a","expectedTitles":["架构概览"]}
+{"id":"zh-page-010","query":"开发约定 ","project":"fixture-a","expectedTitles":["开发约定"]}
+{"id":"zh-page-011","query":"运行与测试指南 ","project":"fixture-a","expectedTitles":["运行与测试指南"]}
+{"id":"zh-page-012","query":"依赖摘要 ","project":"fixture-a","expectedTitles":["依赖摘要"]}
+{"id":"zh-page-013","query":"  架构概览","project":"fixture-a","expectedTitles":["架构概览"]}
+{"id":"zh-page-014","query":"  开发约定","project":"fixture-a","expectedTitles":["开发约定"]}
+{"id":"zh-page-015","query":"  运行与测试指南","project":"fixture-a","expectedTitles":["运行与测试指南"]}
+{"id":"zh-page-016","query":"  依赖摘要","project":"fixture-a","expectedTitles":["依赖摘要"]}
+{"id":"zh-page-017","query":"架构概览  ","project":"fixture-a","expectedTitles":["架构概览"]}
+{"id":"zh-page-018","query":"开发约定  ","project":"fixture-a","expectedTitles":["开发约定"]}
+{"id":"zh-page-019","query":"运行与测试指南  ","project":"fixture-a","expectedTitles":["运行与测试指南"]}
+{"id":"zh-page-020","query":"依赖摘要  ","project":"fixture-a","expectedTitles":["依赖摘要"]}
+{"id":"zh-empty-001","query":"不存在的中文符号一","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-002","query":"不存在的中文符号二","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-003","query":"不存在的中文符号三","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-004","query":"不存在的中文符号四","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-005","query":"不存在的中文符号五","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-006","query":"不存在的中文符号六","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-007","query":"不存在的中文符号七","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-008","query":"不存在的中文符号八","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-009","query":"不存在的中文符号九","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-010","query":"不存在的中文符号十","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-011","query":"虚构模块甲","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-012","query":"虚构模块乙","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-013","query":"虚构模块丙","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-014","query":"虚构模块丁","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-015","query":"虚构模块戊","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-016","query":"虚构模块己","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-017","query":"虚构模块庚","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-018","query":"虚构模块辛","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-019","query":"虚构模块壬","project":"fixture-a","expectEmpty":true}
+{"id":"zh-empty-020","query":"虚构模块癸","project":"fixture-a","expectEmpty":true}

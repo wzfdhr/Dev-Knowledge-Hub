@@ -91,7 +91,7 @@ export const tokens = { colorAccent: "#1677ff", radius: "6px", focusRing: "0 0 0
 ### Task 4: 扩充版本化检索评测集
 
 **依赖：** Task 2。
-**Files：** Create `evaluation/knowledge-v2/cases.jsonl`, `evaluation/knowledge-v2/fixtures/`, `src/server/knowledge/retrieval-evaluation-v2.test.ts`, `scripts/evaluate-knowledge.mjs`; Modify `package.json`.
+**Files：** Create `evaluation/knowledge-v2/cases.jsonl`, `src/server/knowledge/retrieval-evaluation-v2.ts`, `src/server/knowledge/retrieval-evaluation-v2.test.ts`, `scripts/evaluate-knowledge.mjs`; Modify `package.json`.
 **输入：** 已发布 fixture release、当前检索 API。
 **输出：** 至少 100 条 case 与 `npm run evaluate:knowledge`。
 

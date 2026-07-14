@@ -63,6 +63,10 @@ Folder upload accepts at most 50,000 files and 2 GiB of accepted text. Every par
 
 The endpoint returns HTTP 409 `UPLOAD_REPOSITORY_REQUIRED` when no active repository exists or the active repository is not kind `upload`. A Git/local replacement is immediately archived and switched. An upload replacement first returns HTTP 202 with `{repository,pendingUpload:true}` while the existing repository remains current; send its accepted folder files to `/api/repositories/:repositoryId/folder-import` to atomically activate the candidate. Failed imports discard the empty candidate and leave the former repository current.
 
+## Git outbound policy
+
+Git synchronization only permits credential-free public `https` remotes on port `443`. The server validates literal IP hosts and every DNS answer before repository preparation, validates again immediately before `clone` or `fetch`, and disables Git HTTP redirect following. Loopback, link-local, private, carrier-grade NAT, unique-local IPv6, and unspecified addresses return `GIT_EGRESS_DENIED` without exposing the resolved address.
+
 ## MCP tools
 
 Both HTTP and stdio expose exactly these tools:

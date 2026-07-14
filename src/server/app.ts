@@ -32,6 +32,7 @@ import {
 } from "./persistence/store.js";
 import { decryptSecret, encryptSecret } from "./security/crypto.js";
 import { DirtyWorktreeError, syncRepository } from "./git/snapshot.js";
+import { GitEgressDeniedError } from "./security/egress-policy.js";
 import { hashPassword, verifyPassword } from "./security/password.js";
 import {
   createRecoveryCodes,
@@ -1731,7 +1732,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         });
         return summary;
       } catch (error) {
-        const code = error instanceof DirtyWorktreeError ? error.code : "SYNC_FAILED";
+        const code = error instanceof DirtyWorktreeError || error instanceof GitEgressDeniedError ? error.code : "SYNC_FAILED";
         await options.store.finishImportReport(admin.workspaceId, importReport.id, {
           status: "failed",
           collectedFileCount: 0,
@@ -1752,6 +1753,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           return reply.code(409).send({
             error: { code: error.code, message: error.message, changedPaths: error.changedPaths }
           });
+        }
+        if (error instanceof GitEgressDeniedError) {
+          return sendError(reply, 400, error.code, error.message);
         }
         return sendError(reply, 500, "SYNC_FAILED", "Repository synchronization failed");
       }

@@ -4,6 +4,7 @@ import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 
 import type { RepositoryRecord } from "../persistence/store.js";
+import { assertAllowedGitUrl } from "../security/egress-policy.js";
 
 export interface GitRunOptions {
   cwd: string;
@@ -54,13 +55,15 @@ export async function prepareRemoteRepository({
   dataDir,
   token,
   runner = runGit,
-  environment = process.env
+  environment = process.env,
+  assertEgress = assertAllowedGitUrl
 }: {
   repository: RepositoryRecord;
   dataDir: string;
   token?: string;
   runner?: GitRunner;
   environment?: NodeJS.ProcessEnv;
+  assertEgress?: typeof assertAllowedGitUrl;
 }): Promise<string> {
   if (repository.kind !== "git" || !repository.cloneUrl) {
     throw new Error("Remote repository metadata is invalid");
@@ -69,6 +72,7 @@ export async function prepareRemoteRepository({
   if (parsedUrl.protocol !== "https:" || parsedUrl.username || parsedUrl.password) {
     throw new Error("Remote repository must use a credential-free HTTPS URL");
   }
+  await assertEgress(parsedUrl);
 
   const repositoriesDir = path.join(dataDir, "repos");
   const target = path.join(repositoriesDir, repository.id);
@@ -87,17 +91,21 @@ export async function prepareRemoteRepository({
     DEVKH_GIT_TOKEN: token ?? ""
   });
   const credentialIsolation = ["-c", "credential.helper="];
+  const redirectIsolation = ["-c", "http.followRedirects=false"];
+
+  // Resolve immediately before network I/O as a DNS-rebinding defense.
+  await assertEgress(parsedUrl);
 
   if (await exists(path.join(target, ".git"))) {
     await runner({
       cwd: target,
-      args: [...credentialIsolation, "fetch", "--prune", "origin"],
+      args: [...credentialIsolation, ...redirectIsolation, "fetch", "--prune", "origin"],
       env
     });
   } else {
     await runner({
       cwd: repositoriesDir,
-      args: [...credentialIsolation, "clone", "--no-checkout", repository.cloneUrl, target],
+      args: [...credentialIsolation, ...redirectIsolation, "clone", "--no-checkout", repository.cloneUrl, target],
       env
     });
   }

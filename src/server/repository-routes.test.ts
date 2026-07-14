@@ -195,6 +195,21 @@ describe("repository routes", () => {
     expect(JSON.stringify(response.json())).not.toContain(token);
   });
 
+  test("rejects a Git sync to a private target without disclosing its resolved address", async () => {
+    const { app, cookie } = await authenticatedApp();
+    await app.inject({
+      method: "POST", url: "/api/repositories", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { kind: "git", url: "https://127.0.0.1/repo.git", name: "Blocked remote" }
+    });
+    const response = await app.inject({
+      method: "POST", url: "/api/repositories/current/sync", headers: { cookie, ...csrfHeaders(cookie) }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: { code: "GIT_EGRESS_DENIED", message: "Git remote is not allowed by the outbound network policy" } });
+    expect(JSON.stringify(response.json())).not.toContain("127.0.0.1");
+  });
+
   test("replaces the current repository and exposes only sanitized archived history", async () => {
     const { app, cookie } = await authenticatedApp();
     await app.inject({

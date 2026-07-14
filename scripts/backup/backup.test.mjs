@@ -137,6 +137,13 @@ test("restore drill never writes production Docker volumes", () => {
     assert.doesNotMatch(calls, /docker compose .* stop/);
     assert.doesNotMatch(calls, /docker compose .* exec/);
     assert.doesNotMatch(calls, /pg_restore .*--clean/);
+    const evidenceDirectory = join(fixture.environment.BACKUP_STATE_DIR, "recovery-evidence");
+    const [evidenceFile] = execFileSync("find", [evidenceDirectory, "-type", "f"], { encoding: "utf8" }).trim().split("\n");
+    const evidence = JSON.parse(readFileSync(evidenceFile, "utf8"));
+    assert.deepEqual(
+      { operation: evidence.operation, productionVolumeTouched: evidence.productionVolumeTouched, restoredSnapshotCount: evidence.restoredSnapshotCount, pgRestoreListValidated: evidence.pgRestoreListValidated },
+      { operation: "restore-drill", productionVolumeTouched: false, restoredSnapshotCount: 1, pgRestoreListValidated: true }
+    );
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

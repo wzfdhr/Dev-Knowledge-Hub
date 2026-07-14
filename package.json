@@ -22,13 +22,15 @@
     "mcp:stdio": "node --env-file-if-exists=.env --import tsx src/server/mcp-stdio.ts",
     "test:e2e": "playwright test",
     "test:backup": "node --test scripts/backup/backup.test.mjs",
+    "test:runtime": "node --test scripts/security/verify-runtime.node-test.mjs",
     "test:integration": "vitest run src/server/persistence/postgres-knowledge.integration.test.ts",
     "acceptance": "vitest run acceptance/real-query.acceptance.test.ts",
     "evaluate:knowledge": "node --import tsx scripts/evaluate-knowledge.mjs",
     "delivery:verify": "node scripts/verify-delivery.mjs",
     "licenses:check": "node scripts/licenses-check.mjs",
     "licenses:report": "node scripts/licenses-check.mjs --report",
-    "secrets:scan": "node scripts/secrets-scan.mjs"
+    "secrets:scan": "node scripts/secrets-scan.mjs",
+    "runtime:verify": "node scripts/security/verify-runtime.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.12",

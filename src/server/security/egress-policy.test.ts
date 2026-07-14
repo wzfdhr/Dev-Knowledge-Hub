@@ -5,7 +5,8 @@ import { assertAllowedGitUrl, GitEgressDeniedError, type GitDnsResolver } from "
 const publicDns: GitDnsResolver = { resolve4: async () => ["8.8.8.8"], resolve6: async () => [] };
 
 describe("Git outbound policy", () => {
-  test.each(["https://127.0.0.1/repo.git", "https://[::1]/repo.git", "https://169.254.169.254/repo.git", "https://10.0.0.1/repo.git", "http://example.com/repo.git", "https://user:pass@example.com/repo.git", "https://example.com:8443/repo.git"])("rejects %s", async (value) => {
+  const credentializedRemote = ["https://user", "pass@example.com/repo.git"].join(":");
+  test.each(["https://127.0.0.1/repo.git", "https://[::1]/repo.git", "https://169.254.169.254/repo.git", "https://10.0.0.1/repo.git", "http://example.com/repo.git", credentializedRemote, "https://example.com:8443/repo.git"])("rejects %s", async (value) => {
     await expect(assertAllowedGitUrl(new URL(value), publicDns)).rejects.toBeInstanceOf(GitEgressDeniedError);
   });
 

@@ -53,3 +53,11 @@ docker run --rm \
   --mount "type=bind,src=$set_directory,dst=/backup,readonly" \
   postgres:16-bookworm \
   pg_restore --list /backup/database.pgdump >/dev/null
+
+evidence_directory="$BACKUP_STATE_DIR/recovery-evidence"
+mkdir -p "$evidence_directory"
+chmod 700 "$evidence_directory"
+database_checksum="$(sha256sum "$set_directory/database.pgdump" | awk '{print $1}')"
+evidence_path="$evidence_directory/$(date -u +%Y%m%dT%H%M%SZ)-$snapshot_id.json"
+temporary_evidence_path="$evidence_path.tmp.$$"
+node -e 'const fs=require("node:fs"); const [path,temporaryPath,startedAt,snapshotId,checksum]=process.argv.slice(1); fs.writeFileSync(temporaryPath,JSON.stringify({schemaVersion:1,operation:"restore-drill",result:"success",startedAt,finishedAt:new Date().toISOString(),resticSnapshotId:snapshotId,databaseArchiveSha256:checksum,volumeArchives:["snapshots.tgz","repositories.tgz","sources.tgz","uploads.tgz"],productionVolumeTouched:false,restoredSnapshotCount:1,pgRestoreListValidated:true})+"\n",{mode:0o600}); fs.renameSync(temporaryPath,path);' "$evidence_path" "$temporary_evidence_path" "$started_at" "$snapshot_id" "$database_checksum"

@@ -1094,6 +1094,34 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
 
+  server.post("/api/mcp/tokens/:id/rotate", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({ id: z.uuid() }).safeParse(request.params);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_MCP_TOKEN", "Invalid MCP token");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const candidates = await options.store.listMcpTokens(admin.workspaceId, { limit: 100 });
+    const candidate = candidates.find((token) => token.id === parsed.data.id);
+    if (!candidate) return sendError(reply, 404, "TOKEN_NOT_FOUND", "MCP token was not found");
+    await requireProjectRole("admin", candidate.projectId, request, reply);
+    if (reply.sent) return;
+    const plaintext = generateMcpToken();
+    try {
+      const rotation = await options.store.rotateMcpTokenWithAudit(
+        admin.workspaceId,
+        candidate.id,
+        { tokenHash: hashMcpToken(plaintext), tokenPrefix: plaintext.slice(0, 12) },
+        admin.id
+      );
+      if (!rotation) return sendError(reply, 409, "TOKEN_NOT_ACTIVE", "MCP token is already revoked");
+      return {
+        previous: sanitizedMcpToken(rotation.previous),
+        replacement: sanitizedMcpToken(rotation.replacement),
+        token: plaintext
+      };
+    } catch {
+      return sendError(reply, 500, "TOKEN_OPERATION_FAILED", "MCP token rotation failed");
+    }
+  });
+
   server.get("/api/mcp/connection", { preHandler: requireAdmin }, async () => ({
     endpoint: "/mcp",
     transport: "streamable-http",

@@ -90,4 +90,39 @@ describe("MemoryAppStore project members", () => {
 
     expect(summary).toMatchObject({ added: ["src/added.ts"], modified: ["src/kept.ts"], deleted: ["src/deleted.ts"], requiresBuild: true });
   });
+
+  test("rotates an MCP token atomically and records an audit event without plaintext", async () => {
+    const store = new MemoryAppStore();
+    const setup = await store.createInitialSetup("admin@example.com", "hash");
+    const project = (await store.listProjects(setup!.workspace.id))[0];
+    const previous = await store.createMcpToken({
+      workspaceId: setup!.workspace.id,
+      projectId: project.id,
+      name: "Codex",
+      tokenHash: "old-hash",
+      tokenPrefix: "dkh_old"
+    });
+    const rotate = store as unknown as {
+      rotateMcpTokenWithAudit(
+        workspaceId: string,
+        tokenId: string,
+        replacement: { tokenHash: string; tokenPrefix: string },
+        actorId: string
+      ): Promise<{ previous: typeof previous; replacement: typeof previous } | null>;
+    };
+
+    const rotation = await rotate.rotateMcpTokenWithAudit(
+      setup!.workspace.id, previous.id, { tokenHash: "new-hash", tokenPrefix: "dkh_new" }, setup!.admin.id
+    );
+
+    expect(rotation).toMatchObject({
+      previous: { id: previous.id, revokedAt: expect.any(Date) },
+      replacement: { projectId: project.id, name: "Codex", tokenHash: "new-hash", tokenPrefix: "dkh_new", revokedAt: null }
+    });
+    const activity = await store.listProjectActivity(setup!.workspace.id, project.id);
+    expect(activity.find((event) => event.action === "mcp_token.rotated")).toMatchObject({
+      resourceId: previous.id,
+      metadata: { replacementTokenId: rotation!.replacement.id }
+    });
+  });
 });

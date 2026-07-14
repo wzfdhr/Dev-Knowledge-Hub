@@ -621,6 +621,45 @@ export class MemoryAppStore implements AppStore {
     }
   }
 
+  async rotateMcpTokenWithAudit(
+    workspaceId: string,
+    tokenId: string,
+    replacement: Pick<McpTokenRecord, "tokenHash" | "tokenPrefix">,
+    actorId: string
+  ): Promise<{ previous: McpTokenRecord; replacement: McpTokenRecord } | null> {
+    const previous = this.mcpTokens.find((candidate) =>
+      candidate.id === tokenId && candidate.workspaceId === workspaceId && !candidate.revokedAt
+    );
+    if (!previous) return null;
+    const tokenLength = this.mcpTokens.length;
+    const auditLength = this.auditEvents.length;
+    const previousRevokedAt = previous.revokedAt;
+    try {
+      const next = await this.createMcpToken({
+        workspaceId,
+        projectId: previous.projectId,
+        name: previous.name,
+        tokenHash: replacement.tokenHash,
+        tokenPrefix: replacement.tokenPrefix
+      });
+      previous.revokedAt = new Date();
+      await this.recordAudit({
+        workspaceId,
+        actorId,
+        action: "mcp_token.rotated",
+        resourceType: "mcp_token",
+        resourceId: previous.id,
+        metadata: { replacementTokenId: next.id }
+      });
+      return { previous, replacement: next };
+    } catch (error) {
+      previous.revokedAt = previousRevokedAt;
+      this.mcpTokens.splice(tokenLength);
+      this.auditEvents.splice(auditLength);
+      throw error;
+    }
+  }
+
   async createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord> {
     const now = new Date();
     const record: AgentFeedbackRecord = {

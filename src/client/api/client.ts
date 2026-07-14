@@ -111,6 +111,7 @@ export interface ApiClient extends ResumableUploadApi {
   getProjectCodexConnection(projectId: string): Promise<CodexConnectionPack>;
   createMcpToken(name: string, projectId: string): Promise<McpToken & { token: string }>;
   revokeMcpToken(id: string): Promise<{ token: McpToken }>;
+  rotateMcpToken(id: string): Promise<{ previous: McpToken; replacement: McpToken; token: string }>;
   getModelConfig(): Promise<{ config: ModelConfig | null }>;
   updateModelConfig(input: { provider: ModelProvider; model: string; apiKey: string }): Promise<{ config: ModelConfig }>;
 }
@@ -240,6 +241,7 @@ export const api: ApiClient = {
   getProjectCodexConnection: (projectId) => request(`/api/projects/${encodeURIComponent(projectId)}/codex-connection`),
   createMcpToken: (name, projectId) => request("/api/mcp/tokens", { method: "POST", body: json({ name, projectId }) }),
   revokeMcpToken: (id) => request(`/api/mcp/tokens/${id}/revoke`, { method: "POST" }),
+  rotateMcpToken: (id) => request(`/api/mcp/tokens/${encodeURIComponent(id)}/rotate`, { method: "POST" }),
   getModelConfig: () => request("/api/settings/model"),
   updateModelConfig: (input) => request("/api/settings/model", { method: "PUT", body: json(input) })
 };

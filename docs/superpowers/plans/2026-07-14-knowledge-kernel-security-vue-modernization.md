@@ -31,27 +31,28 @@ npm run licenses:check
 
 ## 阶段 0：基线、凭证与评测
 
-### Task 1: 建立发布门禁、Token 轮换可见性与代码基线
+### Task 1: 建立 MCP Token 原子轮换与代码基线
 
 **依赖：** 无。
-**Files：** Modify `package.json`, `src/server/auth-routes.test.ts`, `src/server/auth-routes.ts`, `src/client/pages/settings-page.tsx`, `src/client/app.test.tsx`; Create `scripts/secrets-scan.mjs`, `docs/operations/token-rotation.md`.
-**输入：** 已有 `AdminRecord.sessionVersion`、模型配置与 MCP Token。
-**输出：** `POST /api/settings/security/rotate-session-secret`、`GET /api/settings/security/rotation-status`，以及 `npm run secrets:scan`。
+**Files：** Modify `src/server/app.ts`, `src/server/app.test.ts`, `src/server/persistence/store.ts`, `src/server/persistence/memory-store.ts`, `src/server/persistence/memory-store.test.ts`, `src/server/persistence/postgres-store.ts`, `src/server/persistence/postgres-store.test.ts`, `src/client/api/client.ts`, `src/client/api/client.test.ts`, `src/client/pages/project-codex-page.tsx`, `src/client/app.test.tsx`, `docs/operations/token-rotation.md`.
+**输入：** 已有项目级 `McpTokenRecord`、`mcp_tokens` 审计和项目 admin 授权。
+**输出：** `POST /api/mcp/tokens/:id/rotate`，原子返回旧 Token 的已撤销记录与新 Token 的一次性明文。
 
 **TDD：**
-1. 写失败测试：管理员轮换后旧 session 请求返回 `401 SESSION_REVOKED`；非 admin 返回 `403`；日志和 JSON 不含 secret。
-2. 运行 `npm test -- src/server/auth-routes.test.ts src/client/app.test.tsx`，预期缺少 route/控件而失败。
-3. 最小实现：生成 32-byte secret，使用现有加密密钥加密存储，递增所有 workspace 用户 `sessionVersion`，写 `security.session_secret_rotated` 审计；UI 只显示时间和受影响 session 数。
+1. 写失败测试：项目 admin 轮换后旧 MCP Token 认证失败、新 Token 可认证；project member/reader 与跨项目 token 返回 `403 PROJECT_ACCESS_DENIED`；创建失败时旧 Token 仍有效；审计 action 为 `mcp_token.rotated` 且没有明文。
+2. 运行 `npm test -- src/server/app.test.ts src/server/persistence/memory-store.test.ts src/client/app.test.tsx`，预期缺少 route/控件而失败。
+3. 最小实现：生成 replacement plaintext，在单事务中插入同项目同名称的新 Token、撤销旧 Token、写 `mcp_token.rotated` 审计；UI 在当前项目 Token 行展示轮换按钮，并用已有一次性密文弹窗显示 replacement。
 4. 再次运行同一命令，预期通过。
 
 ```ts
-await api.rotateSessionSecret();
-expect(await requestWithOldCookie()).toMatchObject({ statusCode: 401 });
+const result = await api.rotateMcpToken("old-token-id");
+expect(result.previous.revokedAt).toEqual(expect.any(String));
+expect(result.token).toMatch(/^dkh_/);
 ```
 
-**验收：** 轮换只允许管理员；Token 和密码不被输出；扫描脚本拒绝 AWS key、private key、`.env` 内容。
-**Rollback：** 禁用 route 与 UI flag；不回写已撤销 session，管理员重新登录。
-**提交：** `chore: add release and token rotation baseline`。
+**验收：** 轮换只允许当前项目 admin；旧 Token 只在 replacement 已写入后撤销；日志、审计 metadata 和列表不输出明文；`scripts/secrets-scan.mjs` 继续通过。
+**Rollback：** 隐藏轮换 UI 并禁用 route；已撤销 Token 不恢复，管理员用创建 Token 流程生成新的替代 Token。
+**提交：** `feat: add atomic mcp token rotation`。
 
 ### Task 2: 收口工作区/项目基线与审计查询
 

@@ -1292,6 +1292,54 @@ export class PostgresAppStore implements AppStore {
     });
   }
 
+  async rotateMcpTokenWithAudit(
+    workspaceId: string,
+    tokenId: string,
+    replacement: Pick<McpTokenRecord, "tokenHash" | "tokenPrefix">,
+    actorId: string
+  ): Promise<{ previous: McpTokenRecord; replacement: McpTokenRecord } | null> {
+    return this.transaction(async (client) => {
+      const previousResult = await client.query<McpTokenRow>(
+        `SELECT id, workspace_id, project_id, name, token_hash, token_prefix,
+                created_at, last_used_at, revoked_at
+         FROM mcp_tokens
+         WHERE workspace_id = $1 AND id = $2 AND revoked_at IS NULL
+         FOR UPDATE`,
+        [workspaceId, tokenId]
+      );
+      const previousRow = previousResult.rows[0];
+      if (!previousRow) return null;
+      const previous = mcpTokenRecord(previousRow);
+      const replacementResult = await client.query<McpTokenRow>(
+        `INSERT INTO mcp_tokens (workspace_id, project_id, name, token_hash, token_prefix)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, workspace_id, project_id, name, token_hash, token_prefix,
+                   created_at, last_used_at, revoked_at`,
+        [workspaceId, previous.projectId, previous.name, replacement.tokenHash, replacement.tokenPrefix]
+      );
+      const replacementToken = mcpTokenRecord(replacementResult.rows[0]);
+      const revokedResult = await client.query<McpTokenRow>(
+        `UPDATE mcp_tokens SET revoked_at = now(), updated_at = now()
+         WHERE workspace_id = $1 AND id = $2 AND revoked_at IS NULL
+         RETURNING id, workspace_id, project_id, name, token_hash, token_prefix,
+                   created_at, last_used_at, revoked_at`,
+        [workspaceId, tokenId]
+      );
+      const revoked = revokedResult.rows[0];
+      if (!revoked) throw new Error("MCP token rotation lost its lock");
+      const revokedToken = mcpTokenRecord(revoked);
+      await this.insertAudit(client, {
+        workspaceId,
+        actorId,
+        action: "mcp_token.rotated",
+        resourceType: "mcp_token",
+        resourceId: tokenId,
+        metadata: { replacementTokenId: replacementToken.id }
+      });
+      return { previous: revokedToken, replacement: replacementToken };
+    });
+  }
+
   async createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord> {
     const { rows } = await this.pool.query<FeedbackRow>(
       `INSERT INTO agent_feedback

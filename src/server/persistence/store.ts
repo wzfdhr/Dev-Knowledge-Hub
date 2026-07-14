@@ -118,6 +118,11 @@ export interface McpTokenRecord {
   revokedAt: Date | null;
 }
 
+export interface McpTokenRotation {
+  previous: McpTokenRecord;
+  replacement: McpTokenRecord;
+}
+
 export type AgentFeedbackStatus = (typeof AGENT_FEEDBACK_STATUSES)[number];
 
 export interface AgentFeedbackRecord {
@@ -524,6 +529,12 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
     tokenId: string,
     actorId: string
   ): Promise<McpTokenRecord | null>;
+  rotateMcpTokenWithAudit(
+    workspaceId: string,
+    tokenId: string,
+    replacement: Pick<McpTokenRecord, "tokenHash" | "tokenPrefix">,
+    actorId: string
+  ): Promise<McpTokenRotation | null>;
   createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord>;
   reportFeedbackWithAudit(input: CreateFeedbackInput): Promise<AgentFeedbackRecord>;
   listFeedback(

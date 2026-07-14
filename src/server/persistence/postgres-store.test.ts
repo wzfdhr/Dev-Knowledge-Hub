@@ -211,6 +211,44 @@ describe("PostgresAppStore repository reads", () => {
   });
 });
 
+describe("PostgresAppStore MCP token rotation", () => {
+  test("rotates an active MCP token in one audited transaction", async () => {
+    const oldToken = {
+      id: "token-old", workspace_id: "workspace-1", project_id: "project-1", name: "Codex",
+      token_hash: "old-hash", token_prefix: "dkh_old", created_at: new Date("2026-07-01"),
+      last_used_at: null, revoked_at: null
+    };
+    const newToken = { ...oldToken, id: "token-new", token_hash: "new-hash", token_prefix: "dkh_new", created_at: new Date("2026-07-14") };
+    const revokedToken = { ...oldToken, revoked_at: new Date("2026-07-14") };
+    const query = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
+      if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+      if (sql.includes("FROM mcp_tokens") && sql.includes("FOR UPDATE")) return { rows: [oldToken] };
+      if (sql.includes("INSERT INTO mcp_tokens")) return { rows: [newToken] };
+      if (sql.includes("UPDATE mcp_tokens")) return { rows: [revokedToken] };
+      if (sql.includes("INSERT INTO audit_events")) return { rows: [] };
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+
+    const rotation = await store.rotateMcpTokenWithAudit(
+      "workspace-1", "token-old", { tokenHash: "new-hash", tokenPrefix: "dkh_new" }, "admin-1"
+    );
+
+    expect(rotation).toMatchObject({
+      previous: { id: "token-old", revokedAt: expect.any(Date) },
+      replacement: { id: "token-new", projectId: "project-1", revokedAt: null }
+    });
+    expect(query.mock.calls.map(([sql]) => String(sql).trim().split(/\s+/)[0])).toEqual([
+      "BEGIN", "SELECT", "INSERT", "UPDATE", "INSERT", "COMMIT"
+    ]);
+    expect(query.mock.calls[4][1]).toEqual(expect.arrayContaining([
+      expect.stringContaining("replacementTokenId"), expect.stringContaining("token-new")
+    ]));
+  });
+});
+
 describe("PostgresAppStore knowledge releases", () => {
   test("replays build events in monotonic sequence order", async () => {
     const query = vi.fn(async (sql: string) => ({ rows: [], sql }));

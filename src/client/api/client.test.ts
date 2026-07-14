@@ -37,4 +37,19 @@ describe("project Codex API client", () => {
       body: JSON.stringify({ name: "Local Codex", projectId: "project-1" })
     }));
   });
+
+  test("rotates one MCP token through its dedicated endpoint", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      previous: { id: "old", revokedAt: "2026-07-14T00:00:00.000Z" },
+      replacement: { id: "new", projectId: "project-1", name: "Local Codex" },
+      token: "dkh_replacement"
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.rotateMcpToken("old token");
+
+    expect(fetch).toHaveBeenCalledWith("/api/mcp/tokens/old%20token/rotate", expect.objectContaining({
+      method: "POST"
+    }));
+  });
 });

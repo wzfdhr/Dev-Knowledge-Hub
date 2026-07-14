@@ -1005,6 +1005,29 @@ describe("MCP token disclosure", () => {
     expect(screen.getByText("dkh_secret-t")).toBeVisible();
   });
 
+  test("rotates a project token and shows only the replacement plaintext once", async () => {
+    const user = userEvent.setup();
+    const rotateMcpToken = vi.fn().mockResolvedValue({
+      previous: { id: "old", projectId: "project", name: "Local agent", tokenPrefix: "dkh_old", createdAt: "2026-07-11", lastUsedAt: null, revokedAt: "2026-07-14" },
+      replacement: { id: "new", projectId: "project", name: "Local agent", tokenPrefix: "dkh_new", createdAt: "2026-07-14", lastUsedAt: null, revokedAt: null },
+      token: "dkh_replacement-shown-once"
+    });
+    const api = {
+      getProjectCodexConnection: vi.fn().mockResolvedValue({ projectId: "project", endpoint: "/mcp", environmentVariable: "DEVKH_PROJECT_TOKEN", configToml: "[mcp]", agentsMarkdown: "# Rules", checkCommand: "test -n token" }),
+      listProjectMcpTokens: vi.fn()
+        .mockResolvedValueOnce({ tokens: [{ id: "old", projectId: "project", name: "Local agent", tokenPrefix: "dkh_old", createdAt: "2026-07-11", lastUsedAt: null, revokedAt: null }] })
+        .mockResolvedValue({ tokens: [{ id: "old", projectId: "project", name: "Local agent", tokenPrefix: "dkh_old", createdAt: "2026-07-11", lastUsedAt: null, revokedAt: "2026-07-14" }, { id: "new", projectId: "project", name: "Local agent", tokenPrefix: "dkh_new", createdAt: "2026-07-14", lastUsedAt: null, revokedAt: null }] }),
+      rotateMcpToken
+    } as unknown as ApiClient;
+
+    renderPageAt(<Routes><Route path="/projects/:projectId/codex" element={<ProjectCodexPage api={api} />} /></Routes>, "/projects/project/codex");
+    await user.click(await screen.findByRole("button", { name: "轮换 Local agent" }));
+
+    expect(rotateMcpToken).toHaveBeenCalledWith("old", expect.anything());
+    const dialog = await screen.findByRole("dialog", { name: "已轮换项目 Token" });
+    expect(within(dialog).getByText("dkh_replacement-shown-once")).toBeInTheDocument();
+  });
+
   test("loads token records after the first one hundred", async () => {
     const user = userEvent.setup();
     const firstPage = Array.from({ length: 100 }, (_, index) => ({

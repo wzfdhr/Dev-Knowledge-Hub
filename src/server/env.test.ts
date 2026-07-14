@@ -8,8 +8,14 @@ describe("loadEnv", () => {
       nodeEnv: "test",
       host: "127.0.0.1",
       port: 3000,
-      dataDir: "./data"
+      dataDir: "./data",
+      knowledgePipelineV2: false
     });
+  });
+
+  test("enables the new knowledge pipeline only for an explicit true flag", () => {
+    expect(loadEnv({ mode: "development", env: { KNOWLEDGE_PIPELINE_V2: "true" } }).knowledgePipelineV2).toBe(true);
+    expect(loadEnv({ mode: "development", env: { KNOWLEDGE_PIPELINE_V2: "false" } }).knowledgePipelineV2).toBe(false);
   });
 
   test("production mode rejects missing required secrets", () => {

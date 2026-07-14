@@ -1,0 +1,140 @@
+import { describe, expect, test } from "vitest";
+
+import { PipelineStageWorker, type PipelineStageJob, type PipelineStageJobQueue } from "./worker";
+import type { PipelineArtifactStore, PipelineStageRunRecord } from "../../persistence/store";
+import type { BuildRecord } from "../build-service";
+
+const digest = "a".repeat(64);
+
+function createBuild(cancelRequested = false): BuildRecord {
+  return {
+    id: "build-1", workspaceId: "workspace-1", repositoryId: "repository-1", snapshotId: "snapshot-1",
+    snapshotPath: "/tmp/snapshot", commitSha: "b".repeat(40), status: "queued", warnings: [], cancelRequested,
+    purpose: { kind: "standard", feedbackIds: [], feedbackContext: [] }
+  };
+}
+
+class FakePipelineStore implements PipelineArtifactStore {
+  readonly runs: PipelineStageRunRecord[] = [];
+  constructor(readonly build: BuildRecord | null = createBuild()) {}
+
+  async createStageRun(input: { workspaceId: string; projectId: string; snapshotId: string; buildId: string; stage: PipelineStageRunRecord["stage"]; attempt: number; inputDigest: string }) {
+    const existing = this.runs.find((run) => run.buildId === input.buildId && run.stage === input.stage && run.attempt === input.attempt);
+    if (existing) return existing;
+    const run: PipelineStageRunRecord = {
+      id: `run-${this.runs.length + 1}`, ...input, status: "queued", outputManifestIds: [],
+      startedAt: null, finishedAt: null, errorCode: null, errorDetail: null
+    };
+    this.runs.push(run);
+    return run;
+  }
+
+  async claimNextStageRun(workspaceId: string, projectId: string, scope?: { buildId?: string; stage?: PipelineStageRunRecord["stage"] }) {
+    const run = this.runs.find((candidate) => candidate.workspaceId === workspaceId && candidate.projectId === projectId
+      && candidate.status === "queued" && (!scope?.buildId || candidate.buildId === scope.buildId)
+      && (!scope?.stage || candidate.stage === scope.stage));
+    if (!run) return null;
+    run.status = "running";
+    run.startedAt = "2026-07-14T00:00:00.000Z";
+    return run;
+  }
+
+  async transitionStageRun(_workspaceId: string, _projectId: string, stageRunId: string, expectedStatus: PipelineStageRunRecord["status"], status: PipelineStageRunRecord["status"], details = {}) {
+    const run = this.runs.find((candidate) => candidate.id === stageRunId);
+    if (!run || run.status !== expectedStatus) return null;
+    run.status = status;
+    run.finishedAt = "2026-07-14T00:00:01.000Z";
+    Object.assign(run, details);
+    return run;
+  }
+
+  async findReusableArtifact() { return null; }
+  async createArtifactWithAudit(): Promise<never> { throw new Error("not used"); }
+  async getBuild() { return this.build; }
+}
+
+class FakeQueue implements PipelineStageJobQueue {
+  readonly sent: PipelineStageJob[] = [];
+  handler: ((job: PipelineStageJob) => Promise<void>) | null = null;
+  async send(job: PipelineStageJob) { this.sent.push(job); }
+  async start(handler: (job: PipelineStageJob) => Promise<void>) { this.handler = handler; }
+  async stop() {}
+}
+
+const job: PipelineStageJob = {
+  workspaceId: "workspace-1", projectId: "project-1", snapshotId: "snapshot-1", buildId: "build-1",
+  stages: ["convert", "extract", "graph"], stageIndex: 0, inputDigest: digest
+};
+
+describe("PipelineStageWorker", () => {
+  test("succeeds one stage, then persists and queues only the next stage", async () => {
+    const store = new FakePipelineStore();
+    const queue = new FakeQueue();
+    const worker = new PipelineStageWorker(store, queue, async () => ({ outputManifestIds: ["artifact-1"] }));
+    await worker.schedule(job);
+
+    await worker.process(job);
+
+    expect(store.runs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stage: "convert", status: "succeeded", outputManifestIds: ["artifact-1"] }),
+      expect.objectContaining({ stage: "extract", status: "queued" })
+    ]));
+    expect(store.runs.some((run) => run.stage === "graph")).toBe(false);
+    expect(queue.sent).toEqual([expect.objectContaining({ stageIndex: 0 }), expect.objectContaining({ stageIndex: 1 })]);
+  });
+
+  test("does not schedule a downstream stage after a worker failure", async () => {
+    const store = new FakePipelineStore();
+    const queue = new FakeQueue();
+    const worker = new PipelineStageWorker(store, queue, async () => { throw new Error("parser failed"); });
+    await worker.schedule(job);
+
+    await worker.process(job);
+
+    expect(store.runs).toEqual([expect.objectContaining({ stage: "convert", status: "failed", errorCode: "PIPELINE_STAGE_FAILED" })]);
+    expect(queue.sent).toHaveLength(1);
+  });
+
+  test("records a cache hit as reused before scheduling the next stage", async () => {
+    const store = new FakePipelineStore();
+    const queue = new FakeQueue();
+    const worker = new PipelineStageWorker(store, queue, async () => ({
+      outputManifestIds: ["artifact-1"],
+      reused: true
+    }));
+    await worker.schedule(job);
+
+    await worker.process(job);
+
+    expect(store.runs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stage: "convert", status: "reused", outputManifestIds: ["artifact-1"] }),
+      expect.objectContaining({ stage: "extract", status: "queued" })
+    ]));
+  });
+
+  test("cancels a claimed stage without executing or scheduling downstream work", async () => {
+    const store = new FakePipelineStore(createBuild(true));
+    const queue = new FakeQueue();
+    const execute = async () => { throw new Error("must not execute"); };
+    const worker = new PipelineStageWorker(store, queue, execute);
+    await worker.schedule(job);
+
+    await worker.process(job);
+
+    expect(store.runs).toEqual([expect.objectContaining({ stage: "convert", status: "cancelled" })]);
+    expect(queue.sent).toHaveLength(1);
+  });
+
+  test("cancels an orphaned queued stage without executing it", async () => {
+    const store = new FakePipelineStore(null);
+    const queue = new FakeQueue();
+    const execute = async () => { throw new Error("must not execute"); };
+    const worker = new PipelineStageWorker(store, queue, execute);
+    await worker.schedule(job);
+
+    await worker.process(job);
+
+    expect(store.runs).toEqual([expect.objectContaining({ stage: "convert", status: "cancelled" })]);
+    expect(queue.sent).toHaveLength(1);
+  });
+});

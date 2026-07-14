@@ -38,7 +38,11 @@ export interface CreateStageRunInput {
 
 export interface PipelineArtifactStore {
   createStageRun(input: CreateStageRunInput): Promise<PipelineStageRunRecord>;
-  claimNextStageRun(workspaceId: string, projectId: string): Promise<PipelineStageRunRecord | null>;
+  claimNextStageRun(
+    workspaceId: string,
+    projectId: string,
+    scope?: { buildId?: string; stage?: BuildStage }
+  ): Promise<PipelineStageRunRecord | null>;
   transitionStageRun(
     workspaceId: string,
     projectId: string,

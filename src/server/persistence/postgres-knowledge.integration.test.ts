@@ -152,10 +152,15 @@ integration("PostgreSQL cited knowledge integration", () => {
       workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId, buildId: build.build.id,
       attempt: 1, inputDigest: "b".repeat(64)
     };
-    await store.createStageRun({ ...baseStage, stage: "convert" });
+    const convert = await store.createStageRun({ ...baseStage, stage: "convert" });
+    const replayedConvert = await store.createStageRun({ ...baseStage, stage: "convert" });
+    expect(replayedConvert.id).toBe(convert.id);
     await store.createStageRun({ ...baseStage, stage: "extract" });
     const [firstClaim, secondClaim] = await Promise.all([
-      store.claimNextStageRun(setup!.workspace.id, repository!.projectId),
+      store.claimNextStageRun(setup!.workspace.id, repository!.projectId, {
+        buildId: build.build.id,
+        stage: "convert"
+      }),
       store.claimNextStageRun(setup!.workspace.id, repository!.projectId)
     ]);
     expect(firstClaim).toMatchObject({ status: "running" });

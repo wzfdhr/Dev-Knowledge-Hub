@@ -16,7 +16,8 @@ const artifactRow = {
 
 describe("PostgresAppStore pipeline persistence", () => {
   test("writes project-scoped stage runs and reuses only matching immutable artifacts", async () => {
-    const query = vi.fn(async (sql: string) => {
+    const query = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
       if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
       if (sql.includes("INSERT INTO build_stage_runs")) return { rows: [stageRow] };
       if (sql.includes("INSERT INTO knowledge_artifacts")) return { rows: [artifactRow] };
@@ -44,8 +45,26 @@ describe("PostgresAppStore pipeline persistence", () => {
     expect(query.mock.calls.some(([sql]) => String(sql).includes("workspace_id = $1 AND project_id = $2"))).toBe(true);
   });
 
-  test("claims one queued stage with SKIP LOCKED inside a transaction", async () => {
+  test("creates a stage run idempotently when the queue replays its schedule request", async () => {
     const query = vi.fn(async (sql: string) => {
+      if (sql.includes("INSERT INTO build_stage_runs")) return { rows: [stageRow] };
+      return { rows: [] };
+    });
+    const store = new PostgresAppStore({ query } as never);
+
+    await store.createStageRun({
+      workspaceId: "workspace-1", projectId: "project-1", snapshotId: "snapshot-1", buildId: "build-1",
+      stage: "convert", attempt: 1, inputDigest: "a".repeat(64)
+    });
+
+    expect(String(query.mock.calls[0][0])).toContain(
+      "ON CONFLICT (build_job_id, stage, attempt) DO UPDATE"
+    );
+  });
+
+  test("claims one queued stage with SKIP LOCKED inside a transaction", async () => {
+    const query = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
       if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
       if (sql.includes("UPDATE build_stage_runs")) return { rows: [{ ...stageRow, status: "running", started_at: new Date("2026-07-14T00:00:00.000Z") }] };
       return { rows: [] };
@@ -53,10 +72,14 @@ describe("PostgresAppStore pipeline persistence", () => {
     const client = { query, release: vi.fn() };
     const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
 
-    await expect(store.claimNextStageRun("workspace-1", "project-1")).resolves.toMatchObject({
+    await expect(store.claimNextStageRun("workspace-1", "project-1", {
+      buildId: "build-1",
+      stage: "convert"
+    })).resolves.toMatchObject({
       id: "stage-run-1", status: "running"
     });
     expect(String(query.mock.calls[1][0])).toContain("FOR UPDATE SKIP LOCKED");
+    expect(query.mock.calls[1][1]).toEqual(["workspace-1", "project-1", "build-1", "convert"]);
     expect(client.release).toHaveBeenCalledOnce();
   });
 });

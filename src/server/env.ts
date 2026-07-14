@@ -23,7 +23,8 @@ const sharedEnvSchema = z.object({
   DEVKH_MASTER_KEY: masterKeySchema.optional(),
   DEVKH_SESSION_SECRET: z.string().min(1).optional(),
   PUBLIC_BASE_URL: publicBaseUrlSchema.optional(),
-  DEVKH_LEGACY_SESSION_READ_UNTIL: legacySessionReadUntilSchema.optional()
+  DEVKH_LEGACY_SESSION_READ_UNTIL: legacySessionReadUntilSchema.optional(),
+  KNOWLEDGE_PIPELINE_V2: z.enum(["true", "false"]).default("false").transform((value) => value === "true")
 });
 
 const productionEnvSchema = sharedEnvSchema.extend({
@@ -44,6 +45,7 @@ export interface AppEnv {
   sessionSecret?: string;
   publicBaseUrl?: string;
   legacySessionReadUntil?: Date;
+  knowledgePipelineV2: boolean;
 }
 
 export function loadEnv({
@@ -64,7 +66,8 @@ export function loadEnv({
       masterKey: parsed.DEVKH_MASTER_KEY,
       sessionSecret: parsed.DEVKH_SESSION_SECRET,
       publicBaseUrl: parsed.PUBLIC_BASE_URL,
-      legacySessionReadUntil: parsed.DEVKH_LEGACY_SESSION_READ_UNTIL
+      legacySessionReadUntil: parsed.DEVKH_LEGACY_SESSION_READ_UNTIL,
+      knowledgePipelineV2: parsed.KNOWLEDGE_PIPELINE_V2
     };
   }
 
@@ -78,6 +81,7 @@ export function loadEnv({
     masterKey: parsed.DEVKH_MASTER_KEY,
     sessionSecret: parsed.DEVKH_SESSION_SECRET,
     publicBaseUrl: parsed.PUBLIC_BASE_URL,
-    legacySessionReadUntil: parsed.DEVKH_LEGACY_SESSION_READ_UNTIL
+    legacySessionReadUntil: parsed.DEVKH_LEGACY_SESSION_READ_UNTIL,
+    knowledgePipelineV2: parsed.KNOWLEDGE_PIPELINE_V2
   };
 }

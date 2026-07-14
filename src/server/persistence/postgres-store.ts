@@ -557,6 +557,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          ON snapshot.id = build.snapshot_id AND snapshot.workspace_id = build.workspace_id
        WHERE build.workspace_id = $1 AND build.id = $4
          AND repository.project_id = $2 AND snapshot.id = $3 AND snapshot.repository_id = build.repository_id
+       ON CONFLICT (build_job_id, stage, attempt) DO UPDATE
+       SET updated_at = build_stage_runs.updated_at
        RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
                  input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
       [input.workspaceId, input.projectId, input.snapshotId, input.buildId, queued.stage, queued.attempt, queued.status, queued.inputDigest]
@@ -565,12 +567,18 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return stageRunRecord(rows[0]);
   }
 
-  async claimNextStageRun(workspaceId: string, projectId: string): Promise<PipelineStageRunRecord | null> {
+  async claimNextStageRun(
+    workspaceId: string,
+    projectId: string,
+    scope: { buildId?: string; stage?: BuildStage } = {}
+  ): Promise<PipelineStageRunRecord | null> {
     return this.transaction(async (client) => {
       const { rows } = await client.query<StageRunRow>(
         `WITH candidate AS (
            SELECT id FROM build_stage_runs
            WHERE workspace_id = $1 AND project_id = $2 AND status = 'queued'
+             AND ($3::uuid IS NULL OR build_job_id = $3)
+             AND ($4::text IS NULL OR stage = $4)
            ORDER BY created_at, id
            FOR UPDATE SKIP LOCKED
            LIMIT 1
@@ -582,7 +590,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          RETURNING run.id, run.workspace_id, run.project_id, run.snapshot_id, run.build_job_id,
                    run.stage, run.attempt, run.status, run.input_digest, run.output_manifest_ids,
                    run.started_at, run.finished_at, run.error_code, run.error_detail`,
-        [workspaceId, projectId]
+        [workspaceId, projectId, scope.buildId ?? null, scope.stage ?? null]
       );
       return rows[0] ? stageRunRecord(rows[0]) : null;
     });

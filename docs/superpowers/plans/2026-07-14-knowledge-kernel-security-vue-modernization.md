@@ -74,9 +74,9 @@ server.get("/api/projects/:projectId/activity", { preHandler: requireAdmin }, li
 ### Task 3: 固定 Vue 3.5 发布基线与共享设计令牌
 
 **依赖：** Task 1。
-**Files：** Modify `package.json`, `package-lock.json`, `vite.config.ts`; Create `src/client-vue/main.ts`, `src/client-vue/styles/tokens.css`, `src/client-vue/app.test.ts`, `docs/operations/vue-baseline.md`.
+**Files：** Modify `package.json`, `package-lock.json`, `vite.config.ts`, `src/server/app.ts`, `src/server/app.test.ts`, `vite.config.test.ts`, `Dockerfile`; Create `console-vue/index.html`, `src/client-vue/main.ts`, `src/client-vue/styles/tokens.css`, `src/client-vue/app.test.ts`, `docs/operations/vue-baseline.md`.
 **输入：** Vite build、现有 CSP nonce。
-**输出：** `vue@3.5.13`、`@vitejs/plugin-vue@5.2.1`、Vue 空 shell 与 CSS token。
+**输出：** `vue@3.5.13`、`@vitejs/plugin-vue@6.0.8`、Vue 空 shell 与 CSS token。
 
 **TDD：** 先写 `vite.config.test.ts` 断言 Vue entry 不替换 React entry、CSP nonce 可传入 style injection；运行失败。最小加入依赖和 `/console-vue/health` 页面，锁定 lockfile，重跑 `npm run build` 与 `npm test -- src/client-vue/app.test.ts vite.config.test.ts`。
 
@@ -84,7 +84,7 @@ server.get("/api/projects/:projectId/activity", { preHandler: requireAdmin }, li
 export const tokens = { colorAccent: "#1677ff", radius: "6px", focusRing: "0 0 0 3px #91caff" } as const;
 ```
 
-**验收：** 不出现 `aheart-ui` 或其他 UI package；Vue/React 可同时构建；页面响应 CSP nonce。
+**验收：** Vue 迁移不出现 `aheart-ui`、Ant Design Vue、Element Plus 或其他 UI component package；Vue/React 可同时构建；页面响应 CSP nonce。现有 React 依赖不在此任务修改范围内。
 **Rollback：** 删除 `/console-vue/*` 路由与 Vue bundle，React 不受影响。
 **提交：** `chore: establish vue 3.5 console baseline`。
 

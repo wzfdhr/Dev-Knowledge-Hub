@@ -1,5 +1,8 @@
+import { fileURLToPath, URL } from "node:url";
+
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import vue from "@vitejs/plugin-vue";
 
 const productionApi = "https://izbp13w996yh3m83ypf3crz.tailf6e278.ts.net";
 const apiTarget = process.env.DEVKH_API_PROXY_TARGET ?? productionApi;
@@ -18,9 +21,15 @@ function apiProxy(target: string) {
 }
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), vue()],
   build: {
-    outDir: "dist/client"
+    outDir: "dist/client",
+    rollupOptions: {
+      input: {
+        react: fileURLToPath(new URL("./index.html", import.meta.url)),
+        vue: fileURLToPath(new URL("./console-vue/index.html", import.meta.url))
+      }
+    }
   },
   server: {
     port: 5173,

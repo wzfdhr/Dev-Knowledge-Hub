@@ -6,7 +6,7 @@
 
 现有知识链路已经具备不可变 `source_snapshots`、`source_files`、符号/依赖索引、知识页、引用、构建、发布、MCP Token、项目成员权限、导入报告、变更影响、关键词检索和检索评测。上传在浏览器与服务端双重过滤依赖目录、构建产物、敏感文件和二进制内容。当前自动化基线为 320 个通过用例、5 个显式跳过用例；升级期间不得降低该基线。
 
-Vue 管理端固定使用 `vue@3.5.13`。不安装 `aheart-ui` 或任何外部 UI 库；组件、可访问性行为、设计令牌和图标适配全部存于仓库。React 管理端在迁移期间继续可运行，直至生产切换门禁通过。每阶段由执行代理分别以产品经理视角和开发经理视角审查实际 diff；这是同一执行主体的决策自审，不表示存在外部审批人。
+Vue 管理端固定使用 `vue@3.5.13`。Vue 迁移不安装 `aheart-ui`、Ant Design Vue、Element Plus 或其他外部 UI 组件库；Vue 组件、可访问性行为、设计令牌和图标适配全部存于仓库。现有 React 管理端及其既有依赖在迁移期间不作范围外改动，直至生产切换门禁通过。每阶段由执行代理分别以产品经理视角和开发经理视角审查实际 diff；这是同一执行主体的决策自审，不表示存在外部审批人。
 
 ## 2. 目标、非目标与 clean-room
 
@@ -253,7 +253,7 @@ remediation 由成员创建或从 lint 转化；接受后只计算受影响 sour
 
 ## 14. Vue 并行迁移
 
-Vue entry 为 `/console-vue/*`，React 回退为 `/console-react/*`，根 `/` 由 `CONSOLE_IMPLEMENTATION=react|vue` 反向代理到其中之一；Cookie、REST、SSE、项目选择 header、DTO、错误码、CSP nonce 和 MCP 页面完全共享。Vue 使用 `@vitejs/plugin-vue@5.2.1`、`vue@3.5.13`、Vue Router 4.5.0、`@tanstack/vue-query@5.66.0`，版本写入 lockfile。
+Vue entry 为 `/console-vue/*`，React 回退为 `/console-react/*`，根 `/` 由 `CONSOLE_IMPLEMENTATION=react|vue` 反向代理到其中之一；Cookie、REST、SSE、项目选择 header、DTO、错误码、CSP nonce 和 MCP 页面完全共享。Vue 使用 `@vitejs/plugin-vue@6.0.8`、`vue@3.5.13`、Vue Router 4.5.0、`@tanstack/vue-query@5.66.0`，版本写入 lockfile。`6.0.8` 与当前 Vite 8 基线兼容，不能使用仅支持 Vite 5/6 的旧插件版本。
 
 路由映射：`/projects`、`/projects/:projectId/overview`、`imports`、`versions`、`knowledge`、`collaboration`、`codex`、`/knowledge`、`/feedback`、`/members`、`/settings` 一一对应。共享 DTO 放入 `src/shared/api-contracts.ts`，Fastify schema、React client、Vue client 都由该文件的 Zod schema 推导。Vue 的 `ui/` 提供 Button、Input、Dialog、Table、Tabs、Toast、EmptyState、DataList，键盘、aria、焦点圈和移动布局由 Playwright 覆盖。
 

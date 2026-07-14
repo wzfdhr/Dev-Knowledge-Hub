@@ -303,11 +303,15 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
   if (options.clientDir) {
-    const clientEntrypoint = fs.readFile(path.join(options.clientDir, "index.html"), "utf8");
+    const clientEntrypointPath = (entrypoint: "react" | "vue") => entrypoint === "vue"
+      ? path.join(options.clientDir!, "console-vue", "index.html")
+      : path.join(options.clientDir!, "index.html");
     void server.register(fastifyStatic, { root: options.clientDir, index: false });
     server.setNotFoundHandler((request, reply) => {
       if (request.method === "GET" && !request.url.startsWith("/api/") && request.url !== "/mcp") {
-        return clientEntrypoint.then((html) => {
+        const pathname = new URL(request.url, "http://devkh.local").pathname;
+        const entrypoint = pathname === "/console-vue" || pathname.startsWith("/console-vue/") ? "vue" : "react";
+        return fs.readFile(clientEntrypointPath(entrypoint), "utf8").then((html) => {
           if (!html.includes(CSP_NONCE_PLACEHOLDER)) throw new Error("Client entrypoint is missing CSP nonce placeholder");
           const page = html.replace(
             CSP_NONCE_PLACEHOLDER,

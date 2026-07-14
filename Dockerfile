@@ -5,6 +5,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY tsconfig.json tsconfig.node.json vite.config.ts index.html ./
+COPY console-vue ./console-vue
 COPY src ./src
 COPY drizzle ./drizzle
 RUN npm run build

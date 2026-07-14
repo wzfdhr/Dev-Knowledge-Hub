@@ -57,12 +57,12 @@ describe("delivery database isolation", () => {
     expect(smokeSteps).toContain("docker compose up -d");
   });
 
-  test("mounts resumable upload staging at the same path used by the application", async () => {
+  test("does not retain a legacy resumable upload staging volume", async () => {
     const dockerfile = await readFile("Dockerfile", "utf8");
     const compose = parse(await readFile("docker-compose.yml", "utf8"));
 
-    expect(dockerfile).toContain("/var/lib/devkh/upload-staging");
-    expect(compose.services.app.volumes).toContain("upload_staging:/var/lib/devkh/upload-staging");
+    expect(dockerfile).not.toContain("/var/lib/devkh/upload-staging");
+    expect(compose.services.app.volumes).not.toContain("upload_staging:/var/lib/devkh/upload-staging");
   });
 
   test("keeps uploaded source data in its own durable volume", async () => {

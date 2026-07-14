@@ -66,11 +66,10 @@ describe("folder import routes", () => {
     expect(response.json()).toMatchObject({ fileCount: 1, ignored: { total: 1, reasons: { excluded_directory: 1 } } });
   });
 
-  test("rejects the retired ZIP route and no longer registers resumable uploads", async () => {
+  test("does not register retired ZIP or resumable upload routes", async () => {
     const context = await authenticatedApp();
     const retired = await context.app.inject({ method: "POST", url: "/api/repositories/current/uploads", headers: { cookie: context.cookie, ...csrfHeaders(context.cookie) }, payload: {} });
-    expect(retired.statusCode).toBe(410);
-    expect(retired.json()).toMatchObject({ error: { code: "ZIP_UPLOAD_RETIRED" } });
+    expect(retired.statusCode).toBe(404);
     expect((await context.app.inject({ method: "POST", url: "/api/uploads/resumable", headers: { cookie: context.cookie, ...csrfHeaders(context.cookie) }, payload: {} })).statusCode).toBe(404);
   });
 });

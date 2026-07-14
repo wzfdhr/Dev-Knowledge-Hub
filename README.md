@@ -64,7 +64,7 @@ docker compose ps
 curl --fail --resolve "$DEVKH_DOMAIN:443:127.0.0.1" "https://$DEVKH_DOMAIN/api/health"
 ```
 
-Compose exposes only Caddy on host ports `80` and `443`; Caddy forwards traffic to the app on the private Compose network and obtains HTTPS certificates for `DEVKH_DOMAIN`. PostgreSQL and the app have no host port mappings. The app waits for database health, uses a read-only root filesystem and a no-exec temporary `/tmp`, and persists PostgreSQL data, immutable snapshots, Git mirrors, and upload staging in separate named volumes. The image installs its Git askpass helper as a static executable under `/app/scripts`; PATs are passed only in the Git child environment. Stop gracefully with `docker compose down`; do not add `--volumes` unless deleting all retained state is intentional.
+Compose exposes only Caddy on host ports `80` and `443`; Caddy forwards traffic to the app on the private Compose network and obtains HTTPS certificates for `DEVKH_DOMAIN`. PostgreSQL and the app have no host port mappings. The app waits for database health, uses a read-only root filesystem and a no-exec temporary `/tmp`, and persists PostgreSQL data, immutable snapshots, Git mirrors, uploads, and artifacts in separate named volumes. The image installs its Git askpass helper as a static executable under `/app/scripts`; PATs are passed only in the Git child environment. Stop gracefully with `docker compose down`; do not add `--volumes` unless deleting all retained state is intentional.
 
 For a deployed server, confirm the public health endpoint and Caddy certificate path after DNS has propagated:
 
@@ -92,12 +92,12 @@ Integration cleanup must target only `TEST_DATABASE_URL`; never point it at `dev
 ## Operating workflow
 
 1. Open the console and complete one-time admin setup.
-2. Enter a project from Project Center and open **Data Upload**. Select the original project folder; the browser filters dependencies, build output, binary files, and sensitive files before resumable upload. ZIP, Git HTTPS, and server-local paths remain alternative sources.
+2. Enter a project from Project Center and open **Data Upload**. Select the original project folder; the browser filters dependencies, build output, binary files, and sensitive files before direct folder upload. Git HTTPS and server-local paths remain alternative sources.
 3. Open **Knowledge Versions**, build the immutable source snapshot, review the cited draft, and explicitly publish it.
 4. Open the project's **Codex Integration** page, create a project-scoped MCP token, and install the generated `.codex/config.toml` and `AGENTS.md` snippets. Token plaintext is shown once.
 5. Use **Team Collaboration** to inspect workspace members and project-isolated audit activity. Review reported gaps in Feedback; acknowledge before rebuilding. Rebuild never auto-publishes.
 
-Folder imports accept up to 50,000 selected files, 2 GiB of accepted source before compression, and a 500 MiB filtered archive. The original folder never leaves the browser: only the filtered archive is uploaded. The server removes upload staging and raw ZIP bytes after import.
+Folder imports accept up to 50,000 accepted files and 2 GiB of accepted source. Dependency and build directories are excluded before their contents are read or uploaded; the server repeats the same filtering before it creates an immutable snapshot. ZIP imports are not supported.
 
 `SIGTERM` and `SIGINT` stop HTTP intake, close active MCP sessions, drain pg-boss, and close the database pool. Compose grants 30 seconds for this path.
 

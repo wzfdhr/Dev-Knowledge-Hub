@@ -13,8 +13,8 @@
 1. 创建团队项目。
 2. 选择未经人工清理的本地项目文件夹。
 3. 浏览器先过滤依赖、构建产物、敏感文件和无关文件。
-4. 将过滤后的内容压缩并分块续传到服务器。
-5. 服务端再次执行 ZIP 安全校验和文件过滤，创建不可变源码快照。
+4. 将过滤后的文件直接上传到服务器。
+5. 服务端再次执行文件过滤，创建不可变源码快照。
 6. 人工发起知识构建、审核草稿并发布。
 7. 为项目创建 MCP Token，将生成的 `.codex/config.toml` 和 `AGENTS.md` 接入 Codex。
 8. Codex 在开发任务开始前查询该项目的已发布知识，并返回可验证引用。
@@ -205,12 +205,12 @@ Codex 行为约束是“代码修改、排错、评审、规划和测试设计�
 
 - `src/client/pages/`：页面。
 - `src/client/components/`：工作台、上传进度、报告、活动等组件。
-- `src/client/api/`：HTTP 客户端、文件夹过滤/打包、续传控制。
+- `src/client/api/`：HTTP 客户端与文件夹过滤。
 - `src/server/app.ts`：认证、REST、SSE 和 MCP HTTP 路由。
 - `src/server/persistence/store.ts`：领域持久化接口。
 - `src/server/persistence/memory-store.ts`：单元测试/E2E 内存实现。
 - `src/server/persistence/postgres-store.ts`：生产 PostgreSQL 实现。
-- `src/server/uploads/`：续传会话和 ZIP 安全导入。
+- `src/server/uploads/`：直接文件夹导入。
 - `src/server/git/`：Git mirror、脏工作区检查、不可变快照。
 - `src/server/knowledge/`：解析、生成、构建生命周期、检索。
 - `src/server/mcp/`：Token 认证和八个工具。
@@ -249,8 +249,8 @@ Codex 行为约束是“代码修改、排错、评审、规划和测试设计�
 - MCP Token 明文只显示一次，数据库只存哈希，可撤销。
 - API 不回传 PAT、模型 Key、密码或 Token 明文。
 - HTTPS Git URL 禁止内嵌用户名/密码。
-- ZIP 拒绝绝对路径、路径穿越、反斜杠路径、符号链接、密码包、重复/冲突条目和压缩炸弹。
-- 原始 ZIP 导入后删除，只长期保留过滤后的不可变源码和文档。
+- 文件夹上传拒绝不安全路径、重复路径、超限文件和非文本内容；依赖与构建目录在浏览器和服务端均被过滤。
+- 不保留原始上传内容，只长期保留过滤后的不可变源码和文档。
 - PostgreSQL 不应暴露公网；生产由 Nginx 为 `hub.starking.icu` 提供 TLS，应用仅监听 localhost。
 - 不要把 `.env`、数据库转储、SSH 私钥、服务器地址、Token 或生成密钥写入仓库、聊天或此文档。
 
@@ -424,7 +424,7 @@ npm test
 
 然后根据任务选择入口：
 
-- 上传：`src/client/pages/project-imports-page.tsx`、`src/client/api/folder-import.ts`、`src/client/api/resumable-upload.ts`、`src/server/uploads/`
+- 上传：`src/client/pages/project-imports-page.tsx`、`src/client/api/folder-import.ts`、`src/server/uploads/folder-import.ts`
 - 项目/权限：`drizzle/0011_team_projects_and_roles.sql`、`src/server/team-routes.test.ts`、`src/server/persistence/`
 - 知识算法：`src/server/knowledge/intelligence.ts`、`generator.ts`、`postgres-store.ts`
 - MCP/Codex：`src/server/mcp/`、`src/server/codex/`、`src/client/pages/project-codex-page.tsx`

@@ -36,9 +36,6 @@ RUN apt-get update \
   && mkdir -p /var/lib/devkh/snapshots /var/lib/devkh/repos /var/lib/devkh/uploads /var/lib/devkh/artifacts \
   && chown -R node:node /app /var/lib/devkh
 
-RUN mkdir -p /var/lib/devkh/upload-staging \
-  && chown -R node:node /var/lib/devkh
-
 COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/drizzle ./drizzle

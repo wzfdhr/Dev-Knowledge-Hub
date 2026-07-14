@@ -41,7 +41,6 @@
     "@fastify/static": "^9.3.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@tanstack/react-query": "^5.101.2",
-    "@zip.js/zip.js": "^2.8.26",
     "ai": "^7.0.22",
     "antd": "^5.29.3",
     "argon2": "^0.44.0",

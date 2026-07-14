@@ -7,7 +7,7 @@ The React/Vite console and Fastify API are built into one Node.js 22.13.0 runtim
 ```mermaid
 flowchart LR
   Console["React administration console"] --> API["Fastify HTTP API"]
-  Folder["Local project folder"] --> Filter["Browser filter and ZIP packaging"]
+  Folder["Local project folder"] --> Filter["Browser folder filter"]
   Filter --> API
   Agent["MCP client"] --> HTTP["Streamable HTTP /mcp"]
   Stdio["MCP stdio client"] --> Tools["Shared MCP tools"]
@@ -23,8 +23,8 @@ flowchart LR
 
 ## Data flow
 
-1. Each workspace contains multiple isolated projects. A project accepts a browser-filtered folder import, a clean server-local Git worktree, or a credential-free HTTPS mirror with the image's static askpass helper. The browser uses a temporary filtered ZIP only as the resumable transport format; the console has no direct ZIP selection workflow.
-2. Folder imports discard dependencies, build output, binary files, and sensitive paths before resumable upload. The server repeats archive safety and source filtering, then records accepted UTF-8 text with byte-level hashes in an immutable project snapshot.
+1. Each workspace contains multiple isolated projects. A project accepts a browser-filtered folder import, a clean server-local Git worktree, or a credential-free HTTPS mirror with the image's static askpass helper. ZIP import is not supported.
+2. Folder imports discard dependencies, build output, binary files, and sensitive paths before direct upload. The server repeats source filtering, then records accepted UTF-8 text with byte-level hashes in an immutable project snapshot.
 3. A durable build carries those persisted hashes into symbols/pages/citations, creates deterministic knowledge, and validates generated knowledge. Feedback rebuilds persist and inject their acknowledged feedback context.
 4. Operators create and explicitly publish a release. Only the current published release is visible through MCP.
 5. MCP tokens are project-scoped. Responses pin `releaseId` and `commitSha`; citations include path, inclusive line range, commit/content version, and blob hash.

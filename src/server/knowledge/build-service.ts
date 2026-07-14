@@ -1,12 +1,12 @@
 import { EventEmitter } from "node:events";
 import { promises as fs } from "node:fs";
 
-import type { BUILD_JOB_STATUSES } from "../../shared/contracts.js";
+import type { LegacyBuildStatus } from "./pipeline/contracts.js";
 import { generateKnowledge, type KnowledgeOutput, validateKnowledge } from "./generator.js";
 import type { KnowledgeEnhancer } from "./enhancer.js";
 import { analyzeSnapshot, type Citation, type CodeIndex } from "./intelligence.js";
 
-export type BuildStatus = (typeof BUILD_JOB_STATUSES)[number];
+export type BuildStatus = LegacyBuildStatus;
 
 export interface FeedbackGenerationContext {
   feedbackId: string;

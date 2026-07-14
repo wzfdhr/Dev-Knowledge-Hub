@@ -2,6 +2,19 @@ export const APP_NAME = "Dev Knowledge Hub";
 export const SERVICE_NAME = "dev-knowledge-hub";
 export const APP_VERSION = "0.1.0";
 
+export const BUILD_STAGES = [
+  "convert",
+  "extract",
+  "tables",
+  "graph",
+  "synthesize",
+  "index",
+  "lint",
+  "viz",
+  "validate",
+  "package"
+] as const;
+
 export const BUILD_JOB_STATUSES = [
   "queued",
   "syncing",

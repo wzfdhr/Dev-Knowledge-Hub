@@ -163,6 +163,32 @@
   border-radius: 0;
 }
 
+.project-directory-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.project-directory-row {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  min-width: 0;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.project-directory-row:last-child { border-bottom: 0; }
+.project-directory-row > .project-name-cell { flex: 2 1 220px; }
+.project-directory-row > .project-data-cell { flex: 1 1 130px; }
+.project-directory-row > .project-release-cell { flex: 0 1 110px; }
+.project-directory-row > .ant-btn { flex: 0 0 auto; }
+
+@media (max-width: 840px) {
+  .project-directory-row { align-items: flex-start; flex-wrap: wrap; gap: 12px; }
+  .project-directory-row > .project-name-cell { flex-basis: calc(100% - 110px); }
+  .project-directory-row > .project-data-cell { flex-basis: 42%; }
+}
+
 .project-name-cell,
 .project-name-cell > div,
 .project-data-cell {
@@ -661,78 +687,101 @@
   width: 14px;
 }
 
-.collaboration-grid {
+.project-collaboration-page {
   display: grid;
-  grid-template-columns: minmax(300px, 0.9fr) minmax(420px, 1.4fr);
   gap: 18px;
 }
 
-.collaboration-panel {
+.project-collaboration-page .page-header {
+  margin-bottom: 0;
+}
+
+.admin-section {
   min-width: 0;
+  overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 7px;
   background: var(--surface);
 }
 
-.collaboration-panel > header {
-  min-height: 60px;
+.section-toolbar {
+  min-height: 68px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 0 18px;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--border);
 }
 
-.collaboration-panel > header span {
-  display: flex;
+.section-toolbar > div,
+.section-title {
+  min-width: 0;
+  display: inline-flex;
   align-items: center;
   gap: 9px;
 }
 
-.collaboration-panel > header svg {
+.section-toolbar > div {
+  flex-wrap: wrap;
+}
+
+.section-title h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.section-title svg {
   width: 17px;
   color: #496986;
 }
 
-.collaboration-panel > header strong {
-  font-size: 13px;
-}
-
-.collaboration-panel > header small {
+.section-toolbar small {
   color: var(--muted);
   font-size: 10px;
 }
 
-.roster-heading,
-.roster-list > div {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 90px;
-  align-items: center;
-  gap: 14px;
-  padding: 0 18px;
+.member-list {
+  display: flex;
+  flex-direction: column;
 }
 
-.roster-heading {
-  min-height: 36px;
+.member-list-heading,
+.member-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 16px;
+}
+
+.member-list-heading {
   background: #f8f9fb;
   color: var(--muted);
   font-size: 10px;
   font-weight: 700;
 }
 
-.roster-list > div {
-  min-height: 58px;
+.member-row {
   border-top: 1px solid #edf0f3;
 }
 
-.roster-list > div:first-child {
-  border-top: 0;
+.member-list-heading > div,
+.member-cell {
+  min-width: 0;
+  flex: 1 1 0;
+  overflow-wrap: anywhere;
+}
+
+.member-primary {
+  flex-grow: 2;
 }
 
 .member-identity {
   min-width: 0;
   display: flex;
+  flex: 1 1 0;
   align-items: center;
   gap: 10px;
 }
@@ -757,13 +806,30 @@
   white-space: nowrap;
 }
 
-.collaboration-note {
-  margin: 0;
-  padding: 15px 18px;
-  border-top: 1px solid var(--border);
+.member-table-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.member-time {
   color: var(--muted);
-  font-size: 10px;
-  line-height: 1.55;
+  font-size: 11px;
+}
+
+.member-dialog-fields {
+  display: grid;
+  gap: 16px;
+}
+
+.member-dialog-fields label {
+  display: grid;
+  gap: 8px;
+  color: #4e5d70;
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .activity-list {
@@ -772,10 +838,11 @@
 
 .project-activity-item {
   min-height: 68px;
-  display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
-  align-items: center;
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
   gap: 11px;
+  padding: 12px 0;
   border-bottom: 1px solid #edf0f3;
 }
 
@@ -787,6 +854,7 @@
   width: 32px;
   height: 32px;
   display: grid;
+  flex: 0 0 auto;
   place-items: center;
   border-radius: 6px;
   background: #f0f4f8;
@@ -800,37 +868,114 @@
 .project-activity-item > div {
   min-width: 0;
   display: flex;
+  flex: 1 1 0;
   flex-direction: column;
   gap: 4px;
 }
 
 .project-activity-item strong {
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .project-activity-item small {
-  overflow: hidden;
   color: var(--muted);
   font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
-.activity-stream > .ant-btn {
+.activity-section > .ant-btn {
   margin: 0 18px 18px;
 }
 
-@media (max-width: 1000px) {
-  .collaboration-grid {
-    grid-template-columns: 1fr;
-  }
+.import-history {
+  margin-top: 20px;
+  border-top: 1px solid #dfe5eb;
+}
+
+.import-history > header {
+  display: flex;
+  align-items: center;
+  min-height: 70px;
+}
+
+.import-history > header h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.import-history-list {
+  border: 1px solid #dfe5eb;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.import-history-item {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  padding: 13px 16px;
+  border-bottom: 1px solid #edf0f3;
+}
+
+.import-history-item:last-child {
+  border-bottom: 0;
+}
+
+.import-history-item > div {
+  min-width: 0;
+  display: flex;
+  flex: 1 1 180px;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.import-history-item > div:last-child {
+  flex: 0 1 auto;
+  align-items: flex-end;
+}
+
+.import-history-item strong,
+.import-history-item span {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.import-history-item small {
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 540px) {
-  .roster-heading,
-  .roster-list > div {
-    grid-template-columns: minmax(0, 1fr) 72px;
+  .section-toolbar {
+    align-items: flex-start;
     padding-inline: 13px;
+  }
+
+  .section-toolbar > div {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .member-table-actions {
+    justify-content: flex-start;
+  }
+
+  .member-list-heading {
+    display: none;
+  }
+
+  .member-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .member-cell {
+    flex-basis: auto;
   }
 
   .activity-list {

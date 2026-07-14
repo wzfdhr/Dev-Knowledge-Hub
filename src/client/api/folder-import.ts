@@ -1,6 +1,6 @@
 import { BlobReader, BlobWriter, ZipWriter } from "@zip.js/zip.js";
 
-import { filterImportFile } from "../../shared/import-filter";
+import { filterImportFile, isExcludedImportDirectory } from "../../shared/import-filter";
 import type { ImportProgress } from "./types";
 
 export const MAX_FOLDER_IMPORT_FILES = 50_000;
@@ -73,10 +73,6 @@ async function addFile(
     totalFiles: report.totalFiles,
     detail: `正在读取 ${path}`
   });
-  if (report.totalFiles > MAX_FOLDER_IMPORT_FILES) {
-    throw new FolderImportError("项目包含的文件超过 50,000 个，无法导入");
-  }
-
   const preliminary = filterImportFile({ path, byteSize: file.size });
   if (!preliminary.accepted) {
     ignore(report, preliminary.reason);
@@ -98,6 +94,10 @@ async function addFile(
       detail: `已过滤 ${path}`
     });
     return;
+  }
+
+  if (report.acceptedFiles.length >= MAX_FOLDER_IMPORT_FILES) {
+    throw new FolderImportError("可采集文件超过 50,000 个，无法导入");
   }
 
   report.acceptedBytes += file.size;
@@ -122,6 +122,15 @@ async function walkDirectory(
   for await (const entry of handle.values()) {
     const entryPath = prefix ? `${prefix}/${entry.name}` : entry.name;
     if (entry.kind === "directory") {
+      if (isExcludedImportDirectory(entry.name)) {
+        ignore(report, "excluded_directory");
+        options.onProgress?.({
+          phase: "filtering", status: "running", percent: 0,
+          processedFiles: report.totalFiles, totalFiles: report.totalFiles,
+          detail: `已跳过目录 ${entryPath}`
+        });
+        continue;
+      }
       await walkDirectory(entry, entryPath, report, options);
     } else {
       await addFile(report, entryPath, await entry.getFile(), options);

@@ -35,6 +35,9 @@ RUN apt-get update \
   && mkdir -p /var/lib/devkh/snapshots /var/lib/devkh/repos /var/lib/devkh/uploads \
   && chown -R node:node /app /var/lib/devkh
 
+RUN mkdir -p /var/lib/devkh/upload-staging \
+  && chown -R node:node /var/lib/devkh
+
 COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/drizzle ./drizzle
@@ -47,3 +50,10 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=5 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
 
 CMD ["node", "dist/server/server/main.js"]
+
+FROM runtime AS integration
+
+COPY --from=build --chown=node:node /app/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/src ./src
+COPY --from=build --chown=node:node /app/drizzle ./drizzle
+COPY --from=build --chown=node:node /app/tsconfig.json /app/tsconfig.node.json /app/vite.config.ts ./

@@ -23,6 +23,7 @@ function createFixture({ resticBackupExit = "0" } = {}) {
 printf 'docker %s\n' "$*" >> "$CALL_LOG"
 case " $* " in
   *" compose "*" exec "*) printf 'fake-pgdump\n' ;;
+  *" pg_restore "*) printf 'pg_restore %s\n' "$*" >> "$CALL_LOG" ;;
   *" run "*)
     stage=$(printf '%s\n' "$*" | sed -n 's/.*type=bind,src=\([^,]*\),dst=\/backup.*/\1/p')
     archive=$(printf '%s\n' "$*" | sed -n 's/.*\/backup\/\([^ ]*\.tgz\).*/\1/p')
@@ -46,16 +47,15 @@ case "$1" in
     printf 'fake-pgdump\n' > "$set_directory/database.pgdump"
     tar -C "$empty_directory" -czf "$set_directory/snapshots.tgz" .
     tar -C "$empty_directory" -czf "$set_directory/repositories.tgz" .
+    tar -C "$empty_directory" -czf "$set_directory/sources.tgz" .
     tar -C "$empty_directory" -czf "$set_directory/uploads.tgz" .
-    (cd "$set_directory" && sha256sum database.pgdump snapshots.tgz repositories.tgz uploads.tgz > checksums.sha256)
+    (cd "$set_directory" && sha256sum database.pgdump snapshots.tgz repositories.tgz sources.tgz uploads.tgz > checksums.sha256)
     printf '{"schemaVersion":1}\n' > "$set_directory/manifest.json"
     ;;
 esac
 `);
-  writeFileSync(join(bin, "pg_restore"), "#!/usr/bin/env sh\nprintf 'pg_restore %s\\n' \"$*\" >> \"$CALL_LOG\"\n");
   chmodSync(join(bin, "docker"), 0o755);
   chmodSync(join(bin, "restic"), 0o755);
-  chmodSync(join(bin, "pg_restore"), 0o755);
 
   return {
     root,
@@ -69,6 +69,7 @@ esac
       COMPOSE_PROJECT_NAME: "dev-knowledge-hub",
       SNAPSHOT_VOLUME: "devkh_snapshots",
       REPOSITORY_VOLUME: "devkh_repositories",
+      UPLOADED_SOURCES_VOLUME: "devkh_sources",
       UPLOAD_VOLUME: "devkh_uploads",
       RESTIC_REPOSITORY: "s3:https://example.invalid/devkh",
       RESTIC_PASSWORD_FILE: passwordFile,
@@ -132,8 +133,9 @@ test("restore drill never writes production Docker volumes", () => {
     assert.equal(result.status, 0);
     const calls = readFileSync(fixture.log, "utf8");
     assert.match(calls, /restic restore latest --target/);
+    assert.match(calls, /docker run .*postgres:16-bookworm pg_restore --list \/backup\/database\.pgdump/);
     assert.doesNotMatch(calls, /docker compose .* stop/);
-    assert.doesNotMatch(calls, /docker run/);
+    assert.doesNotMatch(calls, /docker compose .* exec/);
     assert.doesNotMatch(calls, /pg_restore .*--clean/);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
@@ -152,4 +154,14 @@ test("systemd backup timer keeps credentials outside its unit file", () => {
   assert.match(service, /UMask=0077/);
   assert.match(service, /ReadWritePaths=\/var\/lib\/devkh-backup/);
   assert.match(environment, /RESTIC_CACHE_DIR=\/var\/lib\/devkh-backup\/restic-cache/);
+});
+
+test("backs up the durable uploaded source volume separately from upload staging", () => {
+  const backup = readFileSync(backupScript, "utf8");
+  const restore = readFileSync(restoreDrillScript, "utf8");
+  const environment = readFileSync(join(projectRoot, "deployment/backup/backup.env.example"), "utf8");
+
+  assert.match(environment, /UPLOADED_SOURCES_VOLUME=/);
+  assert.match(backup, /sources:\$UPLOADED_SOURCES_VOLUME/);
+  assert.match(restore, /sources\.tgz/);
 });

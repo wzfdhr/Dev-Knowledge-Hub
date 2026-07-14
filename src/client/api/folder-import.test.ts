@@ -46,6 +46,21 @@ describe("folder import scanning", () => {
     });
   });
 
+  test("skips excluded directories without descending into their files", async () => {
+    const excludedFile = {
+      kind: "file" as const,
+      name: "index.ts",
+      getFile: async (): Promise<File> => { throw new Error("excluded directories must not be read"); }
+    };
+    const report = await scanDirectory(directory("demo", [
+      directory("node_modules", [excludedFile]),
+      directory("src", [file("main.ts", "export {}; ")])
+    ]));
+
+    expect(report.acceptedFiles.map((item) => item.path)).toEqual(["src/main.ts"]);
+    expect(report.ignored.reasons).toEqual({ excluded_directory: 1 });
+  });
+
   test("uses browser relative paths from the directory input fallback", async () => {
     const files = [
       Object.assign(browserFile("main.ts", "export {};"), { webkitRelativePath: "demo/src/main.ts" }),
@@ -56,6 +71,19 @@ describe("folder import scanning", () => {
 
     expect(report.acceptedFiles.map((item) => item.path)).toEqual(["src/main.ts"]);
     expect(report.ignored.reasons).toEqual({ unsupported_extension: 1 });
+  });
+
+  test("does not count ignored dependency files against the accepted-file limit", async () => {
+    const ignoredFiles = Array.from({ length: 50_001 }, (_, index) => ({
+      name: `${index}.js`, size: 1, arrayBuffer: async () => { throw new Error("ignored content must not be read"); },
+      webkitRelativePath: `demo/node_modules/package/${index}.js`
+    } as unknown as File));
+    const accepted = Object.assign(browserFile("main.ts", "export {};"), { webkitRelativePath: "demo/src/main.ts" });
+
+    const report = await scanSelectedFiles([...ignoredFiles, accepted]);
+
+    expect(report.acceptedFiles.map((item) => item.path)).toEqual(["src/main.ts"]);
+    expect(report.ignored.reasons).toEqual({ excluded_directory: 50_001 });
   });
 
   test("reports reading and filtering progress while scanning", async () => {

@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import { filterImportFile } from "../../shared/import-filter.js";
+
 import type {
   AppStore,
   RepositoryRecord,
@@ -10,18 +12,6 @@ import type {
 } from "../persistence/store.js";
 import { prepareRemoteRepository, runGit } from "./remote.js";
 
-const MAX_FILE_BYTES = 1024 * 1024;
-const SKIPPED_DIRECTORIES = new Set([
-  ".git",
-  "node_modules",
-  "dist",
-  "build",
-  "coverage",
-  ".next"
-]);
-const SOURCE_EXTENSIONS = new Set([
-  ".ts", ".tsx", ".js", ".jsx", ".md", ".json", ".yaml", ".yml"
-]);
 const repositorySyncs = new Map<string, Promise<void>>();
 
 export class DirtyWorktreeError extends Error {
@@ -58,36 +48,6 @@ function changedPaths(status: Buffer): string[] {
   return [...new Set(paths)].sort();
 }
 
-function isCandidate(filePath: string): boolean {
-  const segments = filePath.split("/");
-  if (segments.some((segment) => SKIPPED_DIRECTORIES.has(segment))) return false;
-  if (filePath === ".env") return false;
-  if (filePath === ".env.example") return true;
-
-  const basename = path.posix.basename(filePath);
-  if (/^package(?:-lock)?\.json$/.test(basename)) return true;
-  if (["pnpm-lock.yaml", "yarn.lock"].includes(basename)) return true;
-  if (/^tsconfig(?:\.[^.]+)?\.json$/.test(basename)) return true;
-  if (/^(?:vitest|jest|playwright|cypress)\.config\.(?:ts|js|tsx|jsx)$/.test(basename)) return true;
-  return SOURCE_EXTENSIONS.has(path.posix.extname(filePath).toLowerCase());
-}
-
-function isGenerated(content: Buffer): boolean {
-  const header = content.subarray(0, 2048).toString("utf8").toLowerCase();
-  return header.includes("@generated")
-    || header.includes("generated file")
-    || header.includes("do not edit");
-}
-
-function isUtf8(content: Buffer): boolean {
-  try {
-    new TextDecoder("utf-8", { fatal: true }).decode(content);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function languageFor(filePath: string): string | null {
   const extension = path.posix.extname(filePath).toLowerCase();
   return ({
@@ -119,7 +79,13 @@ export interface SnapshotSummary {
   commitSha: string;
   ref: string;
   fileCount: number;
+  textBytes: number;
+  ignored: { total: number; reasons: Record<string, number> };
   unchanged: boolean;
+}
+
+function recordIgnored(reasons: Record<string, number>, reason: string): void {
+  reasons[reason] = (reasons[reason] ?? 0) + 1;
 }
 
 async function withRepositorySync<T>(key: string, operation: () => Promise<T>): Promise<T> {
@@ -195,6 +161,8 @@ async function syncRepositoryUnlocked({
       commitSha,
       ref: existing.ref,
       fileCount: await store.countSnapshotFiles(existing.id),
+      textBytes: await store.snapshotTextBytes(existing.id),
+      ignored: { total: 0, reasons: {} },
       unchanged: true
     };
   }
@@ -215,22 +183,33 @@ async function syncRepositoryUnlocked({
     .toString("utf8")
     .split("\0")
     .filter(Boolean)
-    .filter(isCandidate)
     .sort();
 
   const snapshotId = randomUUID();
   const snapshotDirectory = path.join(dataDir, "snapshots", snapshotId);
   const files: SourceFileRecord[] = [];
+  const ignoredReasons: Record<string, number> = {};
   for (const filePath of tracked) {
     const byteSize = Number((await runGit({
       cwd: repositoryPath,
       args: ["cat-file", "-s", `${commitSha}:${filePath}`]
     })).toString("utf8").trim());
-    if (!Number.isSafeInteger(byteSize) || byteSize > MAX_FILE_BYTES) continue;
+    if (!Number.isSafeInteger(byteSize)) {
+      recordIgnored(ignoredReasons, "file_too_large");
+      continue;
+    }
+    const pathDecision = filterImportFile({ path: filePath, byteSize });
+    if (!pathDecision.accepted) {
+      recordIgnored(ignoredReasons, pathDecision.reason);
+      continue;
+    }
 
     const content = await runGit({ cwd: repositoryPath, args: ["show", `${commitSha}:${filePath}`] });
-    if (content.length > MAX_FILE_BYTES || content.includes(0) || !isUtf8(content)
-      || isGenerated(content)) continue;
+    const contentDecision = filterImportFile({ path: filePath, byteSize, content });
+    if (!contentDecision.accepted) {
+      recordIgnored(ignoredReasons, contentDecision.reason);
+      continue;
+    }
 
     const outputPath = path.join(snapshotDirectory, "files", ...filePath.split("/"));
     await mkdir(path.dirname(outputPath), { recursive: true });
@@ -272,10 +251,24 @@ async function syncRepositoryUnlocked({
       commitSha: persisted.commitSha,
       ref: persisted.ref,
       fileCount: await store.countSnapshotFiles(persisted.id),
+      textBytes: await store.snapshotTextBytes(persisted.id),
+      ignored: { total: 0, reasons: {} },
       unchanged: true
     };
   }
-  return { snapshotId, commitSha, ref, fileCount: files.length, unchanged: false };
+  const textBytes = files.reduce((total, file) => total + file.byteSize, 0);
+  return {
+    snapshotId,
+    commitSha,
+    ref,
+    fileCount: files.length,
+    textBytes,
+    ignored: {
+      total: Object.values(ignoredReasons).reduce((total, count) => total + count, 0),
+      reasons: ignoredReasons
+    },
+    unchanged: false
+  };
 }
 
 export function syncRepository(

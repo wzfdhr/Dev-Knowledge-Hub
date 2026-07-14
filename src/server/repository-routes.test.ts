@@ -38,6 +38,35 @@ afterEach(async () => {
 });
 
 describe("repository routes", () => {
+  test("treats a project without a repository as an empty onboarding state", async () => {
+    const { app, cookie } = await authenticatedApp();
+    const projects = await app.inject({ method: "GET", url: "/api/projects", headers: { cookie } });
+    const projectId = projects.json().projects[0].id as string;
+    const headers = { cookie, "x-devkh-project": projectId };
+
+    const [repository, status, builds, releases] = await Promise.all([
+      app.inject({ method: "GET", url: "/api/repositories/current", headers }),
+      app.inject({ method: "GET", url: "/api/repositories/current/status", headers }),
+      app.inject({ method: "GET", url: "/api/builds?limit=20&offset=0", headers }),
+      app.inject({ method: "GET", url: "/api/releases?limit=20&offset=0", headers })
+    ]);
+
+    expect(repository.statusCode).toBe(200);
+    expect(repository.json()).toEqual({ repository: null });
+    expect(status.statusCode).toBe(200);
+    expect(status.json()).toEqual({ repository: null, latestSnapshot: null });
+    expect(builds.statusCode).toBe(200);
+    expect(builds.json()).toMatchObject({ builds: [], total: 0, nextOffset: null });
+    expect(releases.statusCode).toBe(200);
+    expect(releases.json()).toMatchObject({ releases: [], total: 0, nextOffset: null });
+
+    const sync = await app.inject({
+      method: "POST", url: "/api/repositories/current/sync", headers
+    });
+    expect(sync.statusCode).toBe(404);
+    expect(sync.json()).toMatchObject({ error: { code: "REPOSITORY_NOT_FOUND" } });
+  });
+
   test("returns a persisted project summary without fabricated defaults", async () => {
     const { app, cookie } = await authenticatedApp();
     const projects = await app.inject({ method: "GET", url: "/api/projects", headers: { cookie } });

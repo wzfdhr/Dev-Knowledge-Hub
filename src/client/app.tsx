@@ -52,6 +52,7 @@ export function App({ api = defaultApi }: { api?: ApiClient }) {
       <Route path="overview" element={<ProjectOverviewPage api={api} />} />
       <Route path="imports" element={<ProjectImportsPage api={api} />} />
       <Route path="versions" element={<ProjectVersionsPage api={api} />} />
+      <Route path="knowledge" element={<KnowledgePage api={api} />} />
       <Route path="collaboration" element={<ProjectCollaborationPage api={api} />} />
       <Route path="codex" element={<ProjectCodexPage api={api} />} />
     </Route>

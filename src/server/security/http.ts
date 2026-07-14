@@ -1,4 +1,12 @@
+import { randomBytes } from "node:crypto";
+
 import type { FastifyInstance, FastifyRequest } from "fastify";
+
+declare module "fastify" {
+  interface FastifyRequest {
+    cspNonce: string;
+  }
+}
 
 export const MAX_REQUEST_BODY_BYTES = 1_048_576;
 
@@ -119,9 +127,11 @@ export function registerHttpSecurity(
     sweepIntervalMs: policy.sweepIntervalMs
   });
 
+  server.decorateRequest("cspNonce", "");
   server.addHook("onRequest", async (request, reply) => {
+    request.cspNonce = randomBytes(32).toString("base64");
     const headers = {
-      "content-security-policy": "default-src 'self'; base-uri 'self'; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'",
+      "content-security-policy": `default-src 'self'; base-uri 'self'; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; worker-src 'self' blob:; style-src 'self' 'nonce-${request.cspNonce}'`,
       "cross-origin-opener-policy": "same-origin",
       "referrer-policy": "no-referrer",
       "x-content-type-options": "nosniff",

@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -104,6 +104,31 @@ describe("ResumableUploadSessionManager", () => {
       complete: true,
       finalized: true
     });
+  });
+
+  test("removes expired sessions and orphaned completed uploads while retaining active upload data", async () => {
+    const { root, manager } = await fixture();
+    const expired = await manager.create({ totalBytes: 4, chunkSize: 4 });
+    const active = await manager.create({ totalBytes: 4, chunkSize: 4 });
+    await manager.uploadChunk(active.id, 0, Buffer.from("live"), 4);
+    const finalized = await manager.finalize(active.id);
+    const orphanPath = path.join(root, "completed", "a0b1c2d3-e4f5-6789-abcd-ef0123456789.upload");
+    const freshOrphanPath = path.join(root, "completed", "b0b1c2d3-e4f5-6789-abcd-ef0123456789.upload");
+    await writeFile(orphanPath, "orphan");
+    await writeFile(freshOrphanPath, "fresh");
+
+    const now = new Date("2026-07-14T00:00:00.000Z");
+    const expiredAt = new Date(now.getTime() - (25 * 60 * 60 * 1000));
+    await utimes(path.join(root, "sessions", expired.id, "session.json"), expiredAt, expiredAt);
+    await utimes(orphanPath, expiredAt, expiredAt);
+    await utimes(finalized.path, expiredAt, expiredAt);
+
+    await expect(manager.cleanupExpired(now)).resolves.toEqual({ sessions: 1, completed: 1 });
+    await expect(manager.status(expired.id)).rejects.toMatchObject({ code: "SESSION_NOT_FOUND" });
+    await expect(manager.status(active.id)).resolves.toMatchObject({ finalized: true });
+    await expect(readFile(orphanPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(freshOrphanPath, "utf8")).resolves.toBe("fresh");
+    await expect(readFile(finalized.path, "utf8")).resolves.toBe("live");
   });
 
   test("never maps a supplied session id into an arbitrary path", async () => {

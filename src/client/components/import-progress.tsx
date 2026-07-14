@@ -46,15 +46,16 @@ export function ImportProgress({
       <div><p className="eyebrow">处理流程</p><h2 id="import-progress-title">导入进度</h2></div>
       {progress && <strong className="import-percent">{progress.percent}%</strong>}
     </div>
-    <ol className="import-stage-list" aria-label="导入阶段">
+    <div className="import-stage-list" aria-label="导入阶段">
       {stages.map((stage, index) => {
         const complete = progress?.status === "completed" || activeIndex > index;
         const active = activeIndex === index;
-        return <li key={stage.phase} className={complete ? "complete" : active ? "active" : undefined}>
-          <span aria-hidden="true">{complete ? <Check /> : <Circle />}</span>{stage.label}
-        </li>;
+        return <div key={stage.phase} className={`import-stage${complete ? " complete" : active ? " active" : ""}`}>
+          <span className="import-stage-icon" aria-hidden="true">{complete ? <Check /> : <Circle />}</span>
+          <span className="import-stage-label">{stage.label}</span>
+        </div>;
       })}
-    </ol>
+    </div>
     <Progress percent={progress?.percent ?? 0} showInfo={false} status={progress?.status === "failed" ? "exception" : undefined} />
     <div className="import-progress-meta" aria-live="polite">
       <span>{progress?.detail ?? "选择项目文件夹后，将在本机完成读取、过滤和压缩。"}</span>
@@ -68,4 +69,3 @@ export function ImportProgress({
     </div>}
   </section>;
 }
-

@@ -11,6 +11,15 @@ import { BuildService, type BuildJobQueue } from "./knowledge/build-service.js";
 import { PgBossBuildJobQueue } from "./knowledge/job-queue.js";
 import { anthropicEnhancer, openAiCompatibleEnhancer, type KnowledgeEnhancer } from "./knowledge/enhancer.js";
 import { decryptSecret } from "./security/crypto.js";
+import { syncRepository } from "./git/snapshot.js";
+import { ResumableUploadSessionManager } from "./uploads/resumable-upload.js";
+
+const UPLOAD_STAGING_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+const IMPORT_REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+
+interface UploadStagingCleaner {
+  cleanupExpired(): Promise<unknown>;
+}
 
 export interface BootstrapDependencies {
   createDatabase: typeof createDatabase;
@@ -23,6 +32,10 @@ export interface BootstrapDependencies {
     enhancerForWorkspace: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>
   ) => BuildService;
   buildServer: typeof buildServer;
+  createUploadStagingCleaner?: (directory: string) => UploadStagingCleaner;
+  setInterval?: (callback: () => void, delay: number) => unknown;
+  clearInterval?: (timer: unknown) => void;
+  reportBackgroundError?: (operation: string, error: unknown) => void;
 }
 
 const defaultDependencies: BootstrapDependencies = {
@@ -71,7 +84,93 @@ export async function bootstrapServer(
     ...(env.publicBaseUrl ? { publicBaseUrl: env.publicBaseUrl } : {}),
     ...(mode === "production" ? { clientDir: path.resolve("dist/client") } : {})
   });
+  const cleaner = dependencies.createUploadStagingCleaner?.(path.join(env.dataDir, "upload-staging"))
+    ?? new ResumableUploadSessionManager(path.join(env.dataDir, "upload-staging"));
+  const reportBackgroundError = dependencies.reportBackgroundError
+    ?? ((operation: string, error: unknown) => server.log.error({ err: error }, operation));
+  const runUploadStagingCleanup = () => {
+    void cleaner.cleanupExpired().catch((error: unknown) => {
+      reportBackgroundError("Upload staging cleanup failed", error);
+    });
+  };
+  const runImportReportCleanup = () => {
+    void store.deleteExpiredImportReports(new Date(Date.now() - IMPORT_REPORT_RETENTION_MS))
+      .catch((error: unknown) => {
+        reportBackgroundError("Import report cleanup failed", error);
+      });
+  };
+  const runGitSynchronization = () => {
+    void store.listActiveGitRepositories().then(async (repositories) => {
+      await Promise.all(repositories.map(async (repository) => {
+        const report = await store.createImportReport({
+          workspaceId: repository.workspaceId,
+          projectId: repository.projectId,
+          repositoryId: repository.id,
+          actorId: null,
+          sourceKind: "git"
+        });
+        try {
+          const credential = await store.repositoryCredential(repository.workspaceId, repository.id);
+          const summary = await syncRepository({
+            repository,
+            dataDir: env.dataDir,
+            store,
+            ...(credential ? { token: decryptSecret(credential, env.masterKey!) } : {})
+          });
+          await store.finishImportReport(repository.workspaceId, report.id, {
+            status: "succeeded",
+            collectedFileCount: summary.fileCount,
+            collectedTextBytes: summary.textBytes,
+            ignored: summary.ignored,
+            snapshotId: summary.snapshotId,
+            failureCode: null
+          });
+          await store.recordAudit({
+            workspaceId: repository.workspaceId,
+            action: "repository.scheduled_sync_succeeded",
+            resourceType: "repository",
+            resourceId: repository.id,
+            metadata: { unchanged: summary.unchanged, commitSha: summary.commitSha }
+          });
+        } catch (error) {
+          await store.finishImportReport(repository.workspaceId, report.id, {
+            status: "failed",
+            collectedFileCount: 0,
+            collectedTextBytes: 0,
+            ignored: { total: 0, reasons: {} },
+            snapshotId: null,
+            failureCode: "SCHEDULED_SYNC_FAILED"
+          }).catch(() => undefined);
+          await store.recordAudit({
+            workspaceId: repository.workspaceId,
+            action: "repository.scheduled_sync_failed",
+            resourceType: "repository",
+            resourceId: repository.id,
+            metadata: { code: "SCHEDULED_SYNC_FAILED" }
+          }).catch(() => undefined);
+          throw error;
+        }
+      }));
+    }).catch((error: unknown) => {
+      reportBackgroundError("Git synchronization failed", error);
+    });
+  };
+  const runMaintenance = () => {
+    runUploadStagingCleanup();
+    runImportReportCleanup();
+    runGitSynchronization();
+  };
+  runMaintenance();
+  const scheduleCleanup = dependencies.setInterval
+    ?? ((callback: () => void, delay: number) => globalThis.setInterval(callback, delay));
+  const clearCleanup = dependencies.clearInterval
+    ?? ((timer: unknown) => globalThis.clearInterval(timer as never));
+  const cleanupInterval = scheduleCleanup(
+    runMaintenance,
+    UPLOAD_STAGING_CLEANUP_INTERVAL_MS
+  );
   server.addHook("onClose", async () => {
+    clearCleanup(cleanupInterval);
     await buildService.stop();
     await database.pool.end();
   });

@@ -18,8 +18,12 @@ import { AGENT_FEEDBACK_STATUSES, SERVICE_NAME } from "../shared/contracts.js";
 import {
   FeedbackNotAcknowledgedError,
   InvalidFeedbackTransitionError,
+  LastProjectAdminError,
+  LastWorkspaceAdminError,
   type AdminRecord,
   type AppStore,
+  type ProjectMemberRecord,
+  type ReleaseRecord,
   type RepositoryRecord,
   type TeamMemberRecord,
   type TeamRole,
@@ -31,6 +35,7 @@ import { hashPassword, verifyPassword } from "./security/password.js";
 import { createSessionToken, verifySessionToken } from "./security/session.js";
 import { createCodexConnectionPack } from "./codex/connection-pack.js";
 import type { BuildEvent, BuildService } from "./knowledge/build-service.js";
+import { deriveChangeImpact } from "./knowledge/change-impact.js";
 import {
   authenticateMcpToken,
   createMcpAuthorizationGuard,
@@ -57,6 +62,7 @@ import {
 
 const SESSION_COOKIE = "devkh_session";
 const SESSION_MAX_AGE = 8 * 60 * 60;
+const CSP_NONCE_PLACEHOLDER = "<!-- devkh:csp-nonce -->";
 
 const credentialsSchema = z.object({
   email: z.email().transform((value) => value.toLowerCase()),
@@ -99,6 +105,10 @@ const memberSchema = z.object({
   password: z.string().min(12),
   role: teamRoleSchema
 });
+const memberPasswordSchema = z.object({ password: z.string().min(12) });
+const memberDisabledSchema = z.object({ disabled: z.boolean() });
+const projectMemberSchema = z.object({ userId: z.uuid(), role: teamRoleSchema });
+const projectMemberRoleSchema = z.object({ role: teamRoleSchema });
 
 function paginationMetadata(total: number, offset: number, itemCount: number) {
   const consumed = offset + itemCount;
@@ -171,8 +181,14 @@ function archivedRepositoryDto(repository: RepositoryRecord) {
   };
 }
 
-function memberDto(member: TeamMemberRecord | AdminRecord) {
-  return { id: member.id, email: member.email, role: member.role, createdAt: "createdAt" in member ? member.createdAt : undefined };
+function memberDto(member: TeamMemberRecord | ProjectMemberRecord | AdminRecord) {
+  return {
+    id: member.id,
+    email: member.email,
+    role: member.role,
+    createdAt: "createdAt" in member ? member.createdAt : undefined,
+    disabledAt: "disabledAt" in member ? member.disabledAt : null
+  };
 }
 
 function projectDto(project: ProjectRecord) {
@@ -182,6 +198,23 @@ function projectDto(project: ProjectRecord) {
     slug: project.slug,
     archivedAt: project.archivedAt,
     createdAt: project.createdAt
+  };
+}
+
+function importReportDto(report: Awaited<ReturnType<AppStore["listImportReports"]>>[number]) {
+  return {
+    id: report.id,
+    projectId: report.projectId,
+    repositoryId: report.repositoryId,
+    sourceKind: report.sourceKind,
+    status: report.status,
+    startedAt: report.startedAt,
+    finishedAt: report.finishedAt,
+    collectedFileCount: report.collectedFileCount,
+    collectedTextBytes: report.collectedTextBytes,
+    ignored: report.ignored,
+    snapshotId: report.snapshotId,
+    failureCode: report.failureCode
   };
 }
 
@@ -245,10 +278,18 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
   if (options.clientDir) {
-    void server.register(fastifyStatic, { root: options.clientDir });
+    const clientEntrypoint = fs.readFile(path.join(options.clientDir, "index.html"), "utf8");
+    void server.register(fastifyStatic, { root: options.clientDir, index: false });
     server.setNotFoundHandler((request, reply) => {
       if (request.method === "GET" && !request.url.startsWith("/api/") && request.url !== "/mcp") {
-        return reply.sendFile("index.html");
+        return clientEntrypoint.then((html) => {
+          if (!html.includes(CSP_NONCE_PLACEHOLDER)) throw new Error("Client entrypoint is missing CSP nonce placeholder");
+          const page = html.replace(
+            CSP_NONCE_PLACEHOLDER,
+            `<meta name="devkh-csp-nonce" content="${request.cspNonce}" />`
+          );
+          return reply.type("text/html; charset=utf-8").header("cache-control", "no-store").send(page);
+        });
       }
       return sendError(reply, 404, "NOT_FOUND", "Route was not found");
     });
@@ -271,7 +312,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     try {
       const session = await verifySessionToken(token, options.sessionSecret);
       const admin = await options.store.findAdminById(session.adminId, session.workspaceId);
-      if (!admin) throw new Error("Unknown session administrator");
+      if (!admin || admin.disabledAt || admin.sessionVersion !== session.sessionVersion) {
+        throw new Error("Unknown session administrator");
+      }
       (request as AuthenticatedRequest).sessionAdmin = admin;
     } catch {
       sendError(reply, 401, "UNAUTHORIZED", "Authentication required");
@@ -294,6 +337,73 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     requireRole("admin", request, reply);
   const requireContributor = (request: FastifyRequest, reply: FastifyReply) =>
     requireRole("member", request, reply);
+
+  async function requireProjectRole(
+    role: TeamRole,
+    projectId: string,
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<void> {
+    await requireAdmin(request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const access = await options.store.projectAccess(admin.workspaceId, projectId, admin.id);
+    if (!access || !access.role || !roleAllows(access.role, role)) {
+      sendError(reply, 403, "PROJECT_ACCESS_DENIED", "Insufficient project role");
+    }
+  }
+
+  async function requireRepositoryRole(
+    role: TeamRole,
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<RepositoryRecord | null> {
+    await requireAdmin(request, reply);
+    if (reply.sent) return null;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
+    if (!repository) {
+      sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+      return null;
+    }
+    await requireProjectRole(role, repository.projectId, request, reply);
+    return reply.sent ? null : repository;
+  }
+
+  async function currentRepositoryForRead(
+    request: FastifyRequest,
+    reply: FastifyReply
+  ): Promise<RepositoryRecord | null> {
+    await requireAdmin(request, reply);
+    if (reply.sent) return null;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repository = await options.store.currentRepository(
+      admin.workspaceId,
+      requestedProjectId(request)
+    );
+    if (repository) await requireProjectRole("reader", repository.projectId, request, reply);
+    return reply.sent ? null : repository;
+  }
+
+  async function requireReleaseProjectRole(
+    role: TeamRole,
+    releaseId: string | null,
+    request: FastifyRequest,
+    reply: FastifyReply,
+    notFoundCode: string
+  ): Promise<{ repository: RepositoryRecord; release: ReleaseRecord } | null> {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const release = releaseId ? await options.store.getRelease(admin.workspaceId, releaseId) : null;
+    const repository = release
+      ? await options.store.getRepository(admin.workspaceId, release.repositoryId)
+      : null;
+    if (!release || !repository) {
+      sendError(reply, 404, notFoundCode, "The requested record was not found");
+      return null;
+    }
+    await requireProjectRole(role, repository.projectId, request, reply);
+    return reply.sent ? null : { repository, release };
+  }
 
   server.get("/api/health", async () => ({ status: "ok", service: SERVICE_NAME }));
 
@@ -324,7 +434,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const parsed = credentialsSchema.safeParse(request.body);
     const workspace = await options.store.defaultWorkspace();
     const admin = parsed.success ? await options.store.findAdminByEmail(parsed.data.email) : null;
-    const valid = parsed.success && admin
+    const valid = parsed.success && admin && !admin.disabledAt
       ? await verifyPassword(admin.passwordHash, parsed.data.password)
       : false;
 
@@ -341,7 +451,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
 
     const token = await createSessionToken(
-      { adminId: admin.id, workspaceId: admin.workspaceId },
+      // The version lets administrators invalidate issued tokens without storing tokens server-side.
+      { adminId: admin.id, workspaceId: admin.workspaceId, sessionVersion: admin.sessionVersion },
       options.sessionSecret
     );
     reply.setCookie(SESSION_COOKIE, token, cookieOptions);
@@ -433,11 +544,20 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       const params = z.object({ projectId: z.uuid(), id: z.uuid() }).safeParse(request.params);
       if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload import");
       const admin = (request as AuthenticatedRequest).sessionAdmin;
+      await requireProjectRole("member", params.data.projectId, request, reply);
+      if (reply.sent) return;
       const repository = await options.store.currentRepository(admin.workspaceId, params.data.projectId);
       if (!repository || repository.kind !== "upload") {
         return sendError(reply, 409, "UPLOAD_REPOSITORY_REQUIRED", "Project requires an upload source");
       }
       let finalizedPath: string | undefined;
+      const importReport = await options.store.createImportReport({
+        workspaceId: admin.workspaceId,
+        projectId: params.data.projectId,
+        repositoryId: repository.id,
+        actorId: admin.id,
+        sourceKind: repository.kind
+      });
       try {
         const finalized = await resumableUploads.finalize(params.data.id, admin.id);
         finalizedPath = finalized.path;
@@ -449,6 +569,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           actorId: admin.id,
           store: options.store
         });
+        await options.store.finishImportReport(admin.workspaceId, importReport.id, {
+          status: "succeeded",
+          collectedFileCount: summary.fileCount,
+          collectedTextBytes: summary.textBytes,
+          ignored: summary.ignored,
+          snapshotId: summary.snapshotId,
+          failureCode: null
+        });
         reply.code(summary.unchanged ? 200 : 201);
         return {
           snapshotId: summary.snapshotId,
@@ -458,6 +586,17 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           ignored: summary.ignored
         };
       } catch (error) {
+        const failureCode = error instanceof ResumableUploadError || error instanceof UploadArchiveError
+          ? error.code
+          : "UPLOAD_FAILED";
+        await options.store.finishImportReport(admin.workspaceId, importReport.id, {
+          status: "failed",
+          collectedFileCount: 0,
+          collectedTextBytes: 0,
+          ignored: { total: 0, reasons: {} },
+          snapshotId: null,
+          failureCode
+        }).catch(() => undefined);
         if (error instanceof ResumableUploadError || error instanceof UploadArchiveError) {
           const statusCode = error instanceof ResumableUploadError
             ? (error.code === "SESSION_NOT_FOUND" ? 404 : 409)
@@ -476,8 +615,49 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const parsed = z.object(paginationQuerySchema).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project query");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const projects = await options.store.listProjects(admin.workspaceId, parsed.data);
+    const projects = await options.store.listAccessibleProjects(admin.workspaceId, admin.id, parsed.data);
     return { projects: projects.map(projectDto) };
+  });
+
+  server.get("/api/workspace/overview", { preHandler: requireAdmin }, async (request) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const records = await options.store.workspaceOverview(admin.workspaceId, admin.id);
+    const summaries = records.map((record) => ({
+      project: projectDto(record.project),
+      repository: record.repository ? repositoryDto(record.repository).repository : null,
+      latestSnapshot: record.latestSnapshot ? {
+        id: record.latestSnapshot.id,
+        commitSha: record.latestSnapshot.commitSha,
+        ref: record.latestSnapshot.ref,
+        commitTimestamp: record.latestSnapshot.commitTimestamp,
+        fileCount: record.latestSnapshot.fileCount
+      } : null,
+      indexedTextBytes: record.indexedTextBytes,
+      currentRelease: record.currentRelease,
+      latestBuild: record.latestBuild,
+      memberCount: record.memberCount,
+      pendingFeedbackCount: record.pendingFeedbackCount
+    }));
+    const members = await options.store.countTeamMembers(admin.workspaceId);
+    return {
+      projects: summaries,
+      totals: {
+        projects: summaries.length,
+        connected: summaries.filter((item) => item.repository).length,
+        published: summaries.filter((item) => item.currentRelease).length,
+        members
+      }
+    };
+  });
+
+  server.get("/api/workspace/knowledge/search", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({ q: z.string().trim().min(1).max(500) }).safeParse(request.query);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid search query");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const results = await options.store.searchWorkspaceKnowledge(admin.workspaceId, admin.id, parsed.data.q);
+    return { results: results.map(({ project, ...result }) => ({
+      ...result, projectId: project.id, projectName: project.name, projectSlug: project.slug
+    })) };
   });
 
   server.post("/api/projects", { preHandler: requireAdministrator }, async (request, reply) => {
@@ -493,13 +673,16 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
     if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const project = (await options.store.listProjects(admin.workspaceId, { limit: 100 }))
-      .find((candidate) => candidate.id === params.data.projectId && candidate.archivedAt === null);
-    if (!project) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
-    const [repository, memberCount] = await Promise.all([
+    const access = await options.store.projectAccess(admin.workspaceId, params.data.projectId, admin.id);
+    if (!access || access.project.archivedAt !== null) {
+      return sendError(reply, 403, "PROJECT_ACCESS_DENIED", "Insufficient project role");
+    }
+    const project = access.project;
+    const [repository, members] = await Promise.all([
       options.store.currentRepository(admin.workspaceId, project.id),
-      options.store.countTeamMembers(admin.workspaceId)
+      options.store.listProjectMembers(admin.workspaceId, project.id, { limit: 100 })
     ]);
+    const memberCount = members.length;
     if (!repository) {
       return {
         project: projectDto(project), repository: null, latestSnapshot: null,
@@ -537,13 +720,15 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       return sendError(reply, 400, "INVALID_REQUEST", "Invalid project activity query");
     }
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const project = (await options.store.listProjects(admin.workspaceId, { limit: 100 }))
-      .find((candidate) => candidate.id === params.data.projectId && candidate.archivedAt === null);
-    if (!project) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    const access = await options.store.projectAccess(admin.workspaceId, params.data.projectId, admin.id);
+    if (!access || access.project.archivedAt !== null) {
+      return sendError(reply, 403, "PROJECT_ACCESS_DENIED", "Insufficient project role");
+    }
+    const project = access.project;
     const [activity, total, members] = await Promise.all([
       options.store.listProjectActivity(admin.workspaceId, project.id, parsed.data),
       options.store.countProjectActivity(admin.workspaceId, project.id),
-      options.store.listTeamMembers(admin.workspaceId, { limit: 100 })
+      options.store.listProjectMembers(admin.workspaceId, project.id, { limit: 100 })
     ]);
     const actorEmails = new Map(members.map((member) => [member.id, member.email]));
     return {
@@ -563,16 +748,96 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     };
   });
 
-  server.post("/api/projects/:projectId/repositories", { preHandler: requireAdministrator }, async (request, reply) => {
+  server.get("/api/projects/:projectId/import-reports", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    const parsed = z.object(paginationQuerySchema).safeParse(request.query);
+    if (!params.success || !parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid import report query");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const access = await options.store.projectAccess(admin.workspaceId, params.data.projectId, admin.id);
+    if (!access || access.project.archivedAt !== null) {
+      return sendError(reply, 403, "PROJECT_ACCESS_DENIED", "Insufficient project role");
+    }
+    const [reports, total] = await Promise.all([
+      options.store.listImportReports(admin.workspaceId, params.data.projectId, parsed.data),
+      options.store.countImportReports(admin.workspaceId, params.data.projectId)
+    ]);
+    return { reports: reports.map(importReportDto), ...paginationMetadata(total, parsed.data.offset ?? 0, reports.length) };
+  });
+
+  server.get("/api/projects/:projectId/changes", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project");
+    await requireProjectRole("reader", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repository = await options.store.currentRepository(admin.workspaceId, params.data.projectId);
+    if (!repository) return { change: null };
+    const snapshot = await options.store.latestSnapshot(admin.workspaceId, repository.id);
+    const change = snapshot
+      ? await options.store.snapshotChangeSummary(admin.workspaceId, repository.id, snapshot.id)
+      : null;
+    if (!change) return { change: null };
+    const release = await options.store.currentRelease(admin.workspaceId, repository.id);
+    return {
+      change: release
+        ? deriveChangeImpact(change, await options.store.knowledgeMetadata(admin.workspaceId, release.id))
+        : change
+    };
+  });
+
+  server.get("/api/projects/:projectId/knowledge-quality", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project");
+    await requireProjectRole("reader", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const overview = (await options.store.workspaceOverview(admin.workspaceId, admin.id))
+      .find((entry) => entry.project.id === params.data.projectId);
+    if (!overview) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    const repository = overview.repository;
+    const snapshot = overview.latestSnapshot;
+    const release = overview.currentRelease;
+    const change = repository && snapshot
+      ? await options.store.snapshotChangeSummary(admin.workspaceId, repository.id, snapshot.id)
+      : null;
+    const metadata = release
+      ? await options.store.knowledgeMetadata(admin.workspaceId, release.id)
+      : null;
+    const enrichedChange = change && metadata ? deriveChangeImpact(change, metadata) : change;
+    const knowledge = release
+      ? await options.store.knowledgeReleaseSummary(admin.workspaceId, release.id)
+      : { pageCount: 0, chunkCount: 0, citationCount: 0 };
+    const diagnostics: Array<{ code: string }> = [];
+    if (!repository) diagnostics.push({ code: "SOURCE_MISSING" });
+    else if (!snapshot) diagnostics.push({ code: "SNAPSHOT_MISSING" });
+    else if (overview.latestBuild?.status === "failed") diagnostics.push({ code: "BUILD_FAILED" });
+    else if (!release) diagnostics.push({ code: "RELEASE_MISSING" });
+    else if (enrichedChange?.requiresBuild && release.snapshotId !== snapshot.id) diagnostics.push({ code: "REBUILD_RECOMMENDED" });
+    else diagnostics.push({ code: "PUBLISHED" });
+    return {
+      repository,
+      latestSnapshot: snapshot,
+      currentRelease: release,
+      latestBuild: overview.latestBuild,
+      pendingFeedbackCount: overview.pendingFeedbackCount,
+      indexedTextBytes: overview.indexedTextBytes,
+      knowledge,
+      change: enrichedChange,
+      diagnostics
+    };
+  });
+
+  server.post("/api/projects/:projectId/repositories", { preHandler: requireAdmin }, async (request, reply) => {
     const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
     const parsed = repositorySchema.safeParse(request.body);
     if (!params.success || !parsed.success) {
       return sendError(reply, 400, "INVALID_REQUEST", "Invalid project repository details");
     }
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const project = (await options.store.listProjects(admin.workspaceId, { limit: 100 }))
-      .find((candidate) => candidate.id === params.data.projectId && candidate.archivedAt === null);
-    if (!project) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    await requireProjectRole("admin", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const project = (await options.store.projectAccess(admin.workspaceId, params.data.projectId, admin.id))?.project;
+    if (!project || project.archivedAt !== null) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
     const repository = await options.store.createRepositoryWithAudit(
       admin.workspaceId,
       repositoryInput(parsed.data, options.masterKey),
@@ -583,13 +848,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return reply.code(201).send(repositoryDto(repository));
   });
 
-  server.get("/api/projects/:projectId/codex-connection", { preHandler: requireAdministrator }, async (request, reply) => {
+  server.get("/api/projects/:projectId/codex-connection", { preHandler: requireAdmin }, async (request, reply) => {
     const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
     if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const project = (await options.store.listProjects(admin.workspaceId, { limit: 100 }))
-      .find((candidate) => candidate.id === params.data.projectId && candidate.archivedAt === null);
-    if (!project) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    await requireProjectRole("admin", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const project = (await options.store.projectAccess(admin.workspaceId, params.data.projectId, admin.id))?.project;
+    if (!project || project.archivedAt !== null) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
     const environmentVariable = `DEVKH_${project.slug.replace(/[^a-z0-9]+/gi, "_").toUpperCase()}_TOKEN`;
     const endpoint = `${(options.publicBaseUrl ?? `${request.protocol}://${request.host}`).replace(/\/+$/, "")}/mcp`;
     const pack = createCodexConnectionPack({
@@ -599,6 +865,82 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       environmentVariable
     });
     return { projectId: project.id, endpoint, environmentVariable, ...pack };
+  });
+
+  server.get("/api/projects/:projectId/members", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    const parsed = z.object(paginationQuerySchema).safeParse(request.query);
+    if (!params.success || !parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project member query");
+    await requireProjectRole("reader", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const members = await options.store.listProjectMembers(admin.workspaceId, params.data.projectId, parsed.data);
+    return { members: members.map(memberDto) };
+  });
+
+  server.get("/api/projects/:projectId/available-members", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project");
+    await requireProjectRole("admin", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const members = await options.store.listTeamMembers(admin.workspaceId, { limit: 100 });
+    return { members: members.map(memberDto) };
+  });
+
+  server.post("/api/projects/:projectId/members", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    const body = projectMemberSchema.safeParse(request.body);
+    if (!params.success || !body.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project member");
+    await requireProjectRole("admin", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const member = await options.store.addProjectMember(
+      admin.workspaceId, params.data.projectId, body.data.userId, body.data.role, admin.id
+    );
+    if (!member) return sendError(reply, 409, "PROJECT_MEMBER_INVALID", "Member is unavailable for this project or role");
+    return reply.code(201).send({ member: memberDto(member) });
+  });
+
+  server.patch("/api/projects/:projectId/members/:userId", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid(), userId: z.uuid() }).safeParse(request.params);
+    const body = projectMemberRoleSchema.safeParse(request.body);
+    if (!params.success || !body.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project member role");
+    await requireProjectRole("admin", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    try {
+      const member = await options.store.updateProjectMemberRole(
+        admin.workspaceId, params.data.projectId, params.data.userId, body.data.role, admin.id
+      );
+      if (!member) return sendError(reply, 404, "PROJECT_MEMBER_NOT_FOUND", "Project member was not found");
+      return { member: memberDto(member) };
+    } catch (error) {
+      if (error instanceof LastProjectAdminError) {
+        return sendError(reply, 409, "LAST_PROJECT_ADMIN", "A project must retain an administrator");
+      }
+      throw error;
+    }
+  });
+
+  server.delete("/api/projects/:projectId/members/:userId", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid(), userId: z.uuid() }).safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project member");
+    await requireProjectRole("admin", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    try {
+      const member = await options.store.removeProjectMember(
+        admin.workspaceId, params.data.projectId, params.data.userId, admin.id
+      );
+      if (!member) return sendError(reply, 404, "PROJECT_MEMBER_NOT_FOUND", "Project member was not found");
+      return { member: memberDto(member) };
+    } catch (error) {
+      if (error instanceof LastProjectAdminError) {
+        return sendError(reply, 409, "LAST_PROJECT_ADMIN", "A project must retain an administrator");
+      }
+      throw error;
+    }
   });
 
   server.get("/api/members", { preHandler: requireAdministrator }, async (request, reply) => {
@@ -620,6 +962,40 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }, admin.id);
     if (!member) return sendError(reply, 409, "MEMBER_EXISTS", "A member with this email already exists");
     return reply.code(201).send({ member: memberDto(member) });
+  });
+
+  server.patch("/api/members/:userId/password", { preHandler: requireAdministrator }, async (request, reply) => {
+    const params = z.object({ userId: z.uuid() }).safeParse(request.params);
+    const body = memberPasswordSchema.safeParse(request.body);
+    if (!params.success || !body.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid member password");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const member = await options.store.resetTeamMemberPassword(
+      admin.workspaceId, params.data.userId, await hashPassword(body.data.password), admin.id
+    );
+    if (!member) return sendError(reply, 404, "MEMBER_NOT_FOUND", "Member was not found");
+    return { member: memberDto(member) };
+  });
+
+  server.patch("/api/members/:userId/disabled", { preHandler: requireAdministrator }, async (request, reply) => {
+    const params = z.object({ userId: z.uuid() }).safeParse(request.params);
+    const body = memberDisabledSchema.safeParse(request.body);
+    if (!params.success || !body.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid member status");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    if (params.data.userId === admin.id && body.data.disabled) {
+      return sendError(reply, 409, "SELF_DISABLE_FORBIDDEN", "Administrators cannot disable their own account");
+    }
+    try {
+      const member = await options.store.setTeamMemberDisabled(
+        admin.workspaceId, params.data.userId, body.data.disabled, admin.id
+      );
+      if (!member) return sendError(reply, 404, "MEMBER_NOT_FOUND", "Member was not found");
+      return { member: memberDto(member) };
+    } catch (error) {
+      if (error instanceof LastWorkspaceAdminError) {
+        return sendError(reply, 409, "LAST_WORKSPACE_ADMIN", "A workspace must retain an active administrator");
+      }
+      throw error;
+    }
   });
 
   const modelConfigDto = (config: Awaited<ReturnType<AppStore["getModelConfig"]>>) => ({
@@ -651,15 +1027,17 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
 
-  server.post("/api/mcp/tokens", { preHandler: requireAdministrator }, async (request, reply) => {
+  server.post("/api/mcp/tokens", { preHandler: requireAdmin }, async (request, reply) => {
     const parsed = z.object({ name: z.string().trim().min(1).max(100), projectId: z.uuid().optional() }).safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MCP token");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const projects = await options.store.listProjects(admin.workspaceId, { limit: 100 });
+    const projects = await options.store.listAccessibleProjects(admin.workspaceId, admin.id, { limit: 100 });
     const project = parsed.data.projectId
       ? projects.find((candidate) => candidate.id === parsed.data.projectId && candidate.archivedAt === null)
       : projects.find((candidate) => candidate.archivedAt === null);
     if (!project) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    await requireProjectRole("admin", project.id, request, reply);
+    if (reply.sent) return;
     const plaintext = generateMcpToken();
     try {
       const token = await options.store.createMcpTokenWithAudit({
@@ -675,10 +1053,17 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
 
-  server.get("/api/mcp/tokens", { preHandler: requireAdministrator }, async (request, reply) => {
+  server.get("/api/mcp/tokens", { preHandler: requireAdmin }, async (request, reply) => {
     const parsed = z.object({ ...paginationQuerySchema, projectId: z.uuid().optional() }).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid pagination");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
+    if (!parsed.data.projectId && admin.role !== "admin") {
+      return sendError(reply, 403, "PROJECT_ACCESS_DENIED", "Choose a project to view its MCP tokens");
+    }
+    if (parsed.data.projectId) {
+      await requireProjectRole("reader", parsed.data.projectId, request, reply);
+      if (reply.sent) return;
+    }
     const [tokens, total] = await Promise.all([
       options.store.listMcpTokens(admin.workspaceId, parsed.data, parsed.data.projectId),
       options.store.countMcpTokens(admin.workspaceId, parsed.data.projectId)
@@ -689,11 +1074,16 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     };
   });
 
-  server.post("/api/mcp/tokens/:id/revoke", { preHandler: requireAdministrator }, async (request, reply) => {
+  server.post("/api/mcp/tokens/:id/revoke", { preHandler: requireAdmin }, async (request, reply) => {
     const parsed = z.object({ id: z.uuid() }).safeParse(request.params);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MCP token");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     try {
+      const candidates = await options.store.listMcpTokens(admin.workspaceId, { limit: 100 });
+      const candidate = candidates.find((token) => token.id === parsed.data.id);
+      if (!candidate) return sendError(reply, 404, "TOKEN_NOT_FOUND", "MCP token was not found");
+      await requireProjectRole("admin", candidate.projectId, request, reply);
+      if (reply.sent) return;
       const token = await options.store.revokeMcpTokenWithAudit(
         admin.workspaceId, parsed.data.id, admin.id
       );
@@ -712,7 +1102,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     tools: MCP_TOOL_NAMES
   }));
 
-  server.post("/api/repositories", { preHandler: requireAdmin }, async (request, reply) => {
+  server.post("/api/repositories", { preHandler: requireAdministrator }, async (request, reply) => {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const parsed = repositorySchema.safeParse(request.body);
     if (!parsed.success) {
@@ -734,6 +1124,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const parsed = repositorySchema.safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid repository connection");
+    const current = await requireRepositoryRole("admin", request, reply);
+    if (!current) return;
     if (parsed.data.kind === "upload") {
       const candidate = await options.store.prepareUploadReplacementWithAudit(
         admin.workspaceId,
@@ -752,23 +1144,23 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return reply.code(201).send(repositoryDto(repository));
   });
 
-  server.get("/api/repositories/archived", { preHandler: requireAdmin }, async (request) => {
+  server.get("/api/repositories/archived", { preHandler: requireAdministrator }, async (request) => {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const repositories = await options.store.listArchivedRepositories(admin.workspaceId);
     return { repositories: repositories.map(archivedRepositoryDto) };
   });
 
   server.get("/api/repositories/current", { preHandler: requireAdmin }, async (request, reply) => {
-    const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
-    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
-    return repositoryDto(repository);
+    const repository = await currentRepositoryForRead(request, reply);
+    if (reply.sent) return;
+    return repository ? repositoryDto(repository) : { repository: null };
   });
 
   server.get("/api/repositories/current/status", { preHandler: requireAdmin }, async (request, reply) => {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
-    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    const repository = await currentRepositoryForRead(request, reply);
+    if (reply.sent) return;
+    if (!repository) return { repository: null, latestSnapshot: null };
     const latest = await options.store.latestSnapshot(admin.workspaceId, repository.id);
     return {
       ...repositoryDto(repository),
@@ -799,6 +1191,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           "Connect and activate an upload repository before importing a ZIP snapshot"
         );
       }
+      await requireProjectRole("member", repository.projectId, request, reply);
+      if (reply.sent) return;
 
       const requestDirectory = path.join(options.dataDir, "uploads", randomUUID());
       const archivePath = path.join(requestDirectory, "archive.zip");
@@ -896,6 +1290,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       if (!repository || await options.store.latestSnapshot(admin.workspaceId, repository.id)) {
         return sendError(reply, 404, "UPLOAD_REPLACEMENT_NOT_FOUND", "Upload replacement was not found");
       }
+      await requireProjectRole("admin", repository.projectId, request, reply);
+      if (reply.sent) return;
 
       const requestDirectory = path.join(options.dataDir, "uploads", randomUUID());
       const archivePath = path.join(requestDirectory, "archive.zip");
@@ -1036,10 +1432,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     { preHandler: requireAdmin },
     async (request, reply) => {
       const admin = (request as AuthenticatedRequest).sessionAdmin;
-      const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
-      if (!repository) {
-        return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
-      }
+      const repository = await requireRepositoryRole("member", request, reply);
+      if (!repository) return;
       if (repository.kind === "upload") {
         return sendError(
           reply,
@@ -1048,6 +1442,13 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           "Upload repositories receive new versions through ZIP import"
         );
       }
+      const importReport = await options.store.createImportReport({
+        workspaceId: admin.workspaceId,
+        projectId: repository.projectId,
+        repositoryId: repository.id,
+        actorId: admin.id,
+        sourceKind: repository.kind
+      });
       try {
         const encryptedCredential = await options.store.repositoryCredential(
           admin.workspaceId,
@@ -1062,9 +1463,25 @@ export function buildServer(options: ServerOptions): FastifyInstance {
             ? { token: decryptSecret(encryptedCredential, options.masterKey) }
             : {})
         });
+        await options.store.finishImportReport(admin.workspaceId, importReport.id, {
+          status: "succeeded",
+          collectedFileCount: summary.fileCount,
+          collectedTextBytes: summary.textBytes,
+          ignored: summary.ignored,
+          snapshotId: summary.snapshotId,
+          failureCode: null
+        });
         return summary;
       } catch (error) {
         const code = error instanceof DirtyWorktreeError ? error.code : "SYNC_FAILED";
+        await options.store.finishImportReport(admin.workspaceId, importReport.id, {
+          status: "failed",
+          collectedFileCount: 0,
+          collectedTextBytes: 0,
+          ignored: { total: 0, reasons: {} },
+          snapshotId: null,
+          failureCode: code
+        }).catch(() => undefined);
         void options.store.recordAudit({
           workspaceId: admin.workspaceId,
           actorId: admin.id,
@@ -1090,8 +1507,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const parsed = z.object({ snapshotId: z.uuid() }).safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid build request");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
-    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    const repository = await requireRepositoryRole("member", request, reply);
+    if (!repository) return;
     const snapshot = await options.store.findSnapshotById(admin.workspaceId, parsed.data.snapshotId);
     if (!snapshot || snapshot.repositoryId !== repository.id) {
       return sendError(reply, 404, "SNAPSHOT_NOT_FOUND", "Snapshot was not found");
@@ -1110,8 +1527,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const parsed = z.object(paginationQuerySchema).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid pagination");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
-    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    const repository = await currentRepositoryForRead(request, reply);
+    if (reply.sent) return;
+    if (!repository) return { builds: [], ...paginationMetadata(0, parsed.data.offset ?? 0, 0) };
     const [builds, total] = await Promise.all([
       options.store.listBuilds(admin.workspaceId, repository.id, parsed.data),
       options.store.countBuilds(admin.workspaceId, repository.id)
@@ -1129,6 +1547,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       ? await options.store.getBuild(admin.workspaceId, parsed.data.id)
       : null;
     if (!build) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    const repository = await requireRepositoryRole("reader", request, reply);
+    if (!repository) return;
+    if (repository.id !== build.repositoryId) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
     return { build };
   });
 
@@ -1138,9 +1559,12 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const parsed = z.object({ id: z.string().min(1) }).safeParse(request.params);
-    const build = parsed.success
-      ? await options.buildService.cancelBuild(admin.workspaceId, parsed.data.id)
-      : null;
+    const existing = parsed.success ? await options.store.getBuild(admin.workspaceId, parsed.data.id) : null;
+    if (!existing) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    const repository = await requireRepositoryRole("member", request, reply);
+    if (!repository) return;
+    if (repository.id !== existing.repositoryId) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    const build = await options.buildService.cancelBuild(admin.workspaceId, existing.id);
     if (!build) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
     return { build };
   });
@@ -1155,6 +1579,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
     const build = await options.store.getBuild(admin.workspaceId, params.data.id);
     if (!build) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    const repository = await requireRepositoryRole("reader", request, reply);
+    if (!repository) return;
+    if (repository.id !== build.repositoryId) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
     const buffered = new Map<number, BuildEvent>();
     let streaming = false;
     let lastSequence = 0;
@@ -1214,8 +1641,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       .safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid search query");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
-    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    const repository = await requireRepositoryRole("reader", request, reply);
+    if (!repository) return;
     return {
       results: await options.store.searchKnowledge(
         admin.workspaceId, repository.id, parsed.data.q, parsed.data.releaseId
@@ -1227,6 +1654,11 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const parsed = z.object({ releaseId: z.string().min(1) }).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid metadata query");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const release = await options.store.getRelease(admin.workspaceId, parsed.data.releaseId);
+    if (!release) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
+    const repository = await requireRepositoryRole("reader", request, reply);
+    if (!repository) return;
+    if (repository.id !== release.repositoryId) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
     return options.store.knowledgeMetadata(admin.workspaceId, parsed.data.releaseId);
   });
 
@@ -1237,9 +1669,17 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid page query");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repository = await requireRepositoryRole("reader", request, reply);
+    if (!repository) return;
+    const release = parsed.data.releaseId
+      ? await options.store.getRelease(admin.workspaceId, parsed.data.releaseId)
+      : await options.store.currentRelease(admin.workspaceId, repository.id);
+    if (!release || release.repositoryId !== repository.id) {
+      return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
+    }
     const [pages, total] = await Promise.all([
-      options.store.listKnowledgePages(admin.workspaceId, parsed.data.releaseId, parsed.data),
-      options.store.countKnowledgePages(admin.workspaceId, parsed.data.releaseId)
+      options.store.listKnowledgePages(admin.workspaceId, release.id, parsed.data),
+      options.store.countKnowledgePages(admin.workspaceId, release.id)
     ]);
     return {
       pages,
@@ -1254,6 +1694,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       ? await options.store.getKnowledgePage(admin.workspaceId, parsed.data.id)
       : null;
     if (!page) return sendError(reply, 404, "PAGE_NOT_FOUND", "Knowledge page was not found");
+    const repository = await requireRepositoryRole("reader", request, reply);
+    if (!repository) return;
+    if (repository.id !== page.repositoryId) return sendError(reply, 404, "PAGE_NOT_FOUND", "Knowledge page was not found");
     return { page };
   });
 
@@ -1269,11 +1712,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       .safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid source range");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
-    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
-    const release = parsed.data.releaseId
-      ? await options.store.getRelease(admin.workspaceId, parsed.data.releaseId)
-      : await options.store.currentRelease(admin.workspaceId, repository.id);
+    const selected = parsed.data.releaseId
+      ? await requireReleaseProjectRole("reader", parsed.data.releaseId, request, reply, "RELEASE_NOT_FOUND")
+      : null;
+    if (reply.sent) return;
+    const repository = selected?.repository ?? await currentRepositoryForRead(request, reply);
+    if (reply.sent) return;
+    if (!repository) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
+    const release = selected?.release ?? await options.store.currentRelease(admin.workspaceId, repository.id);
     if (!release) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
     const snapshot = await options.store.findSnapshotById(admin.workspaceId, release.snapshotId);
     const sourceFile = await options.store.findSourceFile(
@@ -1314,8 +1760,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       .safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid release draft");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
-    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    const repository = await requireRepositoryRole("member", request, reply);
+    if (!repository) return;
     try {
       const release = await options.store.createReleaseDraft(
         admin.workspaceId, repository.id, parsed.data.buildId, parsed.data.version
@@ -1326,10 +1772,15 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
 
-  server.post("/api/releases/:id/publish", { preHandler: requireAdministrator }, async (request, reply) => {
+  server.post("/api/releases/:id/publish", { preHandler: requireAdmin }, async (request, reply) => {
     const parsed = z.object({ id: z.string().min(1) }).safeParse(request.params);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid release");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const existing = await options.store.getRelease(admin.workspaceId, parsed.data.id);
+    if (!existing) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
+    const repository = await requireRepositoryRole("admin", request, reply);
+    if (!repository) return;
+    if (repository.id !== existing.repositoryId) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
     try {
       return { release: await options.store.publishRelease(admin.workspaceId, parsed.data.id) };
     } catch (error) {
@@ -1339,8 +1790,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.get("/api/releases/current", { preHandler: requireAdmin }, async (request, reply) => {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
-    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    const repository = await requireRepositoryRole("reader", request, reply);
+    if (!repository) return;
     const release = await options.store.currentRelease(admin.workspaceId, repository.id);
     if (!release) return sendError(reply, 404, "RELEASE_NOT_FOUND", "No release is published");
     const snapshot = await options.store.findSnapshotById(admin.workspaceId, release.snapshotId);
@@ -1353,6 +1804,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const release = await options.store.getRelease(admin.workspaceId, parsed.data.id);
     if (!release) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
+    const repository = await requireRepositoryRole("reader", request, reply);
+    if (!repository) return;
+    if (repository.id !== release.repositoryId) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
     const snapshot = await options.store.findSnapshotById(admin.workspaceId, release.snapshotId);
     return { release: { ...release, commitSha: snapshot?.commitSha ?? null } };
   });
@@ -1361,8 +1815,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const parsed = z.object(paginationQuerySchema).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid pagination");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
-    if (!repository) return sendError(reply, 404, "REPOSITORY_NOT_FOUND", "No repository is connected");
+    const repository = await currentRepositoryForRead(request, reply);
+    if (reply.sent) return;
+    if (!repository) return { releases: [], ...paginationMetadata(0, parsed.data.offset ?? 0, 0) };
     const [releases, total] = await Promise.all([
       options.store.listReleases(admin.workspaceId, repository.id, parsed.data),
       options.store.countReleases(admin.workspaceId, repository.id)
@@ -1384,13 +1839,27 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       .safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid feedback filter");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const [feedback, total] = await Promise.all([
-      options.store.listFeedback(admin.workspaceId, parsed.data.status, parsed.data),
-      options.store.countFeedback(admin.workspaceId, parsed.data.status)
-    ]);
+    const feedback = await options.store.listFeedback(admin.workspaceId, parsed.data.status, parsed.data);
+    const scoped = (await Promise.all(feedback.map(async (item) => {
+      if (!item.releaseId) return null;
+      const release = await options.store.getRelease(admin.workspaceId, item.releaseId);
+      const repository = release
+        ? await options.store.getRepository(admin.workspaceId, release.repositoryId)
+        : null;
+      if (!release || !repository) return null;
+      const access = await options.store.projectAccess(admin.workspaceId, repository.projectId, admin.id);
+      if (!access?.role) return null;
+      return {
+        ...item,
+        projectId: access.project.id,
+        projectName: access.project.name,
+        projectSlug: access.project.slug,
+        releaseVersion: release.version
+      };
+    }))).filter((item): item is NonNullable<typeof item> => item !== null);
     return {
-      feedback,
-      ...paginationMetadata(total, parsed.data.offset ?? 0, feedback.length)
+      feedback: scoped,
+      ...paginationMetadata(scoped.length, parsed.data.offset ?? 0, scoped.length)
     };
   });
 
@@ -1401,6 +1870,12 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       return sendError(reply, 400, "INVALID_REQUEST", "Invalid feedback transition");
     }
     const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const existing = await options.store.getFeedback(admin.workspaceId, params.data.id);
+    if (!existing) return sendError(reply, 404, "FEEDBACK_NOT_FOUND", "Feedback was not found");
+    const selected = await requireReleaseProjectRole(
+      "member", existing.releaseId, request, reply, "FEEDBACK_NOT_FOUND"
+    );
+    if (!selected) return;
     try {
       const feedback = await options.store.transitionFeedbackWithAudit(
         admin.workspaceId, params.data.id, body.data.status, admin.id
@@ -1427,25 +1902,23 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (feedback.status !== "acknowledged") {
       return sendError(reply, 409, "FEEDBACK_NOT_ACKNOWLEDGED", "Feedback must be acknowledged first");
     }
-    const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
-    const release = repository
-      ? await options.store.currentRelease(admin.workspaceId, repository.id)
-      : null;
-    const snapshot = release
-      ? await options.store.findSnapshotById(admin.workspaceId, release.snapshotId)
-      : null;
-    if (!repository || !release || !snapshot) {
+    const selected = await requireReleaseProjectRole(
+      "member", feedback.releaseId, request, reply, "FEEDBACK_NOT_FOUND"
+    );
+    if (!selected) return;
+    const snapshot = await options.store.findSnapshotById(admin.workspaceId, selected.release.snapshotId);
+    if (!snapshot) {
       return sendError(reply, 409, "UNPUBLISHED", "No published release can be rebuilt");
     }
     try {
       const result = await options.store.requestFeedbackRebuildWithAudit({
         workspaceId: admin.workspaceId,
         feedbackId: feedback.id,
-        releaseId: release.id,
+        releaseId: selected.release.id,
         actorId: admin.id,
         build: {
           workspaceId: admin.workspaceId,
-          repositoryId: repository.id,
+          repositoryId: selected.repository.id,
           snapshotId: snapshot.id,
           snapshotPath: snapshot.storagePath,
           commitSha: snapshot.commitSha

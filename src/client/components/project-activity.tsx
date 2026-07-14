@@ -37,11 +37,11 @@ function ActivityIcon({ action }: { action: string }) {
 export function ProjectActivityItem({ event }: { event: ProjectActivityRecord }) {
   const label = actionLabels[event.action] ?? "更新了项目";
   const actor = event.actorEmail ?? "系统";
-  return <article className="project-activity-item">
+  return <div className="project-activity-item">
     <span className="activity-icon"><ActivityIcon action={event.action} /></span>
     <div>
       <strong>{label}</strong>
       <small>{actor} · {new Date(event.createdAt).toLocaleString("zh-CN")}</small>
     </div>
-  </article>;
+  </div>;
 }

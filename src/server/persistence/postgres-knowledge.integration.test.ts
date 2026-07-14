@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -17,6 +17,7 @@ import { syncRepository } from "../git/snapshot";
 import { BuildService } from "../knowledge/build-service";
 import { PgBossBuildJobQueue } from "../knowledge/job-queue";
 import { hashMcpToken } from "../mcp/auth";
+import { LastProjectAdminError } from "./store";
 import { PostgresAppStore } from "./postgres-store";
 
 const databaseUrl = process.env.TEST_DATABASE_URL
@@ -29,12 +30,14 @@ const execute = promisify(execFile);
 
 async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean): Promise<T> {
   const deadline = Date.now() + 15_000;
+  let latest: T | undefined;
   while (Date.now() < deadline) {
     const value = await read();
+    latest = value;
     if (ready(value)) return value;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error("Timed out waiting for PostgreSQL workflow state");
+  throw new Error(`Timed out waiting for PostgreSQL workflow state: ${JSON.stringify(latest)}`);
 }
 
 integration("PostgreSQL cited knowledge integration", () => {
@@ -45,19 +48,168 @@ integration("PostgreSQL cited knowledge integration", () => {
     pool = new Pool({ connectionString: databaseUrl });
     await runMigrations(pool);
     const { rows } = await pool.query<{ names: string[] }>(
-      `SELECT array_agg(table_name ORDER BY table_name) AS names
+      `SELECT json_agg(table_name ORDER BY table_name) AS names
        FROM information_schema.tables
        WHERE table_schema = 'public'
-         AND table_name IN ('build_events', 'build_jobs', 'knowledge_chunks', 'releases')`
+         AND table_name IN ('build_events', 'build_jobs', 'import_reports', 'knowledge_chunks', 'project_members', 'releases')`
     );
     expect(rows[0].names).toEqual([
-      "build_events", "build_jobs", "knowledge_chunks", "releases"
+      "build_events", "build_jobs", "import_reports", "knowledge_chunks", "project_members", "releases"
     ]);
     const extension = await pool.query(
       "SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'"
     );
     expect(extension.rows).toHaveLength(1);
-  });
+  }, 30_000);
+
+  test(databaseUrl
+    ? "persists project memberships, rejects cross-workspace users, and protects the final project administrator"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("admin@example.com", "hash");
+    expect(await store.listActiveGitRepositories()).toEqual([]);
+    const project = await store.createProject(setup!.workspace.id, { name: "Permissions", slug: "permissions" }, setup!.admin.id);
+    const contributor = await store.createTeamMember(setup!.workspace.id, {
+      email: "member@example.com", passwordHash: "hash", role: "member"
+    }, setup!.admin.id);
+    const disabledMember = await store.setTeamMemberDisabled(
+      setup!.workspace.id, contributor!.id, true, setup!.admin.id
+    );
+    expect(disabledMember).toMatchObject({ id: contributor!.id, disabledAt: expect.any(Date), sessionVersion: 2 });
+    expect(await store.findAdminById(contributor!.id, setup!.workspace.id))
+      .toMatchObject({ disabledAt: expect.any(Date), sessionVersion: 2 });
+    const enabledMember = await store.setTeamMemberDisabled(
+      setup!.workspace.id, contributor!.id, false, setup!.admin.id
+    );
+    expect(enabledMember).toMatchObject({ id: contributor!.id, disabledAt: null, sessionVersion: 3 });
+    expect(await store.projectAccess(setup!.workspace.id, project!.id, contributor!.id)).toBeNull();
+    expect(await store.addProjectMember(
+      setup!.workspace.id, project!.id, contributor!.id, "reader", setup!.admin.id
+    )).toMatchObject({ id: contributor!.id, role: "reader" });
+    expect(await store.projectAccess(setup!.workspace.id, project!.id, contributor!.id))
+      .toMatchObject({ role: "reader" });
+    const overview = await store.workspaceOverview(setup!.workspace.id, contributor!.id);
+    expect(overview).toEqual([
+      expect.objectContaining({ project: expect.objectContaining({ id: project!.id }), indexedTextBytes: 0 })
+    ]);
+    expect(await store.searchWorkspaceKnowledge(setup!.workspace.id, contributor!.id, "missing"))
+      .toEqual([]);
+    const repository = await store.createRepositoryWithAudit(setup!.workspace.id, {
+      kind: "upload", name: "Permissions source"
+    }, setup!.admin.id, project!.id);
+    const connectedOverview = await store.workspaceOverview(setup!.workspace.id, contributor!.id);
+    expect(connectedOverview).toEqual([
+      expect.objectContaining({ repository: expect.objectContaining({ id: repository!.id, kind: "upload" }) })
+    ]);
+
+    await store.recordAudit({
+      workspaceId: setup!.workspace.id,
+      actorId: setup!.admin.id,
+      action: "project.checked",
+      resourceType: "project",
+      resourceId: project!.id
+    });
+    expect(await store.listProjectActivity(setup!.workspace.id, project!.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "project.checked" })
+    ]));
+    expect(await store.countProjectActivity(setup!.workspace.id, project!.id)).toBeGreaterThan(0);
+
+    const report = await store.createImportReport({
+      workspaceId: setup!.workspace.id,
+      projectId: project!.id,
+      repositoryId: null,
+      actorId: setup!.admin.id,
+      sourceKind: "upload"
+    });
+    const completedReport = await store.finishImportReport(setup!.workspace.id, report.id, {
+      status: "succeeded",
+      collectedFileCount: 2,
+      collectedTextBytes: 128,
+      ignored: { total: 1, reasons: { generated: 1 } },
+      snapshotId: null,
+      failureCode: null
+    });
+    expect(completedReport).toMatchObject({ status: "succeeded", collectedTextBytes: 128 });
+    expect(await store.listImportReports(setup!.workspace.id, project!.id)).toEqual([
+      expect.objectContaining({ id: report.id, ignored: { total: 1, reasons: { generated: 1 } } })
+    ]);
+
+    const otherWorkspace = await pool.query<{ id: string }>(
+      "INSERT INTO workspaces (name, slug) VALUES ('Other', 'other') RETURNING id"
+    );
+    const outsider = await pool.query<{ id: string }>(
+      `INSERT INTO admin_users (workspace_id, email, password_hash)
+       VALUES ($1, 'outsider@example.com', 'hash') RETURNING id`,
+      [otherWorkspace.rows[0].id]
+    );
+    await pool.query(
+      "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
+      [otherWorkspace.rows[0].id, outsider.rows[0].id]
+    );
+    expect(await store.addProjectMember(
+      setup!.workspace.id, project!.id, outsider.rows[0].id, "reader", setup!.admin.id
+    )).toBeNull();
+
+    await store.updateProjectMemberRole(
+      setup!.workspace.id, project!.id, contributor!.id, "admin", setup!.admin.id
+    );
+    await store.removeProjectMember(setup!.workspace.id, project!.id, setup!.admin.id, setup!.admin.id);
+    await expect(store.updateProjectMemberRole(
+      setup!.workspace.id, project!.id, contributor!.id, "reader", contributor!.id
+    )).rejects.toBeInstanceOf(LastProjectAdminError);
+    const audit = await pool.query<{ action: string }>(
+      "SELECT action FROM audit_events WHERE workspace_id = $1 ORDER BY created_at, id",
+      [setup!.workspace.id]
+    );
+    expect(audit.rows.map((row) => row.action)).toEqual(expect.arrayContaining([
+      "project_member.added", "project_member.role_changed", "project_member.removed"
+    ]));
+  }, 30_000);
+
+  test(databaseUrl
+    ? "persists deterministic added, modified, and deleted files between snapshots"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("changes@example.com", "hash");
+    const repository = await store.createRepository(setup!.workspace.id, { kind: "upload", name: "Changes" });
+    const firstId = randomUUID();
+    const secondId = randomUUID();
+    await store.createSnapshot({
+      snapshot: {
+        id: firstId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+        commitSha: "a".repeat(40), ref: "main", remoteUrl: null,
+        commitTimestamp: new Date("2026-01-01T00:00:00.000Z"), storagePath: "/tmp/changes-first"
+      },
+      files: [
+        { id: randomUUID(), workspaceId: setup!.workspace.id, snapshotId: firstId, path: "src/kept.ts", byteSize: 3, contentHash: "one", language: "typescript" },
+        { id: randomUUID(), workspaceId: setup!.workspace.id, snapshotId: firstId, path: "src/deleted.ts", byteSize: 3, contentHash: "old", language: "typescript" }
+      ]
+    });
+    await store.createSnapshot({
+      snapshot: {
+        id: secondId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+        commitSha: "b".repeat(40), ref: "main", remoteUrl: null,
+        commitTimestamp: new Date("2026-01-02T00:00:00.000Z"), storagePath: "/tmp/changes-second"
+      },
+      files: [
+        { id: randomUUID(), workspaceId: setup!.workspace.id, snapshotId: secondId, path: "src/kept.ts", byteSize: 3, contentHash: "two", language: "typescript" },
+        { id: randomUUID(), workspaceId: setup!.workspace.id, snapshotId: secondId, path: "src/added.ts", byteSize: 3, contentHash: "new", language: "typescript" }
+      ]
+    });
+
+    await expect(store.snapshotChangeSummary(setup!.workspace.id, repository!.id, firstId))
+      .resolves.toMatchObject({ previousSnapshotId: null, added: ["src/deleted.ts", "src/kept.ts"], modified: [], deleted: [], requiresBuild: true });
+    await expect(store.snapshotChangeSummary(setup!.workspace.id, repository!.id, secondId))
+      .resolves.toMatchObject({ previousSnapshotId: firstId, added: ["src/added.ts"], modified: ["src/kept.ts"], deleted: ["src/deleted.ts"], requiresBuild: true });
+  }, 30_000);
 
   test(databaseUrl
     ? "runs the audited production workflow, pg-boss reconciliation, publish rollback, and MCP revocation"
@@ -65,6 +217,7 @@ integration("PostgreSQL cited knowledge integration", () => {
     if (!databaseUrl) return;
     pool ??= new Pool({ connectionString: databaseUrl });
     await runMigrations(pool);
+    await pool.query("DELETE FROM pgboss.job WHERE name = $1", ["knowledge-build"]);
     await pool.query("TRUNCATE workspaces CASCADE");
     const store = new PostgresAppStore(pool);
 
@@ -120,6 +273,16 @@ integration("PostgreSQL cited knowledge integration", () => {
         (build) => build?.status === "ready"
       );
       expect(ready?.status).toBe("ready");
+      const pendingJobs = await waitFor(
+        async () => Number((await pool!.query<{ count: string }>(
+          `SELECT count(*)::text AS count
+           FROM pgboss.job
+           WHERE name = 'knowledge-build' AND singleton_key = $1 AND state = 'created'`,
+          [undispatched.build.id]
+        )).rows[0].count),
+        (count) => count === 0
+      );
+      expect(pendingJobs).toBe(0);
 
       const firstRelease = await store.createReleaseDraft(
         setup!.workspace.id,

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { openAsBlob } from "node:fs";
 import {
   chmod,
+  cp,
   mkdir,
   readdir,
   rename,
@@ -65,6 +66,7 @@ export interface UploadSnapshotSummary {
   snapshotId: string;
   sourceVersion: string;
   fileCount: number;
+  textBytes: number;
   unchanged: boolean;
   storagePath: string;
   ignored: { total: number; reasons: Record<string, number> };
@@ -219,6 +221,16 @@ async function removeReadOnlyTree(directory: string): Promise<void> {
   await rm(directory, { recursive: true, force: true });
 }
 
+async function moveDirectory(source: string, destination: string): Promise<void> {
+  try {
+    await rename(source, destination);
+  } catch (error) {
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "EXDEV") throw error;
+    await cp(source, destination, { recursive: true, errorOnExist: true, force: false });
+    await rm(source, { recursive: true, force: true });
+  }
+}
+
 export async function importZipArchive({
   archivePath: sourceArchivePath,
   dataDir,
@@ -303,12 +315,14 @@ export async function importZipArchive({
     }
 
     const sourceVersion = versionHash.digest("hex");
+    const textBytes = accepted.reduce((total, file) => total + file.byteSize, 0);
     const existing = await store.findSnapshotByCommit(workspaceId, repositoryId, sourceVersion);
     if (existing) {
       return {
         snapshotId: existing.id,
         sourceVersion,
         fileCount: await store.countSnapshotFiles(existing.id),
+        textBytes,
         unchanged: true,
         storagePath: existing.storagePath,
         ignored: { total: Object.values(ignoredReasons).reduce((sum, value) => sum + value, 0), reasons: ignoredReasons }
@@ -330,7 +344,7 @@ export async function importZipArchive({
     await mkdir(path.dirname(promotedSnapshotDirectory), { recursive: true, mode: 0o700 });
     await mkdir(promotedSnapshotDirectory, { recursive: false, mode: 0o700 });
     const storagePath = path.join(promotedSnapshotDirectory, "files");
-    await rename(stagedFiles, storagePath);
+    await moveDirectory(stagedFiles, storagePath);
     await makeReadOnly(storagePath, files.map((file) => file.path));
     await chmod(promotedSnapshotDirectory, 0o555);
     const snapshot: SourceSnapshotRecord = {
@@ -351,6 +365,7 @@ export async function importZipArchive({
         snapshotId: persisted.id,
         sourceVersion: persisted.commitSha,
         fileCount: await store.countSnapshotFiles(persisted.id),
+        textBytes,
         unchanged: true,
         storagePath: persisted.storagePath,
         ignored: { total: Object.values(ignoredReasons).reduce((sum, value) => sum + value, 0), reasons: ignoredReasons }
@@ -361,6 +376,7 @@ export async function importZipArchive({
       snapshotId,
       sourceVersion,
       fileCount: files.length,
+      textBytes,
       unchanged: false,
       storagePath,
       ignored: { total: Object.values(ignoredReasons).reduce((sum, value) => sum + value, 0), reasons: ignoredReasons }

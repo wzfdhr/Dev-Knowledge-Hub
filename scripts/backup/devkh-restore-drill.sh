@@ -47,5 +47,9 @@ set_directory="$(dirname "$(find "$target" -type f -name manifest.json -print -q
 )
 tar -tzf "$set_directory/snapshots.tgz" >/dev/null
 tar -tzf "$set_directory/repositories.tgz" >/dev/null
+tar -tzf "$set_directory/sources.tgz" >/dev/null
 tar -tzf "$set_directory/uploads.tgz" >/dev/null
-pg_restore --list "$set_directory/database.pgdump" >/dev/null
+docker run --rm \
+  --mount "type=bind,src=$set_directory,dst=/backup,readonly" \
+  postgres:16-bookworm \
+  pg_restore --list /backup/database.pgdump >/dev/null

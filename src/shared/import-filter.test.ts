@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { filterImportFile } from "./import-filter";
+import { filterImportFile, isExcludedImportDirectory } from "./import-filter";
 
 describe("filterImportFile", () => {
   test("keeps supported source files and reports local exclusions", () => {
@@ -20,5 +20,13 @@ describe("filterImportFile", () => {
       .toEqual({ accepted: false, reason: "binary" });
     expect(filterImportFile({ path: "src/large.ts", byteSize: 1024 * 1024 + 1 }))
       .toEqual({ accepted: false, reason: "file_too_large" });
+  });
+
+  test("recognizes common dependency and generated-output directories before file scanning", () => {
+    expect(isExcludedImportDirectory("node_modules")).toBe(true);
+    expect(isExcludedImportDirectory(".pnpm-store")).toBe(true);
+    expect(isExcludedImportDirectory(".venv")).toBe(true);
+    expect(isExcludedImportDirectory(".next")).toBe(true);
+    expect(isExcludedImportDirectory("vendor")).toBe(false);
   });
 });

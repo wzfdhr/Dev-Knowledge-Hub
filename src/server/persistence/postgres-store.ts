@@ -4,6 +4,9 @@ import {
   boundedKnowledgePage,
   FeedbackNotAcknowledgedError,
   InvalidFeedbackTransitionError,
+  LastProjectAdminError,
+  LastWorkspaceAdminError,
+  knowledgeMatchReason,
   normalizePagination
 } from "./store.js";
 
@@ -17,6 +20,7 @@ import type {
   CreateFeedbackInput,
   CreateSnapshotInput,
   FeedbackRebuildInput,
+  ImportReportRecord,
   KnowledgePageRecord,
   KnowledgeMetadata,
   KnowledgeSearchResult,
@@ -28,6 +32,11 @@ import type {
   RepositoryConnectionInput,
   RepositoryRecord,
   ProjectRecord,
+  ProjectAccess,
+  ProjectMemberRecord,
+  ProjectRole,
+  WorkspaceKnowledgeSearchRecord,
+  WorkspaceProjectOverviewRecord,
   SetupResult,
   SourceSnapshotRecord,
   TeamMemberRecord,
@@ -137,6 +146,23 @@ interface FeedbackRow extends QueryResultRow {
   updated_at: Date;
 }
 
+interface ImportReportRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  repository_id: string | null;
+  actor_id: string | null;
+  source_kind: ImportReportRecord["sourceKind"];
+  status: ImportReportRecord["status"];
+  started_at: Date;
+  finished_at: Date | null;
+  collected_file_count: number;
+  collected_text_bytes: string;
+  ignored: ImportReportRecord["ignored"];
+  snapshot_id: string | null;
+  failure_code: string | null;
+}
+
 interface ProjectRow extends QueryResultRow {
   id: string;
   workspace_id: string;
@@ -153,6 +179,25 @@ interface TeamMemberRow extends QueryResultRow {
   password_hash: string;
   role: TeamRole;
   created_at: Date;
+  disabled_at: Date | null;
+  session_version: number;
+}
+
+interface ProjectMemberRow extends QueryResultRow {
+  id: string;
+  project_id: string;
+  workspace_id: string;
+  email: string;
+  role: ProjectRole;
+  created_at: Date;
+}
+
+interface ProjectMemberLockRow extends ProjectMemberRow {
+  workspace_role: TeamRole;
+}
+
+interface ProjectAccessRow extends ProjectRow {
+  role: ProjectRole | null;
 }
 
 interface AuditEventRow extends QueryResultRow {
@@ -273,6 +318,25 @@ function feedbackRecord(row: FeedbackRow): AgentFeedbackRecord {
   };
 }
 
+function importReportRecord(row: ImportReportRow): ImportReportRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    projectId: row.project_id,
+    repositoryId: row.repository_id,
+    actorId: row.actor_id,
+    sourceKind: row.source_kind,
+    status: row.status,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    collectedFileCount: row.collected_file_count,
+    collectedTextBytes: Number(row.collected_text_bytes),
+    ignored: row.ignored ?? { total: 0, reasons: {} },
+    snapshotId: row.snapshot_id,
+    failureCode: row.failure_code
+  };
+}
+
 function projectRecord(row: ProjectRow): ProjectRecord {
   return {
     id: row.id,
@@ -290,6 +354,19 @@ function teamMemberRecord(row: TeamMemberRow): TeamMemberRecord {
     workspaceId: row.workspace_id,
     email: row.email,
     passwordHash: row.password_hash,
+    role: row.role,
+    createdAt: row.created_at,
+    disabledAt: row.disabled_at,
+    sessionVersion: row.session_version
+  };
+}
+
+function projectMemberRecord(row: ProjectMemberRow): ProjectMemberRecord {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    workspaceId: row.workspace_id,
+    email: row.email,
     role: row.role,
     createdAt: row.created_at
   };
@@ -368,10 +445,11 @@ export class PostgresAppStore implements AppStore {
       const workspace = workspaceResult.rows[0];
       const adminResult = await client.query<{
         id: string; workspace_id: string; email: string; password_hash: string;
+        disabled_at: Date | null; session_version: number;
       }>(
         `INSERT INTO admin_users (workspace_id, email, password_hash)
          VALUES ($1, $2, $3)
-         RETURNING id, workspace_id, email, password_hash`,
+         RETURNING id, workspace_id, email, password_hash, disabled_at, session_version`,
         [workspace.id, email, passwordHash]
       );
       const admin = adminResult.rows[0];
@@ -379,9 +457,14 @@ export class PostgresAppStore implements AppStore {
         "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'admin')",
         [workspace.id, admin.id]
       );
-      await client.query(
-        "INSERT INTO projects (workspace_id, name, slug) VALUES ($1, $2, $3)",
+      const projectResult = await client.query<ProjectRow>(
+        `INSERT INTO projects (workspace_id, name, slug) VALUES ($1, $2, $3)
+         RETURNING id, workspace_id, name, slug, archived_at, created_at`,
         [workspace.id, "默认项目", "default-project"]
+      );
+      await client.query(
+        "INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, 'admin')",
+        [projectResult.rows[0].id, admin.id]
       );
       await this.insertAudit(client, {
         workspaceId: workspace.id,
@@ -398,7 +481,9 @@ export class PostgresAppStore implements AppStore {
           workspaceId: admin.workspace_id,
           email: admin.email,
           passwordHash: admin.password_hash,
-          role: "admin"
+          role: "admin",
+          disabledAt: admin.disabled_at,
+          sessionVersion: admin.session_version
         }
       };
     } catch (error) {
@@ -411,7 +496,8 @@ export class PostgresAppStore implements AppStore {
 
   async findAdminByEmail(email: string): Promise<AdminRecord | null> {
     const { rows } = await this.pool.query<TeamMemberRow>(
-      `SELECT u.id, u.workspace_id, u.email, u.password_hash, m.role, m.created_at
+      `SELECT u.id, u.workspace_id, u.email, u.password_hash, m.role, m.created_at,
+              u.disabled_at, u.session_version
        FROM admin_users u
        JOIN workspace_members m ON m.workspace_id = u.workspace_id AND m.user_id = u.id
        WHERE u.email = $1 LIMIT 1`,
@@ -423,13 +509,16 @@ export class PostgresAppStore implements AppStore {
       workspaceId: row.workspace_id,
       email: row.email,
       passwordHash: row.password_hash,
-      role: row.role
+      role: row.role,
+      disabledAt: row.disabled_at,
+      sessionVersion: row.session_version
     } : null;
   }
 
   async findAdminById(id: string, workspaceId: string): Promise<AdminRecord | null> {
     const { rows } = await this.pool.query<TeamMemberRow>(
-      `SELECT u.id, u.workspace_id, u.email, u.password_hash, m.role, m.created_at
+      `SELECT u.id, u.workspace_id, u.email, u.password_hash, m.role, m.created_at,
+              u.disabled_at, u.session_version
        FROM admin_users u
        JOIN workspace_members m ON m.workspace_id = u.workspace_id AND m.user_id = u.id
        WHERE u.id = $1 AND u.workspace_id = $2`,
@@ -441,14 +530,17 @@ export class PostgresAppStore implements AppStore {
       workspaceId: row.workspace_id,
       email: row.email,
       passwordHash: row.password_hash,
-      role: row.role
+      role: row.role,
+      disabledAt: row.disabled_at,
+      sessionVersion: row.session_version
     } : null;
   }
 
   async listTeamMembers(workspaceId: string, pagination?: Pagination): Promise<TeamMemberRecord[]> {
     const { limit, offset } = normalizePagination(pagination);
     const { rows } = await this.pool.query<TeamMemberRow>(
-      `SELECT u.id, u.workspace_id, u.email, u.password_hash, m.role, m.created_at
+      `SELECT u.id, u.workspace_id, u.email, u.password_hash, m.role, m.created_at,
+              u.disabled_at, u.session_version
        FROM admin_users u
        JOIN workspace_members m ON m.workspace_id = u.workspace_id AND m.user_id = u.id
        WHERE u.workspace_id = $1
@@ -473,11 +565,11 @@ export class PostgresAppStore implements AppStore {
     actorId: string
   ): Promise<TeamMemberRecord | null> {
     return this.transaction(async (client) => {
-      const inserted = await client.query<{ id: string; workspace_id: string; email: string; password_hash: string }>(
+      const inserted = await client.query<{ id: string; workspace_id: string; email: string; password_hash: string; disabled_at: Date | null; session_version: number }>(
         `INSERT INTO admin_users (workspace_id, email, password_hash)
          VALUES ($1, $2, $3)
          ON CONFLICT (workspace_id, email) DO NOTHING
-         RETURNING id, workspace_id, email, password_hash`,
+         RETURNING id, workspace_id, email, password_hash, disabled_at, session_version`,
         [workspaceId, input.email, input.passwordHash]
       );
       const user = inserted.rows[0];
@@ -486,8 +578,9 @@ export class PostgresAppStore implements AppStore {
         `INSERT INTO workspace_members (workspace_id, user_id, role)
          VALUES ($1, $2, $3)
          RETURNING $2::uuid AS id, $1::uuid AS workspace_id, $4::text AS email,
-                   $5::text AS password_hash, role, created_at`,
-        [workspaceId, user.id, input.role, user.email, user.password_hash]
+                   $5::text AS password_hash, role, created_at,
+                   $6::timestamptz AS disabled_at, $7::integer AS session_version`,
+        [workspaceId, user.id, input.role, user.email, user.password_hash, user.disabled_at, user.session_version]
       );
       const member = teamMemberRecord(membership.rows[0]);
       await this.insertAudit(client, {
@@ -499,6 +592,75 @@ export class PostgresAppStore implements AppStore {
         metadata: { role: member.role }
       });
       return member;
+    });
+  }
+
+  async resetTeamMemberPassword(
+    workspaceId: string, userId: string, passwordHash: string, actorId: string
+  ): Promise<TeamMemberRecord | null> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<TeamMemberRow>(
+        `UPDATE admin_users u
+         SET password_hash = $3, session_version = session_version + 1, updated_at = now()
+         FROM workspace_members m
+         WHERE u.id = m.user_id AND u.workspace_id = m.workspace_id
+           AND u.workspace_id = $1 AND u.id = $2
+         RETURNING u.id, u.workspace_id, u.email, u.password_hash, m.role, m.created_at,
+                   u.disabled_at, u.session_version`,
+        [workspaceId, userId, passwordHash]
+      );
+      const member = rows[0] ? teamMemberRecord(rows[0]) : null;
+      if (!member) return null;
+      await this.insertAudit(client, {
+        workspaceId, actorId, action: "member.password_reset", resourceType: "workspace_member", resourceId: member.id
+      });
+      return member;
+    });
+  }
+
+  async setTeamMemberDisabled(
+    workspaceId: string, userId: string, disabled: boolean, actorId: string
+  ): Promise<TeamMemberRecord | null> {
+    return this.transaction(async (client) => {
+      const target = await client.query<TeamMemberRow>(
+        `SELECT u.id, u.workspace_id, u.email, u.password_hash, m.role, m.created_at,
+                u.disabled_at, u.session_version
+         FROM admin_users u
+         JOIN workspace_members m ON m.workspace_id = u.workspace_id AND m.user_id = u.id
+         WHERE u.workspace_id = $1 AND u.id = $2 FOR UPDATE`,
+        [workspaceId, userId]
+      );
+      const member = target.rows[0];
+      if (!member) return null;
+      if (disabled && !member.disabled_at && member.role === "admin") {
+        const activeAdministrators = await client.query<{ id: string }>(
+          `SELECT u.id
+           FROM admin_users u
+           JOIN workspace_members m ON m.workspace_id = u.workspace_id AND m.user_id = u.id
+           WHERE u.workspace_id = $1 AND m.role = 'admin' AND u.disabled_at IS NULL
+           FOR UPDATE`,
+          [workspaceId]
+        );
+        if (activeAdministrators.rows.length <= 1) throw new LastWorkspaceAdminError();
+      }
+      const updated = await client.query<{ disabled_at: Date | null; session_version: number }>(
+        `UPDATE admin_users
+         SET disabled_at = CASE WHEN $3 THEN now() ELSE NULL END,
+             session_version = session_version + 1,
+             updated_at = now()
+         WHERE workspace_id = $1 AND id = $2
+         RETURNING disabled_at, session_version`,
+        [workspaceId, userId, disabled]
+      );
+      const result = teamMemberRecord({ ...member, ...updated.rows[0] });
+      await this.insertAudit(client, {
+        workspaceId,
+        actorId,
+        action: disabled ? "member.disabled" : "member.enabled",
+        resourceType: "workspace_member",
+        resourceId: result.id
+      });
+      return result;
     });
   }
 
@@ -529,6 +691,17 @@ export class PostgresAppStore implements AppStore {
       const row = rows[0];
       if (!row) return null;
       const project = projectRecord(row);
+      const creator = await client.query<{ user_id: string }>(
+        `INSERT INTO project_members (project_id, user_id, role)
+         SELECT $1, workspace_members.user_id, 'admin'
+         FROM workspace_members
+         WHERE workspace_members.workspace_id = $2 AND workspace_members.user_id = $3
+         RETURNING user_id`,
+        [project.id, workspaceId, actorId]
+      );
+      if (!creator.rows[0]) {
+        throw new Error("Project creator must be a workspace member");
+      }
       await this.insertAudit(client, {
         workspaceId,
         actorId,
@@ -538,6 +711,346 @@ export class PostgresAppStore implements AppStore {
       });
       return project;
     });
+  }
+
+  async listAccessibleProjects(
+    workspaceId: string,
+    userId: string,
+    pagination?: Pagination
+  ): Promise<ProjectRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    const { rows } = await this.pool.query<ProjectRow>(
+      `SELECT p.id, p.workspace_id, p.name, p.slug, p.archived_at, p.created_at
+       FROM projects p
+       JOIN workspace_members wm ON wm.workspace_id = p.workspace_id AND wm.user_id = $2
+       LEFT JOIN project_members pm ON pm.project_id = p.id AND pm.user_id = $2
+       WHERE p.workspace_id = $1 AND (wm.role = 'admin' OR pm.user_id IS NOT NULL)
+       ORDER BY p.created_at ASC, p.id ASC
+       LIMIT $3 OFFSET $4`,
+      [workspaceId, userId, limit, offset]
+    );
+    return rows.map(projectRecord);
+  }
+
+  async workspaceOverview(workspaceId: string, userId: string): Promise<WorkspaceProjectOverviewRecord[]> {
+    type OverviewRow = QueryResultRow & {
+      project: Record<string, unknown>;
+      repository: Record<string, unknown> | null;
+      latest_snapshot: Record<string, unknown> | null;
+      current_release: Record<string, unknown> | null;
+      latest_build: Record<string, unknown> | null;
+      indexed_text_bytes: string;
+      member_count: string;
+      pending_feedback_count: string;
+    };
+    const { rows } = await this.pool.query<OverviewRow>(
+      `WITH accessible_projects AS (
+         SELECT p.id, p.workspace_id, p.name, p.slug, p.archived_at, p.created_at
+         FROM projects p
+         JOIN workspace_members wm ON wm.workspace_id = p.workspace_id AND wm.user_id = $2
+         LEFT JOIN project_members pm ON pm.project_id = p.id AND pm.user_id = $2
+         WHERE p.workspace_id = $1 AND p.archived_at IS NULL
+           AND (wm.role = 'admin' OR pm.user_id IS NOT NULL)
+       )
+       SELECT jsonb_build_object(
+                'id', p.id, 'workspace_id', p.workspace_id, 'name', p.name, 'slug', p.slug,
+                'archived_at', p.archived_at, 'created_at', p.created_at
+              ) AS project,
+              repo.value AS repository, snapshot.value AS latest_snapshot,
+              release.value AS current_release, build.value AS latest_build,
+              COALESCE(snapshot.indexed_text_bytes, 0)::text AS indexed_text_bytes,
+              COALESCE(members.member_count, 0)::text AS member_count,
+              COALESCE(feedback.pending_feedback_count, 0)::text AS pending_feedback_count
+       FROM accessible_projects p
+       LEFT JOIN LATERAL (
+         SELECT jsonb_build_object(
+           'id', r.id, 'workspace_id', r.workspace_id, 'project_id', r.project_id,
+           'kind', r.kind, 'name', r.name, 'local_path', r.local_path, 'clone_url', r.clone_url,
+           'default_branch', r.default_branch, 'archived_at', r.archived_at,
+           'has_credential', EXISTS (SELECT 1 FROM encrypted_credentials c WHERE c.repository_id = r.id)
+         ) AS value, r.id
+         FROM repositories r WHERE r.workspace_id = p.workspace_id AND r.project_id = p.id
+           AND r.archived_at IS NULL LIMIT 1
+       ) repo ON true
+       LEFT JOIN LATERAL (
+         SELECT jsonb_build_object(
+                  'id', s.id, 'workspace_id', s.workspace_id, 'repository_id', s.repository_id,
+                  'commit_sha', s.commit_sha, 'ref', s.ref, 'remote_url', s.remote_url,
+                  'commit_timestamp', s.commit_timestamp, 'storage_path', s.storage_path,
+                  'file_count', COALESCE(files.file_count, 0)
+                ) AS value,
+                COALESCE(files.indexed_text_bytes, 0) AS indexed_text_bytes
+         FROM source_snapshots s
+         LEFT JOIN LATERAL (
+           SELECT count(*)::bigint AS file_count, COALESCE(sum(byte_size), 0)::bigint AS indexed_text_bytes
+           FROM source_files f WHERE f.snapshot_id = s.id
+         ) files ON true
+         WHERE s.workspace_id = p.workspace_id AND s.repository_id = repo.id
+         ORDER BY s.commit_timestamp DESC, s.created_at DESC, s.id DESC LIMIT 1
+       ) snapshot ON true
+       LEFT JOIN LATERAL (
+         SELECT jsonb_build_object(
+           'id', r.id, 'workspace_id', r.workspace_id, 'repository_id', r.repository_id,
+           'build_job_id', r.build_job_id, 'snapshot_id', r.snapshot_id, 'version', r.version,
+           'created_at', r.created_at, 'published_at', r.published_at
+         ) AS value
+         FROM release_channels channel JOIN releases r ON r.id = channel.release_id
+         WHERE channel.workspace_id = p.workspace_id AND channel.repository_id = repo.id AND channel.name = 'current'
+         LIMIT 1
+       ) release ON true
+       LEFT JOIN LATERAL (
+         SELECT jsonb_build_object(
+           'id', b.id, 'workspace_id', b.workspace_id, 'repository_id', b.repository_id,
+           'snapshot_id', b.snapshot_id, 'snapshot_path', b.snapshot_path, 'commit_sha', b.commit_sha,
+           'status', b.status, 'warnings', b.warnings, 'cancel_requested', b.cancel_requested,
+           'error_message', b.error_message, 'purpose', b.purpose, 'feedback_ids', b.feedback_ids,
+           'feedback_context', b.feedback_context
+         ) AS value
+         FROM build_jobs b WHERE b.workspace_id = p.workspace_id AND b.repository_id = repo.id
+         ORDER BY b.created_at DESC, b.id DESC LIMIT 1
+       ) build ON true
+       LEFT JOIN LATERAL (
+         SELECT count(*)::bigint AS member_count FROM project_members pm WHERE pm.project_id = p.id
+       ) members ON true
+       LEFT JOIN LATERAL (
+         SELECT count(*)::bigint AS pending_feedback_count
+         FROM agent_feedback f JOIN releases r ON r.id = f.release_id
+         WHERE f.workspace_id = p.workspace_id AND f.status = 'open' AND r.repository_id = repo.id
+       ) feedback ON true
+       ORDER BY p.created_at ASC, p.id ASC`,
+      [workspaceId, userId]
+    );
+    const date = (value: unknown) => new Date(String(value));
+    return rows.map((row) => {
+      const project = row.project;
+      const repository = row.repository;
+      const snapshot = row.latest_snapshot;
+      const release = row.current_release;
+      const build = row.latest_build;
+      return {
+        project: {
+          id: String(project.id), workspaceId: String(project.workspace_id), name: String(project.name),
+          slug: String(project.slug), archivedAt: project.archived_at ? date(project.archived_at) : null,
+          createdAt: date(project.created_at)
+        },
+        repository: repository ? {
+          id: String(repository.id), workspaceId: String(repository.workspace_id), projectId: String(repository.project_id),
+          kind: repository.kind as RepositoryRecord["kind"], name: String(repository.name),
+          localPath: repository.local_path ? String(repository.local_path) : null,
+          cloneUrl: repository.clone_url ? String(repository.clone_url) : null,
+          defaultBranch: String(repository.default_branch), archivedAt: repository.archived_at ? date(repository.archived_at) : null,
+          hasCredential: Boolean(repository.has_credential)
+        } : null,
+        latestSnapshot: snapshot ? {
+          id: String(snapshot.id), workspaceId: String(snapshot.workspace_id), repositoryId: String(snapshot.repository_id),
+          commitSha: String(snapshot.commit_sha), ref: String(snapshot.ref),
+          remoteUrl: snapshot.remote_url ? String(snapshot.remote_url) : null,
+          commitTimestamp: date(snapshot.commit_timestamp), storagePath: String(snapshot.storage_path),
+          fileCount: Number(snapshot.file_count ?? 0)
+        } : null,
+        indexedTextBytes: Number(row.indexed_text_bytes),
+        currentRelease: release ? {
+          id: String(release.id), workspaceId: String(release.workspace_id), repositoryId: String(release.repository_id),
+          buildId: String(release.build_job_id), snapshotId: String(release.snapshot_id), version: String(release.version),
+          createdAt: date(release.created_at), publishedAt: release.published_at ? date(release.published_at) : null
+        } : null,
+        latestBuild: build ? {
+          id: String(build.id), workspaceId: String(build.workspace_id), repositoryId: String(build.repository_id),
+          snapshotId: String(build.snapshot_id), snapshotPath: String(build.snapshot_path),
+          commitSha: String(build.commit_sha), status: build.status as BuildStatus, warnings: build.warnings as BuildRecord["warnings"],
+          cancelRequested: Boolean(build.cancel_requested),
+          purpose: build.purpose === "feedback" ? {
+            kind: "feedback", feedbackIds: (build.feedback_ids ?? []) as string[],
+            feedbackContext: (build.feedback_context ?? []) as BuildRecord["purpose"]["feedbackContext"]
+          } : standardBuildPurpose(),
+          ...(build.error_message ? { errorMessage: String(build.error_message) } : {})
+        } : null,
+        memberCount: Number(row.member_count),
+        pendingFeedbackCount: Number(row.pending_feedback_count)
+      };
+    });
+  }
+
+  async searchWorkspaceKnowledge(
+    workspaceId: string,
+    userId: string,
+    query: string
+  ): Promise<WorkspaceKnowledgeSearchRecord[]> {
+    const { rows } = await this.pool.query<ProjectRow>(
+      `SELECT p.id, p.workspace_id, p.name, p.slug, p.archived_at, p.created_at
+       FROM projects p
+       JOIN workspace_members wm ON wm.workspace_id = p.workspace_id AND wm.user_id = $2
+       LEFT JOIN project_members pm ON pm.project_id = p.id AND pm.user_id = $2
+       WHERE p.workspace_id = $1 AND p.archived_at IS NULL
+         AND (wm.role = 'admin' OR pm.user_id IS NOT NULL)
+       ORDER BY p.created_at ASC, p.id ASC`,
+      [workspaceId, userId]
+    );
+    const resultSets = await Promise.all(rows.map(async (row) => {
+      const project = projectRecord(row);
+      const repository = await this.currentRepository(workspaceId, project.id);
+      if (!repository || !(await this.currentRelease(workspaceId, repository.id))) return [];
+      return (await this.searchKnowledge(workspaceId, repository.id, query)).map((result) => ({ ...result, project }));
+    }));
+    return resultSets.flat().sort((left, right) => right.score - left.score || left.title.localeCompare(right.title)).slice(0, 50);
+  }
+
+  async listProjectMembers(
+    workspaceId: string,
+    projectId: string,
+    pagination?: Pagination
+  ): Promise<ProjectMemberRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    const { rows } = await this.pool.query<ProjectMemberRow>(
+      `SELECT pm.user_id AS id, pm.project_id, p.workspace_id, u.email, pm.role, pm.created_at
+       FROM project_members pm
+       JOIN projects p ON p.id = pm.project_id
+       JOIN admin_users u ON u.id = pm.user_id
+       JOIN workspace_members wm ON wm.workspace_id = p.workspace_id AND wm.user_id = pm.user_id
+       WHERE p.workspace_id = $1 AND p.id = $2
+       ORDER BY pm.created_at ASC, pm.user_id ASC
+       LIMIT $3 OFFSET $4`,
+      [workspaceId, projectId, limit, offset]
+    );
+    return rows.map(projectMemberRecord);
+  }
+
+  async addProjectMember(
+    workspaceId: string,
+    projectId: string,
+    userId: string,
+    role: ProjectRole,
+    actorId: string
+  ): Promise<ProjectMemberRecord | null> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<ProjectMemberRow>(
+        `WITH inserted AS (
+           INSERT INTO project_members (project_id, user_id, role)
+           SELECT p.id, wm.user_id, $4::team_role
+           FROM projects p
+           JOIN workspace_members wm ON wm.workspace_id = p.workspace_id AND wm.user_id = $3
+           WHERE p.workspace_id = $1 AND p.id = $2
+             AND (wm.role <> 'reader' OR $4::team_role = 'reader')
+           ON CONFLICT (project_id, user_id) DO NOTHING
+           RETURNING project_id, user_id, role, created_at
+         )
+         SELECT inserted.user_id AS id, inserted.project_id, p.workspace_id, u.email,
+                inserted.role, inserted.created_at
+         FROM inserted
+         JOIN projects p ON p.id = inserted.project_id
+         JOIN admin_users u ON u.id = inserted.user_id`,
+        [workspaceId, projectId, userId, role]
+      );
+      const row = rows[0];
+      if (!row) return null;
+      const member = projectMemberRecord(row);
+      await this.insertAudit(client, {
+        workspaceId,
+        actorId,
+        action: "project_member.added",
+        resourceType: "project_member",
+        resourceId: member.id,
+        metadata: { projectId, userId, role }
+      });
+      return member;
+    });
+  }
+
+  async updateProjectMemberRole(
+    workspaceId: string,
+    projectId: string,
+    userId: string,
+    role: ProjectRole,
+    actorId: string
+  ): Promise<ProjectMemberRecord | null> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<ProjectMemberLockRow>(
+        `SELECT pm.user_id AS id, pm.project_id, p.workspace_id, u.email, pm.role, pm.created_at,
+                wm.role AS workspace_role
+         FROM project_members pm
+         JOIN projects p ON p.id = pm.project_id
+         JOIN admin_users u ON u.id = pm.user_id
+         JOIN workspace_members wm ON wm.workspace_id = p.workspace_id AND wm.user_id = pm.user_id
+         WHERE p.workspace_id = $1 AND p.id = $2
+         FOR UPDATE OF pm`,
+        [workspaceId, projectId]
+      );
+      const current = rows.find((member) => member.id === userId);
+      if (!current || (current.workspace_role === "reader" && role !== "reader")) return null;
+      if (current.role === "admin" && role !== "admin" && rows.filter((member) => member.role === "admin").length === 1) {
+        throw new LastProjectAdminError();
+      }
+      await client.query(
+        `UPDATE project_members SET role = $2, updated_at = now()
+         WHERE project_id = $1 AND user_id = $3`,
+        [projectId, role, userId]
+      );
+      const member = projectMemberRecord({ ...current, role });
+      await this.insertAudit(client, {
+        workspaceId,
+        actorId,
+        action: "project_member.role_changed",
+        resourceType: "project_member",
+        resourceId: member.id,
+        metadata: { projectId, userId, role }
+      });
+      return member;
+    });
+  }
+
+  async removeProjectMember(
+    workspaceId: string,
+    projectId: string,
+    userId: string,
+    actorId: string
+  ): Promise<ProjectMemberRecord | null> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<ProjectMemberLockRow>(
+        `SELECT pm.user_id AS id, pm.project_id, p.workspace_id, u.email, pm.role, pm.created_at,
+                wm.role AS workspace_role
+         FROM project_members pm
+         JOIN projects p ON p.id = pm.project_id
+         JOIN admin_users u ON u.id = pm.user_id
+         JOIN workspace_members wm ON wm.workspace_id = p.workspace_id AND wm.user_id = pm.user_id
+         WHERE p.workspace_id = $1 AND p.id = $2
+         FOR UPDATE OF pm`,
+        [workspaceId, projectId]
+      );
+      const current = rows.find((member) => member.id === userId);
+      if (!current) return null;
+      if (current.role === "admin" && rows.filter((member) => member.role === "admin").length === 1) {
+        throw new LastProjectAdminError();
+      }
+      await client.query(
+        "DELETE FROM project_members WHERE project_id = $1 AND user_id = $2",
+        [projectId, userId]
+      );
+      const member = projectMemberRecord(current);
+      await this.insertAudit(client, {
+        workspaceId,
+        actorId,
+        action: "project_member.removed",
+        resourceType: "project_member",
+        resourceId: member.id,
+        metadata: { projectId, userId, role: member.role }
+      });
+      return member;
+    });
+  }
+
+  async projectAccess(workspaceId: string, projectId: string, userId: string): Promise<ProjectAccess | null> {
+    const { rows } = await this.pool.query<ProjectAccessRow>(
+      `SELECT p.id, p.workspace_id, p.name, p.slug, p.archived_at, p.created_at,
+              CASE WHEN wm.role = 'admin' THEN 'admin'::team_role ELSE pm.role END AS role
+       FROM projects p
+       JOIN workspace_members wm ON wm.workspace_id = p.workspace_id AND wm.user_id = $3
+       LEFT JOIN project_members pm ON pm.project_id = p.id AND pm.user_id = $3
+       WHERE p.workspace_id = $1 AND p.id = $2
+         AND (wm.role = 'admin' OR pm.user_id IS NOT NULL)`,
+      [workspaceId, projectId, userId]
+    );
+    const row = rows[0];
+    return row ? { project: projectRecord(row), role: row.role } : null;
   }
 
   async defaultWorkspace(): Promise<WorkspaceRecord | null> {
@@ -565,19 +1078,19 @@ export class PostgresAppStore implements AppStore {
          (a.resource_type = 'project' AND a.resource_id = $2::text)
          OR EXISTS (
            SELECT 1 FROM repositories r
-           WHERE r.workspace_id = a.workspace_id AND r.project_id = $2
+           WHERE r.workspace_id = a.workspace_id AND r.project_id = $3::uuid
              AND r.id::text = a.resource_id
          )
          OR EXISTS (
            SELECT 1 FROM mcp_tokens t
-           WHERE t.workspace_id = a.workspace_id AND t.project_id = $2
+           WHERE t.workspace_id = a.workspace_id AND t.project_id = $3::uuid
              AND t.id::text = a.resource_id
          )
          OR a.metadata->>'projectId' = $2::text
        )
        ORDER BY a.created_at DESC, a.id DESC
-       LIMIT $3 OFFSET $4`,
-      [workspaceId, projectId, limit, offset]
+       LIMIT $4 OFFSET $5`,
+      [workspaceId, projectId, projectId, limit, offset]
     );
     return rows.map(auditEventRecord);
   }
@@ -590,19 +1103,82 @@ export class PostgresAppStore implements AppStore {
          (a.resource_type = 'project' AND a.resource_id = $2::text)
          OR EXISTS (
            SELECT 1 FROM repositories r
-           WHERE r.workspace_id = a.workspace_id AND r.project_id = $2
+           WHERE r.workspace_id = a.workspace_id AND r.project_id = $3::uuid
              AND r.id::text = a.resource_id
          )
          OR EXISTS (
            SELECT 1 FROM mcp_tokens t
-           WHERE t.workspace_id = a.workspace_id AND t.project_id = $2
+           WHERE t.workspace_id = a.workspace_id AND t.project_id = $3::uuid
              AND t.id::text = a.resource_id
          )
          OR a.metadata->>'projectId' = $2::text
        )`,
+      [workspaceId, projectId, projectId]
+    );
+    return Number(rows[0]?.total ?? 0);
+  }
+
+  async createImportReport(
+    input: Omit<ImportReportRecord, "id" | "startedAt" | "finishedAt" | "status" | "collectedFileCount" | "collectedTextBytes" | "ignored" | "snapshotId" | "failureCode">
+  ): Promise<ImportReportRecord> {
+    const { rows } = await this.pool.query<ImportReportRow>(
+      `INSERT INTO import_reports (workspace_id, project_id, repository_id, actor_id, source_kind, status)
+       VALUES ($1, $2, $3, $4, $5, 'running')
+       RETURNING id, workspace_id, project_id, repository_id, actor_id, source_kind, status,
+                 started_at, finished_at, collected_file_count, collected_text_bytes, ignored,
+                 snapshot_id, failure_code`,
+      [input.workspaceId, input.projectId, input.repositoryId, input.actorId, input.sourceKind]
+    );
+    return importReportRecord(rows[0]);
+  }
+
+  async finishImportReport(
+    workspaceId: string,
+    reportId: string,
+    input: Pick<ImportReportRecord, "status" | "collectedFileCount" | "collectedTextBytes" | "ignored" | "snapshotId" | "failureCode">
+  ): Promise<ImportReportRecord | null> {
+    const { rows } = await this.pool.query<ImportReportRow>(
+      `UPDATE import_reports
+       SET status = $3, finished_at = now(), collected_file_count = $4, collected_text_bytes = $5,
+           ignored = $6::jsonb, snapshot_id = $7, failure_code = $8
+       WHERE workspace_id = $1 AND id = $2 AND status = 'running'
+       RETURNING id, workspace_id, project_id, repository_id, actor_id, source_kind, status,
+                 started_at, finished_at, collected_file_count, collected_text_bytes, ignored,
+                 snapshot_id, failure_code`,
+      [workspaceId, reportId, input.status, input.collectedFileCount, input.collectedTextBytes,
+        JSON.stringify(input.ignored), input.snapshotId, input.failureCode]
+    );
+    return rows[0] ? importReportRecord(rows[0]) : null;
+  }
+
+  async listImportReports(workspaceId: string, projectId: string, pagination?: Pagination): Promise<ImportReportRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    const { rows } = await this.pool.query<ImportReportRow>(
+      `SELECT id, workspace_id, project_id, repository_id, actor_id, source_kind, status,
+              started_at, finished_at, collected_file_count, collected_text_bytes, ignored,
+              snapshot_id, failure_code
+       FROM import_reports WHERE workspace_id = $1 AND project_id = $2
+       ORDER BY started_at DESC, id DESC LIMIT $3 OFFSET $4`,
+      [workspaceId, projectId, limit, offset]
+    );
+    return rows.map(importReportRecord);
+  }
+
+  async countImportReports(workspaceId: string, projectId: string): Promise<number> {
+    const { rows } = await this.pool.query<{ total: string }>(
+      "SELECT count(*)::text AS total FROM import_reports WHERE workspace_id = $1 AND project_id = $2",
       [workspaceId, projectId]
     );
     return Number(rows[0]?.total ?? 0);
+  }
+
+  async deleteExpiredImportReports(cutoff: Date): Promise<number> {
+    const { rowCount } = await this.pool.query(
+      `DELETE FROM import_reports
+       WHERE status IN ('failed', 'cancelled') AND finished_at < $1`,
+      [cutoff]
+    );
+    return rowCount ?? 0;
   }
 
   async createMcpToken(
@@ -1056,6 +1632,34 @@ export class PostgresAppStore implements AppStore {
     return rows[0] ? repositoryRecord(rows[0]) : null;
   }
 
+  async listActiveGitRepositories(): Promise<RepositoryRecord[]> {
+    const { rows } = await this.pool.query<RepositoryRow>(
+      `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
+              r.default_branch, r.archived_at,
+              EXISTS (
+                SELECT 1 FROM encrypted_credentials c
+                WHERE c.workspace_id = r.workspace_id AND c.repository_id = r.id
+              ) AS has_credential
+       FROM repositories r WHERE r.kind = 'git' AND r.archived_at IS NULL
+       ORDER BY r.workspace_id, r.project_id, r.id`
+    );
+    return rows.map(repositoryRecord);
+  }
+
+  async getRepository(workspaceId: string, repositoryId: string): Promise<RepositoryRecord | null> {
+    const { rows } = await this.pool.query<RepositoryRow>(
+      `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
+              r.default_branch, r.archived_at,
+              EXISTS (
+                SELECT 1 FROM encrypted_credentials c
+                WHERE c.workspace_id = r.workspace_id AND c.repository_id = r.id
+              ) AS has_credential
+       FROM repositories r WHERE r.workspace_id = $1 AND r.id = $2 LIMIT 1`,
+      [workspaceId, repositoryId]
+    );
+    return rows[0] ? repositoryRecord(rows[0]) : null;
+  }
+
   async listArchivedRepositories(workspaceId: string): Promise<RepositoryRecord[]> {
     const { rows } = await this.pool.query<RepositoryRow>(
       `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
@@ -1242,6 +1846,44 @@ export class PostgresAppStore implements AppStore {
     return rows[0] ? snapshotRecord(rows[0]) : null;
   }
 
+  async snapshotChangeSummary(workspaceId: string, repositoryId: string, snapshotId: string) {
+    const { rows } = await this.pool.query<{ previous_snapshot_id: string | null; added: string[]; modified: string[]; deleted: string[] }>(
+      `WITH current_snapshot AS (
+         SELECT id, repository_id, commit_timestamp, created_at FROM source_snapshots
+         WHERE workspace_id = $1 AND repository_id = $2 AND id = $3
+       ), previous_snapshot AS (
+         SELECT s.id FROM source_snapshots s JOIN current_snapshot c ON c.repository_id = s.repository_id
+         WHERE s.workspace_id = $1 AND (s.commit_timestamp, s.created_at, s.id) < (c.commit_timestamp, c.created_at, c.id)
+         ORDER BY s.commit_timestamp DESC, s.created_at DESC, s.id DESC LIMIT 1
+       ), current_files AS (
+         SELECT path, content_hash FROM source_files
+         WHERE snapshot_id = (SELECT id FROM current_snapshot)
+       ), previous_files AS (
+         SELECT path, content_hash FROM source_files
+         WHERE snapshot_id = (SELECT id FROM previous_snapshot)
+       )
+       SELECT (SELECT id FROM previous_snapshot) AS previous_snapshot_id,
+         coalesce((SELECT array_agg(c.path ORDER BY c.path)
+           FROM current_files c LEFT JOIN previous_files p ON p.path = c.path
+           WHERE p.path IS NULL), '{}'::text[]) AS added,
+         coalesce((SELECT array_agg(c.path ORDER BY c.path)
+           FROM current_files c JOIN previous_files p ON p.path = c.path
+           WHERE c.content_hash <> p.content_hash), '{}'::text[]) AS modified,
+         coalesce((SELECT array_agg(p.path ORDER BY p.path)
+           FROM previous_files p LEFT JOIN current_files c ON c.path = p.path
+           WHERE c.path IS NULL), '{}'::text[]) AS deleted
+       FROM current_snapshot`,
+      [workspaceId, repositoryId, snapshotId]
+    );
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      snapshotId, previousSnapshotId: row.previous_snapshot_id, added: row.added ?? [], modified: row.modified ?? [], deleted: row.deleted ?? [],
+      requiresBuild: (row.added?.length ?? 0) + (row.modified?.length ?? 0) + (row.deleted?.length ?? 0) > 0,
+      affectedModules: [], suggestedTests: []
+    };
+  }
+
   async findSourceFile(workspaceId: string, snapshotId: string, filePath: string) {
     const { rows } = await this.pool.query<{
       id: string; workspace_id: string; snapshot_id: string; path: string;
@@ -1342,6 +1984,14 @@ export class PostgresAppStore implements AppStore {
       [snapshotId]
     );
     return Number(rows[0]?.count ?? 0);
+  }
+
+  async snapshotTextBytes(snapshotId: string): Promise<number> {
+    const { rows } = await this.pool.query<{ total: string }>(
+      "SELECT coalesce(sum(byte_size), 0)::text AS total FROM source_files WHERE snapshot_id = $1",
+      [snapshotId]
+    );
+    return Number(rows[0]?.total ?? 0);
   }
 
   async sourceFileHashes(workspaceId: string, snapshotId: string): Promise<ReadonlyMap<string, string>> {
@@ -2112,6 +2762,7 @@ export class PostgresAppStore implements AppStore {
       kind: row.kind,
       title: row.title,
       excerpt: row.excerpt,
+      matchReason: knowledgeMatchReason(row.kind, row.title, query),
       score: Number(row.score),
       pageId: row.page_id,
       releaseId: row.release_id,
@@ -2132,10 +2783,10 @@ export class PostgresAppStore implements AppStore {
       [workspaceId, releaseId]
     );
     const dependencies = await this.pool.query<{
-      source_name: string; target_name: string; kind: string; source_path: string;
+      source_name: string; target_name: string; kind: string; source_path: string; target_path: string | null;
       start_line: number; end_line: number;
     }>(
-      `SELECT ce.source_name, ce.target_name, ce.kind, ce.source_path, ce.start_line, ce.end_line
+      `SELECT ce.source_name, ce.target_name, ce.kind, ce.source_path, ce.target_path, ce.start_line, ce.end_line
        FROM releases r JOIN code_edges ce ON ce.snapshot_id = r.snapshot_id
        WHERE r.workspace_id = $1 AND r.id = $2
        ORDER BY ce.source_path, ce.start_line, ce.source_name, ce.target_name LIMIT 500`,
@@ -2148,6 +2799,7 @@ export class PostgresAppStore implements AppStore {
       })),
       dependencies: dependencies.rows.map((row) => ({
         source: row.source_name, target: row.target_name, kind: row.kind, path: row.source_path,
+        targetPath: row.target_path,
         startLine: row.start_line, endLine: row.end_line
       }))
     };

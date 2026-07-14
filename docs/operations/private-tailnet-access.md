@@ -1,33 +1,29 @@
-# Private Tailnet Access
+# Public Team Access
 
 ## Team Onboarding
 
-Install the official Tailscale client on the teammate's device and sign in to the owner's Tailnet. Open Dev Knowledge Hub at the server's `.ts.net` HTTPS address. Do not use a public IP address, port 8443, or Tailscale Funnel.
+Open `https://hub.starking.icu`. Access is invitation-only: a workspace administrator creates the member account and provides its initial password through an approved private channel. There is no public registration endpoint.
 
 ## Verify
 
-On the server, run `tailscale status`, `tailscale serve status`, and `cd /opt/dev-knowledge-hub && docker compose ps`. The health endpoint at `/api/health` must return:
+On the server, run `cd /opt/dev-knowledge-hub && docker compose ps` and verify the local application health endpoint. Through the public domain, `/api/health` must return:
 
 ```json
 {"status":"ok","service":"dev-knowledge-hub"}
 ```
 
+Nginx terminates TLS for `hub.starking.icu` and proxies only to the app's localhost listener. PostgreSQL remains private to Docker.
+
+Active Git sources are synchronized at startup and then hourly. Each run creates a server-side import report, skips duplicate commits, and records a sanitized audit result.
+
 ## Remove a Teammate
 
-Remove the user or device in the Tailscale administration console. Then remove the corresponding Dev Knowledge Hub account and revoke its MCP tokens in the application. Both actions are required: Tailnet removal blocks network access, and application revocation prevents reuse if access is restored later.
+In the Members page, disable the account. This immediately invalidates its active browser sessions and prevents future login. Remove its project memberships and revoke its project MCP tokens where appropriate. Resetting a member password also invalidates existing sessions.
 
-## Rollback
+## Recovery
 
-To stop Tailnet serving, run `tailscale serve reset`.
-
-To restore the temporary self-signed endpoint while investigating, run:
-
-```bash
-ln -s /etc/nginx/sites-available/dev-knowledge-hub-ip /etc/nginx/sites-enabled/dev-knowledge-hub-ip && nginx -t && systemctl reload nginx
-```
-
-This rollback restores only the temporary `https://118.31.105.66:8443` endpoint. It is not browser-trusted and must not be treated as the normal team URL.
+The public endpoint is the normal production route. Do not use a public IP address, port `8443`, or Tailscale Serve as an operational fallback. Restore from the documented encrypted backup only after a verified restore drill.
 
 ## Backup Boundary
 
-Tailscale protects network access and encrypted transit. It does not encrypt source snapshots at rest and it does not create backups. Encrypted off-host backups and restore drills are a separate operational requirement.
+HTTPS protects data in transit. It does not encrypt source snapshots at rest and does not create backups. Encrypted off-host backups and restore drills remain a separate operational requirement.

@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -53,6 +55,16 @@ function renderAppAt(api: ApiClient, path: string) {
 }
 
 describe("shared console copy", () => {
+  test("uses direct flex containers for collaboration members instead of a table widget", async () => {
+    const source = await readFile(resolve(process.cwd(), "src/client/pages/project-collaboration-page.tsx"), "utf8");
+    const workspaceSource = await readFile(resolve(process.cwd(), "src/client/pages/members-page.tsx"), "utf8");
+
+    expect(source).toContain('className="member-list"');
+    expect(source).not.toContain("<Table");
+    expect(workspaceSource).toContain('className="member-list workspace-member-list"');
+    expect(workspaceSource).not.toContain("<Table");
+  });
+
   test("keeps project navigation scoped to the project URL", async () => {
     const api = {
       setupStatus: vi.fn().mockResolvedValue({ setupRequired: false }),
@@ -95,7 +107,7 @@ describe("shared console copy", () => {
 
     expect(await screen.findByRole("heading", { name: "资料上传" })).toBeVisible();
     expect(screen.getByRole("button", { name: "选择项目文件夹" })).toBeVisible();
-    expect(within(screen.getByRole("list", { name: "导入阶段" })).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+    expect(["读取文件", "安全过滤", "本地压缩", "分块上传", "服务端校验", "创建内容版本"].map((label) => screen.getByText(label).textContent)).toEqual([
       "读取文件", "安全过滤", "本地压缩", "分块上传", "服务端校验", "创建内容版本"
     ]);
   });
@@ -196,7 +208,9 @@ describe("shared console copy", () => {
     renderAppAt(api, "/projects/project-1/collaboration");
 
     expect(await screen.findByRole("heading", { name: "团队协作" })).toBeVisible();
-    expect(screen.getByText("团队角色")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "项目成员" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "添加成员" })).toBeVisible();
+    expect(screen.getByRole("columnheader", { name: "项目角色" })).toBeVisible();
     expect(screen.getByText("资料同步成功")).toBeVisible();
     expect(screen.getAllByText("admin@example.com")).not.toHaveLength(0);
   });
@@ -958,17 +972,10 @@ describe("repository replacement", () => {
     } as unknown as ApiClient;
 
     renderPage(<ProjectImportsPage api={api} projectId="project" />);
-    const zip = new File(["zip"], "project.zip", { type: "application/zip" });
-    const uploadInput = await screen.findByLabelText("ZIP 项目包") as HTMLInputElement;
-    await user.upload(uploadInput, zip);
-    expect(uploadInput.files?.[0]).toBe(zip);
-    expect({
-      valid: uploadInput.checkValidity(),
-      valueMissing: uploadInput.validity.valueMissing,
-      typeMismatch: uploadInput.validity.typeMismatch,
-      customError: uploadInput.validity.customError
-    }).toEqual({ valid: true, valueMissing: false, typeMismatch: false, customError: false });
-    await user.click(screen.getByRole("button", { name: "开始上传" }));
+    const projectFile = new File(["export {};"], "main.ts", { type: "text/typescript" });
+    const uploadInput = await screen.findByLabelText("项目文件夹") as HTMLInputElement;
+    await user.upload(uploadInput, projectFile);
+    await user.click(await screen.findByRole("button", { name: "确认并开始上传" }));
 
     await waitFor(() => expect(api.importResumableUpload).toHaveBeenCalledWith("project", "session"));
     await waitFor(() => expect(sessionStorage.getItem("devkh:last-snapshot")).toContain("snapshot"));

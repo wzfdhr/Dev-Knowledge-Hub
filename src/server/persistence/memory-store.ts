@@ -4,6 +4,9 @@ import {
   boundedKnowledgePage,
   FeedbackNotAcknowledgedError,
   InvalidFeedbackTransitionError,
+  LastProjectAdminError,
+  LastWorkspaceAdminError,
+  knowledgeMatchReason,
   normalizePagination
 } from "./store.js";
 
@@ -18,6 +21,7 @@ import type {
   CreateFeedbackInput,
   EncryptedCredentialRecord,
   FeedbackRebuildInput,
+  ImportReportRecord,
   KnowledgePageRecord,
   KnowledgeMetadata,
   KnowledgeSearchResult,
@@ -33,7 +37,12 @@ import type {
   SetupResult,
   TeamMemberRecord,
   TeamRole,
+  ProjectAccess,
+  ProjectMemberRecord,
+  ProjectRole,
   ProjectRecord,
+  WorkspaceKnowledgeSearchRecord,
+  WorkspaceProjectOverviewRecord,
   WorkspaceRecord
 } from "./store.js";
 import type {
@@ -50,6 +59,7 @@ export class MemoryAppStore implements AppStore {
   private admin: AdminRecord | null = null;
   private readonly members: TeamMemberRecord[] = [];
   private readonly projects: ProjectRecord[] = [];
+  private readonly projectMembers: Array<ProjectMemberRecord & { userId: string }> = [];
   private readonly repositories: RepositoryRecord[] = [];
   readonly auditEvents: AuditEventRecord[] = [];
   readonly mcpTokens: McpTokenRecord[] = [];
@@ -57,6 +67,7 @@ export class MemoryAppStore implements AppStore {
   readonly encryptedCredentials: EncryptedCredentialRecord[] = [];
   readonly sourceSnapshots: SourceSnapshotRecord[] = [];
   readonly sourceFiles: SourceFileRecord[] = [];
+  readonly importReports: ImportReportRecord[] = [];
   readonly builds: BuildRecord[] = [];
   readonly buildEvents: BuildEvent[] = [];
   private nextBuildEventSequence = 1;
@@ -85,15 +96,27 @@ export class MemoryAppStore implements AppStore {
         workspaceId: this.workspace.id,
         email,
         passwordHash,
-        role: "admin"
+        role: "admin",
+        disabledAt: null,
+        sessionVersion: 1
       };
       this.members.push({ ...this.admin, createdAt: new Date() });
-      this.projects.push({
+      const project = {
         id: randomUUID(),
         workspaceId: this.workspace.id,
         name: "默认项目",
         slug: "default-project",
         archivedAt: null,
+        createdAt: new Date()
+      };
+      this.projects.push(project);
+      this.projectMembers.push({
+        id: this.admin.id,
+        userId: this.admin.id,
+        projectId: project.id,
+        workspaceId: this.workspace.id,
+        email: this.admin.email,
+        role: "admin",
         createdAt: new Date()
       });
       await this.recordAudit({
@@ -119,7 +142,9 @@ export class MemoryAppStore implements AppStore {
       workspaceId: member.workspaceId,
       email: member.email,
       passwordHash: member.passwordHash,
-      role: member.role
+      role: member.role,
+      disabledAt: member.disabledAt,
+      sessionVersion: member.sessionVersion
     } : null;
   }
 
@@ -130,7 +155,9 @@ export class MemoryAppStore implements AppStore {
       workspaceId: member.workspaceId,
       email: member.email,
       passwordHash: member.passwordHash,
-      role: member.role
+      role: member.role,
+      disabledAt: member.disabledAt,
+      sessionVersion: member.sessionVersion
     } : null;
   }
 
@@ -159,7 +186,9 @@ export class MemoryAppStore implements AppStore {
       email: input.email,
       passwordHash: input.passwordHash,
       role: input.role,
-      createdAt: new Date()
+      createdAt: new Date(),
+      disabledAt: null,
+      sessionVersion: 1
     };
     this.members.push(member);
     await this.recordAudit({
@@ -169,6 +198,42 @@ export class MemoryAppStore implements AppStore {
       resourceType: "workspace_member",
       resourceId: member.id,
       metadata: { role: member.role }
+    });
+    return member;
+  }
+
+  async resetTeamMemberPassword(
+    workspaceId: string, userId: string, passwordHash: string, actorId: string
+  ): Promise<TeamMemberRecord | null> {
+    const member = this.members.find((candidate) => candidate.workspaceId === workspaceId && candidate.id === userId);
+    if (!member) return null;
+    member.passwordHash = passwordHash;
+    member.sessionVersion += 1;
+    await this.recordAudit({
+      workspaceId, actorId, action: "member.password_reset", resourceType: "workspace_member", resourceId: member.id
+    });
+    return member;
+  }
+
+  async setTeamMemberDisabled(
+    workspaceId: string, userId: string, disabled: boolean, actorId: string
+  ): Promise<TeamMemberRecord | null> {
+    const member = this.members.find((candidate) => candidate.workspaceId === workspaceId && candidate.id === userId);
+    if (!member) return null;
+    if (disabled && !member.disabledAt && member.role === "admin") {
+      const activeAdministrators = this.members.filter((candidate) =>
+        candidate.workspaceId === workspaceId && candidate.role === "admin" && !candidate.disabledAt
+      );
+      if (activeAdministrators.length <= 1) throw new LastWorkspaceAdminError();
+    }
+    member.disabledAt = disabled ? new Date() : null;
+    member.sessionVersion += 1;
+    await this.recordAudit({
+      workspaceId,
+      actorId,
+      action: disabled ? "member.disabled" : "member.enabled",
+      resourceType: "workspace_member",
+      resourceId: member.id
     });
     return member;
   }
@@ -188,6 +253,8 @@ export class MemoryAppStore implements AppStore {
     if (this.projects.some((project) => project.workspaceId === workspaceId && project.slug === input.slug)) {
       return null;
     }
+    const actor = this.members.find((member) => member.id === actorId && member.workspaceId === workspaceId);
+    if (!actor) return null;
     const project: ProjectRecord = {
       id: randomUUID(),
       workspaceId,
@@ -197,6 +264,15 @@ export class MemoryAppStore implements AppStore {
       createdAt: new Date()
     };
     this.projects.push(project);
+    this.projectMembers.push({
+      id: actor.id,
+      userId: actor.id,
+      projectId: project.id,
+      workspaceId,
+      email: actor.email,
+      role: "admin",
+      createdAt: new Date()
+    });
     await this.recordAudit({
       workspaceId,
       actorId,
@@ -205,6 +281,154 @@ export class MemoryAppStore implements AppStore {
       resourceId: project.id
     });
     return project;
+  }
+
+  async listAccessibleProjects(
+    workspaceId: string,
+    userId: string,
+    pagination?: Pagination
+  ): Promise<ProjectRecord[]> {
+    const member = this.members.find((candidate) => candidate.workspaceId === workspaceId && candidate.id === userId);
+    if (!member) return [];
+    if (member.role === "admin") return this.listProjects(workspaceId, pagination);
+    const accessible = new Set(this.projectMembers
+      .filter((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId)
+      .map((candidate) => candidate.projectId));
+    const { limit, offset } = normalizePagination(pagination);
+    return this.projects.filter((project) => project.workspaceId === workspaceId && accessible.has(project.id))
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id))
+      .slice(offset, offset + limit);
+  }
+
+  async workspaceOverview(workspaceId: string, userId: string): Promise<WorkspaceProjectOverviewRecord[]> {
+    const projects = await this.listAccessibleProjects(workspaceId, userId, { limit: 100 });
+    return Promise.all(projects.map(async (project) => {
+      const repository = await this.currentRepository(workspaceId, project.id);
+      const latestSnapshot = repository ? await this.latestSnapshot(workspaceId, repository.id) : null;
+      const currentRelease = repository ? await this.currentRelease(workspaceId, repository.id) : null;
+      const builds = repository ? await this.listBuilds(workspaceId, repository.id, { limit: 1 }) : [];
+      const snapshotFiles = latestSnapshot
+        ? this.sourceFiles.filter((file) => file.snapshotId === latestSnapshot.id)
+        : [];
+      const feedback = repository
+        ? this.feedback.filter((item) => item.workspaceId === workspaceId && item.status === "open"
+          && this.releases.some((release) => release.id === item.releaseId && release.repositoryId === repository.id))
+        : [];
+      return {
+        project,
+        repository,
+        latestSnapshot: latestSnapshot ? { ...latestSnapshot, fileCount: snapshotFiles.length } : null,
+        indexedTextBytes: snapshotFiles.reduce((total, file) => total + file.byteSize, 0),
+        currentRelease,
+        latestBuild: builds[0] ?? null,
+        memberCount: this.projectMembers.filter((member) => member.projectId === project.id).length,
+        pendingFeedbackCount: feedback.length
+      };
+    }));
+  }
+
+  async searchWorkspaceKnowledge(
+    workspaceId: string,
+    userId: string,
+    query: string
+  ): Promise<WorkspaceKnowledgeSearchRecord[]> {
+    const projects = await this.listAccessibleProjects(workspaceId, userId, { limit: 100 });
+    const resultSets = await Promise.all(projects.map(async (project) => {
+      const repository = await this.currentRepository(workspaceId, project.id);
+      if (!repository || !(await this.currentRelease(workspaceId, repository.id))) return [];
+      return (await this.searchKnowledge(workspaceId, repository.id, query)).map((result) => ({ ...result, project }));
+    }));
+    return resultSets.flat().sort((left, right) => right.score - left.score || left.title.localeCompare(right.title)).slice(0, 50);
+  }
+
+  async listProjectMembers(
+    workspaceId: string,
+    projectId: string,
+    pagination?: Pagination
+  ): Promise<ProjectMemberRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    return this.projectMembers.filter((member) =>
+      member.workspaceId === workspaceId && member.projectId === projectId
+    ).sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id))
+      .slice(offset, offset + limit).map((member) => this.projectMemberRecord(member));
+  }
+
+  private projectMemberRecord(member: ProjectMemberRecord & { userId: string }): ProjectMemberRecord {
+    return {
+      id: member.id,
+      projectId: member.projectId,
+      workspaceId: member.workspaceId,
+      email: member.email,
+      role: member.role,
+      createdAt: member.createdAt
+    };
+  }
+
+  private projectMember(workspaceId: string, projectId: string, userId: string) {
+    return this.projectMembers.find((member) =>
+      member.workspaceId === workspaceId && member.projectId === projectId && member.userId === userId
+    );
+  }
+
+  private assertProjectAdminSurvives(workspaceId: string, projectId: string, userId: string, nextRole?: ProjectRole) {
+    const current = this.projectMember(workspaceId, projectId, userId);
+    if (!current || current.role !== "admin" || nextRole === "admin") return;
+    const otherAdmin = this.projectMembers.some((member) =>
+      member.workspaceId === workspaceId && member.projectId === projectId
+      && member.userId !== userId && member.role === "admin"
+    );
+    if (!otherAdmin) throw new LastProjectAdminError();
+  }
+
+  private canAssignProjectRole(workspaceId: string, userId: string, role: ProjectRole): boolean {
+    const member = this.members.find((candidate) => candidate.workspaceId === workspaceId && candidate.id === userId);
+    return Boolean(member && (member.role !== "reader" || role === "reader"));
+  }
+
+  async addProjectMember(
+    workspaceId: string, projectId: string, userId: string, role: ProjectRole, actorId: string
+  ): Promise<ProjectMemberRecord | null> {
+    const project = this.projects.find((candidate) => candidate.workspaceId === workspaceId && candidate.id === projectId);
+    const user = this.members.find((candidate) => candidate.workspaceId === workspaceId && candidate.id === userId);
+    if (!project || !user || !this.canAssignProjectRole(workspaceId, userId, role) || this.projectMember(workspaceId, projectId, userId)) {
+      return null;
+    }
+    const member = { id: user.id, userId: user.id, projectId, workspaceId, email: user.email, role, createdAt: new Date() };
+    this.projectMembers.push(member);
+    await this.recordAudit({ workspaceId, actorId, action: "project_member.added", resourceType: "project_member", resourceId: user.id, metadata: { projectId, userId, role } });
+    return this.projectMemberRecord(member);
+  }
+
+  async updateProjectMemberRole(
+    workspaceId: string, projectId: string, userId: string, role: ProjectRole, actorId: string
+  ): Promise<ProjectMemberRecord | null> {
+    const member = this.projectMember(workspaceId, projectId, userId);
+    if (!member || !this.canAssignProjectRole(workspaceId, userId, role)) return null;
+    this.assertProjectAdminSurvives(workspaceId, projectId, userId, role);
+    member.role = role;
+    await this.recordAudit({ workspaceId, actorId, action: "project_member.role_changed", resourceType: "project_member", resourceId: userId, metadata: { projectId, userId, role } });
+    return this.projectMemberRecord(member);
+  }
+
+  async removeProjectMember(
+    workspaceId: string, projectId: string, userId: string, actorId: string
+  ): Promise<ProjectMemberRecord | null> {
+    const member = this.projectMember(workspaceId, projectId, userId);
+    if (!member) return null;
+    this.assertProjectAdminSurvives(workspaceId, projectId, userId);
+    const index = this.projectMembers.indexOf(member);
+    this.projectMembers.splice(index, 1);
+    await this.recordAudit({ workspaceId, actorId, action: "project_member.removed", resourceType: "project_member", resourceId: userId, metadata: { projectId, userId, role: member.role } });
+    return this.projectMemberRecord(member);
+  }
+
+  async projectAccess(workspaceId: string, projectId: string, userId: string): Promise<ProjectAccess | null> {
+    const project = this.projects.find((candidate) => candidate.workspaceId === workspaceId && candidate.id === projectId);
+    const workspaceMember = this.members.find((candidate) => candidate.workspaceId === workspaceId && candidate.id === userId);
+    if (!project || !workspaceMember) return null;
+    if (workspaceMember.role === "admin") return { project, role: "admin" };
+    const membership = this.projectMember(workspaceId, projectId, userId);
+    return membership ? { project, role: membership.role } : null;
   }
 
   async defaultWorkspace(): Promise<WorkspaceRecord | null> {
@@ -245,6 +469,57 @@ export class MemoryAppStore implements AppStore {
     return this.auditEvents.filter((event) =>
       event.workspaceId === workspaceId && this.projectOwnsAuditEvent(projectId, event)
     ).length;
+  }
+
+  async createImportReport(
+    input: Omit<ImportReportRecord, "id" | "startedAt" | "finishedAt" | "status" | "collectedFileCount" | "collectedTextBytes" | "ignored" | "snapshotId" | "failureCode">
+  ): Promise<ImportReportRecord> {
+    const report: ImportReportRecord = {
+      ...input,
+      id: randomUUID(),
+      status: "running",
+      startedAt: new Date(),
+      finishedAt: null,
+      collectedFileCount: 0,
+      collectedTextBytes: 0,
+      ignored: { total: 0, reasons: {} },
+      snapshotId: null,
+      failureCode: null
+    };
+    this.importReports.push(report);
+    return report;
+  }
+
+  async finishImportReport(
+    workspaceId: string,
+    reportId: string,
+    input: Pick<ImportReportRecord, "status" | "collectedFileCount" | "collectedTextBytes" | "ignored" | "snapshotId" | "failureCode">
+  ): Promise<ImportReportRecord | null> {
+    const report = this.importReports.find((candidate) => candidate.workspaceId === workspaceId && candidate.id === reportId);
+    if (!report || report.status !== "running") return null;
+    Object.assign(report, input, { finishedAt: new Date() });
+    return report;
+  }
+
+  async listImportReports(workspaceId: string, projectId: string, pagination?: Pagination): Promise<ImportReportRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    return this.importReports.filter((report) => report.workspaceId === workspaceId && report.projectId === projectId)
+      .sort((left, right) => right.startedAt.getTime() - left.startedAt.getTime() || right.id.localeCompare(left.id))
+      .slice(offset, offset + limit);
+  }
+
+  async countImportReports(workspaceId: string, projectId: string): Promise<number> {
+    return this.importReports.filter((report) => report.workspaceId === workspaceId && report.projectId === projectId).length;
+  }
+
+  async deleteExpiredImportReports(cutoff: Date): Promise<number> {
+    const before = this.importReports.length;
+    const retained = this.importReports.filter((report) => report.status !== "failed"
+      && report.status !== "cancelled"
+      || !report.finishedAt
+      || report.finishedAt >= cutoff);
+    this.importReports.splice(0, this.importReports.length, ...retained);
+    return before - retained.length;
   }
 
   async createMcpToken(
@@ -624,6 +899,16 @@ export class MemoryAppStore implements AppStore {
     ) ?? null;
   }
 
+  async listActiveGitRepositories(): Promise<RepositoryRecord[]> {
+    return this.repositories.filter((repository) => repository.kind === "git" && repository.archivedAt === null);
+  }
+
+  async getRepository(workspaceId: string, repositoryId: string): Promise<RepositoryRecord | null> {
+    return this.repositories.find((repository) =>
+      repository.workspaceId === workspaceId && repository.id === repositoryId
+    ) ?? null;
+  }
+
   async listArchivedRepositories(workspaceId: string): Promise<RepositoryRecord[]> {
     return this.repositories.filter((repository) =>
       repository.workspaceId === workspaceId && repository.archivedAt !== null
@@ -809,6 +1094,24 @@ export class MemoryAppStore implements AppStore {
     ).sort((left, right) => right.commitTimestamp.getTime() - left.commitTimestamp.getTime())[0] ?? null;
   }
 
+  async snapshotChangeSummary(workspaceId: string, repositoryId: string, snapshotId: string) {
+    const snapshots = this.sourceSnapshots.filter((snapshot) => snapshot.workspaceId === workspaceId && snapshot.repositoryId === repositoryId)
+      .sort((left, right) => left.commitTimestamp.getTime() - right.commitTimestamp.getTime() || left.id.localeCompare(right.id));
+    const position = snapshots.findIndex((snapshot) => snapshot.id === snapshotId);
+    if (position < 0) return null;
+    const current = new Map(this.sourceFiles.filter((file) => file.snapshotId === snapshotId).map((file) => [file.path, file.contentHash]));
+    const previousSnapshot = snapshots[position - 1];
+    const previous = new Map(this.sourceFiles.filter((file) => file.snapshotId === previousSnapshot?.id).map((file) => [file.path, file.contentHash]));
+    const added = [...current.keys()].filter((path) => !previous.has(path)).sort();
+    const deleted = [...previous.keys()].filter((path) => !current.has(path)).sort();
+    const modified = [...current.keys()].filter((path) => previous.has(path) && previous.get(path) !== current.get(path)).sort();
+    return {
+      snapshotId, previousSnapshotId: previousSnapshot?.id ?? null, added, modified, deleted,
+      requiresBuild: added.length + modified.length + deleted.length > 0,
+      affectedModules: [], suggestedTests: []
+    };
+  }
+
   async findSourceFile(
     workspaceId: string,
     snapshotId: string,
@@ -821,6 +1124,12 @@ export class MemoryAppStore implements AppStore {
 
   async countSnapshotFiles(snapshotId: string): Promise<number> {
     return this.sourceFiles.filter((file) => file.snapshotId === snapshotId).length;
+  }
+
+  async snapshotTextBytes(snapshotId: string): Promise<number> {
+    return this.sourceFiles
+      .filter((file) => file.snapshotId === snapshotId)
+      .reduce((total, file) => total + file.byteSize, 0);
   }
 
   async sourceFileHashes(workspaceId: string, snapshotId: string): Promise<ReadonlyMap<string, string>> {
@@ -1221,6 +1530,7 @@ export class MemoryAppStore implements AppStore {
       results.push({
         kind,
         title,
+        matchReason: knowledgeMatchReason(kind, title, query),
         score,
         excerpt: foundPage.body.slice(0, 240),
         pageId: foundPage.id,
@@ -1296,6 +1606,7 @@ export class MemoryAppStore implements AppStore {
       })),
       dependencies: index.edges.map((edge) => ({
         source: edge.source, target: edge.target, kind: edge.kind, path: edge.citation.path,
+        targetPath: edge.targetPath ?? null,
         startLine: edge.citation.startLine, endLine: edge.citation.endLine
       }))
     };

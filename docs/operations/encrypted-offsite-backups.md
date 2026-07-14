@@ -3,7 +3,7 @@
 ## Scope
 
 This runbook backs up one application-consistent set: the PostgreSQL database and the
-`snapshot_data`, `repository_mirrors`, and `upload_staging` Docker volumes. It encrypts
+`snapshot_data`, `repository_mirrors`, `uploaded_sources`, and `upload_staging` Docker volumes. It encrypts
 the set on the ECS host with restic before it is uploaded to a private Alibaba Cloud OSS
 bucket. Tailscale protects application access; it is not a backup or source-at-rest
 encryption mechanism.
@@ -24,10 +24,10 @@ passwords, archive contents, or database dumps. The server files
 
 ## Cloud Resource Boundary
 
-Create a private OSS bucket outside the Hangzhou ECS region. Keep public access blocking on
+Create a private OSS bucket in the selected Alibaba Cloud region. Keep public access blocking on
 and do not enable website hosting or anonymous read/list access. Create a dedicated RAM user
 named `devkh-backup-writer` with programmatic access only. Its policy is limited to this
-bucket and the `devkh/*` prefix; do not use Alibaba Cloud root keys.
+bucket; backups are stored under the `devkh/` prefix. Do not use Alibaba Cloud root keys.
 
 Record only the bucket name, region, endpoint hostname, RAM user name, and creation date in
 this runbook. Do not record AccessKey values or repository passwords.
@@ -98,7 +98,7 @@ separately retained restic password and `DEVKH_MASTER_KEY`; do not reuse the pro
 environment file blindly.
 
 1. Install Docker Compose, restic, and the matching application checkout on the recovery host.
-2. Create empty `snapshot_data`, `repository_mirrors`, and `upload_staging` volumes.
+2. Create empty `snapshot_data`, `repository_mirrors`, `uploaded_sources`, and `upload_staging` volumes.
 3. Restore the selected restic snapshot into a staging directory and verify its manifest and
    checksums.
 4. Start only PostgreSQL, restore `database.pgdump` with `pg_restore --clean --if-exists`,

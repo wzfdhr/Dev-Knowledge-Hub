@@ -14,6 +14,7 @@ import path from "node:path";
 
 export const MAX_RESUMABLE_UPLOAD_BYTES = 500 * 1024 * 1024;
 export const MAX_RESUMABLE_UPLOAD_CHUNK_BYTES = 16 * 1024 * 1024;
+export const RESUMABLE_UPLOAD_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 export type ResumableUploadErrorCode =
   | "CHUNK_ALREADY_RECEIVED"
@@ -56,6 +57,11 @@ export interface FinalizedResumableUpload {
   id: string;
   path: string;
   byteSize: number;
+}
+
+export interface ResumableUploadCleanupResult {
+  sessions: number;
+  completed: number;
 }
 
 interface SessionMetadata {
@@ -237,6 +243,44 @@ export class ResumableUploadSessionManager {
     await rm(session.directory, { recursive: true, force: true });
   }
 
+  async cleanupExpired(now = new Date()): Promise<ResumableUploadCleanupResult> {
+    await this.ensureRoots();
+    const expiresAt = now.getTime() - RESUMABLE_UPLOAD_EXPIRY_MS;
+    const referencedCompletedFiles = new Set<string>();
+    let sessions = 0;
+
+    for (const entry of await readdir(this.sessionsDirectory(), { withFileTypes: true })) {
+      if (!entry.isDirectory() || !isUuid(entry.name)) continue;
+      const directory = path.join(this.sessionsDirectory(), entry.name);
+      const metadataPath = path.join(directory, "session.json");
+      const metadataModifiedAt = await this.modifiedAt(metadataPath, directory);
+      if (metadataModifiedAt <= expiresAt) {
+        await rm(directory, { recursive: true, force: true });
+        sessions += 1;
+        continue;
+      }
+
+      try {
+        const finalized = await this.finalization({ directory, metadata: { id: entry.name, totalBytes: 1, chunkSize: 1 } });
+        if (finalized) referencedCompletedFiles.add(finalized.fileName);
+      } catch {
+        // A recent malformed session is left in place for manual investigation.
+      }
+    }
+
+    let completed = 0;
+    for (const entry of await readdir(this.completedDirectory(), { withFileTypes: true })) {
+      if (!entry.isFile() || !isFinalFileName(entry.name) || referencedCompletedFiles.has(entry.name)) continue;
+      const filePath = path.join(this.completedDirectory(), entry.name);
+      if (await this.modifiedAt(filePath) <= expiresAt) {
+        await rm(filePath, { force: true });
+        completed += 1;
+      }
+    }
+
+    return { sessions, completed };
+  }
+
   private sessionsDirectory(): string {
     return path.join(this.root, "sessions");
   }
@@ -357,6 +401,15 @@ export class ResumableUploadSessionManager {
       await rename(temporaryPath, destination);
     } finally {
       await rm(temporaryPath, { force: true });
+    }
+  }
+
+  private async modifiedAt(primaryPath: string, fallbackPath?: string): Promise<number> {
+    try {
+      return (await lstat(primaryPath)).mtimeMs;
+    } catch (error) {
+      if (fallbackPath && this.errorCode(error) === "ENOENT") return (await lstat(fallbackPath)).mtimeMs;
+      throw error;
     }
   }
 

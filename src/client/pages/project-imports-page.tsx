@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button, Modal, Segmented } from "antd";
-import { FileArchive, FolderOpen, GitBranch, HardDriveUpload, Server } from "lucide-react";
+import { Button, Modal, Segmented, Tag } from "antd";
+import { FolderOpen, GitBranch, HardDriveUpload, Server } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 
@@ -35,13 +35,18 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
   const projectId = explicitProjectId ?? params.projectId ?? "";
   const queryClient = useQueryClient();
   const folderInput = useRef<HTMLInputElement>(null);
-  const zipInput = useRef<HTMLInputElement>(null);
   const controller = useRef<UploadController | null>(null);
   const repository = useQuery({ queryKey: projectKeys.repository(projectId), queryFn: api.getRepository, retry: false });
-  const missingRepository = repository.error instanceof ApiError && repository.error.status === 404;
+  const importHistory = useQuery({
+    queryKey: ["import-reports", projectId],
+    queryFn: () => api.listImportReports(projectId, { limit: 20, offset: 0 }),
+    retry: false
+  });
+  const missingRepository = repository.data?.repository === null
+    || (repository.error instanceof ApiError && repository.error.status === 404);
+  const currentRepository = repository.data?.repository ?? null;
   const [sourceKind, setSourceKind] = useState<SourceKind>("upload");
   const [report, setReport] = useState<FolderImportReport | null>(null);
-  const [zip, setZip] = useState<File | null>(null);
   const [progress, setProgress] = useState<ImportProgressValue>(idleProgress());
   const [result, setResult] = useState<UploadSnapshotSummary | null>(null);
   const [paused, setPaused] = useState(false);
@@ -61,19 +66,19 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
     }));
     setResult(upload);
     setReport(null);
-    setZip(null);
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: keys.repository }),
       queryClient.invalidateQueries({ queryKey: projectKeys.repository(projectId) }),
       queryClient.invalidateQueries({ queryKey: keys.builds }),
-      queryClient.invalidateQueries({ queryKey: keys.releases })
+      queryClient.invalidateQueries({ queryKey: keys.releases }),
+      queryClient.invalidateQueries({ queryKey: ["import-reports", projectId] })
     ]);
   };
 
   const ensureUploadSource = async (): Promise<{ repository: Repository; replacement: boolean }> => {
-    if (repository.data?.repository.kind === "upload") return { repository: repository.data.repository, replacement: false };
-    const name = repository.data?.repository.name ?? "上传项目";
-    if (repository.data) {
+    if (currentRepository?.kind === "upload") return { repository: currentRepository, replacement: false };
+    const name = currentRepository?.name ?? "上传项目";
+    if (currentRepository) {
       const value = await api.replaceRepository({ kind: "upload", name });
       return { repository: value.repository, replacement: Boolean(value.pendingUpload) };
     }
@@ -82,9 +87,7 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
   };
 
   const upload = useMutation({
-    mutationFn: async (selectedFile?: File) => {
-      const file = selectedFile ?? zip;
-      if (!file) throw new Error("请选择项目文件夹或 ZIP 项目包");
+    mutationFn: async (file: File) => {
       const source = await ensureUploadSource();
       const nextController = createUploadController();
       controller.current = nextController;
@@ -100,7 +103,6 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
   const inspect = async (action: () => Promise<FolderImportReport>) => {
     setResult(null);
     setReport(null);
-    setZip(null);
     try {
       const value = await action();
       setReport(value);
@@ -122,7 +124,6 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
     if (!report) return;
     try {
       const file = await packageFolderImport(report, { onProgress: setProgress });
-      setZip(file);
       upload.mutate(file);
     } catch (value) {
       setProgress((current) => ({ ...current, status: "failed", detail: errorMessage(value) }));
@@ -131,11 +132,11 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
 
   const connectAlternative = useMutation({
     mutationFn: () => {
-      const name = repository.data?.repository.name ?? "项目仓库";
+      const name = currentRepository?.name ?? "项目仓库";
       const input = sourceKind === "local"
         ? { kind: "local" as const, name, path: location }
         : { kind: "git" as const, name, url: location, ...(token ? { token } : {}) };
-      return repository.data ? api.replaceRepository(input) : api.connectRepository(input);
+      return currentRepository ? api.replaceRepository(input) : api.connectRepository(input);
     },
     onSuccess: () => { setLocation(""); setToken(""); setReplaceOpen(false); void repository.refetch(); }
   });
@@ -144,38 +145,34 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
   if (repository.error && !missingRepository) return <div className="page"><ErrorState message={errorMessage(repository.error)} retry={() => void repository.refetch()} /></div>;
 
   return <div className="page project-imports-page">
-    <header className="page-header"><div><p className="eyebrow">项目资料</p><h1>资料上传</h1><p>直接选择原始项目文件夹。系统会在本机自动过滤依赖、构建产物、二进制文件和敏感文件，再安全上传到服务器。</p></div>{repository.data && <Button icon={<FileArchive aria-hidden="true" />} onClick={() => setReplaceOpen(true)}>更换资料来源</Button>}</header>
+    <header className="page-header"><div><p className="eyebrow">项目资料</p><h1>资料上传</h1><p>直接选择原始项目文件夹。系统会在本机自动过滤依赖、构建产物、二进制文件和敏感文件，再安全上传到服务器。</p></div>{currentRepository && <Button icon={<FolderOpen aria-hidden="true" />} onClick={() => setReplaceOpen(true)}>更换资料来源</Button>}</header>
     <div className="import-workspace">
       <section className="import-dropzone">
         <div className="import-dropzone-icon"><FolderOpen aria-hidden="true" /></div>
         <p className="eyebrow">推荐方式</p>
         <h2>选择完整项目文件夹</h2>
         <p>无需手动删除 <code>node_modules</code>、<code>dist</code> 或密钥文件，过滤发生在上传之前。</p>
-        <input ref={folderInput} className="visually-hidden" type="file" multiple onChange={(event) => {
+        <input ref={folderInput} className="visually-hidden" aria-label="项目文件夹" type="file" multiple onChange={(event) => {
           const files = Array.from(event.target.files ?? []);
           event.target.value = "";
           if (files.length) void inspect(() => scanSelectedFiles(files, { onProgress: setProgress }));
         }} />
         <Button type="primary" size="large" icon={<FolderOpen aria-hidden="true" />} onClick={chooseFolder}>选择项目文件夹</Button>
-        <button className="import-zip-link" type="button" onClick={() => zipInput.current?.click()}><HardDriveUpload aria-hidden="true" />已有 ZIP？也可以直接上传</button>
-        <input ref={zipInput} className="visually-hidden" aria-label="ZIP 项目包" type="file" accept="application/zip,.zip" onChange={(event) => {
-          const file = event.target.files?.[0] ?? null;
-          setZip(file);
-          setReport(null);
-          if (file) setProgress({ phase: "packaging", status: "completed", percent: 100, processedBytes: file.size, totalBytes: file.size, detail: `已选择 ${file.name}` });
-        }} />
-        {zip && !report && <div className="selected-archive"><FileArchive aria-hidden="true" /><span><strong>{zip.name}</strong><small>{formatBytes(zip.size)}</small></span><Button type="primary" loading={upload.isPending} onClick={() => upload.mutate(zip)}>开始上传</Button></div>}
       </section>
       <ImportProgress progress={progress} paused={paused} onPause={() => { controller.current?.pause(); setPaused(true); }} onResume={() => { controller.current?.resume(); setPaused(false); }} onCancel={() => controller.current?.cancel()} />
     </div>
-    {report && <div className="import-report-row"><FolderFilterReport report={report} /><div className="import-confirm-panel"><h2>确认上传这些资料</h2><p>{repository.data && repository.data.repository.kind !== "upload" ? "当前资料来源会保留为只读归档，完成上传后切换到新内容版本。" : "上传完成后仍需人工构建并发布，当前线上知识不会自动变化。"}</p><Button type="primary" loading={upload.isPending} disabled={!report.acceptedFiles.length} onClick={() => void packageAndUpload()}>确认并开始上传</Button></div></div>}
+    {report && <div className="import-report-row"><FolderFilterReport report={report} /><div className="import-confirm-panel"><h2>确认上传这些资料</h2><p>{currentRepository && currentRepository.kind !== "upload" ? "当前资料来源会保留为只读归档，完成上传后切换到新内容版本。" : "上传完成后仍需人工构建并发布，当前线上知识不会自动变化。"}</p><Button type="primary" loading={upload.isPending} disabled={!report.acceptedFiles.length} onClick={() => void packageAndUpload()}>确认并开始上传</Button></div></div>}
     {result && <ImportResultReport upload={result} />}
     {upload.error && <ErrorState message={errorMessage(upload.error)} />}
+    <section className="import-history" aria-labelledby="import-history-title">
+      <header><div><p className="eyebrow">服务端记录</p><h2 id="import-history-title">导入历史</h2></div></header>
+      {importHistory.isLoading ? <Loading label="正在加载导入历史" /> : importHistory.error ? <ErrorState message={errorMessage(importHistory.error)} retry={() => void importHistory.refetch()} /> : importHistory.data?.reports.length ? <div className="import-history-list">{importHistory.data.reports.map((item) => <div className="import-history-item" key={item.id}><div><strong>{item.sourceKind === "upload" ? "文件夹上传" : item.sourceKind}</strong><small>{new Date(item.startedAt).toLocaleString("zh-CN")}</small></div><div><span>{item.collectedFileCount} 个文件 · {formatBytes(item.collectedTextBytes)}</span>{item.ignored.total > 0 && <small>过滤 {item.ignored.total} 项</small>}</div><div>{item.status === "succeeded" ? <Tag color="green">成功</Tag> : item.status === "failed" ? <Tag color="red">失败</Tag> : <Tag>{item.status === "running" ? "进行中" : "已取消"}</Tag>}{item.failureCode && <small>{item.failureCode}</small>}</div></div>)}</div> : <div className="document-empty"><h2>暂无服务端导入记录</h2><p>完成一次资料上传后，这里会显示实际采集结果和过滤原因。</p></div>}
+    </section>
     <section className="source-options"><div><p className="eyebrow">其他来源</p><h2>服务器目录或 Git 仓库</h2><p>本地路径只适用于服务器自身可以读取的目录；电脑上的项目优先使用文件夹上传。</p></div><Button onClick={() => setReplaceOpen(true)}>配置其他来源</Button></section>
     <Modal title="更换资料来源" open={replaceOpen} onCancel={() => setReplaceOpen(false)} footer={null} destroyOnHidden>
       <p className="modal-description">旧来源和已发布知识会保留为只读历史，新来源不会自动发布。</p>
       <Segmented block value={sourceKind} onChange={(value) => setSourceKind(value as SourceKind)} options={[
-        { value: "upload", label: "文件夹 / ZIP", icon: <HardDriveUpload aria-hidden="true" /> },
+        { value: "upload", label: "项目文件夹", icon: <HardDriveUpload aria-hidden="true" /> },
         { value: "git", label: "Git HTTPS", icon: <GitBranch aria-hidden="true" /> },
         { value: "local", label: "服务器路径", icon: <Server aria-hidden="true" /> }
       ]} />

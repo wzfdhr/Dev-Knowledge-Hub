@@ -579,6 +579,7 @@ describe("PostgresAppStore audited mutations", () => {
       if (sql.includes("INSERT INTO audit_events")) throw new Error("audit unavailable");
       if (sql.includes("INSERT INTO workspaces")) return { rows: [workspaceRow] };
       if (sql.includes("INSERT INTO admin_users")) return { rows: [adminRow] };
+      if (sql.includes("INSERT INTO projects")) return { rows: [{ id: "project-1" }] };
       if (sql.includes("SELECT 1 FROM admin_users")) return { rows: [] };
       if (sql.includes("FROM projects")) return { rows: [{ id: "project-1" }] };
       if (sql.includes("INSERT INTO repositories")) return { rows: [repositoryRow] };

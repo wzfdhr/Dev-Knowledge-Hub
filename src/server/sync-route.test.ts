@@ -79,6 +79,15 @@ describe("repository sync route", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ unchanged: false, ref: "main", fileCount: 1 });
     expect(store.auditEvents.at(-1)).toMatchObject({ action: "repository.sync_succeeded" });
+    expect(store.importReports).toHaveLength(1);
+    expect(store.importReports[0]).toMatchObject({
+      projectId: (await store.listProjects((await store.defaultWorkspace())!.id))[0].id,
+      sourceKind: "local",
+      status: "succeeded",
+      collectedFileCount: 1,
+      collectedTextBytes: "export const value = true;\n".length,
+      ignored: { total: 0, reasons: {} }
+    });
   });
 
   test("returns DIRTY_WORKTREE paths and audits failure", async () => {

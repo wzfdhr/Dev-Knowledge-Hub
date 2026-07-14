@@ -43,9 +43,11 @@ function activateUploadRepository(
   store: UploadRepositoryStore,
   workspaceId: string
 ): void {
+  const projects = (store as unknown as { projects: Array<{ id: string; workspaceId: string }> }).projects;
   store.uploadRepository = {
     id: "upload-repository-1",
     workspaceId,
+    projectId: projects.find((project) => project.workspaceId === workspaceId)!.id,
     kind: "upload",
     name: "Uploaded source",
     localPath: null,

@@ -1,0 +1,9 @@
+[
+  { "id": "symbol-add", "query": "add", "expectedTitle": "add" },
+  { "id": "symbol-clamp", "query": "clamp", "expectedTitle": "clamp" },
+  { "id": "module-math", "query": "src/math.ts", "expectedTitle": "src/math.ts" },
+  { "id": "dependency-util", "query": "src/util.js", "expectedTitle": "src/util.js" },
+  { "id": "command-test", "query": "test", "expectedTitle": "test" },
+  { "id": "chinese-test-guide", "query": "运行与测试", "expectedTitle": "运行与测试指南" },
+  { "id": "no-result", "query": "不存在的虚构符号", "expectNoResults": true }
+]

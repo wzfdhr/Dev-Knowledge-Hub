@@ -86,12 +86,12 @@ async function context(store: MemoryAppStore = new MemoryAppStore()) {
 
 describe("manual feedback workflow", () => {
   test("filters feedback and enforces the transition table", async () => {
-    const { app, store, cookie, workspaceId } = await context();
+    const { app, store, cookie, workspaceId, release } = await context();
     const persistence = store as unknown as {
       createFeedback(input: Record<string, unknown>): Promise<{ id: string }>;
     };
     const feedback = await persistence.createFeedback({
-      workspaceId, query: "deployment", reason: "missing", expected: "steps",
+      workspaceId, releaseId: release.id, query: "deployment", reason: "missing", expected: "steps",
       citations: [{
         path: "src/math.ts", startLine: 16, endLine: 18,
         commitSha: "b".repeat(40), blobHash: "c".repeat(64)
@@ -213,9 +213,9 @@ describe("audited mutation atomicity", () => {
 
   test("does not revoke a token when revocation audit fails", async () => {
     const store = new FailingAuditStore();
-    const { app, cookie, workspaceId } = await context(store);
+    const { app, cookie, workspaceId, repository } = await context(store);
     const token = await store.createMcpToken({
-      workspaceId, projectId: "project-1", name: "CI", tokenHash: "c".repeat(64), tokenPrefix: "dkh_example"
+      workspaceId, projectId: repository.projectId, name: "CI", tokenHash: "c".repeat(64), tokenPrefix: "dkh_example"
     });
     const auditCount = store.auditEvents.length;
     store.failAudit = true;
@@ -258,8 +258,10 @@ describe("audited mutation atomicity", () => {
 
   test("rolls back a feedback transition and maps audit failure as server failure", async () => {
     const store = new FailingAuditStore();
-    const { app, cookie, workspaceId } = await context(store);
-    const feedback = await store.createFeedback({ workspaceId, query: "deploy", reason: "missing" });
+    const { app, cookie, workspaceId, release } = await context(store);
+    const feedback = await store.createFeedback({
+      workspaceId, releaseId: release.id, query: "deploy", reason: "missing"
+    });
     const auditCount = store.auditEvents.length;
     store.failAudit = true;
 
@@ -278,7 +280,9 @@ describe("audited mutation atomicity", () => {
   test("rolls back rebuild creation and association when its audit fails", async () => {
     const store = new FailingAuditStore();
     const { app, cookie, workspaceId, release } = await context(store);
-    const feedback = await store.createFeedback({ workspaceId, query: "deploy", reason: "missing" });
+    const feedback = await store.createFeedback({
+      workspaceId, releaseId: release.id, query: "deploy", reason: "missing"
+    });
     await store.transitionFeedback(workspaceId, feedback.id, "acknowledged");
     const buildCount = store.builds.length;
     const eventCount = store.buildEvents.length;

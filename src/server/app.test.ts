@@ -1,8 +1,9 @@
 import { describe, expect, test } from "vitest";
 
 import { buildServer } from "./app";
-import { createSessionToken } from "./security/session";
 import { MemoryAppStore } from "./persistence/memory-store";
+import { hashPassword } from "./security/password";
+import { authenticatedCookie, csrfHeaders } from "./test-support/csrf";
 
 function testServer() {
   return buildServer({
@@ -113,7 +114,8 @@ describe("buildServer", () => {
 
   test("rotates an MCP token only for the owning project administrator", async () => {
     const store = new MemoryAppStore();
-    const setup = await store.createInitialSetup("admin@example.com", "hash");
+    const password = "correct horse battery staple";
+    const setup = await store.createInitialSetup("admin@example.com", await hashPassword(password));
     const project = (await store.listProjects(setup!.workspace.id))[0];
     const previous = await store.createMcpToken({
       workspaceId: setup!.workspace.id,
@@ -123,9 +125,6 @@ describe("buildServer", () => {
       tokenPrefix: "dkh_old"
     });
     const secret = "rotation-test-session-secret";
-    const session = await createSessionToken({
-      adminId: setup!.admin.id, workspaceId: setup!.workspace.id, sessionVersion: setup!.admin.sessionVersion
-    }, secret);
     const app = buildServer({
       store,
       masterKey: Buffer.alloc(32, 1).toString("base64"),
@@ -133,11 +132,15 @@ describe("buildServer", () => {
       dataDir: "/tmp/devkh-rotation-test",
       nodeEnv: "test"
     });
+    const login = await app.inject({
+      method: "POST", url: "/api/session", payload: { email: "admin@example.com", password }
+    });
+    const cookie = authenticatedCookie(login);
 
     const response = await app.inject({
       method: "POST",
       url: `/api/mcp/tokens/${previous.id}/rotate`,
-      headers: { cookie: `devkh_session=${session}` }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
 
     expect(response.statusCode).toBe(200);
@@ -154,8 +157,9 @@ describe("buildServer", () => {
     const store = new MemoryAppStore();
     const setup = await store.createInitialSetup("admin@example.com", "hash");
     const project = (await store.listProjects(setup!.workspace.id))[0];
+    const password = "correct horse battery staple";
     const member = await store.createTeamMember(setup!.workspace.id, {
-      email: "member@example.com", passwordHash: "hash", role: "member"
+      email: "member@example.com", passwordHash: await hashPassword(password), role: "member"
     }, setup!.admin.id);
     await store.addProjectMember(setup!.workspace.id, project.id, member!.id, "member", setup!.admin.id);
     const token = await store.createMcpToken({
@@ -166,9 +170,6 @@ describe("buildServer", () => {
       tokenPrefix: "dkh_active"
     });
     const secret = "rotation-member-test-session-secret";
-    const session = await createSessionToken({
-      adminId: member!.id, workspaceId: setup!.workspace.id, sessionVersion: member!.sessionVersion
-    }, secret);
     const app = buildServer({
       store,
       masterKey: Buffer.alloc(32, 1).toString("base64"),
@@ -176,11 +177,15 @@ describe("buildServer", () => {
       dataDir: "/tmp/devkh-rotation-member-test",
       nodeEnv: "test"
     });
+    const login = await app.inject({
+      method: "POST", url: "/api/session", payload: { email: "member@example.com", password }
+    });
+    const cookie = authenticatedCookie(login);
 
     const response = await app.inject({
       method: "POST",
       url: `/api/mcp/tokens/${token.id}/rotate`,
-      headers: { cookie: `devkh_session=${session}` }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
 
     expect(response.statusCode).toBe(403);

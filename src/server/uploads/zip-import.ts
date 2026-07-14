@@ -4,6 +4,7 @@ import {
   chmod,
   cp,
   mkdir,
+  open,
   readdir,
   rename,
   rm,
@@ -231,6 +232,20 @@ async function moveDirectory(source: string, destination: string): Promise<void>
   }
 }
 
+async function assertZipSignature(archivePath: string): Promise<void> {
+  const file = await open(archivePath, "r");
+  try {
+    const header = Buffer.alloc(4);
+    const { bytesRead } = await file.read(header, 0, header.length, 0);
+    const signature = header.subarray(0, bytesRead).toString("binary");
+    if (!["PK\u0003\u0004", "PK\u0005\u0006", "PK\u0007\u0008"].includes(signature)) {
+      throw new UploadArchiveError("INVALID_ZIP", "Invalid ZIP archive");
+    }
+  } finally {
+    await file.close();
+  }
+}
+
 export async function importZipArchive({
   archivePath: sourceArchivePath,
   dataDir,
@@ -262,6 +277,7 @@ export async function importZipArchive({
         "ZIP exceeds the 500 MiB compressed limit"
       );
     }
+    await assertZipSignature(sourceArchivePath);
     reader = new ZipReader(new BlobReader(await openAsBlob(sourceArchivePath)));
     const entries = validatedEntries(await readBoundedEntries(reader, limits), limits);
     const ignoredReasons: Record<string, number> = {};

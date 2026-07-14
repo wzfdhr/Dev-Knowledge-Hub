@@ -32,7 +32,15 @@ import {
 import { decryptSecret, encryptSecret } from "./security/crypto.js";
 import { DirtyWorktreeError, syncRepository } from "./git/snapshot.js";
 import { hashPassword, verifyPassword } from "./security/password.js";
-import { createSessionToken, verifySessionToken } from "./security/session.js";
+import {
+  createCsrfToken,
+  createOpaqueSessionId,
+  hashSessionId,
+  SESSION_DURATION_SECONDS,
+  verifyCsrfToken,
+  verifySessionToken
+} from "./security/session.js";
+import { MemorySessionStore, type SessionStore } from "./security/session-store.js";
 import { createCodexConnectionPack } from "./codex/connection-pack.js";
 import type { BuildEvent, BuildService } from "./knowledge/build-service.js";
 import { deriveChangeImpact } from "./knowledge/change-impact.js";
@@ -61,6 +69,7 @@ import {
 } from "./uploads/resumable-upload.js";
 
 const SESSION_COOKIE = "devkh_session";
+const CSRF_COOKIE = "devkh_csrf";
 const SESSION_MAX_AGE = 8 * 60 * 60;
 const CSP_NONCE_PLACEHOLDER = "<!-- devkh:csp-nonce -->";
 
@@ -153,6 +162,8 @@ export interface ServerOptions {
   clientDir?: string;
   rateLimits?: RateLimitPolicy;
   publicBaseUrl?: string;
+  sessionStore?: SessionStore;
+  legacySessionReadUntil?: Date;
 }
 
 function sseEvent(event: BuildEvent): string {
@@ -273,6 +284,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   const resumableUploads = new ResumableUploadSessionManager(
     path.join(options.dataDir, "upload-staging")
   );
+  const sessionStore = options.sessionStore ?? new MemorySessionStore();
   registerHttpSecurity(server, options.rateLimits ?? DEFAULT_RATE_LIMITS);
   server.addContentTypeParser(
     "application/octet-stream",
@@ -331,20 +343,49 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     secure: options.nodeEnv === "production",
     maxAge: SESSION_MAX_AGE
   };
+  const csrfCookieOptions = { ...cookieOptions, httpOnly: false, sameSite: "strict" as const };
 
   async function requireAdmin(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const token = request.cookies[SESSION_COOKIE];
-    if (!token) {
+    const sessionId = request.cookies[SESSION_COOKIE];
+    if (!sessionId) {
       sendError(reply, 401, "UNAUTHORIZED", "Authentication required");
       return;
     }
     try {
-      const session = await verifySessionToken(token, options.sessionSecret);
-      const admin = await options.store.findAdminById(session.adminId, session.workspaceId);
-      if (!admin || admin.disabledAt || admin.sessionVersion !== session.sessionVersion) {
-        throw new Error("Unknown session administrator");
+      const session = await sessionStore.findActive(hashSessionId(sessionId));
+      if (session) {
+        const admin = await options.store.findAdminById(session.userId, session.workspaceId);
+        if (!admin || admin.disabledAt || admin.sessionVersion !== session.sessionVersion) {
+          throw new Error("Unknown session administrator");
+        }
+        if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
+          const csrfCookie = request.cookies[CSRF_COOKIE];
+          const csrfHeader = request.headers["x-devkh-csrf"];
+          if (!csrfCookie || typeof csrfHeader !== "string" || csrfHeader !== csrfCookie
+            || verifyCsrfToken(csrfHeader, sessionId, options.sessionSecret) !== session.csrfSecretHash) {
+            sendError(reply, 403, "CSRF_INVALID", "CSRF token is missing or invalid");
+            return;
+          }
+        }
+        (request as AuthenticatedRequest).sessionAdmin = admin;
+        return;
       }
-      (request as AuthenticatedRequest).sessionAdmin = admin;
+
+      if (options.legacySessionReadUntil && options.legacySessionReadUntil > new Date()) {
+        if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
+          sendError(reply, 401, "SESSION_REFRESH_REQUIRED", "Please sign in again to continue");
+          return;
+        }
+        const legacy = await verifySessionToken(sessionId, options.sessionSecret);
+        const admin = await options.store.findAdminById(legacy.adminId, legacy.workspaceId);
+        if (!admin || admin.disabledAt || admin.sessionVersion !== legacy.sessionVersion) {
+          throw new Error("Unknown legacy session administrator");
+        }
+        (request as AuthenticatedRequest).sessionAdmin = admin;
+        return;
+      }
+
+      throw new Error("Unknown session");
     } catch {
       sendError(reply, 401, "UNAUTHORIZED", "Authentication required");
     }
@@ -479,12 +520,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       return sendError(reply, 401, "INVALID_CREDENTIALS", "Invalid email or password");
     }
 
-    const token = await createSessionToken(
-      // The version lets administrators invalidate issued tokens without storing tokens server-side.
-      { adminId: admin.id, workspaceId: admin.workspaceId, sessionVersion: admin.sessionVersion },
-      options.sessionSecret
-    );
-    reply.setCookie(SESSION_COOKIE, token, cookieOptions);
+    const sessionId = createOpaqueSessionId();
+    const csrf = createCsrfToken(sessionId, options.sessionSecret);
+    await sessionStore.create({
+      idHash: hashSessionId(sessionId), userId: admin.id, workspaceId: admin.workspaceId, csrfSecretHash: csrf.nonceHash,
+      sessionVersion: admin.sessionVersion, expiresAt: new Date(Date.now() + SESSION_DURATION_SECONDS * 1_000), revokedAt: null
+    });
+    reply.setCookie(SESSION_COOKIE, sessionId, cookieOptions);
+    reply.setCookie(CSRF_COOKIE, csrf.token, csrfCookieOptions);
     void options.store.recordAudit({
       workspaceId: admin.workspaceId,
       actorId: admin.id,
@@ -494,8 +537,11 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return { authenticated: true, admin: { id: admin.id, email: admin.email, role: admin.role } };
   });
 
-  server.delete("/api/session", async (_request, reply) => {
+  server.delete("/api/session", { preHandler: requireAdmin }, async (request, reply) => {
+    const sessionId = request.cookies[SESSION_COOKIE];
+    if (sessionId) await sessionStore.revoke(hashSessionId(sessionId));
     reply.clearCookie(SESSION_COOKIE, { path: "/" });
+    reply.clearCookie(CSRF_COOKIE, { path: "/" });
     return reply.code(204).send();
   });
 
@@ -1353,9 +1399,18 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       const requestDirectory = path.join(options.dataDir, "uploads", randomUUID());
       const archivePath = path.join(requestDirectory, "archive.zip");
       let replacementActivated = false;
+      let replacementDiscarded = false;
       const cleanup = () => fs.rm(requestDirectory, { recursive: true, force: true });
+      const discardReplacement = async () => {
+        if (!replacementActivated && !replacementDiscarded) {
+          replacementDiscarded = true;
+          await options.store.discardPendingUploadReplacement(admin.workspaceId, repository.id)
+            .catch(() => undefined);
+        }
+      };
       const uploadError = async (statusCode: number, code: string, message: string) => {
         await cleanup();
+        await discardReplacement();
         return sendError(reply, statusCode, code, message);
       };
       await fs.mkdir(requestDirectory, { recursive: true, mode: 0o700 });
@@ -1412,10 +1467,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         return uploadError(500, "UPLOAD_FAILED", "ZIP upload failed");
       } finally {
         await cleanup();
-        if (!replacementActivated) {
-          await options.store.discardPendingUploadReplacement(admin.workspaceId, repository.id)
-            .catch(() => undefined);
-        }
+        await discardReplacement();
       }
     }
   );

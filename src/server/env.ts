@@ -10,6 +10,11 @@ const publicBaseUrlSchema = z.string().url().refine((value) => {
   return url.protocol === "https:" && !url.username && !url.password;
 }, "PUBLIC_BASE_URL must be an HTTPS URL without credentials");
 
+const legacySessionReadUntilSchema = z.string().datetime({ offset: true })
+  .refine((value) => new Date(value).getTime() <= Date.now() + 24 * 60 * 60 * 1_000,
+    "DEVKH_LEGACY_SESSION_READ_UNTIL must be within 24 hours")
+  .transform((value) => new Date(value));
+
 const sharedEnvSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
   HOST: z.string().min(1).default("127.0.0.1"),
@@ -17,7 +22,8 @@ const sharedEnvSchema = z.object({
   DATABASE_URL: z.string().min(1).optional(),
   DEVKH_MASTER_KEY: masterKeySchema.optional(),
   DEVKH_SESSION_SECRET: z.string().min(1).optional(),
-  PUBLIC_BASE_URL: publicBaseUrlSchema.optional()
+  PUBLIC_BASE_URL: publicBaseUrlSchema.optional(),
+  DEVKH_LEGACY_SESSION_READ_UNTIL: legacySessionReadUntilSchema.optional()
 });
 
 const productionEnvSchema = sharedEnvSchema.extend({
@@ -37,6 +43,7 @@ export interface AppEnv {
   masterKey?: string;
   sessionSecret?: string;
   publicBaseUrl?: string;
+  legacySessionReadUntil?: Date;
 }
 
 export function loadEnv({
@@ -56,7 +63,8 @@ export function loadEnv({
       databaseUrl: parsed.DATABASE_URL,
       masterKey: parsed.DEVKH_MASTER_KEY,
       sessionSecret: parsed.DEVKH_SESSION_SECRET,
-      publicBaseUrl: parsed.PUBLIC_BASE_URL
+      publicBaseUrl: parsed.PUBLIC_BASE_URL,
+      legacySessionReadUntil: parsed.DEVKH_LEGACY_SESSION_READ_UNTIL
     };
   }
 
@@ -69,6 +77,7 @@ export function loadEnv({
     databaseUrl: parsed.DATABASE_URL,
     masterKey: parsed.DEVKH_MASTER_KEY,
     sessionSecret: parsed.DEVKH_SESSION_SECRET,
-    publicBaseUrl: parsed.PUBLIC_BASE_URL
+    publicBaseUrl: parsed.PUBLIC_BASE_URL,
+    legacySessionReadUntil: parsed.DEVKH_LEGACY_SESSION_READ_UNTIL
   };
 }

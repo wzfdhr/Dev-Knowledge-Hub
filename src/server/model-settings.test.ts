@@ -1,3 +1,4 @@
+import { authenticatedCookie, csrfHeaders } from "./test-support/csrf";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { buildServer } from "./app";
@@ -27,7 +28,7 @@ async function context() {
   });
   return {
     app, store, masterKey,
-    cookie: String(login.headers["set-cookie"]).split(";", 1)[0]
+    cookie: authenticatedCookie(login)
   };
 }
 
@@ -39,7 +40,7 @@ describe("model settings", () => {
     const plaintext = "sk-model-key-never-returned";
 
     const saved = await app.inject({
-      method: "PUT", url: "/api/settings/model", headers: { cookie },
+      method: "PUT", url: "/api/settings/model", headers: { cookie, ...csrfHeaders(cookie) },
       payload: { provider: "openai", model: "gpt-5-mini", apiKey: plaintext }
     });
 
@@ -58,7 +59,7 @@ describe("model settings", () => {
     expect(decryptSecret(store.encryptedCredentials[0].ciphertext, masterKey)).toBe(plaintext);
 
     const fetched = await app.inject({
-      method: "GET", url: "/api/settings/model", headers: { cookie }
+      method: "GET", url: "/api/settings/model", headers: { cookie, ...csrfHeaders(cookie) }
     });
     expect(fetched.json()).toEqual(saved.json());
     expect(JSON.stringify(fetched.json())).not.toContain(plaintext);
@@ -67,13 +68,13 @@ describe("model settings", () => {
   test("blank API key preserves the existing encrypted secret", async () => {
     const { app, store, cookie } = await context();
     await app.inject({
-      method: "PUT", url: "/api/settings/model", headers: { cookie },
+      method: "PUT", url: "/api/settings/model", headers: { cookie, ...csrfHeaders(cookie) },
       payload: { provider: "openai", model: "gpt-5-mini", apiKey: "existing-secret" }
     });
     const ciphertext = store.encryptedCredentials[0].ciphertext;
 
     const updated = await app.inject({
-      method: "PUT", url: "/api/settings/model", headers: { cookie },
+      method: "PUT", url: "/api/settings/model", headers: { cookie, ...csrfHeaders(cookie) },
       payload: { provider: "anthropic", model: "claude-sonnet-4-5", apiKey: "" }
     });
 
@@ -87,7 +88,7 @@ describe("model settings", () => {
   test("reports an unconfigured model without creating fake state", async () => {
     const { app, cookie } = await context();
     const response = await app.inject({
-      method: "GET", url: "/api/settings/model", headers: { cookie }
+      method: "GET", url: "/api/settings/model", headers: { cookie, ...csrfHeaders(cookie) }
     });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ config: null });

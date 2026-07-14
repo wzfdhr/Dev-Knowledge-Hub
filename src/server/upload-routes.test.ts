@@ -1,3 +1,4 @@
+import { authenticatedCookie, csrfHeaders } from "./test-support/csrf";
 import { chmod, mkdtemp, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -36,6 +37,15 @@ class UploadRepositoryStore extends MemoryAppStore {
 
   override async currentRepository(workspaceId: string): Promise<RepositoryRecord | null> {
     return this.uploadRepository?.workspaceId === workspaceId ? this.uploadRepository : null;
+  }
+}
+
+class TrackingUploadStore extends MemoryAppStore {
+  discarded: string[] = [];
+
+  override async discardPendingUploadReplacement(workspaceId: string, repositoryId: string): Promise<void> {
+    this.discarded.push(repositoryId);
+    await super.discardPendingUploadReplacement(workspaceId, repositoryId);
   }
 }
 
@@ -81,9 +91,10 @@ async function authenticatedApp(store: MemoryAppStore = new MemoryAppStore()) {
   });
   return {
     app,
+    store,
     dataDir,
     workspaceId: setup.json().workspace.id as string,
-    cookie: String(login.headers["set-cookie"]).split(";", 1)[0]
+    cookie: authenticatedCookie(login)
   };
 }
 
@@ -121,7 +132,7 @@ describe("POST /api/repositories/current/uploads", () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/repositories/current/uploads",
-      headers: { cookie, ...multipart(Buffer.alloc(0)).headers },
+      headers: { cookie, ...csrfHeaders(cookie), ...multipart(Buffer.alloc(0)).headers },
       payload: multipart(Buffer.alloc(0)).payload
     });
 
@@ -134,14 +145,14 @@ describe("POST /api/repositories/current/uploads", () => {
     await app.inject({
       method: "POST",
       url: "/api/repositories",
-      headers: { cookie },
+      headers: { cookie, ...csrfHeaders(cookie) },
       payload: { kind: "local", name: "Local", path: "/tmp/local" }
     });
     const body = multipart(await archive());
     const response = await app.inject({
       method: "POST",
       url: "/api/repositories/current/uploads",
-      headers: { cookie, ...body.headers },
+      headers: { cookie, ...csrfHeaders(cookie), ...body.headers },
       payload: body.payload
     });
 
@@ -157,7 +168,7 @@ describe("POST /api/repositories/current/uploads", () => {
     const response = await context.app.inject({
       method: "POST",
       url: "/api/repositories/current/uploads",
-      headers: { cookie: context.cookie, ...body.headers },
+      headers: { cookie: context.cookie, ...csrfHeaders(context.cookie), ...body.headers },
       payload: body.payload
     });
 
@@ -178,13 +189,13 @@ describe("POST /api/repositories/current/uploads", () => {
     await context.app.inject({
       method: "POST",
       url: "/api/repositories",
-      headers: { cookie: context.cookie },
+      headers: { cookie: context.cookie, ...csrfHeaders(context.cookie) },
       payload: { kind: "local", name: "Current project", path: "/tmp/current-project" }
     });
     const prepared = await context.app.inject({
       method: "POST",
       url: "/api/repositories/current/replace",
-      headers: { cookie: context.cookie },
+      headers: { cookie: context.cookie, ...csrfHeaders(context.cookie) },
       payload: { kind: "upload", name: "Uploaded replacement" }
     });
     const candidateId = prepared.json().repository.id as string;
@@ -193,7 +204,7 @@ describe("POST /api/repositories/current/uploads", () => {
     const imported = await context.app.inject({
       method: "POST",
       url: `/api/repositories/${candidateId}/uploads`,
-      headers: { cookie: context.cookie, ...body.headers },
+      headers: { cookie: context.cookie, ...csrfHeaders(context.cookie), ...body.headers },
       payload: body.payload
     });
 
@@ -201,23 +212,23 @@ describe("POST /api/repositories/current/uploads", () => {
     const current = await context.app.inject({
       method: "GET",
       url: "/api/repositories/current",
-      headers: { cookie: context.cookie }
+      headers: { cookie: context.cookie, ...csrfHeaders(context.cookie) }
     });
     expect(current.json()).toMatchObject({ repository: { id: candidateId, kind: "upload" } });
   });
 
   test("discards a failed uploaded replacement while preserving the current repository", async () => {
-    const context = await authenticatedApp();
+    const context = await authenticatedApp(new TrackingUploadStore());
     await context.app.inject({
       method: "POST",
       url: "/api/repositories",
-      headers: { cookie: context.cookie },
+      headers: { cookie: context.cookie, ...csrfHeaders(context.cookie) },
       payload: { kind: "local", name: "Current project", path: "/tmp/current-project" }
     });
     const prepared = await context.app.inject({
       method: "POST",
       url: "/api/repositories/current/replace",
-      headers: { cookie: context.cookie },
+      headers: { cookie: context.cookie, ...csrfHeaders(context.cookie) },
       payload: { kind: "upload", name: "Broken replacement" }
     });
     const body = multipart(Buffer.from("not a zip"));
@@ -225,14 +236,18 @@ describe("POST /api/repositories/current/uploads", () => {
     const imported = await context.app.inject({
       method: "POST",
       url: `/api/repositories/${prepared.json().repository.id}/uploads`,
-      headers: { cookie: context.cookie, ...body.headers },
+      headers: { cookie: context.cookie, ...csrfHeaders(context.cookie), ...body.headers },
       payload: body.payload
     });
 
     expect(imported.statusCode).toBe(400);
-    const current = await context.app.inject({ method: "GET", url: "/api/repositories/current", headers: { cookie: context.cookie } });
+    expect(imported.json()).toMatchObject({ error: { code: "INVALID_ZIP" } });
+    expect((context.store as TrackingUploadStore).discarded).toEqual([prepared.json().repository.id]);
+    expect((context.store as unknown as { sourceSnapshots: Array<{ repositoryId: string }> }).sourceSnapshots)
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ repositoryId: prepared.json().repository.id })]));
+    const current = await context.app.inject({ method: "GET", url: "/api/repositories/current", headers: { cookie: context.cookie, ...csrfHeaders(context.cookie) } });
     expect(current.json()).toMatchObject({ repository: { name: "Current project", kind: "local" } });
-    const archived = await context.app.inject({ method: "GET", url: "/api/repositories/archived", headers: { cookie: context.cookie } });
+    const archived = await context.app.inject({ method: "GET", url: "/api/repositories/archived", headers: { cookie: context.cookie, ...csrfHeaders(context.cookie) } });
     expect(archived.json()).toEqual({ repositories: [] });
   });
 
@@ -258,7 +273,7 @@ describe("POST /api/repositories/current/uploads", () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/repositories/current/uploads",
-      headers: { cookie, "content-type": `multipart/form-data; boundary=${boundary}` },
+      headers: { cookie, ...csrfHeaders(cookie), "content-type": `multipart/form-data; boundary=${boundary}` },
       payload
     });
 
@@ -275,7 +290,7 @@ describe("resumable upload session routes", () => {
     const created = await app.inject({
       method: "POST",
       url: "/api/uploads/resumable",
-      headers: { cookie },
+      headers: { cookie, ...csrfHeaders(cookie) },
       payload: { totalBytes: 9, chunkSize: 4 }
     });
 
@@ -288,13 +303,13 @@ describe("resumable upload session routes", () => {
   test("accepts an indexed binary chunk and reports resumable progress", async () => {
     const { app, cookie } = await authenticatedApp();
     const session = await app.inject({
-      method: "POST", url: "/api/uploads/resumable", headers: { cookie }, payload: { totalBytes: 8, chunkSize: 4 }
+      method: "POST", url: "/api/uploads/resumable", headers: { cookie, ...csrfHeaders(cookie) }, payload: { totalBytes: 8, chunkSize: 4 }
     });
 
     const uploaded = await app.inject({
       method: "PUT",
       url: `/api/uploads/resumable/${session.json<{ id: string }>().id}/chunks/0`,
-      headers: { cookie, "content-type": "application/octet-stream", "x-upload-chunk-size": "4" },
+      headers: { cookie, ...csrfHeaders(cookie), "content-type": "application/octet-stream", "x-upload-chunk-size": "4" },
       payload: Buffer.from("abcd")
     });
 
@@ -305,21 +320,21 @@ describe("resumable upload session routes", () => {
   test("does not disclose one member's resumable session to another member", async () => {
     const { app, cookie } = await authenticatedApp();
     await app.inject({
-      method: "POST", url: "/api/members", headers: { cookie },
+      method: "POST", url: "/api/members", headers: { cookie, ...csrfHeaders(cookie) },
       payload: { email: "member@example.com", password: "a secure member password", role: "member" }
     });
     const memberLogin = await app.inject({
       method: "POST", url: "/api/session",
       payload: { email: "member@example.com", password: "a secure member password" }
     });
-    const memberCookie = String(memberLogin.headers["set-cookie"]).split(";", 1)[0];
+    const memberCookie = authenticatedCookie(memberLogin);
     const session = await app.inject({
-      method: "POST", url: "/api/uploads/resumable", headers: { cookie }, payload: { totalBytes: 8, chunkSize: 4 }
+      method: "POST", url: "/api/uploads/resumable", headers: { cookie, ...csrfHeaders(cookie) }, payload: { totalBytes: 8, chunkSize: 4 }
     });
 
     const status = await app.inject({
       method: "GET", url: `/api/uploads/resumable/${session.json<{ id: string }>().id}`,
-      headers: { cookie: memberCookie }
+      headers: { cookie: memberCookie, ...csrfHeaders(memberCookie) }
     });
 
     expect(status.json()).toMatchObject({ error: { code: "SESSION_NOT_FOUND" } });
@@ -329,32 +344,32 @@ describe("resumable upload session routes", () => {
   test("finalizes a resumable ZIP into an immutable project upload snapshot", async () => {
     const { app, cookie, dataDir } = await authenticatedApp();
     const project = await app.inject({
-      method: "POST", url: "/api/projects", headers: { cookie }, payload: { name: "上传项目", slug: "upload-project" }
+      method: "POST", url: "/api/projects", headers: { cookie, ...csrfHeaders(cookie) }, payload: { name: "上传项目", slug: "upload-project" }
     });
     const projectId = project.json<{ project: { id: string } }>().project.id;
     await app.inject({
       method: "POST",
       url: `/api/projects/${projectId}/repositories`,
-      headers: { cookie },
+      headers: { cookie, ...csrfHeaders(cookie) },
       payload: { kind: "upload", name: "项目包" }
     });
     const zip = await archive();
     const session = await app.inject({
-      method: "POST", url: "/api/uploads/resumable", headers: { cookie },
+      method: "POST", url: "/api/uploads/resumable", headers: { cookie, ...csrfHeaders(cookie) },
       payload: { totalBytes: zip.length, chunkSize: zip.length }
     });
     const sessionId = session.json<{ id: string }>().id;
     await app.inject({
       method: "PUT",
       url: `/api/uploads/resumable/${sessionId}/chunks/0`,
-      headers: { cookie, "content-type": "application/octet-stream", "x-upload-chunk-size": String(zip.length) },
+      headers: { cookie, ...csrfHeaders(cookie), "content-type": "application/octet-stream", "x-upload-chunk-size": String(zip.length) },
       payload: zip
     });
 
     const imported = await app.inject({
       method: "POST",
       url: `/api/projects/${projectId}/uploads/resumable/${sessionId}/import`,
-      headers: { cookie }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
 
     expect(imported.statusCode).toBe(201);
@@ -366,33 +381,33 @@ describe("resumable upload session routes", () => {
   test("activates an uploaded replacement only after its resumable import succeeds", async () => {
     const { app, cookie, dataDir } = await authenticatedApp();
     await app.inject({
-      method: "POST", url: "/api/repositories", headers: { cookie },
+      method: "POST", url: "/api/repositories", headers: { cookie, ...csrfHeaders(cookie) },
       payload: { kind: "local", name: "Current project", path: "/tmp/current-project" }
     });
     const prepared = await app.inject({
-      method: "POST", url: "/api/repositories/current/replace", headers: { cookie },
+      method: "POST", url: "/api/repositories/current/replace", headers: { cookie, ...csrfHeaders(cookie) },
       payload: { kind: "upload", name: "Uploaded replacement" }
     });
     const repositoryId = prepared.json<{ repository: { id: string } }>().repository.id;
     const zip = await archive();
     const session = await app.inject({
-      method: "POST", url: "/api/uploads/resumable", headers: { cookie },
+      method: "POST", url: "/api/uploads/resumable", headers: { cookie, ...csrfHeaders(cookie) },
       payload: { totalBytes: zip.length, chunkSize: zip.length }
     });
     const sessionId = session.json<{ id: string }>().id;
     await app.inject({
       method: "PUT", url: `/api/uploads/resumable/${sessionId}/chunks/0`,
-      headers: { cookie, "content-type": "application/octet-stream", "x-upload-chunk-size": String(zip.length) },
+      headers: { cookie, ...csrfHeaders(cookie), "content-type": "application/octet-stream", "x-upload-chunk-size": String(zip.length) },
       payload: zip
     });
 
     const imported = await app.inject({
       method: "POST", url: `/api/repositories/${repositoryId}/uploads/resumable/${sessionId}/import`,
-      headers: { cookie }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
 
     expect(imported.statusCode).toBe(201);
-    const current = await app.inject({ method: "GET", url: "/api/repositories/current", headers: { cookie } });
+    const current = await app.inject({ method: "GET", url: "/api/repositories/current", headers: { cookie, ...csrfHeaders(cookie) } });
     expect(current.json()).toMatchObject({ repository: { id: repositoryId, kind: "upload" } });
     expect(await readdir(path.join(dataDir, "upload-staging", "sessions"))).toEqual([]);
     expect(await readdir(path.join(dataDir, "upload-staging", "completed"))).toEqual([]);

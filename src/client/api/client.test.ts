@@ -24,6 +24,20 @@ describe("release API client", () => {
 });
 
 describe("project Codex API client", () => {
+  test("attaches the double-submit CSRF header to cookie-authenticated writes", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      id: "token", projectId: "project-1", name: "Local Codex", token: "dkh_secret"
+    }), { status: 201, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetch);
+    vi.stubGlobal("document", { cookie: "devkh_csrf=signed-nonce" });
+
+    await api.createMcpToken("Local Codex", "project-1");
+
+    expect(fetch).toHaveBeenCalledWith("/api/mcp/tokens", expect.objectContaining({
+      headers: expect.objectContaining({ "x-devkh-csrf": "signed-nonce" })
+    }));
+  });
+
   test("creates an MCP token with an explicit project scope", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({
       id: "token", projectId: "project-1", name: "Local Codex", token: "dkh_secret"

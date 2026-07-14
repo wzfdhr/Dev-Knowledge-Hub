@@ -31,6 +31,20 @@ describe("loadEnv", () => {
     });
   });
 
+  test("loads a bounded legacy session read window as a date", () => {
+    expect(loadEnv({
+      mode: "development",
+      env: { DEVKH_LEGACY_SESSION_READ_UNTIL: "2026-07-15T00:00:00.000Z" }
+    }).legacySessionReadUntil).toEqual(new Date("2026-07-15T00:00:00.000Z"));
+  });
+
+  test("rejects a legacy session window longer than 24 hours", () => {
+    expect(() => loadEnv({
+      mode: "development",
+      env: { DEVKH_LEGACY_SESSION_READ_UNTIL: new Date(Date.now() + 25 * 60 * 60 * 1_000).toISOString() }
+    })).toThrow(/24 hours/);
+  });
+
   test("production mode rejects a master key that is not exactly 32 base64 bytes", () => {
     expect(() => loadEnv({
       mode: "production",

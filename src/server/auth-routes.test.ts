@@ -4,6 +4,8 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import { buildServer, type ServerOptions } from "./app";
 import { MemoryAppStore } from "./persistence/memory-store";
+import { hashPassword } from "./security/password";
+import { createSessionToken } from "./security/session";
 
 function options(overrides: Partial<ServerOptions> = {}): ServerOptions {
   return {
@@ -20,6 +22,14 @@ function sessionCookie(response: { headers: Record<string, string | string[] | n
   const header = response.headers["set-cookie"];
   const value = Array.isArray(header) ? header[0] : header;
   if (!value) throw new Error("Expected a session cookie");
+  return String(value).split(";", 1)[0];
+}
+
+function cookie(response: { headers: Record<string, string | string[] | number | undefined> }, name: string): string {
+  const header = response.headers["set-cookie"];
+  const values = Array.isArray(header) ? header : [header];
+  const value = values.find((candidate) => typeof candidate === "string" && candidate.startsWith(`${name}=`));
+  if (!value) throw new Error(`Expected ${name} cookie`);
   return String(value).split(";", 1)[0];
 }
 
@@ -88,12 +98,17 @@ describe("setup and session routes", () => {
     expect(setCookie).toContain("Max-Age=28800");
     expect(setCookie).not.toContain("Secure");
 
-    const cookie = sessionCookie(login);
-    const current = await app.inject({ method: "GET", url: "/api/session", headers: { cookie } });
+    const session = sessionCookie(login);
+    const csrf = cookie(login, "devkh_csrf");
+    const cookieHeader = `${session}; ${csrf}`;
+    const current = await app.inject({ method: "GET", url: "/api/session", headers: { cookie: cookieHeader } });
     expect(current.statusCode).toBe(200);
     expect(current.json()).toMatchObject({ authenticated: true, admin: { email: "admin@example.com" } });
 
-    const logout = await app.inject({ method: "DELETE", url: "/api/session", headers: { cookie } });
+    const logout = await app.inject({
+      method: "DELETE", url: "/api/session",
+      headers: { cookie: cookieHeader, "x-devkh-csrf": csrf.split("=", 2)[1] }
+    });
     expect(logout.statusCode).toBe(204);
     expect(String(logout.headers["set-cookie"])).toContain("Max-Age=0");
 
@@ -102,6 +117,98 @@ describe("setup and session routes", () => {
       "session.login_failed",
       "session.login_succeeded"
     ]);
+  });
+
+  test("requires a double-submit CSRF token for cookie-authenticated writes and revokes logout sessions", async () => {
+    const app = buildServer(options());
+    apps.push(app);
+    await app.inject({
+      method: "POST", url: "/api/setup",
+      payload: { email: "admin@example.com", password: "a secure admin password" }
+    });
+    const login = await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "admin@example.com", password: "a secure admin password" }
+    });
+    const session = cookie(login, "devkh_session");
+    const csrf = cookie(login, "devkh_csrf");
+
+    expect(session.split("=", 2)[1]).not.toContain(".");
+    expect(csrf).toContain(".");
+    expect((await app.inject({
+      method: "POST", url: "/api/projects", headers: { cookie: `${session}; ${csrf}` },
+      payload: { name: "Missing CSRF", slug: "missing-csrf" }
+    })).statusCode).toBe(403);
+    expect((await app.inject({
+      method: "POST", url: "/api/projects", headers: {
+        cookie: `${session}; ${csrf}`, "x-devkh-csrf": "invalid"
+      }, payload: { name: "Wrong CSRF", slug: "wrong-csrf" }
+    })).statusCode).toBe(403);
+    expect((await app.inject({
+      method: "POST", url: "/api/projects", headers: {
+        cookie: `${session}; ${csrf}`, "x-devkh-csrf": csrf.split("=", 2)[1]
+      }, payload: { name: "CSRF protected", slug: "csrf-protected" }
+    })).statusCode).toBe(201);
+    expect((await app.inject({ method: "GET", url: "/api/session", headers: { cookie: `${session}; ${csrf}` } })).statusCode)
+      .toBe(200);
+
+    expect((await app.inject({
+      method: "DELETE", url: "/api/session", headers: {
+        cookie: `${session}; ${csrf}`, "x-devkh-csrf": csrf.split("=", 2)[1]
+      }
+    })).statusCode).toBe(204);
+    expect((await app.inject({ method: "GET", url: "/api/session", headers: { cookie: `${session}; ${csrf}` } })).statusCode)
+      .toBe(401);
+  });
+
+  test("allows an unexpired legacy cookie to read during the configured rollout window but never write", async () => {
+    const store = new MemoryAppStore();
+    const secret = "test-session-secret-with-sufficient-entropy";
+    const setup = await store.createInitialSetup(
+      "admin@example.com", await hashPassword("a secure admin password")
+    );
+    const legacySession = await createSessionToken({
+      adminId: setup!.admin.id,
+      workspaceId: setup!.workspace.id,
+      sessionVersion: setup!.admin.sessionVersion
+    }, secret);
+    const app = buildServer(options({
+      store,
+      sessionSecret: secret,
+      legacySessionReadUntil: new Date(Date.now() + 60_000)
+    }));
+    apps.push(app);
+    const cookie = `devkh_session=${legacySession}`;
+
+    expect((await app.inject({ method: "GET", url: "/api/session", headers: { cookie } })).statusCode).toBe(200);
+    expect((await app.inject({
+      method: "POST", url: "/api/projects", headers: { cookie },
+      payload: { name: "Legacy write", slug: "legacy-write" }
+    })).statusCode).toBe(401);
+    const expiredWindowApp = buildServer(options({
+      store,
+      sessionSecret: secret,
+      legacySessionReadUntil: new Date(Date.now() - 1)
+    }));
+    apps.push(expiredWindowApp);
+    expect((await expiredWindowApp.inject({ method: "GET", url: "/api/session", headers: { cookie } })).statusCode)
+      .toBe(401);
+  });
+
+  test("does not accept a browser session cookie as MCP bearer authentication", async () => {
+    const app = buildServer(options());
+    apps.push(app);
+    await app.inject({
+      method: "POST", url: "/api/setup",
+      payload: { email: "admin@example.com", password: "a secure admin password" }
+    });
+    const login = await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "admin@example.com", password: "a secure admin password" }
+    });
+
+    expect((await app.inject({ method: "POST", url: "/mcp", headers: { cookie: sessionCookie(login) } })).statusCode)
+      .toBe(401);
   });
 
   test("production session cookies are secure", async () => {
@@ -133,9 +240,11 @@ describe("setup and session routes", () => {
       method: "POST", url: "/api/session",
       payload: { email: "admin@example.com", password: "a secure admin password" }
     });
-    const adminCookie = sessionCookie(adminLogin);
+    const adminSession = sessionCookie(adminLogin);
+    const adminCsrf = cookie(adminLogin, "devkh_csrf");
+    const adminCookie = `${adminSession}; ${adminCsrf}`;
     const member = await app.inject({
-      method: "POST", url: "/api/members", headers: { cookie: adminCookie },
+      method: "POST", url: "/api/members", headers: { cookie: adminCookie, "x-devkh-csrf": adminCsrf.split("=", 2)[1] },
       payload: { email: "member@example.com", password: "a secure member password", role: "member" }
     });
     const memberId = member.json<{ member: { id: string } }>().member.id;
@@ -146,7 +255,7 @@ describe("setup and session routes", () => {
     const memberCookie = sessionCookie(memberLogin);
 
     const disabled = await app.inject({
-      method: "PATCH", url: `/api/members/${memberId}/disabled`, headers: { cookie: adminCookie },
+      method: "PATCH", url: `/api/members/${memberId}/disabled`, headers: { cookie: adminCookie, "x-devkh-csrf": adminCsrf.split("=", 2)[1] },
       payload: { disabled: true }
     });
 

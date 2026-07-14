@@ -13,6 +13,7 @@ import { anthropicEnhancer, openAiCompatibleEnhancer, type KnowledgeEnhancer } f
 import { decryptSecret } from "./security/crypto.js";
 import { syncRepository } from "./git/snapshot.js";
 import { ResumableUploadSessionManager } from "./uploads/resumable-upload.js";
+import { PostgresSessionStore } from "./security/session-store.js";
 
 const UPLOAD_STAGING_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const IMPORT_REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
@@ -82,7 +83,9 @@ export async function bootstrapServer(
     dataDir: env.dataDir,
     nodeEnv: env.nodeEnv,
     ...(env.publicBaseUrl ? { publicBaseUrl: env.publicBaseUrl } : {}),
-    ...(mode === "production" ? { clientDir: path.resolve("dist/client") } : {})
+    ...(env.legacySessionReadUntil ? { legacySessionReadUntil: env.legacySessionReadUntil } : {}),
+    ...(mode === "production" ? { clientDir: path.resolve("dist/client") } : {}),
+    sessionStore: new PostgresSessionStore(database.pool)
   });
   const cleaner = dependencies.createUploadStagingCleaner?.(path.join(env.dataDir, "upload-staging"))
     ?? new ResumableUploadSessionManager(path.join(env.dataDir, "upload-staging"));

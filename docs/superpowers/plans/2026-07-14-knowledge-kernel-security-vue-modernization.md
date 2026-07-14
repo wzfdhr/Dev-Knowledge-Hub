@@ -112,18 +112,18 @@ export const tokens = { colorAccent: "#1677ff", radius: "6px", focusRing: "0 0 0
 ### Task 5: 持久化 session 与 CSRF 合同
 
 **依赖：** 阶段 0 门禁。
-**Files：** Create `drizzle/0015_auth_sessions.sql`, `src/server/security/session-store.ts`, `src/server/security/session-store.test.ts`; Modify `src/server/security/session.ts`, `src/server/security/http.ts`, `src/server/auth-routes.test.ts`, `src/server/bootstrap.ts`.
+**Files：** Create `drizzle/0015_auth_sessions.sql`, `src/server/security/session-store.ts`, `src/server/security/session-store.test.ts`, `src/server/test-support/csrf.ts`, `docs/operations/session-rollout.md`; Modify `src/server/app.ts`, `src/server/security/session.ts`, `src/server/bootstrap.ts`, `src/server/env.ts`, `src/server/env.test.ts`, `src/server/bootstrap.test.ts`, `src/server/auth-routes.test.ts`, `src/server/persistence/postgres-knowledge.integration.test.ts`, `src/client/api/client.ts`, `src/client/api/client.test.ts` and authenticated route tests.
 **输入：** 登录 session cookie。
-**输出：** `auth_sessions` 与 `requireCsrf(request)`。
+**输出：** `auth_sessions`、opaque session cookie 与 cookie-authenticated write 的 CSRF guard。
 
 **TDD：** 先测 POST 无 token、错误 token、过期 session、撤销 session 为 403/401；GET 不需要 CSRF；Bearer MCP 不接受 cookie。运行失败后实现 session ID hash、双提交 HMAC CSRF、`sessionVersion` 检查。
 
 ```sql
-CREATE TABLE auth_sessions (id_hash char(64) PRIMARY KEY, user_id uuid NOT NULL REFERENCES admin_users(id), csrf_secret_hash char(64) NOT NULL, expires_at timestamptz NOT NULL, revoked_at timestamptz);
+CREATE TABLE auth_sessions (id_hash char(64) PRIMARY KEY, user_id uuid NOT NULL REFERENCES admin_users(id), workspace_id uuid NOT NULL REFERENCES workspaces(id), csrf_secret_hash char(64) NOT NULL, session_version integer NOT NULL, expires_at timestamptz NOT NULL, revoked_at timestamptz);
 ```
 
 **验收：** session 绝不以明文持久化；所有 cookie 写路由覆盖；旧 cookie 被禁用/密码变更撤销。
-**Rollback：** 保持旧 session verifier 只读 24 小时，feature flag 切回旧 cookie；不删除新表。
+**Rollback：** 仅在部署时设置一次性的 `DEVKH_LEGACY_SESSION_READ_UNTIL=<UTC ISO 8601>`，最多 24 小时。旧 JWT 在窗口内只允许读，写入返回 `SESSION_REFRESH_REQUIRED`；窗口结束后移除该变量。不得切回旧 cookie 写入，不删除新表。
 **提交：** `feat: persist sessions and enforce csrf`。
 
 ### Task 6: 管理员 MFA 与恢复码

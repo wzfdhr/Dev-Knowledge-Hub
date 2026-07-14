@@ -56,15 +56,16 @@ describe("production bootstrap", () => {
     expect(deps.createBuildQueue).toHaveBeenCalledWith("postgres://localhost/devkh");
     expect(deps.createBuildService).toHaveBeenCalledWith(store, queue, expect.any(Function));
     expect(buildService.start).toHaveBeenCalledOnce();
-    expect(deps.buildServer).toHaveBeenCalledWith({
+    expect(deps.buildServer).toHaveBeenCalledWith(expect.objectContaining({
       store,
       buildService,
       masterKey,
       sessionSecret: "production-session-secret-at-least-32-chars",
       dataDir: "/var/lib/devkh",
       nodeEnv: "production",
-      clientDir: path.resolve("dist/client")
-    });
+      clientDir: path.resolve("dist/client"),
+      sessionStore: expect.anything()
+    }));
     expect(server.addHook).toHaveBeenCalledWith("onClose", expect.any(Function));
     expect(server).toBe(vi.mocked(deps.buildServer).mock.results[0].value);
   });

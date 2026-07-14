@@ -36,13 +36,20 @@ export function activeProjectId(): string | undefined {
   }
 }
 
+function csrfToken(): string | undefined {
+  if (typeof document === "undefined") return undefined;
+  return document.cookie.split(";").map((item) => item.trim()).find((item) => item.startsWith("devkh_csrf="))?.slice("devkh_csrf=".length);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const projectId = activeProjectId();
+  const csrf = init?.method && !["GET", "HEAD", "OPTIONS"].includes(init.method) ? csrfToken() : undefined;
   const response = await fetch(path, {
     credentials: "same-origin",
     ...init,
     headers: {
       ...(projectId ? { "x-devkh-project": projectId } : {}),
+      ...(csrf ? { "x-devkh-csrf": csrf } : {}),
       ...(typeof init?.body === "string" ? { "content-type": "application/json" } : {}),
       ...init?.headers
     }

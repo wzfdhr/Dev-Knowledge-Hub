@@ -181,7 +181,7 @@ CREATE INDEX knowledge_artifacts_build_stage_idx ON knowledge_artifacts(build_id
 
 `knowledge_graph_nodes` 使用 `(artifact_id, id)` 主键，`knowledge_graph_edges` 用 `(artifact_id, id)` 主键并以复合外键约束两端同一 artifact；事实边 `candidate=false` 以 trigger 检查两端存在且 `source_refs <> '[]'`。`table_schemas`、`table_columns`、`search_documents`、`knowledge_lint_issues`、`trust_scores`、`remediation_cases` 与 `remediation_events` 均引用 `artifact_id`。`remediation_cases` 状态只允许 `open -> accepted -> rebuilding -> resolved` 或 `open -> dismissed`；`dismissed` 必须写审计原因与操作者。
 
-安全会话数据增加 `auth_sessions(id_hash, user_id, session_version, csrf_secret_hash, mfa_verified_at, expires_at, revoked_at, last_seen_at, ip_hash, user_agent_hash)`，MFA 恢复码仅保存 scrypt 哈希；MCP Token 增加 `expires_at`、`last_rotated_at`、`scopes jsonb`，Token 明文只在创建响应出现一次。
+安全会话数据增加 `auth_sessions(id_hash, user_id, workspace_id, session_version, csrf_secret_hash, expires_at, revoked_at)`；当前轮次只保存随机 opaque session ID 和 CSRF nonce 的 SHA-256 哈希，绝不保存明文。后续 MFA 轮次再加 `mfa_verified_at`、`last_seen_at`、`ip_hash`、`user_agent_hash`。MFA 恢复码仅保存 scrypt 哈希；MCP Token 增加 `expires_at`、`last_rotated_at`、`scopes jsonb`，Token 明文只在创建响应出现一次。
 
 ## 8. 解析与资源策略
 
@@ -243,8 +243,8 @@ remediation 由成员创建或从 lint 转化；接受后只计算受影响 sour
 
 ## 13. 安全设计
 
-- 会话：opaque、HttpOnly、Secure、SameSite=Lax cookie；数据库存 SHA-256 session ID；登录、密码重置、禁用、角色变更和 MFA 变更递增 `sessionVersion` 并撤销旧 session。
-- CSRF：所有 cookie 鉴权的非 GET/HEAD/OPTIONS 请求要求 `X-CSRF-Token` 与 session 绑定的 HMAC token；MCP Bearer 请求不接受 cookie 且不走 CSRF。
+- 会话：opaque、HttpOnly、Secure、SameSite=Lax cookie；数据库存 SHA-256 session ID，并将 session 绑定用户、工作区和 `sessionVersion`；登录、密码重置、禁用、角色变更和 MFA 变更递增 `sessionVersion` 并撤销旧 session。部署迁移可通过一次性的 UTC 截止时间启用旧 JWT 只读窗口，最长 24 小时，旧 JWT 绝不允许写入。
+- CSRF：所有 cookie 鉴权的非 GET/HEAD/OPTIONS 请求要求浏览器回传 `devkh_csrf` cookie 同值的 `X-Devkh-Csrf`，该值含 session 绑定 HMAC 且数据库只留 nonce 哈希；MCP Bearer 请求不接受 cookie 且不走 CSRF。
 - MFA：仅 workspace admin 可启用 TOTP；使用 `otpauth` 兼容秘密、加密存储、一次性恢复码哈希；MFA challenge 5 分钟、5 次失败后 15 分钟锁定。
 - MCP Token：project-scoped、scope 最小化、固定 90 天过期、撤销和轮换；hash 存储，比较使用 constant-time；每次调用检查项目未归档、Token 未撤销/过期。
 - SSRF/Git：仅 HTTPS，DNS 解析后拒绝 loopback、link-local、private、CGNAT、multicast、reserved IPv4/IPv6；禁止重定向、非 443 端口、URL 凭据和本地协议；clone 进程无 shell，`GIT_TERMINAL_PROMPT=0`，静态 askpass。

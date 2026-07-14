@@ -1,3 +1,4 @@
+import { authenticatedCookie, csrfHeaders } from "./test-support/csrf";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -50,7 +51,7 @@ async function adminContext() {
   return {
     app,
     store,
-    cookie: String(login.headers["set-cookie"]).split(";", 1)[0],
+    cookie: authenticatedCookie(login),
     workspaceId: (await store.defaultWorkspace())!.id
   };
 }
@@ -116,7 +117,7 @@ describe("MCP bearer tokens", () => {
   test("shows plaintext once, persists only its hash, lists sanitized metadata, and rejects revocation", async () => {
     const { app, store, cookie } = await adminContext();
     const created = await app.inject({
-      method: "POST", url: "/api/mcp/tokens", headers: { cookie }, payload: { name: "CI agent" }
+      method: "POST", url: "/api/mcp/tokens", headers: { cookie, ...csrfHeaders(cookie) }, payload: { name: "CI agent" }
     });
 
     expect(created.statusCode).toBe(201);
@@ -127,14 +128,14 @@ describe("MCP bearer tokens", () => {
     expect(persisted.tokenHash).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(persisted)).not.toContain(plaintext);
 
-    const listed = await app.inject({ method: "GET", url: "/api/mcp/tokens", headers: { cookie } });
+    const listed = await app.inject({ method: "GET", url: "/api/mcp/tokens", headers: { cookie, ...csrfHeaders(cookie) } });
     expect(listed.json().tokens[0].tokenPrefix).toBe(plaintext.slice(0, 12));
     expect(listed.json().tokens[0]).not.toHaveProperty("prefix");
     expect(listed.json().tokens[0]).not.toHaveProperty("token");
     expect(listed.json().tokens[0]).not.toHaveProperty("tokenHash");
 
     expect((await app.inject({
-      method: "GET", url: "/api/mcp/connection", headers: { cookie }
+      method: "GET", url: "/api/mcp/connection", headers: { cookie, ...csrfHeaders(cookie) }
     })).json()).toMatchObject({ endpoint: "/mcp", transport: "streamable-http" });
 
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
@@ -168,7 +169,7 @@ describe("MCP bearer tokens", () => {
 
     const tokenId = created.json().id as string;
     expect((await app.inject({
-      method: "POST", url: `/api/mcp/tokens/${tokenId}/revoke`, headers: { cookie }
+      method: "POST", url: `/api/mcp/tokens/${tokenId}/revoke`, headers: { cookie, ...csrfHeaders(cookie) }
     })).statusCode).toBe(200);
     expect((await mcpRequest(plaintext, 2)).status).toBe(401);
     await app.close();
@@ -187,10 +188,10 @@ describe("MCP bearer tokens", () => {
     }
 
     const first = await app.inject({
-      method: "GET", url: "/api/mcp/tokens?limit=100&offset=0", headers: { cookie }
+      method: "GET", url: "/api/mcp/tokens?limit=100&offset=0", headers: { cookie, ...csrfHeaders(cookie) }
     });
     const second = await app.inject({
-      method: "GET", url: "/api/mcp/tokens?limit=100&offset=100", headers: { cookie }
+      method: "GET", url: "/api/mcp/tokens?limit=100&offset=100", headers: { cookie, ...csrfHeaders(cookie) }
     });
 
     expect(first.json()).toMatchObject({ total: 125, nextOffset: 100 });

@@ -1,3 +1,4 @@
+import { authenticatedCookie, csrfHeaders } from "../test-support/csrf";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -17,6 +18,7 @@ import { syncRepository } from "../git/snapshot";
 import { BuildService } from "../knowledge/build-service";
 import { PgBossBuildJobQueue } from "../knowledge/job-queue";
 import { hashMcpToken } from "../mcp/auth";
+import { PostgresSessionStore } from "../security/session-store";
 import { LastProjectAdminError } from "./store";
 import { PostgresAppStore } from "./postgres-store";
 
@@ -51,15 +53,49 @@ integration("PostgreSQL cited knowledge integration", () => {
       `SELECT json_agg(table_name ORDER BY table_name) AS names
        FROM information_schema.tables
        WHERE table_schema = 'public'
-         AND table_name IN ('build_events', 'build_jobs', 'import_reports', 'knowledge_chunks', 'project_members', 'releases')`
+         AND table_name IN ('auth_sessions', 'build_events', 'build_jobs', 'import_reports', 'knowledge_chunks', 'project_members', 'releases')`
     );
     expect(rows[0].names).toEqual([
-      "build_events", "build_jobs", "import_reports", "knowledge_chunks", "project_members", "releases"
+      "auth_sessions", "build_events", "build_jobs", "import_reports", "knowledge_chunks", "project_members", "releases"
     ]);
     const extension = await pool.query(
       "SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'"
     );
     expect(extension.rows).toHaveLength(1);
+  }, 30_000);
+
+  test(databaseUrl
+    ? "persists only hashed opaque session records and revokes them transactionally"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("admin@example.com", "hash");
+    const sessions = new PostgresSessionStore(pool);
+    const idHash = createHash("sha256").update("opaque-session-id").digest("hex");
+    await sessions.create({
+      idHash,
+      userId: setup!.admin.id,
+      workspaceId: setup!.workspace.id,
+      csrfSecretHash: createHash("sha256").update("csrf-nonce").digest("hex"),
+      sessionVersion: setup!.admin.sessionVersion,
+      expiresAt: new Date(Date.now() + 60_000),
+      revokedAt: null
+    });
+
+    await expect(sessions.findActive(idHash)).resolves.toMatchObject({
+      userId: setup!.admin.id,
+      workspaceId: setup!.workspace.id
+    });
+    const persisted = await pool.query<{ id_hash: string; csrf_secret_hash: string }>(
+      "SELECT id_hash, csrf_secret_hash FROM auth_sessions WHERE id_hash = $1", [idHash]
+    );
+    expect(persisted.rows[0]).toMatchObject({ id_hash: idHash });
+    expect(JSON.stringify(persisted.rows[0])).not.toContain("opaque-session-id");
+    await sessions.revoke(idHash);
+    await expect(sessions.findActive(idHash)).resolves.toBeNull();
   }, 30_000);
 
   test(databaseUrl
@@ -455,12 +491,12 @@ integration("PostgreSQL cited knowledge integration", () => {
         payload: { email: "admin@example.com", password: "correct horse battery staple" }
       });
       expect(login.statusCode).toBe(200);
-      const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+      const cookie = authenticatedCookie(login);
 
       const response = await app.inject({
         method: "GET",
         url: "/api/releases/not-a-uuid",
-        headers: { cookie }
+        headers: { cookie, ...csrfHeaders(cookie) }
       });
 
       expect(response.statusCode).toBe(400);

@@ -1,6 +1,6 @@
 # 知识库内核、安全与 Vue 现代化 Implementation Plan
 
-> **For agentic workers:** 每个任务只能在上一任务的“阶段门禁”全部通过后开始。每次提交前执行该任务列出的命令，并将产品经理审查、开发经理审查、命令输出摘要、commit SHA、PR URL 写入 PR 描述的 `Evidence` 小节。产品经理审查验证用户价值、流程完整性、权限可见性、空状态和发布风险；开发经理审查验证类型、事务、安全、测试、回滚和可观测性。两项审查均由执行代理基于实际 diff 留存，不能伪造外部人员审批。
+> **For agentic workers:** 每个任务只能在上一任务的“阶段门禁”全部通过后开始。每次提交前执行该任务列出的命令，并将“产品经理视角自审”“开发经理视角自审”、命令输出摘要、commit SHA、PR URL 写入 PR 描述的 `Evidence` 小节。前者验证用户价值、流程完整性、权限可见性、空状态和发布风险；后者验证类型、事务、安全、测试、回滚和可观测性。两项均由执行代理基于实际 diff 自审并留存，不代表或伪造外部人员审批。
 
 **Goal:** 在不改变私有单工作区产品边界的前提下，建立可验证的知识流水线、安全会话、Graph、检索质量、Vue 3.5 管理端与可回退生产发布机制。
 
@@ -540,8 +540,8 @@ expect(summary).toMatchObject({ concurrentBuilds: 10, errorRate: 0, p95QueueDela
 - Task: 12
 - Failed test observed: `npm test -- src/server/knowledge/pipeline/artifact-store.test.ts` -> expected missing module error
 - Passing verification: `npm test -- src/server/knowledge/pipeline/artifact-store.test.ts`, `npm run typecheck`, `npm run lint`
-- Product manager review: 用户流程、空状态、权限与手动发布边界已按实际截图/测试确认；结论：approve / request changes。
-- Development manager review: 类型、SQL 事务、安全边界、回滚、测试覆盖已按实际 diff 确认；结论：approve / request changes。
+- 产品经理视角自审：用户流程、空状态、权限与手动发布边界已按实际截图/测试确认；结论：approve / request changes。
+- 开发经理视角自审：类型、SQL 事务、安全边界、回滚、测试覆盖已按实际 diff 确认；结论：approve / request changes。
 - Rollback: `KNOWLEDGE_PIPELINE_V2=false`
 - Commit: `<sha>`
 ```

@@ -9,6 +9,8 @@ import type { Citation } from "../knowledge/intelligence.js";
 import type {
   ArtifactManifest,
   BuildStage,
+  GraphEdge,
+  GraphNode,
   StageRun,
   StageStatus
 } from "../knowledge/pipeline/contracts.js";
@@ -61,6 +63,25 @@ export interface PipelineArtifactStore {
     kind: string,
     inputDigest: string
   ): Promise<ArtifactManifest | null>;
+}
+
+export interface KnowledgeGraphRecord {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+export interface SaveKnowledgeGraphInput {
+  workspaceId: string;
+  projectId: string;
+  snapshotId: string;
+  buildId: string;
+  graph: KnowledgeGraphRecord;
+  actorId?: string;
+}
+
+export interface GraphStore {
+  saveKnowledgeGraph(input: SaveKnowledgeGraphInput): Promise<void>;
+  getKnowledgeGraph(workspaceId: string, projectId: string, buildId: string): Promise<KnowledgeGraphRecord | null>;
 }
 
 export interface AdminRecord {
@@ -499,7 +520,7 @@ export interface KnowledgeStore {
   ): Promise<ReleaseRecord[]>;
 }
 
-export interface AppStore extends BuildPersistence, KnowledgeStore {
+export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore {
   listPipelineStageRuns(
     workspaceId: string,
     projectId: string,

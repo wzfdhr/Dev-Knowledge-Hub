@@ -15,6 +15,35 @@ const artifactRow = {
 };
 
 describe("PostgresAppStore pipeline persistence", () => {
+  test("writes and reads an immutable project-scoped graph transactionally", async () => {
+    const sourceRef = { snapshotId: "snapshot-1", path: "src/main.ts", startLine: 1, endLine: 1, blobHash: "a".repeat(64) };
+    const node = {
+      id: "b".repeat(64), projectId: "project-1", snapshotId: "snapshot-1",
+      kind: "module" as const, name: "main.ts", qualifiedName: "src/main.ts", candidate: false, sourceRefs: [sourceRef], attributes: { language: "typescript" }
+    };
+    const query = vi.fn(async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT") return { rows: [], rowCount: 0 };
+      if (sql.includes("FROM build_jobs build")) return { rows: [], rowCount: 1 };
+      if (sql.includes("SELECT 1 FROM knowledge_graph_nodes")) return { rows: [], rowCount: 0 };
+      if (sql.includes("SELECT node_id")) return { rows: [{
+        node_id: node.id, workspace_id: "workspace-1", project_id: node.projectId, snapshot_id: node.snapshotId,
+        kind: node.kind, name: node.name, qualified_name: node.qualifiedName, candidate: false, source_refs: [sourceRef], attributes: node.attributes
+      }], rowCount: 1 };
+      if (sql.includes("SELECT edge_id")) return { rows: [], rowCount: 0 };
+      return { rows: [], rowCount: 0 };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ query, connect: vi.fn(async () => client) } as never);
+
+    await expect(store.saveKnowledgeGraph({
+      workspaceId: "workspace-1", projectId: "project-1", snapshotId: "snapshot-1", buildId: "build-1", graph: { nodes: [node], edges: [] }
+    })).resolves.toBeUndefined();
+    await expect(store.getKnowledgeGraph("workspace-1", "project-1", "build-1"))
+      .resolves.toEqual({ nodes: [node], edges: [] });
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO knowledge_graph_nodes"))).toBe(true);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("workspace_id = $1 AND project_id = $2 AND build_job_id = $3"))).toBe(true);
+  });
+
   test("writes project-scoped stage runs and reuses only matching immutable artifacts", async () => {
     const query = vi.fn(async (sql: string, _values?: unknown[]) => {
       void _values;

@@ -27,6 +27,7 @@ import type {
   ImportReportRecord,
   KnowledgePageRecord,
   KnowledgeMetadata,
+  KnowledgeGraphRecord,
   KnowledgeSearchResult,
   ModelConfigRecord,
   ModelProvider,
@@ -38,6 +39,7 @@ import type {
   RepositoryRecord,
   SourceFileRecord,
   SourceSnapshotRecord,
+  SaveKnowledgeGraphInput,
   SetupResult,
   TeamMemberRecord,
   TeamRole,
@@ -60,6 +62,7 @@ import type {
 } from "../knowledge/build-service.js";
 import { standardBuildPurpose } from "../knowledge/build-service.js";
 import type { CodeIndex } from "../knowledge/intelligence.js";
+import { validateKnowledgeGraph } from "../knowledge/pipeline/graph.js";
 
 export class MemoryAppStore implements AppStore {
   private workspace: WorkspaceRecord | null = null;
@@ -86,6 +89,7 @@ export class MemoryAppStore implements AppStore {
   readonly knowledgePages: KnowledgePageRecord[] = [];
   readonly releases: ReleaseRecord[] = [];
   private readonly indexes = new Map<string, CodeIndex>();
+  private readonly knowledgeGraphs = new Map<string, KnowledgeGraphRecord>();
   private readonly releaseChannels = new Map<string, string>();
 
   async isSetupComplete(): Promise<boolean> {
@@ -1507,6 +1511,30 @@ export class MemoryAppStore implements AppStore {
       && this.pipelineStageRuns.some((run) => run.id === event.stageRunId
         && run.workspaceId === workspaceId && run.projectId === projectId)
     ).slice(0, limit);
+  }
+
+  async saveKnowledgeGraph(input: SaveKnowledgeGraphInput): Promise<void> {
+    validateKnowledgeGraph(input.graph);
+    const build = this.builds.find((candidate) => candidate.id === input.buildId
+      && candidate.workspaceId === input.workspaceId && candidate.snapshotId === input.snapshotId);
+    const repository = build && this.repositories.find((candidate) => candidate.id === build.repositoryId
+      && candidate.workspaceId === input.workspaceId && candidate.projectId === input.projectId);
+    if (!build || !repository) throw new Error("Graph does not belong to the supplied project build");
+    if (this.knowledgeGraphs.has(input.buildId)) throw new Error("Knowledge graph is immutable for this build");
+    this.knowledgeGraphs.set(input.buildId, structuredClone(input.graph));
+    await this.recordAudit({
+      workspaceId: input.workspaceId, actorId: input.actorId, action: "knowledge_graph.created",
+      resourceType: "knowledge_graph", resourceId: input.buildId,
+      metadata: { nodeCount: input.graph.nodes.length, edgeCount: input.graph.edges.length }
+    });
+  }
+
+  async getKnowledgeGraph(workspaceId: string, projectId: string, buildId: string): Promise<KnowledgeGraphRecord | null> {
+    const build = this.builds.find((candidate) => candidate.id === buildId && candidate.workspaceId === workspaceId);
+    const repository = build && this.repositories.find((candidate) => candidate.id === build.repositoryId
+      && candidate.workspaceId === workspaceId && candidate.projectId === projectId);
+    const graph = repository ? this.knowledgeGraphs.get(buildId) : undefined;
+    return graph ? structuredClone(graph) : null;
   }
 
   private recordPipelineStageEvent(run: PipelineStageRunRecord): void {

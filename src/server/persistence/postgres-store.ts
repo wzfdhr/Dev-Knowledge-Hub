@@ -25,6 +25,7 @@ import type {
   ImportReportRecord,
   KnowledgePageRecord,
   KnowledgeMetadata,
+  KnowledgeGraphRecord,
   KnowledgeSearchResult,
   ModelConfigRecord,
   ModelProvider,
@@ -34,6 +35,7 @@ import type {
   PipelineArtifactStore,
   PipelineStageRunRecord,
   CreateStageRunInput,
+  SaveKnowledgeGraphInput,
   ReleaseRecord,
   RepositoryConnectionInput,
   RepositoryRecord,
@@ -61,12 +63,15 @@ import type { Citation } from "../knowledge/intelligence.js";
 import {
   artifactManifestSchema,
   canTransitionStage,
+  graphEdgeSchema,
+  graphNodeSchema,
   stageRunSchema,
   type ArtifactManifest,
   type BuildStage,
   type StageStatus
 } from "../knowledge/pipeline/contracts.js";
 import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
+import { validateKnowledgeGraph } from "../knowledge/pipeline/graph.js";
 
 interface Queryable {
   query<T extends QueryResultRow = QueryResultRow>(text: string, values?: unknown[]): Promise<{ rows: T[] }>;
@@ -153,6 +158,30 @@ interface ArtifactRow extends QueryResultRow {
   source_refs: ArtifactManifest["sourceRefs"];
   producer: ArtifactManifest["producer"];
   created_at: Date;
+}
+
+interface GraphNodeRow extends QueryResultRow {
+  node_id: string;
+  workspace_id: string;
+  project_id: string;
+  snapshot_id: string;
+  kind: "module" | "symbol" | "document" | "table" | "column" | "command";
+  name: string;
+  qualified_name: string;
+  candidate: boolean;
+  source_refs: unknown[];
+  attributes: Record<string, string | number | boolean>;
+}
+
+interface GraphEdgeRow extends QueryResultRow {
+  edge_id: string;
+  from_node_id: string;
+  to_node_id: string;
+  kind: "imports" | "exports" | "calls" | "contains" | "documents" | "reads" | "writes" | "depends_on";
+  candidate: boolean;
+  candidate_reason: string | null;
+  confidence: number;
+  source_refs: unknown[];
 }
 
 interface KnowledgePageRow extends QueryResultRow {
@@ -777,6 +806,78 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       [workspaceId, projectId, snapshotId, stage, kind, inputDigest]
     );
     return rows[0] ? artifactManifest(rows[0]) : null;
+  }
+
+  async saveKnowledgeGraph(input: SaveKnowledgeGraphInput): Promise<void> {
+    validateKnowledgeGraph(input.graph);
+    await this.transaction(async (client) => {
+      const owner = await client.query(
+        `SELECT 1
+         FROM build_jobs build
+         JOIN repositories repository ON repository.id = build.repository_id AND repository.workspace_id = build.workspace_id
+         JOIN source_snapshots snapshot ON snapshot.id = build.snapshot_id AND snapshot.workspace_id = build.workspace_id
+         WHERE build.workspace_id = $1 AND build.id = $2 AND repository.project_id = $3 AND snapshot.id = $4`,
+        [input.workspaceId, input.buildId, input.projectId, input.snapshotId]
+      );
+      if (owner.rowCount !== 1) throw new Error("Graph does not belong to the supplied project build");
+      const existing = await client.query(
+        "SELECT 1 FROM knowledge_graph_nodes WHERE workspace_id = $1 AND project_id = $2 AND build_job_id = $3 LIMIT 1",
+        [input.workspaceId, input.projectId, input.buildId]
+      );
+      if (existing.rowCount) throw new Error("Knowledge graph is immutable for this build");
+      for (const node of input.graph.nodes) {
+        await client.query(
+          `INSERT INTO knowledge_graph_nodes
+           (workspace_id, project_id, snapshot_id, build_job_id, node_id, kind, name, qualified_name, candidate, source_refs, attributes)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb)`,
+          [input.workspaceId, input.projectId, input.snapshotId, input.buildId, node.id, node.kind, node.name,
+            node.qualifiedName, node.candidate, JSON.stringify(node.sourceRefs), JSON.stringify(node.attributes)]
+        );
+      }
+      for (const graphEdge of input.graph.edges) {
+        await client.query(
+          `INSERT INTO knowledge_graph_edges
+           (workspace_id, project_id, snapshot_id, build_job_id, edge_id, from_node_id, to_node_id, kind, candidate, candidate_reason, confidence, source_refs)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)`,
+          [input.workspaceId, input.projectId, input.snapshotId, input.buildId, graphEdge.id, graphEdge.fromNodeId,
+            graphEdge.toNodeId, graphEdge.kind, graphEdge.candidate, graphEdge.candidateReason ?? null,
+            graphEdge.confidence, JSON.stringify(graphEdge.sourceRefs)]
+        );
+      }
+      await this.insertAudit(client, {
+        workspaceId: input.workspaceId, actorId: input.actorId, action: "knowledge_graph.created",
+        resourceType: "knowledge_graph", resourceId: input.buildId,
+        metadata: { nodeCount: input.graph.nodes.length, edgeCount: input.graph.edges.length }
+      });
+    });
+  }
+
+  async getKnowledgeGraph(workspaceId: string, projectId: string, buildId: string): Promise<KnowledgeGraphRecord | null> {
+    const nodes = await this.pool.query<GraphNodeRow>(
+      `SELECT node_id, workspace_id, project_id, snapshot_id, kind, name, qualified_name, candidate, source_refs, attributes
+       FROM knowledge_graph_nodes WHERE workspace_id = $1 AND project_id = $2 AND build_job_id = $3 ORDER BY node_id`,
+      [workspaceId, projectId, buildId]
+    );
+    if (!nodes.rowCount) return null;
+    const edges = await this.pool.query<GraphEdgeRow>(
+      `SELECT edge_id, from_node_id, to_node_id, kind, candidate, candidate_reason, confidence, source_refs
+       FROM knowledge_graph_edges WHERE workspace_id = $1 AND project_id = $2 AND build_job_id = $3 ORDER BY edge_id`,
+      [workspaceId, projectId, buildId]
+    );
+    const graph: KnowledgeGraphRecord = {
+      nodes: nodes.rows.map((row) => graphNodeSchema.parse({
+        id: row.node_id, workspaceId: row.workspace_id, projectId: row.project_id, snapshotId: row.snapshot_id,
+        kind: row.kind, name: row.name, qualifiedName: row.qualified_name, candidate: row.candidate,
+        sourceRefs: row.source_refs, attributes: row.attributes
+      })),
+      edges: edges.rows.map((row) => graphEdgeSchema.parse({
+        id: row.edge_id, fromNodeId: row.from_node_id, toNodeId: row.to_node_id, kind: row.kind,
+        candidate: row.candidate, ...(row.candidate_reason ? { candidateReason: row.candidate_reason } : {}),
+        confidence: row.confidence, sourceRefs: row.source_refs
+      }))
+    };
+    validateKnowledgeGraph(graph);
+    return graph;
   }
 
   async isSetupComplete(): Promise<boolean> {

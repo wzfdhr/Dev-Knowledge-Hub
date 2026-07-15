@@ -147,10 +147,35 @@ async function waitForLog(path, pattern, timeoutMs = 10_000) {
   throw new Error(`Timed out waiting for ${pattern}`);
 }
 
+function signalProcessGroup(child, signal) {
+  if (!child.pid) return;
+  try {
+    process.kill(-child.pid, signal);
+  } catch (error) {
+    if (error.code !== "ESRCH") throw error;
+  }
+}
+
+async function waitForProcessGroupExit(child, timeoutMs = 10_000) {
+  if (!child.pid) return;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(-child.pid, 0);
+    } catch (error) {
+      if (error.code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for child process group exit after ${timeoutMs}ms`);
+}
+
 async function waitForChildExit(child, timeoutMs = 10_000) {
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      child.kill("SIGKILL");
+    const timeout = setTimeout(async () => {
+      signalProcessGroup(child, "SIGKILL");
+      await waitForProcessGroupExit(child).catch(() => undefined);
       reject(new Error(`Timed out waiting for child process exit after ${timeoutMs}ms`));
     }, timeoutMs);
     child.once("exit", (code, signal) => {
@@ -288,15 +313,16 @@ test("interrupted backup and restore operations are recorded as failures", async
       : { resticRestoreBlock: true });
     const script = operation === "backup" ? backupScript : restoreDrillScript;
     const marker = operation === "backup" ? /restic backup/ : /restic restore/;
+    let child;
 
     try {
-      const child = spawn(script, [], {
+      child = spawn(script, [], {
         env: fixture.environment,
         detached: true,
         stdio: "ignore"
       });
       await waitForLog(fixture.log, marker);
-      process.kill(-child.pid, "SIGTERM");
+      signalProcessGroup(child, "SIGTERM");
       const result = await waitForChildExit(child);
 
       assert.notEqual(result.code, 0);
@@ -304,6 +330,8 @@ test("interrupted backup and restore operations are recorded as failures", async
       assert.equal(status.operation, operation);
       assert.equal(status.result, "failed");
     } finally {
+      signalProcessGroup(child, "SIGKILL");
+      await waitForProcessGroupExit(child).catch(() => undefined);
       rmSync(fixture.root, { recursive: true, force: true });
     }
   }

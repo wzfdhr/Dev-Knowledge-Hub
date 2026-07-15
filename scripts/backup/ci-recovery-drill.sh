@@ -38,23 +38,4 @@ evidence_path="$(find "$evidence_directory/recovery-evidence" -type f -name '*.j
   exit 65
 }
 
-node -e '
-  const fs = require("node:fs");
-  const evidence = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-  const integrityPassed = Object.values(evidence.integrity ?? {}).every((value) => value === 0);
-  const representativeDatabaseRestored = ["workspaceCount", "userCount", "projectCount", "projectMemberCount", "snapshotCount", "releaseCount", "releaseChannelCount", "artifactCount"]
-    .every((name) => Number.isInteger(evidence.databaseStats?.[name]) && evidence.databaseStats[name] > 0);
-  const durableFilesRestored = ["snapshots", "repositories", "sources", "artifacts"]
-    .every((name) => Number.isInteger(evidence.volumeFileCounts?.[name])
-      && evidence.volumeFileCounts[name] > 0
-      && /^[a-f0-9]{64}$/.test(evidence.volumeArchiveSha256?.[name] ?? ""));
-  if (evidence.result !== "success"
-    || evidence.productionVolumeTouched !== false
-    || evidence.ephemeralDatabaseRestored !== true
-    || evidence.healthCheckPassed !== true
-    || evidence.artifactContentVerifiedCount !== evidence.databaseStats?.artifactCount
-    || !representativeDatabaseRestored
-    || !durableFilesRestored
-    || !integrityPassed) process.exit(1);
-  process.stdout.write(JSON.stringify(evidence) + "\n");
-' "$evidence_path"
+node "$project_root/scripts/backup/validate-recovery-evidence.mjs" "$evidence_path"

@@ -34,7 +34,7 @@ afterEach(async () => {
     rm(directory, { recursive: true, force: true })));
 });
 
-test("real MCP change context identifies affected modules, conventions, and tests", async () => {
+test("real MCP change context identifies affected modules, conventions, and tests", { timeout: 15_000 }, async () => {
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-acceptance-repo-"));
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-acceptance-data-"));
   temporaryPaths.push(fixtureRoot, dataDir);

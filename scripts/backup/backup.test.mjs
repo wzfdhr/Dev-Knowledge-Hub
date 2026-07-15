@@ -435,6 +435,16 @@ test("restore drill rejects artifact content that does not match its manifest di
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /artifact content digest mismatch/);
+    assert.match(result.stderr, /retained fixture/);
+    assert.match(
+      execFileSync("find", [fixture.environment.BACKUP_STATE_DIR, "-type", "d", "-name", "restore-check.*"], { encoding: "utf8" }),
+      /restore-check/
+    );
+    const calls = readFileSync(fixture.log, "utf8");
+    assert.doesNotMatch(calls, /docker rm -f/);
+    assert.doesNotMatch(calls, /docker network rm/);
+    const status = JSON.parse(readFileSync(join(fixture.environment.BACKUP_STATE_DIR, "status.json"), "utf8"));
+    assert.equal(status.result, "failed");
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

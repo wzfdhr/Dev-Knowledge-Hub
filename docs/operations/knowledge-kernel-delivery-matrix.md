@@ -17,6 +17,20 @@ Updated: 2026-07-15
 
 The supplemental commits remain separate commits in Phase A. They are existing work to verify, not work to reimplement.
 
+## Phase A verification result
+
+| Item | Result |
+| --- | --- |
+| Verified head | `2df20c0` |
+| GitHub run | [`29384372103`](https://github.com/wzfdhr/Dev-Knowledge-Hub/actions/runs/29384372103) |
+| `verify` | Passed, including real PostgreSQL integration, build, acceptance, and E2E |
+| `container-smoke` | Passed, including container health and isolated recovery rehearsal |
+| Recovery artifact | `recovery-evidence`, schema version 2 |
+| Representative database restore | workspace, user, project, project member, snapshot, release, release channel, and artifact counts are each `1` |
+| Durable file restore | snapshot, repository, uploaded source, and artifact file counts are each `1`; all four archive SHA-256 values recorded |
+| Integrity | orphaned release/channel/artifact and invalid project-membership counts are all `0` |
+| Production state | No production deployment or production volume access occurred |
+
 ## Original seven-stage status
 
 | Stage | Current status | Verified implementation | Remaining delivery work |

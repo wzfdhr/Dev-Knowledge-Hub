@@ -58,34 +58,34 @@ openssl rand -hex 32      # DEVKH_SESSION_SECRET
 chmod 600 .env
 
 # This validates Compose without needing a real domain or contacting ACME.
-DEVKH_DOMAIN=example.test ACME_EMAIL=operator@example.test docker compose config --quiet
-docker compose build --pull
-docker compose up -d
-docker compose ps
+DEVKH_DOMAIN=example.test ACME_EMAIL=operator@example.test docker compose -f docker-compose.yml config --quiet
+docker compose -f docker-compose.yml build --pull
+docker compose -f docker-compose.yml up -d
+docker compose -f docker-compose.yml ps
 curl --fail --resolve "$DEVKH_DOMAIN:443:127.0.0.1" "https://$DEVKH_DOMAIN/api/health"
 ```
 
-Compose exposes only Caddy on host ports `80` and `443`; Caddy forwards traffic to the app on the private Compose network and obtains HTTPS certificates for `DEVKH_DOMAIN`. PostgreSQL and the app have no host port mappings. The app waits for database health, uses a read-only root filesystem and a no-exec temporary `/tmp`, and persists PostgreSQL data, immutable snapshots, Git mirrors, uploads, and artifacts in separate named volumes. The image installs its Git askpass helper as a static executable under `/app/scripts`; PATs are passed only in the Git child environment. Stop gracefully with `docker compose down`; do not add `--volumes` unless deleting all retained state is intentional.
+Compose exposes only Caddy on host ports `80` and `443`; Caddy forwards traffic to the app on the private Compose network and obtains HTTPS certificates for `DEVKH_DOMAIN`. PostgreSQL and the app have no host port mappings. The app waits for database health, uses a read-only root filesystem and a no-exec temporary `/tmp`, and persists PostgreSQL data, immutable snapshots, Git mirrors, uploads, and artifacts in separate named volumes. The image installs its Git askpass helper as a static executable under `/app/scripts`; PATs are passed only in the Git child environment. Stop gracefully with `docker compose -f docker-compose.yml down`; do not add `--volumes` unless deleting all retained state is intentional.
 
 For a deployed server, confirm the public health endpoint and Caddy certificate path after DNS has propagated:
 
 ```bash
 curl --fail "https://$DEVKH_DOMAIN/api/health"
-docker compose logs --tail=100 caddy
-docker compose ps
+docker compose -f docker-compose.yml logs --tail=100 caddy
+docker compose -f docker-compose.yml ps
 ```
 
 Compose integration and browser tests are optional deployment checks and can run without a public domain:
 
 ```bash
-docker compose --profile test run --rm integration
-docker compose --profile test run --rm e2e
+docker compose -f docker-compose.yml --profile test run --rm integration
+docker compose -f docker-compose.yml --profile test run --rm e2e
 ```
 
 PostgreSQL initialization creates `dev_knowledge_hub` for the app and a separate `devkh_test` used only by the Compose integration profile. Existing PostgreSQL volumes created before this isolation was added need the test database once before running integration tests:
 
 ```bash
-docker compose exec postgres createdb -U devkh devkh_test
+docker compose -f docker-compose.yml exec postgres createdb -U devkh devkh_test
 ```
 
 Integration cleanup must target only `TEST_DATABASE_URL`; never point it at `dev_knowledge_hub`.
@@ -179,7 +179,7 @@ CI runs these gates with PostgreSQL 16 and uploads Playwright artifacts on failu
 ## Troubleshooting
 
 - **Startup rejects environment:** ensure the master key is exactly 32 random bytes in canonical base64 and all production variables are present.
-- **PostgreSQL remains unhealthy:** inspect `docker compose logs postgres`; verify the password and volume ownership before changing state.
+- **PostgreSQL remains unhealthy:** inspect `docker compose -f docker-compose.yml logs postgres`; verify the password and volume ownership before changing state.
 - **Local sync reports a dirty worktree:** commit, stash, or remove every changed/untracked file. Snapshots intentionally reject dirty local repositories.
 - **Remote sync fails:** use a credential-free HTTPS URL. Supply the PAT separately; never embed credentials in the URL.
 - **MCP returns `UNAUTHORIZED`:** rotate/recreate the token under the project's Codex Integration page and update the client environment. Revoked tokens stop working immediately.

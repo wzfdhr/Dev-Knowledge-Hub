@@ -93,6 +93,18 @@ describe("delivery database isolation", () => {
     );
   });
 
+  test("pins every active operational Compose command to the repository file", async () => {
+    const readme = await readFile("README.md", "utf8");
+    const monitor = await readFile("scripts/monitoring/devkh-monitor.sh", "utf8");
+    const publicAccess = await readFile("docs/operations/private-tailnet-access.md", "utf8");
+    const releaseGates = await readFile("docs/operations/private-repository-release-gates.md", "utf8");
+
+    expect(readme).not.toMatch(/docker compose(?! -f docker-compose\.yml)/);
+    expect(monitor).toContain('docker compose -f "$COMPOSE_DIR/docker-compose.yml"');
+    expect(publicAccess).not.toMatch(/docker compose(?! -f docker-compose\.yml)/);
+    expect(releaseGates).not.toMatch(/docker compose(?! -f docker-compose\.yml)/);
+  });
+
   test("exposes one release verification entrypoint", async () => {
     const packageJson = JSON.parse(await readFile("package.json", "utf8"));
     const deliveryMatrix = await readFile("docs/operations/knowledge-kernel-delivery-matrix.md", "utf8");

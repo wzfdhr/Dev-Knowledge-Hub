@@ -12,7 +12,7 @@ Every phase pull request must have successful, completed checks named:
 Running `npm run release:verify` without a scope executes only the non-destructive `verify` checks.
 The destructive container scope refuses to start unless `DEVKH_CONTAINER_SMOKE=true` and
 `COMPOSE_PROJECT_NAME` is `devkh-ci` or a `devkh-ci-<suffix>` project. This keeps its final
-`docker compose down --volumes` confined to disposable CI volumes.
+`docker compose -f docker-compose.yml down --volumes` confined to disposable CI volumes.
 
 The pull request must target `main`, must no longer be a draft, and must have explicit user approval recorded in the phase review.
 

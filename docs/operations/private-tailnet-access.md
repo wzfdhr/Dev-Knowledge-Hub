@@ -6,7 +6,7 @@ Open `https://hub.starking.icu`. Access is invitation-only: a workspace administ
 
 ## Verify
 
-On the server, run `cd /opt/dev-knowledge-hub && docker compose -f docker-compose.yml ps` and verify the local application health endpoint. Through the public domain, `/api/health` must return:
+On the server, run `docker compose -f /opt/dev-knowledge-hub/docker-compose.yml ps` and verify the local application health endpoint. Through the public domain, `/api/health` must return:
 
 ```json
 {"status":"ok","service":"dev-knowledge-hub"}

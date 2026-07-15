@@ -101,14 +101,15 @@ describe("delivery database isolation", () => {
     const publicAccess = await readFile("docs/operations/private-tailnet-access.md", "utf8");
     const releaseGates = await readFile("docs/operations/private-repository-release-gates.md", "utf8");
 
-    expect(readme).not.toMatch(/docker compose(?! -f docker-compose\.yml)/);
+    expect(readme).toContain('cd /absolute/path/to/dev-knowledge-hub\nDEVKH_COMPOSE_FILE="$PWD/docker-compose.yml"');
+    expect(readme).not.toMatch(/docker compose(?! -f "\$DEVKH_COMPOSE_FILE")/);
     expect(monitor).toContain('docker compose -f "$COMPOSE_DIR/docker-compose.yml"');
     for (const operationalScript of [monitor, backup, restoreDrill]) {
       expect(operationalScript).not.toContain("docker compose -f docker-compose.yml");
       expect(operationalScript).toContain('docker-compose.yml"');
     }
-    expect(publicAccess).not.toMatch(/docker compose(?! -f docker-compose\.yml)/);
-    expect(releaseGates).not.toMatch(/docker compose(?! -f docker-compose\.yml)/);
+    expect(publicAccess).not.toMatch(/docker compose(?! -f \/opt\/dev-knowledge-hub\/docker-compose\.yml)/);
+    expect(releaseGates).not.toMatch(/docker compose(?! -f "\$GITHUB_WORKSPACE\/docker-compose\.yml")/);
   });
 
   test("exposes one release verification entrypoint", async () => {

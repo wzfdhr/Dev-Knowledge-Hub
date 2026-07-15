@@ -3,7 +3,7 @@
 ## Scope
 
 This runbook backs up one application-consistent set: the PostgreSQL database and the
-`snapshot_data`, `repository_mirrors`, and `uploaded_sources` Docker volumes. It encrypts
+`snapshot_data`, `repository_mirrors`, `uploaded_sources`, and `artifact_data` Docker volumes. It encrypts
 the set on the ECS host with restic before it is uploaded to a private Alibaba Cloud OSS
 bucket. Tailscale protects application access; it is not a backup or source-at-rest
 encryption mechanism.
@@ -74,9 +74,12 @@ If a repository already exists, run `restic snapshots` instead of `restic init`.
 ## Verification
 
 Run an initial backup, repository check, and isolated restore drill. The drill restores to a
-temporary directory below `/var/lib/devkh-backup`, validates checksums, archive readability,
-and `pg_restore --list`, then deletes only that temporary directory. It never stops the app,
-writes a Docker volume, or restores into the live database.
+temporary directory below `/var/lib/devkh-backup`, validates checksums and archive paths, restores
+the dump into an ephemeral PostgreSQL container, verifies record counts and permission/release/artifact
+integrity, and starts an ephemeral application container for `/api/health`. It then removes only its
+temporary containers, network, and directory. It never stops the production app, writes a production
+Docker volume, or restores into the live database. It reads the current application image identifier
+from Compose unless `RECOVERY_APP_IMAGE` explicitly identifies the recovery image.
 
 ```bash
 systemctl start devkh-backup.service
@@ -98,7 +101,7 @@ separately retained restic password and `DEVKH_MASTER_KEY`; do not reuse the pro
 environment file blindly.
 
 1. Install Docker Compose, restic, and the matching application checkout on the recovery host.
-2. Create empty `snapshot_data`, `repository_mirrors`, and `uploaded_sources` volumes.
+2. Create empty `snapshot_data`, `repository_mirrors`, `uploaded_sources`, and `artifact_data` volumes.
 3. Restore the selected restic snapshot into a staging directory and verify its manifest and
    checksums.
 4. Start only PostgreSQL, restore `database.pgdump` with `pg_restore --clean --if-exists`,

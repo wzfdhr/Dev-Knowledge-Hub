@@ -23,12 +23,18 @@ function createFixture({ resticBackupExit = "0" } = {}) {
 printf 'docker %s\n' "$*" >> "$CALL_LOG"
 case " $* " in
   *" compose "*" exec "*) printf 'fake-pgdump\n' ;;
+  *" compose "*" images -q app "*) printf 'devkh-recovery-image\n' ;;
   *" pg_restore "*) printf 'pg_restore %s\n' "$*" >> "$CALL_LOG" ;;
-  *" run "*)
+  *" psql "*"workspaceCount"*) printf '{"workspaceCount":1,"projectCount":1,"releaseCount":1,"artifactCount":1}\n' ;;
+  *" psql "*"orphanedReleases"*) printf '{"orphanedReleases":0,"crossWorkspaceProjectMembers":0,"orphanedArtifacts":0}\n' ;;
+  *" pg_isready "*) exit 0 ;;
+  *" exec "*" node -e "*) exit 0 ;;
+  *" run "*" alpine:3.20 tar "*)
     stage=$(printf '%s\n' "$*" | sed -n 's/.*type=bind,src=\([^,]*\),dst=\/backup.*/\1/p')
     archive=$(printf '%s\n' "$*" | sed -n 's/.*\/backup\/\([^ ]*\.tgz\).*/\1/p')
     : > "$stage/$archive"
     ;;
+  *" run -d "*) printf 'fake-container-id\n' ;;
 esac
 `);
   writeFileSync(join(bin, "restic"), String.raw`#!/usr/bin/env sh
@@ -48,9 +54,8 @@ case "$1" in
     tar -C "$empty_directory" -czf "$set_directory/snapshots.tgz" .
     tar -C "$empty_directory" -czf "$set_directory/repositories.tgz" .
     tar -C "$empty_directory" -czf "$set_directory/sources.tgz" .
-    tar -C "$empty_directory" -czf "$set_directory/uploads.tgz" .
     tar -C "$empty_directory" -czf "$set_directory/artifacts.tgz" .
-    (cd "$set_directory" && sha256sum database.pgdump snapshots.tgz repositories.tgz sources.tgz uploads.tgz artifacts.tgz > checksums.sha256)
+    (cd "$set_directory" && sha256sum database.pgdump snapshots.tgz repositories.tgz sources.tgz artifacts.tgz > checksums.sha256)
     printf '{"schemaVersion":1}\n' > "$set_directory/manifest.json"
     ;;
 esac
@@ -71,7 +76,6 @@ esac
       SNAPSHOT_VOLUME: "devkh_snapshots",
       REPOSITORY_VOLUME: "devkh_repositories",
       UPLOADED_SOURCES_VOLUME: "devkh_sources",
-      UPLOAD_VOLUME: "devkh_uploads",
       ARTIFACT_VOLUME: "devkh_artifacts",
       RESTIC_REPOSITORY: "s3:https://example.invalid/devkh",
       RESTIC_PASSWORD_FILE: passwordFile,
@@ -136,15 +140,41 @@ test("restore drill never writes production Docker volumes", () => {
     const calls = readFileSync(fixture.log, "utf8");
     assert.match(calls, /restic restore latest --target/);
     assert.match(calls, /docker run .*postgres:16-bookworm pg_restore --list \/backup\/database\.pgdump/);
+    assert.match(calls, /docker network create devkh-restore-drill-/);
+    assert.match(calls, /docker exec -i devkh-restore-drill-.* pg_restore .*--exit-on-error/);
+    assert.match(calls, /docker exec .* psql .*workspaceCount/);
+    assert.match(calls, /docker exec .* node -e .*api\/health/);
+    assert.match(calls, /docker rm -f devkh-restore-drill-/);
     assert.doesNotMatch(calls, /docker compose .* stop/);
     assert.doesNotMatch(calls, /docker compose .* exec/);
+    assert.doesNotMatch(calls, /type=volume/);
     assert.doesNotMatch(calls, /pg_restore .*--clean/);
     const evidenceDirectory = join(fixture.environment.BACKUP_STATE_DIR, "recovery-evidence");
     const [evidenceFile] = execFileSync("find", [evidenceDirectory, "-type", "f"], { encoding: "utf8" }).trim().split("\n");
     const evidence = JSON.parse(readFileSync(evidenceFile, "utf8"));
     assert.deepEqual(
-      { operation: evidence.operation, productionVolumeTouched: evidence.productionVolumeTouched, restoredSnapshotCount: evidence.restoredSnapshotCount, pgRestoreListValidated: evidence.pgRestoreListValidated, volumeArchives: evidence.volumeArchives },
-      { operation: "restore-drill", productionVolumeTouched: false, restoredSnapshotCount: 1, pgRestoreListValidated: true, volumeArchives: ["snapshots.tgz", "repositories.tgz", "sources.tgz", "uploads.tgz", "artifacts.tgz"] }
+      {
+        operation: evidence.operation,
+        productionVolumeTouched: evidence.productionVolumeTouched,
+        restoredSnapshotCount: evidence.restoredSnapshotCount,
+        pgRestoreListValidated: evidence.pgRestoreListValidated,
+        ephemeralDatabaseRestored: evidence.ephemeralDatabaseRestored,
+        healthCheckPassed: evidence.healthCheckPassed,
+        volumeArchives: evidence.volumeArchives,
+        databaseStats: evidence.databaseStats,
+        integrity: evidence.integrity
+      },
+      {
+        operation: "restore-drill",
+        productionVolumeTouched: false,
+        restoredSnapshotCount: 1,
+        pgRestoreListValidated: true,
+        ephemeralDatabaseRestored: true,
+        healthCheckPassed: true,
+        volumeArchives: ["snapshots.tgz", "repositories.tgz", "sources.tgz", "artifacts.tgz"],
+        databaseStats: { workspaceCount: 1, projectCount: 1, releaseCount: 1, artifactCount: 1 },
+        integrity: { orphanedReleases: 0, crossWorkspaceProjectMembers: 0, orphanedArtifacts: 0 }
+      }
     );
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
@@ -172,8 +202,11 @@ test("backs up durable sources and content-addressed artifacts separately from u
 
   assert.match(environment, /UPLOADED_SOURCES_VOLUME=/);
   assert.match(environment, /ARTIFACT_VOLUME=/);
+  assert.doesNotMatch(environment, /UPLOAD_VOLUME=/);
   assert.match(backup, /sources:\$UPLOADED_SOURCES_VOLUME/);
   assert.match(backup, /artifacts:\$ARTIFACT_VOLUME/);
+  assert.doesNotMatch(backup, /uploads:\$UPLOAD_VOLUME/);
   assert.match(restore, /sources\.tgz/);
   assert.match(restore, /artifacts\.tgz/);
+  assert.doesNotMatch(restore, /uploads\.tgz/);
 });

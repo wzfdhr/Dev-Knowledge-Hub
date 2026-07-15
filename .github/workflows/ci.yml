@@ -55,9 +55,20 @@ jobs:
       DEVKH_PORT: 3000
       DEVKH_DOMAIN: hub.example.test
       ACME_EMAIL: ci@example.test
+      COMPOSE_PROJECT_NAME: devkh-ci
+      RECOVERY_EVIDENCE_DIR: ${{ runner.temp }}/devkh-recovery-evidence
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22.13.0
+      - name: Install recovery tooling
+        run: sudo apt-get update && sudo apt-get install -y restic
       - run: npm run release:verify -- --scope container
+      - name: Upload recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-evidence
+          path: ${{ runner.temp }}/devkh-recovery-evidence/
+          if-no-files-found: error

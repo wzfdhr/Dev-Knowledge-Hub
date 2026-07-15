@@ -58,9 +58,14 @@ describe("delivery database isolation", () => {
     expect(ci.on.push.branches).toEqual(expect.arrayContaining(["main", "codex/mvp"]));
     expect(ci.jobs["container-smoke"].env.DEVKH_DOMAIN).toBe("hub.example.test");
     expect(ci.jobs["container-smoke"].env.ACME_EMAIL).toBe("ci@example.test");
+    expect(ci.jobs["container-smoke"].env.COMPOSE_PROJECT_NAME).toBe("devkh-ci");
     expect(verifySteps).toContain("npx playwright install --with-deps chromium");
     expect(verifySteps).toContain("npm run release:verify -- --scope verify");
+    expect(smokeSteps).toContain("apt-get install -y restic");
     expect(smokeSteps).toContain("npm run release:verify -- --scope container");
+    expect(ci.jobs["container-smoke"].steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uses: "actions/upload-artifact@v4", if: "always()" })
+    ]));
   });
 
   test("requires a real PostgreSQL URL before running the integration release gate", async () => {

@@ -14,7 +14,7 @@ describe("release verification orchestrator", () => {
       "typecheck", "lint", "unit", "postgres-integration", "build", "acceptance", "e2e"
     ]);
     expect(CONTAINER_STEPS.map((step) => step.name)).toEqual([
-      "container-build", "compose-config", "compose-up", "application-health"
+      "container-build", "compose-config", "compose-up", "application-health", "recovery-drill"
     ]);
   });
 

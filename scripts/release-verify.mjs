@@ -24,7 +24,8 @@ export const CONTAINER_STEPS = Object.freeze([
   { name: "container-build", command: "docker", args: ["build", "--target", "runtime", "-t", "devkh:ci", "."] },
   { name: "compose-config", command: "docker", args: [...compose, "config", "--quiet"] },
   { name: "compose-up", command: "docker", args: [...compose, "up", "-d", "--build", "postgres", "app"] },
-  { name: "application-health", healthUrl: "http://127.0.0.1:3000/api/health" }
+  { name: "application-health", healthUrl: "http://127.0.0.1:3000/api/health" },
+  { name: "recovery-drill", command: "bash", args: ["scripts/backup/ci-recovery-drill.sh"] }
 ]);
 
 const cleanupStep = {

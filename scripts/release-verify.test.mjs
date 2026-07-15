@@ -3,6 +3,7 @@ import { describe, expect, test, vi } from "vitest";
 import {
   CONTAINER_STEPS,
   VERIFY_STEPS,
+  assertContainerIsolation,
   parseReleaseScope,
   runReleaseSteps
 } from "./release-verify.mjs";
@@ -21,11 +22,23 @@ describe("release verification orchestrator", () => {
       .toContain("compose -f docker-compose.yml exec -T app node");
   });
 
-  test("uses all checks by default and rejects unknown scopes", () => {
-    expect(parseReleaseScope([])).toBe("all");
+  test("uses the non-destructive verification scope by default and rejects unknown scopes", () => {
+    expect(parseReleaseScope([])).toBe("verify");
     expect(parseReleaseScope(["--scope", "verify"])).toBe("verify");
     expect(parseReleaseScope(["--scope=container"])).toBe("container");
     expect(() => parseReleaseScope(["--scope", "partial"])).toThrow("Unknown release verification scope");
+  });
+
+  test("allows destructive container cleanup only for an explicitly isolated CI project", () => {
+    expect(() => assertContainerIsolation({})).toThrow("DEVKH_CONTAINER_SMOKE");
+    expect(() => assertContainerIsolation({
+      DEVKH_CONTAINER_SMOKE: "true",
+      COMPOSE_PROJECT_NAME: "dev-knowledge-hub"
+    })).toThrow("CI-only Compose project");
+    expect(() => assertContainerIsolation({
+      DEVKH_CONTAINER_SMOKE: "true",
+      COMPOSE_PROJECT_NAME: "devkh-ci"
+    })).not.toThrow();
   });
 
   test("stops at the first failed step and reports its command and exit code", async () => {

@@ -62,6 +62,7 @@ describe("delivery database isolation", () => {
     expect(ci.jobs["container-smoke"].env.PUBLIC_BASE_URL).toBe("https://hub.example.test");
     expect(compose.services.app.environment.PUBLIC_BASE_URL).toContain("set PUBLIC_BASE_URL");
     expect(ci.jobs["container-smoke"].env.COMPOSE_PROJECT_NAME).toBe("devkh-ci");
+    expect(ci.jobs["container-smoke"].env.DEVKH_CONTAINER_SMOKE).toBe("true");
     expect(ci.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DIR).toBe("/tmp/devkh-recovery-evidence");
     expect(verifySteps).toContain("npx playwright install --with-deps chromium");
     expect(verifySteps).toContain("npm run release:verify -- --scope verify");

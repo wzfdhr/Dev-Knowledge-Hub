@@ -16,6 +16,7 @@ function createFixture({
   resticBackupDelay = "0",
   resticRestoreDelay = "0",
   integrityResult = '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":0}',
+  artifactStorageKey = "33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json",
   artifactContent = '{"fixture":true}'
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "devkh-backup-"));
@@ -33,7 +34,7 @@ case " $* " in
   *" pg_restore "*) printf 'pg_restore %s\n' "$*" >> "$CALL_LOG" ;;
   *" psql "*"workspaceCount"*) printf '{"workspaceCount":1,"userCount":1,"projectCount":1,"projectMemberCount":1,"snapshotCount":1,"releaseCount":1,"releaseChannelCount":1,"artifactCount":1}\n' ;;
   *" psql "*"orphanedReleases"*) printf '%s\n' "$FAKE_INTEGRITY_RESULT" ;;
-  *" psql "*"artifact_manifests"*) printf '[{"storageKey":"33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json","contentDigest":"218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9"}]\n' ;;
+  *" psql "*"artifact_manifests"*) printf '[{"projectId":"33333333-3333-4333-8333-333333333333","snapshotId":"55555555-5555-4555-8555-555555555555","stage":"convert","storageKey":"%s","contentDigest":"218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9"}]\n' "$FAKE_ARTIFACT_STORAGE_KEY" ;;
   *" pg_isready "*) exit 0 ;;
   *" exec "*" node -e "*) exit 0 ;;
   *" run "*" alpine:3.20 tar "*)
@@ -87,6 +88,7 @@ esac
       RESTIC_BACKUP_DELAY: resticBackupDelay,
       RESTIC_RESTORE_DELAY: resticRestoreDelay,
       FAKE_INTEGRITY_RESULT: integrityResult,
+      FAKE_ARTIFACT_STORAGE_KEY: artifactStorageKey,
       FAKE_ARTIFACT_CONTENT: artifactContent,
       COMPOSE_DIR: root,
       COMPOSE_PROJECT_NAME: "dev-knowledge-hub",
@@ -255,6 +257,24 @@ test("restore drill rejects artifact content that does not match its manifest di
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /artifact content digest mismatch/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("restore drill rejects artifact storage keys outside the runtime manifest path", () => {
+  const fixture = createFixture({
+    artifactStorageKey: "wrong-project/55555555-5555-4555-8555-555555555555/convert/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json"
+  });
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], {
+      env: fixture.environment,
+      encoding: "utf8"
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /artifact storage key does not match manifest/);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

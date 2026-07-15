@@ -57,6 +57,7 @@ jobs:
       DEVKH_DOMAIN: hub.example.test
       ACME_EMAIL: ci@example.test
       COMPOSE_PROJECT_NAME: devkh-ci
+      DEVKH_CONTAINER_SMOKE: "true"
       RECOVERY_EVIDENCE_DIR: /tmp/devkh-recovery-evidence
     steps:
       - uses: actions/checkout@v4

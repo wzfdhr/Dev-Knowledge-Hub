@@ -118,14 +118,18 @@ integrity="$(docker exec "$database_container" psql -U devkh -d dev_knowledge_hu
 node -e 'const integrity=JSON.parse(process.argv[1]); if(Object.values(integrity).some((value)=>value!==0)){console.error("restored database integrity check failed",integrity);process.exit(1)}' "$integrity"
 
 artifact_manifests="$(docker exec "$database_container" psql -U devkh -d dev_knowledge_hub -At -v ON_ERROR_STOP=1 -c \
-  "SELECT COALESCE(json_agg(json_build_object('storageKey',storage_key,'contentDigest',content_digest) ORDER BY storage_key),'[]'::json)::text AS artifact_manifests FROM knowledge_artifacts;")"
+  "SELECT COALESCE(json_agg(json_build_object('projectId',project_id,'snapshotId',snapshot_id,'stage',stage,'storageKey',storage_key,'contentDigest',content_digest) ORDER BY storage_key),'[]'::json)::text AS artifact_manifests FROM knowledge_artifacts;")"
 artifact_content_verified_count="$(node -e '
   const fs=require("node:fs"); const path=require("node:path"); const crypto=require("node:crypto");
   const root=path.resolve(process.argv[1]); const manifests=JSON.parse(process.argv[2]);
   for(const manifest of manifests){
-    if(typeof manifest.storageKey!=="string"||!/^[a-f0-9]{64}$/.test(manifest.contentDigest??"")) throw new Error("invalid artifact manifest");
+    const safeSegment=/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+    const validStage=["convert","extract","tables","graph","synthesize","index","lint","viz","validate","package"].includes(manifest.stage);
+    if(!safeSegment.test(manifest.projectId??"")||!safeSegment.test(manifest.snapshotId??"")||!validStage||typeof manifest.storageKey!=="string"||!/^[a-f0-9]{64}$/.test(manifest.contentDigest??"")) throw new Error("invalid artifact manifest");
+    const expected=[manifest.projectId,manifest.snapshotId,manifest.stage,`${manifest.contentDigest}.json`].join("/");
+    if(manifest.storageKey!==expected) throw new Error("artifact storage key does not match manifest");
     const absolute=path.resolve(root,...manifest.storageKey.split("/"));
-    if(!absolute.startsWith(`${root}${path.sep}`)||path.basename(absolute)!==`${manifest.contentDigest}.json`) throw new Error("artifact storage key does not match digest");
+    if(!absolute.startsWith(`${root}${path.sep}`)) throw new Error("artifact storage key escapes store");
     let contents; try{contents=fs.readFileSync(absolute)}catch{throw new Error("artifact content is unavailable")}
     if(crypto.createHash("sha256").update(contents).digest("hex")!==manifest.contentDigest) throw new Error("artifact content digest mismatch");
     try{JSON.parse(contents.toString("utf8"))}catch{throw new Error("artifact content is not valid JSON")}

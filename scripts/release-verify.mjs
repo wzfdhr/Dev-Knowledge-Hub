@@ -44,12 +44,22 @@ function commandText(step) {
 }
 
 export function parseReleaseScope(args) {
-  if (args.length === 0) return "all";
+  if (args.length === 0) return "verify";
   const inline = args.find((arg) => arg.startsWith("--scope="));
   const value = inline?.slice("--scope=".length)
     ?? (args[0] === "--scope" ? args[1] : undefined);
   if (value === "verify" || value === "container" || value === "all") return value;
   throw new Error(`Unknown release verification scope: ${value ?? args.join(" ")}`);
+}
+
+export function assertContainerIsolation(env) {
+  if (env.DEVKH_CONTAINER_SMOKE !== "true") {
+    throw new Error("DEVKH_CONTAINER_SMOKE=true is required for destructive container verification");
+  }
+  const project = env.COMPOSE_PROJECT_NAME?.trim() ?? "";
+  if (!/^devkh-ci(?:-[a-z0-9]+)*$/.test(project)) {
+    throw new Error("Container verification requires a CI-only Compose project named devkh-ci or devkh-ci-<suffix>");
+  }
 }
 
 function executeCommand(step) {
@@ -117,6 +127,7 @@ export async function runReleaseSteps(steps, options = {}) {
 }
 
 async function runContainerVerification() {
+  assertContainerIsolation(process.env);
   let failure;
   try {
     await runReleaseSteps(CONTAINER_STEPS);

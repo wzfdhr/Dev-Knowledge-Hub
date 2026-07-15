@@ -51,6 +51,8 @@ finish() {
       fi
       printf 'recovery cleanup failed; inspect recovery resources under: %s\n' "$target" >&2
       exit_code=1
+    elif [[ -n "$evidence_path" && "${RECOVERY_EVIDENCE_DEFER_FINALIZATION:-false}" != "true" ]]; then
+      mv "$evidence_path" "${evidence_path%.pending}"
     fi
   fi
 
@@ -205,6 +207,6 @@ evidence_directory="$BACKUP_STATE_DIR/recovery-evidence"
 mkdir -p "$evidence_directory"
 chmod 700 "$evidence_directory"
 database_checksum="$(sha256sum "$set_directory/database.pgdump" | awk '{print $1}')"
-evidence_path="$evidence_directory/$(date -u +%Y%m%dT%H%M%SZ)-$snapshot_id.json"
+evidence_path="$evidence_directory/$(date -u +%Y%m%dT%H%M%SZ)-$snapshot_id.json.pending"
 temporary_evidence_path="$evidence_path.tmp.$$"
 node -e 'const fs=require("node:fs"); const [path,temporaryPath,startedAt,snapshotId,checksum,databaseStats,integrity,volumeArchiveSha256,volumeFileCounts,artifactContentVerifiedCount]=process.argv.slice(1); fs.writeFileSync(temporaryPath,JSON.stringify({schemaVersion:2,operation:"restore-drill",result:"success",startedAt,finishedAt:new Date().toISOString(),resticSnapshotId:snapshotId,databaseArchiveSha256:checksum,volumeArchives:["snapshots.tgz","repositories.tgz","sources.tgz","artifacts.tgz"],volumeArchiveSha256:JSON.parse(volumeArchiveSha256),volumeFileCounts:JSON.parse(volumeFileCounts),productionVolumeTouched:false,restoredSnapshotCount:1,pgRestoreListValidated:true,ephemeralDatabaseRestored:true,healthCheckPassed:true,artifactContentVerifiedCount:Number(artifactContentVerifiedCount),databaseStats:JSON.parse(databaseStats),integrity:JSON.parse(integrity)})+"\n",{mode:0o600}); fs.renameSync(temporaryPath,path);' "$evidence_path" "$temporary_evidence_path" "$started_at" "$snapshot_id" "$database_checksum" "$database_stats" "$integrity" "$volume_archive_sha256" "$volume_file_counts" "$artifact_content_verified_count"

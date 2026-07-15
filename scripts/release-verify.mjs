@@ -60,6 +60,15 @@ async function invalidateRecoveryEvidence(root, errorClass) {
   })}\n`, { mode: 0o600 });
 }
 
+async function finalizeRecoveryEvidence(root) {
+  if (!root) throw new Error("RECOVERY_EVIDENCE_DIR is required to finalize container recovery evidence");
+  const { readdir, rename } = await import("node:fs/promises");
+  const entries = await readdir(root, { recursive: true });
+  const pending = entries.filter((entry) => entry.endsWith(".json.pending"));
+  if (pending.length !== 1) throw new Error(`Expected exactly one pending recovery evidence file, found ${pending.length}`);
+  await rename(join(root, pending[0]), join(root, pending[0].slice(0, -".pending".length)));
+}
+
 export function parseReleaseScope(args) {
   if (args.length === 0) return "verify";
   const inline = args.find((arg) => arg.startsWith("--scope="));
@@ -169,6 +178,9 @@ export async function runContainerVerification(options = {}) {
     failure = cleanupError;
   }
   if (failure) throw failure;
+  if (env.RECOVERY_EVIDENCE_DEFER_FINALIZATION === "true") {
+    await finalizeRecoveryEvidence(env.RECOVERY_EVIDENCE_DIR);
+  }
 }
 
 export async function main(args = process.argv.slice(2)) {

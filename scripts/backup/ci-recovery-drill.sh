@@ -54,6 +54,7 @@ export RESTIC_REPOSITORY="$temporary_root/restic-repository"
 export RESTIC_PASSWORD_FILE="$password_file"
 export BACKUP_STATE_DIR="$evidence_directory"
 export RECOVERY_APP_IMAGE="${RECOVERY_APP_IMAGE:-devkh:ci}"
+export RECOVERY_EVIDENCE_DEFER_FINALIZATION="${RECOVERY_EVIDENCE_DEFER_FINALIZATION:-false}"
 
 restic init >/dev/null
 "$project_root/scripts/backup/seed-ci-recovery-fixture.sh"

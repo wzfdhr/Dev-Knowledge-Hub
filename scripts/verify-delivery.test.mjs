@@ -131,6 +131,12 @@ describe("delivery database isolation", () => {
     expect(deliveryMatrix).not.toMatch(/\| Verified head \|/);
   });
 
+  test("keeps the local Compose override out of Git", async () => {
+    const gitignore = await readFile(".gitignore", "utf8");
+
+    expect(gitignore).toMatch(/^docker-compose\.override\.yml$/m);
+  });
+
   test("merges only from a trusted workflow after fresh checks of the approved base and head", async () => {
     const workflow = parse(await readFile(".github/workflows/phase-merge.yml", "utf8"));
     const mergeJob = workflow.jobs.merge;

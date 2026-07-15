@@ -22,8 +22,8 @@ The supplemental commits remain separate commits in Phase A. They are existing w
 | Item | Result |
 | --- | --- |
 | Authoritative review target | [Phase A PR #3](https://github.com/wzfdhr/Dev-Knowledge-Hub/pull/3) current head at user approval |
-| Head binding | `phase:merge` requires the approved 40-character head SHA and GitHub `--match-head-commit` |
-| GitHub checks | The current PR head must report successful `verify` and `container-smoke`; older runs are not release evidence |
+| Head binding | `phase:merge` dispatches `phase-merge.yml` for the approved 40-character head SHA; its final job uses GitHub `--match-head-commit` |
+| GitHub checks | The trusted merge workflow reruns `verify` and `container-smoke` against the approved head; only those fresh jobs can unlock its merge job |
 | `verify` | Passed, including real PostgreSQL integration, build, acceptance, and E2E |
 | `container-smoke` | Passed, including container health and isolated recovery rehearsal |
 | Recovery artifact | The current head's `container-smoke` artifact named `recovery-evidence`, schema version 2 |
@@ -48,7 +48,7 @@ The supplemental commits remain separate commits in Phase A. They are existing w
 ## Release-gate policy
 
 - Existing implementations are audited and completed in place; they are not rewritten without a failed requirement or test.
-- A phase cannot merge while either `verify` or `container-smoke` is red. The private repository currently enforces this through `npm run phase:merge` because its GitHub account plan does not provide private branch protection.
+- A phase cannot merge while either `verify` or `container-smoke` is red. The private repository enforces this through `npm run phase:merge`, which dispatches the trusted `phase-merge.yml` workflow from `main` because its GitHub account plan does not provide private branch protection.
 - PostgreSQL integration tests must execute with a real database for a release result; a conditional skip is not a release pass.
 - A production change requires a separate user authorization during Phase F.
 - `docker-compose.override.yml` is a local operator file and must remain untracked.

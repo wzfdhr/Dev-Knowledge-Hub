@@ -12,6 +12,7 @@ const backupScript = join(scriptDirectory, "devkh-backup.sh");
 const restoreDrillScript = join(scriptDirectory, "devkh-restore-drill.sh");
 
 function createFixture({
+  dockerStopExit = "0",
   resticBackupExit = "0",
   resticBackupDelay = "0",
   resticRestoreDelay = "0",
@@ -29,6 +30,7 @@ function createFixture({
   writeFileSync(join(bin, "docker"), String.raw`#!/usr/bin/env sh
 printf 'docker %s\n' "$*" >> "$CALL_LOG"
 case " $* " in
+  *" compose "*" stop app "*) exit "$DOCKER_STOP_EXIT" ;;
   *" compose "*" exec "*) printf 'fake-pgdump\n' ;;
   *" compose "*" images -q app "*) printf 'devkh-recovery-image\n' ;;
   *" pg_restore "*) printf 'pg_restore %s\n' "$*" >> "$CALL_LOG" ;;
@@ -84,6 +86,7 @@ esac
       ...process.env,
       PATH: `${bin}:${process.env.PATH}`,
       CALL_LOG: log,
+      DOCKER_STOP_EXIT: dockerStopExit,
       RESTIC_BACKUP_EXIT: resticBackupExit,
       RESTIC_BACKUP_DELAY: resticBackupDelay,
       RESTIC_RESTORE_DELAY: resticRestoreDelay,
@@ -130,6 +133,24 @@ test("restarts app and skips retention when the encrypted upload fails", () => {
     assert.match(calls, /docker compose .* start app/);
     assert.match(calls, /restic backup/);
     assert.doesNotMatch(calls, /restic forget/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("attempts to restart the app when the stop command reports failure", () => {
+  const fixture = createFixture({ dockerStopExit: "19" });
+
+  try {
+    const result = spawnSync(backupScript, [], {
+      env: fixture.environment,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 19);
+    const calls = readFileSync(fixture.log, "utf8");
+    assert.match(calls, /docker compose .* stop app/);
+    assert.match(calls, /docker compose .* start app/);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -197,7 +218,7 @@ test("restore drill never writes production Docker volumes", () => {
 
     assert.equal(result.status, 0, result.stderr);
     const calls = readFileSync(fixture.log, "utf8");
-    assert.match(calls, /restic restore latest --target/);
+    assert.match(calls, /restic snapshots --latest 1 --json[\s\S]*restic restore abc123 --target/);
     assert.match(calls, /docker run .*postgres:16-bookworm pg_restore --list \/backup\/database\.pgdump/);
     assert.match(calls, /docker network create devkh-restore-drill-/);
     assert.match(calls, /docker exec -i devkh-restore-drill-.* pg_restore .*--exit-on-error/);

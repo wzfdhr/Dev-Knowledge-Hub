@@ -11,11 +11,7 @@ const greenPullRequest = {
   isDraft: false,
   baseRefName: "main",
   headRefName: "codex/phase-a-release-baseline",
-  headRefOid: "a".repeat(40),
-  statusCheckRollup: [
-    { name: "verify", status: "COMPLETED", conclusion: "SUCCESS" },
-    { name: "container-smoke", status: "COMPLETED", conclusion: "SUCCESS" }
-  ]
+  headRefOid: "a".repeat(40)
 };
 
 describe("private-repository merge gate", () => {
@@ -31,22 +27,13 @@ describe("private-repository merge gate", () => {
     expect(() => parseMergeArguments(["not-a-number", "--user-approved", "--approved-head", "a".repeat(40)])).toThrow("pull request number");
   });
 
-  test("rejects drafts, non-main targets, and missing or failed checks", () => {
+  test("rejects drafts, non-main targets, and changed heads", () => {
     expect(() => assertMergeReady({ ...greenPullRequest, isDraft: true })).toThrow("Draft");
     expect(() => assertMergeReady({ ...greenPullRequest, baseRefName: "develop" })).toThrow("main");
     expect(() => assertMergeReady(greenPullRequest, "b".repeat(40))).toThrow("changed after user approval");
-    expect(() => assertMergeReady({
-      ...greenPullRequest,
-      statusCheckRollup: greenPullRequest.statusCheckRollup.slice(0, 1)
-    }, "a".repeat(40))).toThrow("container-smoke");
-    expect(() => assertMergeReady({
-      ...greenPullRequest,
-      statusCheckRollup: greenPullRequest.statusCheckRollup.map((check) =>
-        check.name === "verify" ? { ...check, conclusion: "FAILURE" } : check)
-    }, "a".repeat(40))).toThrow("verify");
   });
 
-  test("uses a merge commit only after the remote PR state is verified", async () => {
+  test("dispatches the trusted merge workflow instead of merging from the client", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce(JSON.stringify(greenPullRequest))
       .mockResolvedValueOnce("");
@@ -59,10 +46,14 @@ describe("private-repository merge gate", () => {
 
     expect(execute).toHaveBeenNthCalledWith(1, [
       "pr", "view", "3", "--json",
-      "number,isDraft,baseRefName,headRefName,headRefOid,statusCheckRollup"
+      "number,isDraft,baseRefName,headRefName,headRefOid"
     ]);
     expect(execute).toHaveBeenNthCalledWith(2, [
-      "pr", "merge", "3", "--merge", "--delete-branch", "--match-head-commit", "a".repeat(40)
+      "workflow", "run", "phase-merge.yml", "--ref", "main",
+      "--field", "pr_number=3",
+      "--field", `approved_head=${"a".repeat(40)}`,
+      "--field", "user_approved=true"
     ]);
+    expect(execute.mock.calls.flat().flat()).not.toContain("merge");
   });
 });

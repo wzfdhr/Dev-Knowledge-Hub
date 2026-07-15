@@ -44,11 +44,11 @@ mkdir -p "$BACKUP_STATE_DIR"
 chmod 700 "$BACKUP_STATE_DIR"
 stage="$(mktemp -d "$BACKUP_STATE_DIR/staging.XXXXXX")"
 
+app_stopped=1
 (
   cd "$COMPOSE_DIR"
   docker compose -f docker-compose.yml -p "$COMPOSE_PROJECT_NAME" stop app
 )
-app_stopped=1
 
 (
   cd "$COMPOSE_DIR"

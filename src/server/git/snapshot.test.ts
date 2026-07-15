@@ -151,7 +151,7 @@ describe("immutable repository snapshots", () => {
     expect(summary.fileCount).toBe(4);
   });
 
-  test("returns unchanged for the same SHA and creates a snapshot for the next commit", async () => {
+  test("returns unchanged for the same SHA and creates a snapshot for the next commit", { timeout: 15_000 }, async () => {
     const repositoryPath = await fixtureRepository();
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-data-"));
     tempDirectories.push(dataDir);

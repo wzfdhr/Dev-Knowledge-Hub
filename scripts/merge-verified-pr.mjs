@@ -3,8 +3,6 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 const executeFile = promisify(execFile);
-const requiredChecks = ["verify", "container-smoke"];
-
 async function executeGh(args) {
   const result = await executeFile("gh", args, { encoding: "utf8" });
   return result.stdout;
@@ -38,14 +36,6 @@ export function assertMergeReady(pullRequest, approvedHead) {
   if (pullRequest.headRefOid !== approvedHead) {
     throw new Error(`PR #${pullRequest.number} changed after user approval`);
   }
-  for (const name of requiredChecks) {
-    const check = pullRequest.statusCheckRollup.find((candidate) =>
-      (candidate.name ?? candidate.context) === name);
-    if (!check) throw new Error(`Required check ${name} is missing`);
-    if (check.status !== "COMPLETED" || check.conclusion !== "SUCCESS") {
-      throw new Error(`Required check ${name} is not successful`);
-    }
-  }
 }
 
 export async function mergeVerifiedPullRequest(input, options = {}) {
@@ -54,13 +44,15 @@ export async function mergeVerifiedPullRequest(input, options = {}) {
     throw new Error("A valid approved head commit is required");
   }
   const execute = options.execute ?? executeGh;
-  const fields = "number,isDraft,baseRefName,headRefName,headRefOid,statusCheckRollup";
+  const fields = "number,isDraft,baseRefName,headRefName,headRefOid";
   const raw = await execute(["pr", "view", String(input.pullRequest), "--json", fields]);
   const pullRequest = JSON.parse(raw);
   assertMergeReady(pullRequest, input.approvedHead.toLowerCase());
   await execute([
-    "pr", "merge", String(input.pullRequest), "--merge", "--delete-branch",
-    "--match-head-commit", input.approvedHead.toLowerCase()
+    "workflow", "run", "phase-merge.yml", "--ref", "main",
+    "--field", `pr_number=${input.pullRequest}`,
+    "--field", `approved_head=${input.approvedHead.toLowerCase()}`,
+    "--field", "user_approved=true"
   ]);
 }
 

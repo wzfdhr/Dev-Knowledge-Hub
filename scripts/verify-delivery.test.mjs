@@ -87,8 +87,39 @@ describe("delivery database isolation", () => {
 
     expect(packageJson.scripts["release:verify"]).toBe("node scripts/release-verify.mjs");
     expect(packageJson.scripts["phase:merge"]).toBe("node scripts/merge-verified-pr.mjs");
-    expect(deliveryMatrix).toContain("--match-head-commit");
+    expect(deliveryMatrix).toContain("phase-merge.yml");
     expect(deliveryMatrix).not.toMatch(/\| Verified head \|/);
+  });
+
+  test("merges only from a trusted workflow after fresh checks of the approved head", async () => {
+    const workflow = parse(await readFile(".github/workflows/phase-merge.yml", "utf8"));
+    const mergeJob = workflow.jobs.merge;
+
+    expect(workflow.on).toHaveProperty("workflow_dispatch");
+    expect(workflow.permissions.contents).toBe("read");
+    expect(workflow.jobs.verify.permissions.contents).toBe("read");
+    expect(workflow.jobs["container-smoke"].permissions.contents).toBe("read");
+    expect(mergeJob.permissions.contents).toBe("write");
+    expect(mergeJob.permissions["pull-requests"]).toBe("write");
+    expect(mergeJob.needs).toEqual(["verify", "container-smoke"]);
+    expect(mergeJob.if).toContain("success()");
+    expect(mergeJob.if).toContain("inputs.user_approved");
+    expect(mergeJob.if).toContain("github.actor == github.repository_owner");
+    expect(workflow.jobs.verify.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uses: "actions/checkout@v4",
+        with: expect.objectContaining({ ref: "${{ inputs.approved_head }}" })
+      })
+    ]));
+    expect(workflow.jobs["container-smoke"].steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uses: "actions/checkout@v4",
+        with: expect.objectContaining({ ref: "${{ inputs.approved_head }}" })
+      })
+    ]));
+    const mergeCommands = mergeJob.steps.map((step) => step.run).filter(Boolean).join("\n");
+    expect(mergeCommands).toContain("--match-head-commit");
+    expect(mergeCommands).toContain("$APPROVED_HEAD");
   });
 
   test("seeds representative durable state before the CI recovery rehearsal", async () => {

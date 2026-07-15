@@ -51,8 +51,8 @@ mkdir -p "$BACKUP_STATE_DIR"
 chmod 700 "$BACKUP_STATE_DIR"
 target="$(mktemp -d "$BACKUP_STATE_DIR/restore-check.XXXXXX")"
 
-restic restore latest --target "$target"
 snapshot_id="$(latest_snapshot_id)"
+restic restore "$snapshot_id" --target "$target"
 set_directory="$(dirname "$(find "$target" -type f -name manifest.json -print -quit)")"
 
 [[ -n "$set_directory" && -f "$set_directory/checksums.sha256" ]] || {

@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
-import { pathToFileURL } from "node:url";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const compose = ["compose", "-f", "docker-compose.yml"];
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const compose = ["compose", "-f", resolve(repositoryRoot, "docker-compose.yml")];
 
 export const VERIFY_STEPS = Object.freeze([
   { name: "secrets", command: npm, args: ["run", "secrets:scan"] },
@@ -21,7 +23,7 @@ export const VERIFY_STEPS = Object.freeze([
 ]);
 
 export const CONTAINER_STEPS = Object.freeze([
-  { name: "container-build", command: "docker", args: ["build", "--target", "runtime", "-t", "devkh:ci", "."] },
+  { name: "container-build", command: "docker", args: ["build", "--target", "runtime", "-t", "devkh:ci", repositoryRoot] },
   { name: "compose-config", command: "docker", args: [...compose, "config", "--quiet"] },
   { name: "compose-up", command: "docker", args: [...compose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "postgres", "app"] },
   {
@@ -30,7 +32,7 @@ export const CONTAINER_STEPS = Object.freeze([
     args: [...compose, "exec", "-T", "app", "node", "-e",
       "fetch('http://127.0.0.1:3000/api/health').then(async(response)=>{console.log(await response.text());process.exit(response.ok?0:1)}).catch(()=>process.exit(1))"]
   },
-  { name: "recovery-drill", command: "bash", args: ["scripts/backup/ci-recovery-drill.sh"] }
+  { name: "recovery-drill", command: "bash", args: [resolve(repositoryRoot, "scripts/backup/ci-recovery-drill.sh")] }
 ]);
 
 const cleanupStep = {
@@ -64,7 +66,7 @@ export function assertContainerIsolation(env) {
 
 function executeCommand(step) {
   return new Promise((resolve, reject) => {
-    const child = spawn(step.command, step.args, { env: process.env, stdio: "inherit" });
+    const child = spawn(step.command, step.args, { cwd: repositoryRoot, env: process.env, stdio: "inherit" });
     child.once("error", (error) => {
       error.exitCode = error.code === "ENOENT" ? 127 : 1;
       reject(error);

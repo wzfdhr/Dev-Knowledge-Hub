@@ -1,4 +1,9 @@
 import { describe, expect, test, vi } from "vitest";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   CONTAINER_STEPS,
@@ -18,8 +23,35 @@ describe("release verification orchestrator", () => {
       "container-build", "compose-config", "compose-up", "application-health", "recovery-drill"
     ]);
     expect(CONTAINER_STEPS.find((step) => step.name === "compose-up")?.args).toContain("--wait");
+    const repositoryRoot = process.cwd();
+    const composeFile = join(repositoryRoot, "docker-compose.yml");
+    expect(isAbsolute(repositoryRoot)).toBe(true);
+    expect(CONTAINER_STEPS.find((step) => step.name === "container-build")?.args.at(-1))
+      .toBe(repositoryRoot);
     expect(CONTAINER_STEPS.find((step) => step.name === "application-health")?.args.join(" "))
-      .toContain("compose -f docker-compose.yml exec -T app node");
+      .toContain(`compose -f ${composeFile} exec -T app node`);
+    expect(CONTAINER_STEPS.find((step) => step.name === "recovery-drill")?.args)
+      .toEqual([join(repositoryRoot, "scripts/backup/ci-recovery-drill.sh")]);
+  });
+
+  test("anchors container verification to this repository when invoked from another directory", async () => {
+    const repositoryRoot = process.cwd();
+    const foreignDirectory = mkdtempSync(join(tmpdir(), "devkh-release-verify-"));
+    try {
+      const scriptUrl = pathToFileURL(join(repositoryRoot, "scripts/release-verify.mjs")).href;
+      const result = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+        import { CONTAINER_STEPS } from ${JSON.stringify(scriptUrl)};
+        process.stdout.write(JSON.stringify(CONTAINER_STEPS));
+      `], { cwd: foreignDirectory, encoding: "utf8" });
+      expect(result.status).toBe(0);
+      const steps = JSON.parse(result.stdout);
+      expect(steps.find((step) => step.name === "container-build")?.args.at(-1))
+        .toBe(repositoryRoot);
+      expect(steps.find((step) => step.name === "compose-config")?.args)
+        .toContain(join(repositoryRoot, "docker-compose.yml"));
+    } finally {
+      rmSync(foreignDirectory, { recursive: true, force: true });
+    }
   });
 
   test("uses the non-destructive verification scope by default and rejects unknown scopes", () => {

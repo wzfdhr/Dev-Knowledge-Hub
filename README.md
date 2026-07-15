@@ -48,7 +48,8 @@ The development server listens on `HOST`/`PORT`. Production requires `DATABASE_U
 
 ```bash
 cp .env.example .env
-# Set DEVKH_DOMAIN and ACME_EMAIL to the public hostname and an operator address.
+# Set DEVKH_DOMAIN and PUBLIC_BASE_URL=https://<your-public-domain> to the same public hostname.
+# Set ACME_EMAIL to an operator address.
 # Generate each secret locally; do not paste output into chat, tickets, or commits.
 openssl rand -hex 24      # POSTGRES_PASSWORD
 openssl rand -base64 32   # DEVKH_MASTER_KEY

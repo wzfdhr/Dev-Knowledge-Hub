@@ -20,6 +20,15 @@ describe("delivery database isolation", () => {
     expect(ci.jobs.verify.env.TEST_DATABASE_URL).toContain("/devkh_test");
   });
 
+  test("documents the public HTTPS base URL required by the Compose application", async () => {
+    const environment = await readFile(".env.example", "utf8");
+    const readme = await readFile("README.md", "utf8");
+
+    expect(environment).toContain("PUBLIC_BASE_URL=https://hub.example.com");
+    expect(readme).toContain("PUBLIC_BASE_URL");
+    expect(readme).toContain("https://<your-public-domain>");
+  });
+
   test("boots both development surfaces, forces production start, and loads dotenv explicitly", async () => {
     const packageJson = JSON.parse(await readFile("package.json", "utf8"));
     const packageLock = JSON.parse(await readFile("package-lock.json", "utf8"));

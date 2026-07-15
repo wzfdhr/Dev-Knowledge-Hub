@@ -13,5 +13,7 @@ describe("remediation identity migration", () => {
     expect(sql).toContain("ADD COLUMN issue_id text");
     expect(sql).toContain("SET issue_id = issue->>'id'");
     expect(sql).toContain("UNIQUE (workspace_id, source_build_id, issue_id)");
+    expect(sql).toContain("missing a non-empty issue.id");
+    expect(sql).toContain("duplicate issue identities");
   });
 });

@@ -1,14 +1,14 @@
 import { authenticatedCookie, csrfHeaders } from "../test-support/csrf";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import { afterAll, describe, expect, test } from "vitest";
 
 import { runMigrations } from "../../db/migrate";
@@ -62,6 +62,59 @@ integration("PostgreSQL cited knowledge integration", () => {
       "SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'"
     );
     expect(extension.rows).toHaveLength(1);
+  }, 30_000);
+
+  test(databaseUrl
+    ? "validates legacy remediation identities before applying the unique migration"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    const migrationSql = await readFile(path.resolve("drizzle/0022_remediation_issue_identity.sql"), "utf8");
+
+    const runFixture = async (
+      issues: Array<{ workspaceId: string; sourceBuildId: string; issue: object }>,
+      verify: (client: PoolClient) => Promise<void>
+    ) => {
+      const client = await pool!.connect();
+      const schema = `remediation_migration_${randomUUID().replaceAll("-", "")}`;
+      try {
+        await client.query(`CREATE SCHEMA ${schema}`);
+        await client.query(`SET search_path TO ${schema}, public`);
+        await client.query(`CREATE TABLE remediation_cases (
+          workspace_id uuid NOT NULL,
+          source_build_id uuid NOT NULL,
+          issue jsonb NOT NULL
+        )`);
+        for (const row of issues) {
+          await client.query(
+            "INSERT INTO remediation_cases (workspace_id, source_build_id, issue) VALUES ($1, $2, $3::jsonb)",
+            [row.workspaceId, row.sourceBuildId, JSON.stringify(row.issue)]
+          );
+        }
+        await verify(client);
+      } finally {
+        await client.query("RESET search_path").catch(() => undefined);
+        await client.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
+        client.release();
+      }
+    };
+
+    const workspaceId = randomUUID();
+    const sourceBuildId = randomUUID();
+    await runFixture([{ workspaceId, sourceBuildId, issue: { id: "lint-1" } }], async (client) => {
+      await client.query(migrationSql);
+      const { rows } = await client.query<{ issue_id: string }>("SELECT issue_id FROM remediation_cases");
+      expect(rows).toEqual([{ issue_id: "lint-1" }]);
+    });
+    await runFixture([{ workspaceId, sourceBuildId, issue: {} }], async (client) => {
+      await expect(client.query(migrationSql)).rejects.toThrow("missing a non-empty issue.id");
+    });
+    await runFixture([
+      { workspaceId, sourceBuildId, issue: { id: "lint-duplicate" } },
+      { workspaceId, sourceBuildId, issue: { id: "lint-duplicate" } }
+    ], async (client) => {
+      await expect(client.query(migrationSql)).rejects.toThrow("duplicate issue identities");
+    });
   }, 30_000);
 
   test(databaseUrl

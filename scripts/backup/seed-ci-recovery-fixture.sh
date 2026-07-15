@@ -30,8 +30,8 @@ VALUES (
   '77777777-7777-4777-8777-777777777777', '11111111-1111-4111-8111-111111111111',
   '33333333-3333-4333-8333-333333333333', '55555555-5555-4555-8555-555555555555',
   '66666666-6666-4666-8666-666666666666', 'convert', 'recovery-fixture', 1,
-  repeat('d', 64), repeat('c', 64),
-  '33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.json',
+  repeat('d', 64), '218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9',
+  '33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json',
   '[]'::jsonb, 'deterministic'
 );
 INSERT INTO releases (id, workspace_id, repository_id, build_job_id, snapshot_id, version, published_at)
@@ -54,5 +54,5 @@ write_volume_file "${COMPOSE_PROJECT_NAME}_snapshot_data" recovery/snapshot.json
 write_volume_file "${COMPOSE_PROJECT_NAME}_repository_mirrors" recovery/HEAD 'ref: refs/heads/main'
 write_volume_file "${COMPOSE_PROJECT_NAME}_uploaded_sources" recovery/source.ts 'export const recoveryFixture = true;'
 write_volume_file "${COMPOSE_PROJECT_NAME}_artifact_data" \
-  33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.json \
+  33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json \
   '{"fixture":true}'

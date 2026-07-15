@@ -31,6 +31,7 @@
   "pgRestoreListValidated": true,
   "ephemeralDatabaseRestored": true,
   "healthCheckPassed": true,
+  "artifactContentVerifiedCount": 8,
   "databaseStats": {
     "workspaceCount": 1,
     "userCount": 1,
@@ -53,8 +54,10 @@
 
 验收时必须验证 `result=success`、`productionVolumeTouched=false`，且 `volumeArchives`
 中的 `snapshots.tgz`、`repositories.tgz`、`sources.tgz`、`artifacts.tgz` 齐全。恢复演练还必须
-真实恢复临时 PostgreSQL、校验 release/权限/artifact 引用并启动临时应用完成健康检查；对应字段均为
-`true`，`integrity` 各项均为 `0`。`resticSnapshotId` 必须与 restic 日志对应。记录不得包含
+真实恢复临时 PostgreSQL、校验 release/build/snapshot/repository/channel 一致性、项目权限和 artifact
+引用，并逐条按 `storageKey` 校验 artifact 文件路径、JSON 与内容 SHA-256。随后启动临时应用完成健康检查；
+对应字段均为 `true`，`artifactContentVerifiedCount` 必须等于 `databaseStats.artifactCount`，`integrity`
+各项均为 `0`。`resticSnapshotId` 必须与 restic 日志对应。记录不得包含
 Restic 密码、OSS/RAM 凭据、数据库 URL、`DEVKH_MASTER_KEY`、源文件内容或数据库转储。
 
 GitHub `container-smoke` 使用临时本地 Restic 仓库执行同一套演练，并将该 JSON 作为

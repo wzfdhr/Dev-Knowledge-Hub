@@ -11,6 +11,7 @@ const greenPullRequest = {
   isDraft: false,
   baseRefName: "main",
   headRefName: "codex/phase-a-release-baseline",
+  headRefOid: "a".repeat(40),
   statusCheckRollup: [
     { name: "verify", status: "COMPLETED", conclusion: "SUCCESS" },
     { name: "container-smoke", status: "COMPLETED", conclusion: "SUCCESS" }
@@ -19,26 +20,30 @@ const greenPullRequest = {
 
 describe("private-repository merge gate", () => {
   test("requires an explicit user approval flag and a positive PR number", () => {
-    expect(parseMergeArguments(["3", "--user-approved"])).toEqual({
+    expect(parseMergeArguments(["3", "--user-approved", "--approved-head", "a".repeat(40)])).toEqual({
       pullRequest: 3,
-      userApproved: true
+      userApproved: true,
+      approvedHead: "a".repeat(40)
     });
-    expect(() => parseMergeArguments(["3"])).toThrow("--user-approved");
-    expect(() => parseMergeArguments(["not-a-number", "--user-approved"])).toThrow("pull request number");
+    expect(() => parseMergeArguments(["3", "--approved-head", "a".repeat(40)])).toThrow("--user-approved");
+    expect(() => parseMergeArguments(["3", "--user-approved"])).toThrow("--approved-head");
+    expect(() => parseMergeArguments(["3", "--user-approved", "--approved-head", "short"])).toThrow("40-character");
+    expect(() => parseMergeArguments(["not-a-number", "--user-approved", "--approved-head", "a".repeat(40)])).toThrow("pull request number");
   });
 
   test("rejects drafts, non-main targets, and missing or failed checks", () => {
     expect(() => assertMergeReady({ ...greenPullRequest, isDraft: true })).toThrow("Draft");
     expect(() => assertMergeReady({ ...greenPullRequest, baseRefName: "develop" })).toThrow("main");
+    expect(() => assertMergeReady(greenPullRequest, "b".repeat(40))).toThrow("changed after user approval");
     expect(() => assertMergeReady({
       ...greenPullRequest,
       statusCheckRollup: greenPullRequest.statusCheckRollup.slice(0, 1)
-    })).toThrow("container-smoke");
+    }, "a".repeat(40))).toThrow("container-smoke");
     expect(() => assertMergeReady({
       ...greenPullRequest,
       statusCheckRollup: greenPullRequest.statusCheckRollup.map((check) =>
         check.name === "verify" ? { ...check, conclusion: "FAILURE" } : check)
-    })).toThrow("verify");
+    }, "a".repeat(40))).toThrow("verify");
   });
 
   test("uses a merge commit only after the remote PR state is verified", async () => {
@@ -46,12 +51,18 @@ describe("private-repository merge gate", () => {
       .mockResolvedValueOnce(JSON.stringify(greenPullRequest))
       .mockResolvedValueOnce("");
 
-    await mergeVerifiedPullRequest({ pullRequest: 3, userApproved: true }, { execute });
+    await mergeVerifiedPullRequest({
+      pullRequest: 3,
+      userApproved: true,
+      approvedHead: "a".repeat(40)
+    }, { execute });
 
     expect(execute).toHaveBeenNthCalledWith(1, [
       "pr", "view", "3", "--json",
-      "number,isDraft,baseRefName,headRefName,statusCheckRollup"
+      "number,isDraft,baseRefName,headRefName,headRefOid,statusCheckRollup"
     ]);
-    expect(execute).toHaveBeenNthCalledWith(2, ["pr", "merge", "3", "--merge", "--delete-branch"]);
+    expect(execute).toHaveBeenNthCalledWith(2, [
+      "pr", "merge", "3", "--merge", "--delete-branch", "--match-head-commit", "a".repeat(40)
+    ]);
   });
 });

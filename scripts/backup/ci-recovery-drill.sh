@@ -52,6 +52,7 @@ node -e '
     || evidence.productionVolumeTouched !== false
     || evidence.ephemeralDatabaseRestored !== true
     || evidence.healthCheckPassed !== true
+    || evidence.artifactContentVerifiedCount !== evidence.databaseStats?.artifactCount
     || !representativeDatabaseRestored
     || !durableFilesRestored
     || !integrityPassed) process.exit(1);

@@ -11,7 +11,7 @@ const projectRoot = join(scriptDirectory, "../..");
 const backupScript = join(scriptDirectory, "devkh-backup.sh");
 const restoreDrillScript = join(scriptDirectory, "devkh-restore-drill.sh");
 
-function createFixture({ resticBackupExit = "0" } = {}) {
+function createFixture({ resticBackupExit = "0", artifactContent = '{"fixture":true}' } = {}) {
   const root = mkdtempSync(join(tmpdir(), "devkh-backup-"));
   const bin = join(root, "bin");
   const log = join(root, "calls.log");
@@ -27,6 +27,7 @@ case " $* " in
   *" pg_restore "*) printf 'pg_restore %s\n' "$*" >> "$CALL_LOG" ;;
   *" psql "*"workspaceCount"*) printf '{"workspaceCount":1,"userCount":1,"projectCount":1,"projectMemberCount":1,"snapshotCount":1,"releaseCount":1,"releaseChannelCount":1,"artifactCount":1}\n' ;;
   *" psql "*"orphanedReleases"*) printf '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":0}\n' ;;
+  *" psql "*"artifact_manifests"*) printf '[{"storageKey":"33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json","contentDigest":"218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9"}]\n' ;;
   *" pg_isready "*) exit 0 ;;
   *" exec "*" node -e "*) exit 0 ;;
   *" run "*" alpine:3.20 tar "*)
@@ -51,10 +52,15 @@ case "$1" in
     empty_directory="$target/empty"
     mkdir -p "$set_directory" "$empty_directory"
     printf 'fake-pgdump\n' > "$set_directory/database.pgdump"
-    tar -C "$empty_directory" -czf "$set_directory/snapshots.tgz" .
-    tar -C "$empty_directory" -czf "$set_directory/repositories.tgz" .
-    tar -C "$empty_directory" -czf "$set_directory/sources.tgz" .
-    tar -C "$empty_directory" -czf "$set_directory/artifacts.tgz" .
+    for name in snapshots repositories sources; do
+      mkdir -p "$empty_directory/$name/recovery"
+      printf '%s\n' "$name" > "$empty_directory/$name/recovery/fixture.txt"
+      tar -C "$empty_directory/$name" -czf "$set_directory/$name.tgz" .
+    done
+    artifact_path="$empty_directory/artifacts/33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert"
+    mkdir -p "$artifact_path"
+    printf '%s\n' "$FAKE_ARTIFACT_CONTENT" > "$artifact_path/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json"
+    tar -C "$empty_directory/artifacts" -czf "$set_directory/artifacts.tgz" .
     (cd "$set_directory" && sha256sum database.pgdump snapshots.tgz repositories.tgz sources.tgz artifacts.tgz > checksums.sha256)
     printf '{"schemaVersion":1}\n' > "$set_directory/manifest.json"
     ;;
@@ -71,6 +77,7 @@ esac
       PATH: `${bin}:${process.env.PATH}`,
       CALL_LOG: log,
       RESTIC_BACKUP_EXIT: resticBackupExit,
+      FAKE_ARTIFACT_CONTENT: artifactContent,
       COMPOSE_DIR: root,
       COMPOSE_PROJECT_NAME: "dev-knowledge-hub",
       SNAPSHOT_VOLUME: "devkh_snapshots",
@@ -174,13 +181,30 @@ test("restore drill never writes production Docker volumes", () => {
         healthCheckPassed: true,
         volumeArchives: ["snapshots.tgz", "repositories.tgz", "sources.tgz", "artifacts.tgz"],
         databaseStats: { workspaceCount: 1, userCount: 1, projectCount: 1, projectMemberCount: 1, snapshotCount: 1, releaseCount: 1, releaseChannelCount: 1, artifactCount: 1 },
-        volumeFileCounts: { snapshots: 0, repositories: 0, sources: 0, artifacts: 0 },
+        volumeFileCounts: { snapshots: 1, repositories: 1, sources: 1, artifacts: 1 },
         integrity: { orphanedReleases: 0, orphanedReleaseChannels: 0, crossWorkspaceProjectMembers: 0, projectMembersWithoutWorkspaceMembership: 0, orphanedArtifacts: 0 }
       }
     );
     for (const archive of ["snapshots", "repositories", "sources", "artifacts"]) {
       assert.match(evidence.volumeArchiveSha256[archive], /^[a-f0-9]{64}$/);
     }
+    assert.equal(evidence.artifactContentVerifiedCount, 1);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("restore drill rejects artifact content that does not match its manifest digest", () => {
+  const fixture = createFixture({ artifactContent: '{"fixture":false}' });
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], {
+      env: fixture.environment,
+      encoding: "utf8"
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /artifact content digest mismatch/);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -214,4 +238,9 @@ test("backs up durable sources and content-addressed artifacts separately from u
   assert.match(restore, /sources\.tgz/);
   assert.match(restore, /artifacts\.tgz/);
   assert.doesNotMatch(restore, /uploads\.tgz/);
+  assert.match(restore, /b\.snapshot_id<>r\.snapshot_id/);
+  assert.match(restore, /s\.repository_id<>r\.repository_id/);
+  assert.match(restore, /r\.repository_id<>c\.repository_id/);
+  assert.match(restore, /repo\.project_id<>a\.project_id/);
+  assert.match(restore, /artifact content digest mismatch/);
 });

@@ -1,4 +1,8 @@
 import { describe, expect, test, vi } from "vitest";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   assertMergeReady,
@@ -14,6 +18,15 @@ const greenPullRequest = {
   headRefName: "codex/phase-a-release-baseline",
   headRefOid: "a".repeat(40)
 };
+
+function git(cwd, args) {
+  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+function configureGitIdentity(cwd) {
+  git(cwd, ["config", "user.email", "phase-a-test@example.test"]);
+  git(cwd, ["config", "user.name", "Phase A Test"]);
+}
 
 describe("private-repository merge gate", () => {
   test("requires an explicit user approval flag and both reviewed commit SHAs", () => {
@@ -64,5 +77,44 @@ describe("private-repository merge gate", () => {
       "--field", "user_approved=true"
     ]);
     expect(execute.mock.calls.flat().flat()).not.toContain("merge");
+  });
+
+  test("rejects the compare-and-swap push when main advances after review", () => {
+    const root = mkdtempSync(join(tmpdir(), "devkh-merge-lease-"));
+    const remote = join(root, "remote.git");
+    const writer = join(root, "writer");
+    const merger = join(root, "merger");
+
+    try {
+      git(root, ["init", "--bare", remote]);
+      git(root, ["clone", remote, writer]);
+      configureGitIdentity(writer);
+      git(writer, ["checkout", "-b", "main"]);
+      writeFileSync(join(writer, "README.md"), "base\n");
+      git(writer, ["add", "README.md"]);
+      git(writer, ["commit", "-m", "base"]);
+      git(writer, ["push", "origin", "main"]);
+      const reviewedBase = git(writer, ["rev-parse", "HEAD"]);
+
+      git(root, ["clone", remote, merger]);
+      configureGitIdentity(merger);
+      git(merger, ["checkout", "-b", "phase-a", "origin/main"]);
+      git(merger, ["commit", "--allow-empty", "-m", "phase merge"]);
+
+      git(writer, ["commit", "--allow-empty", "-m", "advance main"]);
+      git(writer, ["push", "origin", "main"]);
+      const advancedMain = git(writer, ["rev-parse", "HEAD"]);
+
+      const push = spawnSync("git", [
+        "push", "origin", "HEAD:refs/heads/main",
+        `--force-with-lease=refs/heads/main:${reviewedBase}`
+      ], { cwd: merger, encoding: "utf8" });
+
+      expect(push.status).not.toBe(0);
+      expect(`${push.stdout}\n${push.stderr}`).toMatch(/stale info|fetch first|rejected/i);
+      expect(git(root, ["--git-dir", remote, "rev-parse", "refs/heads/main"])).toBe(advancedMain);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

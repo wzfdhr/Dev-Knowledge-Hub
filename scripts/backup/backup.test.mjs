@@ -29,6 +29,8 @@ function createFixture({
   resticBackupExit = "0",
   resticBackupDelay = "0",
   resticRestoreDelay = "0",
+  resticBackupBlock = false,
+  resticRestoreBlock = false,
   integrityResult = '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":0}',
   artifactStorageKey = "33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json",
   artifactContent = '{"fixture":true}'
@@ -38,6 +40,8 @@ function createFixture({
   const log = join(root, "calls.log");
   const stateDirectory = join(root, "state");
   const passwordFile = join(root, "restic-password");
+  const backupBlockFile = join(root, "backup.block");
+  const restoreBlockFile = join(root, "restore.block");
   execFileSync("mkdir", ["-p", bin]);
   writeFileSync(log, "");
   writeFileSync(passwordFile, "test-only-password\n", { mode: 0o600 });
@@ -65,12 +69,14 @@ esac
 printf 'restic %s\n' "$*" >> "$CALL_LOG"
 case "$1" in
   backup)
+    while [ -n "$RESTIC_BACKUP_BLOCK_FILE" ] && [ ! -e "$RESTIC_BACKUP_BLOCK_FILE" ]; do sleep 0.05; done
     sleep "$RESTIC_BACKUP_DELAY"
     if [ "$RESTIC_BACKUP_EXIT" != "0" ]; then exit "$RESTIC_BACKUP_EXIT"; fi
     printf '{"message_type":"summary","snapshot_id":"%s"}\n' "$RESTIC_BACKUP_SNAPSHOT_ID"
     ;;
   snapshots) printf '[{"id":"%s"}]' "$RESTIC_LATEST_SNAPSHOT_ID" ;;
   restore)
+    while [ -n "$RESTIC_RESTORE_BLOCK_FILE" ] && [ ! -e "$RESTIC_RESTORE_BLOCK_FILE" ]; do sleep 0.05; done
     sleep "$RESTIC_RESTORE_DELAY"
     target=""
     while [ "$#" -gt 0 ]; do
@@ -108,6 +114,8 @@ esac
       RESTIC_BACKUP_EXIT: resticBackupExit,
       RESTIC_BACKUP_DELAY: resticBackupDelay,
       RESTIC_RESTORE_DELAY: resticRestoreDelay,
+      RESTIC_BACKUP_BLOCK_FILE: resticBackupBlock ? backupBlockFile : "",
+      RESTIC_RESTORE_BLOCK_FILE: resticRestoreBlock ? restoreBlockFile : "",
       RESTIC_BACKUP_SNAPSHOT_ID: backupSnapshotId,
       RESTIC_LATEST_SNAPSHOT_ID: latestSnapshotId,
       FAKE_INTEGRITY_RESULT: integrityResult,
@@ -137,6 +145,19 @@ async function waitForLog(path, pattern, timeoutMs = 10_000) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Timed out waiting for ${pattern}`);
+}
+
+async function waitForChildExit(child, timeoutMs = 10_000) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`Timed out waiting for child process exit after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      resolve({ code, signal });
+    });
+  });
 }
 
 test("restarts app and skips retention when the encrypted upload fails", () => {
@@ -263,20 +284,20 @@ test("the recovery fixture seeder refuses direct execution outside an isolated C
 test("interrupted backup and restore operations are recorded as failures", async () => {
   for (const operation of ["backup", "restore-drill"]) {
     const fixture = createFixture(operation === "backup"
-      ? { resticBackupDelay: "1" }
-      : { resticRestoreDelay: "1" });
+      ? { resticBackupBlock: true }
+      : { resticRestoreBlock: true });
     const script = operation === "backup" ? backupScript : restoreDrillScript;
     const marker = operation === "backup" ? /restic backup/ : /restic restore/;
 
     try {
       const child = spawn(script, [], {
         env: fixture.environment,
+        detached: true,
         stdio: "ignore"
       });
-      const exited = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
       await waitForLog(fixture.log, marker);
-      child.kill("SIGTERM");
-      const result = await exited;
+      process.kill(-child.pid, "SIGTERM");
+      const result = await waitForChildExit(child);
 
       assert.notEqual(result.code, 0);
       const status = JSON.parse(readFileSync(join(fixture.environment.BACKUP_STATE_DIR, "status.json"), "utf8"));

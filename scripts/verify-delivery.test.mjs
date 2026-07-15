@@ -93,6 +93,15 @@ describe("delivery database isolation", () => {
     );
   });
 
+  test("runs monitoring operational checks through the release backup gate", async () => {
+    const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+    const releaseVerifier = await readFile("scripts/release-verify.mjs", "utf8");
+
+    expect(packageJson.scripts["test:backup"]).toContain("scripts/monitoring/monitor.test.mjs");
+    expect(releaseVerifier).toContain('name: "backup-tests"');
+    expect(releaseVerifier).toContain('args: ["run", "test:backup"]');
+  });
+
   test("pins every active operational Compose command to the repository file", async () => {
     const readme = await readFile("README.md", "utf8");
     const monitor = await readFile("scripts/monitoring/devkh-monitor.sh", "utf8");

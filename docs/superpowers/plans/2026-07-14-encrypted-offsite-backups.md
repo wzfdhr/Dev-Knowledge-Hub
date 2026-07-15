@@ -132,15 +132,15 @@ Expected: FAIL because both operational scripts are absent.
 Source `lib.sh`, stage under `BACKUP_STATE_DIR`, stop `app`, dump only the configured production database in custom format, archive each named volume read-only, checksum the artifacts, write a manifest with timestamp/Git revision/filenames, and start `app` before network upload. The `EXIT INT TERM` trap restarts app if needed and writes only `backup_failed` on error.
 
 ```bash
-(cd "$COMPOSE_DIR" && docker compose -p "$COMPOSE_PROJECT_NAME" stop app)
+(cd "$COMPOSE_DIR" && docker compose -f "$COMPOSE_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" stop app)
 app_stopped=1
-(cd "$COMPOSE_DIR" && docker compose -p "$COMPOSE_PROJECT_NAME" exec -T postgres pg_dump -U devkh -d dev_knowledge_hub -Fc) > "$stage/database.pgdump"
+(cd "$COMPOSE_DIR" && docker compose -f "$COMPOSE_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" exec -T postgres pg_dump -U devkh -d dev_knowledge_hub -Fc) > "$stage/database.pgdump"
 for pair in "snapshots:$SNAPSHOT_VOLUME" "repositories:$REPOSITORY_VOLUME" "uploads:$UPLOAD_VOLUME"; do
   name="${pair%%:*}"; volume="${pair#*:}"
   docker run --rm --mount "type=volume,src=$volume,dst=/source,readonly" --mount "type=bind,src=$stage,dst=/backup" alpine:3.20 tar -C /source -czf "/backup/$name.tgz" .
 done
 write_checksums "$stage"
-(cd "$COMPOSE_DIR" && docker compose -p "$COMPOSE_PROJECT_NAME" start app)
+(cd "$COMPOSE_DIR" && docker compose -f "$COMPOSE_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" start app)
 app_stopped=0
 restic backup "$stage" --tag daily
 snapshot_id="$(latest_snapshot_id)"
@@ -295,7 +295,7 @@ git commit -m "docs: record backup storage inventory"
 ```bash
 ssh -i /Users/start/Desktop/root.pem root@118.31.105.66 '
   set -e; cd /opt/dev-knowledge-hub
-  docker compose ps
+  docker compose -f /opt/dev-knowledge-hub/docker-compose.yml ps
   docker volume ls --format "{{.Name}}" | grep -E "dev-knowledge-hub_(snapshot_data|repository_mirrors|upload_staging)$"
   systemctl --version | head -1
 '
@@ -335,7 +335,7 @@ systemctl start devkh-backup.service
 systemctl start devkh-restic-check.service
 systemctl start devkh-restore-drill.service
 cat /var/lib/devkh-backup/status.json
-cd /opt/dev-knowledge-hub && docker compose ps
+docker compose -f /opt/dev-knowledge-hub/docker-compose.yml ps
 curl --fail --silent --show-error http://127.0.0.1:3000/api/health
 ```
 

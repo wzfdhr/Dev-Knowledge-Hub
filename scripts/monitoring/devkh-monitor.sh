@@ -11,6 +11,11 @@ set -uo pipefail
 : "${MAX_BACKUP_AGE_SECONDS:?missing MAX_BACKUP_AGE_SECONDS}"
 : "${MAX_IMPORT_FAILURE_RATE_PERCENT:?missing MAX_IMPORT_FAILURE_RATE_PERCENT}"
 
+[[ "$COMPOSE_DIR" == /* ]] || {
+  printf 'COMPOSE_DIR must be an absolute path\n' >&2
+  exit 64
+}
+
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 failures=()
 

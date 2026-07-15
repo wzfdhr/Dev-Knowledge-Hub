@@ -11,6 +11,11 @@ require_backup_env() {
     }
   done
 
+  [[ "$COMPOSE_DIR" == /* ]] || {
+    printf 'COMPOSE_DIR must be an absolute path\n' >&2
+    return 64
+  }
+
   [[ -r "$RESTIC_PASSWORD_FILE" ]] || {
     printf 'restic password file is not readable\n' >&2
     return 64

@@ -83,7 +83,7 @@ Expected: `backendState` is `Running`, the DNS name ends in `.ts.net.`, and at l
 - [ ] **Step 1: Capture the healthy app state**
 
 ```bash
-cd /opt/dev-knowledge-hub; docker compose ps; curl -fsS http://127.0.0.1:3000/api/health; cp docker-compose.override.yml docker-compose.override.yml.before-tailnet
+docker compose -f /opt/dev-knowledge-hub/docker-compose.yml ps; curl -fsS http://127.0.0.1:3000/api/health; cp /opt/dev-knowledge-hub/docker-compose.override.yml /opt/dev-knowledge-hub/docker-compose.override.yml.before-tailnet
 ```
 
 Expected: app and PostgreSQL are healthy and health returns `{"status":"ok","service":"dev-knowledge-hub"}`.
@@ -101,7 +101,7 @@ Expected: Serve lists the machine's HTTPS `.ts.net` endpoint and proxy target `h
 Set `PUBLIC_BASE_URL` in `/opt/dev-knowledge-hub/docker-compose.override.yml` to `https://<server>.ts.net`, then run:
 
 ```bash
-cd /opt/dev-knowledge-hub; docker compose up -d --no-deps app; docker compose ps app
+docker compose -f /opt/dev-knowledge-hub/docker-compose.yml up -d --no-deps app; docker compose -f /opt/dev-knowledge-hub/docker-compose.yml ps app
 ```
 
 Expected: the app is healthy and generated MCP connection URLs use the Tailnet address.
@@ -136,7 +136,7 @@ Expected: Nginx validates, no process listens on 8443, and `/etc/nginx/sites-ava
 - [ ] **Step 2: Verify service separation**
 
 ```bash
-curl -fsS -o /dev/null -w 'blog=%{http_code}\\n' http://127.0.0.1/; TAILNET_DNS_NAME="$(tailscale status --json | jq -r '.Self.DNSName' | sed 's/\\.$//')"; curl -fsS -o /dev/null -w 'knowledge-hub=%{http_code}\\n' "https://${TAILNET_DNS_NAME}/api/health"; cd /opt/dev-knowledge-hub && docker compose ps
+curl -fsS -o /dev/null -w 'blog=%{http_code}\\n' http://127.0.0.1/; TAILNET_DNS_NAME="$(tailscale status --json | jq -r '.Self.DNSName' | sed 's/\\.$//')"; curl -fsS -o /dev/null -w 'knowledge-hub=%{http_code}\\n' "https://${TAILNET_DNS_NAME}/api/health"; docker compose -f /opt/dev-knowledge-hub/docker-compose.yml ps
 ```
 
 Expected: blog and knowledge hub both return 200; app and PostgreSQL are healthy.

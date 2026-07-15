@@ -176,6 +176,23 @@ test("attempts to restart the app when the stop command reports failure", () => 
   }
 });
 
+test("refuses a relative Compose directory before changing application state", () => {
+  const fixture = createFixture();
+
+  try {
+    const result = spawnSync(backupScript, [], {
+      env: { ...fixture.environment, COMPOSE_DIR: "." },
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 64);
+    assert.match(result.stderr, /COMPOSE_DIR must be an absolute path/);
+    assert.equal(readFileSync(fixture.log, "utf8"), "");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("uploads one encrypted set before applying retention", () => {
   const fixture = createFixture();
 

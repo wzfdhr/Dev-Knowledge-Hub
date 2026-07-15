@@ -54,7 +54,7 @@ The public Nginx blog virtual host remains unchanged on port 80. Once Tailnet ac
 2. `tailscale serve status` shows an HTTPS handler forwarding only to `127.0.0.1:3000`.
 3. The Tailnet URL returns `/api/health` with HTTP 200 and a valid browser-trusted certificate.
 4. An authenticated browser session succeeds over the Tailnet URL and has a `Secure`, `HttpOnly`, `SameSite=Lax` session cookie.
-5. `docker compose ps` reports healthy app and PostgreSQL services.
+5. `docker compose -f /opt/dev-knowledge-hub/docker-compose.yml ps` reports healthy app and PostgreSQL services.
 6. No process listens on public TCP 8443 after cutover; Nginx's blog port 80 still responds normally.
 
 ## Rollback

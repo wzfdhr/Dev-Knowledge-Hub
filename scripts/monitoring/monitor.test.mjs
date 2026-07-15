@@ -23,6 +23,7 @@ function fixture({ snapshotTime = "1970-01-02T03:45:00.000Z", importCounts = "0|
   };
 
   writeFileSync(backupEnv, "RESTIC_REPOSITORY=s3:https://example.invalid/devkh\nRESTIC_PASSWORD_FILE=/tmp/password\n");
+  writeFileSync(join(root, "docker-compose.yml"), "services: {}\n");
   writeExecutable("curl", "#!/usr/bin/env sh\nexit 0\n");
   writeExecutable("docker", `#!/usr/bin/env sh\ncase "$*" in *exec*) printf '%s\\n' '${importCounts}' ;; *) printf "app healthy\\npostgres healthy\\n" ;; esac\n`);
   writeExecutable("df", "#!/usr/bin/env sh\nprintf \"Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/vda 100 70 30 70%% /\\n\"\n");
@@ -82,6 +83,20 @@ test("fails when the latest encrypted backup is stale", () => {
     assert.equal(status.result, "failed");
     assert.deepEqual(status.failures, ["backup_freshness"]);
     assert.doesNotMatch(readFileSync(join(value.root, "state", "status.json"), "utf8"), /example\.invalid/);
+  } finally {
+    rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("refuses a relative Compose directory before querying operational services", () => {
+  const value = fixture();
+  try {
+    const result = spawnSync(monitorScript, [], {
+      env: { ...value.environment, COMPOSE_DIR: "." },
+      encoding: "utf8"
+    });
+    assert.equal(result.status, 64);
+    assert.match(result.stderr, /COMPOSE_DIR must be an absolute path/);
   } finally {
     rmSync(value.root, { recursive: true, force: true });
   }

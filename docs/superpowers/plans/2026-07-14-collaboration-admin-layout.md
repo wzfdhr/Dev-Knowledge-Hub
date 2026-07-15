@@ -117,7 +117,7 @@ Expected: all commands pass; the production build emits a CSS asset.
 
 ```bash
 rsync -avz -e 'ssh -i /Users/start/Desktop/root.pem' src/client/pages/project-collaboration-page.tsx src/client/workbench.css root@118.31.105.66:/opt/dev-knowledge-hub/src/client/
-ssh -i /Users/start/Desktop/root.pem root@118.31.105.66 'cd /opt/dev-knowledge-hub && docker compose -p dev-knowledge-hub up -d --build app'
+ssh -i /Users/start/Desktop/root.pem root@118.31.105.66 'docker compose -f /opt/dev-knowledge-hub/docker-compose.yml -p dev-knowledge-hub up -d --build app'
 ```
 
 - [x] **Step 2: Verify production health**

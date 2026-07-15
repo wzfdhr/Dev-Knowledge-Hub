@@ -11,20 +11,28 @@ set -euo pipefail
 }
 
 project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$project_root/scripts/backup/lib.sh"
 temporary_root="$(mktemp -d "${RUNNER_TEMP:-/tmp}/devkh-recovery-drill.XXXXXX")"
 evidence_root="${RECOVERY_EVIDENCE_DIR:-${RUNNER_TEMP:-/tmp}/devkh-recovery-evidence}"
 evidence_directory="$evidence_root/run-${GITHUB_RUN_ID:-$$}-${GITHUB_RUN_ATTEMPT:-1}"
 password_file="$temporary_root/restic-password"
+started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 cleanup() {
   local exit_code="$1"
   if (( exit_code == 0 )); then
-    rm -rf "$temporary_root"
+    if ! rm -rf "$temporary_root"; then
+      rm -f "$evidence_directory"/recovery-evidence/*.json || true
+      write_status restore-drill failed "$started_at" "" recovery_cleanup_failed || true
+      printf 'CI recovery cleanup failed; retained temporary root: %s\n' "$temporary_root" >&2
+      return 1
+    fi
   else
     printf 'CI recovery drill failed; retained temporary root: %s\n' "$temporary_root" >&2
   fi
+  return "$exit_code"
 }
-trap 'exit_code=$?; cleanup "$exit_code"; exit "$exit_code"' EXIT
+trap 'exit_code=$?; cleanup "$exit_code"; cleanup_code=$?; exit "$cleanup_code"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 

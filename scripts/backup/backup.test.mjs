@@ -424,6 +424,7 @@ test("preserves the restored fixture when cleanup cannot remove recovery resourc
     assert.equal(result.status, 1);
     assert.match(result.stderr, /recovery cleanup failed/);
     assert.match(execFileSync("find", [fixture.environment.BACKUP_STATE_DIR, "-type", "d", "-name", "restore-check.*"], { encoding: "utf8" }), /restore-check/);
+    assert.equal(execFileSync("find", [join(fixture.environment.BACKUP_STATE_DIR, "recovery-evidence"), "-type", "f"], { encoding: "utf8" }).trim(), "");
     const status = JSON.parse(readFileSync(join(fixture.environment.BACKUP_STATE_DIR, "status.json"), "utf8"));
     assert.equal(status.result, "failed");
   } finally {

@@ -97,6 +97,8 @@ test("rejects incomplete or inconsistent recovery evidence", () => {
 test("the CI recovery drill uses the strict validator", () => {
   const script = readFileSync(join(scriptDirectory, "ci-recovery-drill.sh"), "utf8");
   assert.match(script, /validate-recovery-evidence\.mjs/);
+  assert.match(script, /recovery_cleanup_failed/);
+  assert.match(script, /write_status restore-drill failed/);
 });
 
 test("the documented recovery evidence example passes the strict validator", () => {

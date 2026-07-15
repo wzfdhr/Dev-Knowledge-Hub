@@ -9,6 +9,7 @@ require_backup_env
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 target=""
 snapshot_id=""
+evidence_path=""
 network_name=""
 database_container=""
 application_container=""
@@ -43,6 +44,9 @@ finish() {
     fi
 
     if (( cleanup_failed )); then
+      if [[ -n "$evidence_path" ]]; then
+        rm -f "$evidence_path" || true
+      fi
       printf 'recovery cleanup failed; inspect recovery resources under: %s\n' "$target" >&2
       exit_code=1
     fi

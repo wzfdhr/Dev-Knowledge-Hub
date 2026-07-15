@@ -2275,6 +2275,19 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return rows.map(remediationRecord);
   }
 
+  async countRemediations(
+    workspaceId: string,
+    projectId: string,
+    state?: RemediationState
+  ): Promise<number> {
+    const { rows } = await this.pool.query<{ total: string }>(
+      `SELECT count(*)::text AS total FROM remediation_cases
+       WHERE workspace_id = $1 AND project_id = $2 AND ($3::text IS NULL OR state = $3)`,
+      [workspaceId, projectId, state ?? null]
+    );
+    return Number(rows[0]?.total ?? 0);
+  }
+
   async listRemediationEvents(workspaceId: string, remediationId: string): Promise<RemediationEventRecord[]> {
     const { rows } = await this.pool.query<RemediationEventRow>(
       `SELECT id, workspace_id, remediation_id, from_state, to_state, actor_id, created_at

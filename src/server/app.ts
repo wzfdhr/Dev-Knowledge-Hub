@@ -1053,6 +1053,12 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const knowledge = release
       ? await options.store.knowledgeReleaseSummary(admin.workspaceId, release.id)
       : { pageCount: 0, chunkCount: 0, citationCount: 0 };
+    const remediationStates = ["open", "accepted", "rebuilding", "resolved", "dismissed"] as const;
+    const remediationCounts = await Promise.all(remediationStates.map(async (state) => [
+      state,
+      await options.store.countRemediations(admin.workspaceId, params.data.projectId, state)
+    ] as const));
+    const remediation = Object.fromEntries(remediationCounts) as Record<(typeof remediationStates)[number], number>;
     const diagnostics: Array<{ code: string }> = [];
     if (!repository) diagnostics.push({ code: "SOURCE_MISSING" });
     else if (!snapshot) diagnostics.push({ code: "SNAPSHOT_MISSING" });
@@ -1068,6 +1074,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       pendingFeedbackCount: overview.pendingFeedbackCount,
       indexedTextBytes: overview.indexedTextBytes,
       knowledge,
+      remediation,
       change: enrichedChange,
       diagnostics
     };

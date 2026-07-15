@@ -277,6 +277,7 @@ describe("team projects and members", () => {
       latestSnapshot: null,
       currentRelease: null,
       knowledge: { pageCount: 0, chunkCount: 0, citationCount: 0 },
+      remediation: { open: 0, accepted: 0, rebuilding: 0, resolved: 0, dismissed: 0 },
       diagnostics: [expect.objectContaining({ code: "SOURCE_MISSING" })]
     });
   });

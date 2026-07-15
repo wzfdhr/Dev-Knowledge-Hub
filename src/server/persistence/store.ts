@@ -732,6 +732,11 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore {
     projectId: string,
     pagination?: Pagination
   ): Promise<RemediationRecord[]>;
+  countRemediations(
+    workspaceId: string,
+    projectId: string,
+    state?: RemediationState
+  ): Promise<number>;
   listRemediationEvents(workspaceId: string, remediationId: string): Promise<RemediationEventRecord[]>;
   transitionRemediationWithAudit(
     workspaceId: string,

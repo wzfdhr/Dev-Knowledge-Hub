@@ -995,6 +995,18 @@ export class MemoryAppStore implements AppStore {
       || right.id.localeCompare(left.id)).slice(offset, offset + limit);
   }
 
+  async countRemediations(
+    workspaceId: string,
+    projectId: string,
+    state?: RemediationState
+  ): Promise<number> {
+    return this.remediations.filter((record) =>
+      record.workspaceId === workspaceId
+      && record.projectId === projectId
+      && (!state || record.state === state)
+    ).length;
+  }
+
   async listRemediationEvents(workspaceId: string, remediationId: string): Promise<RemediationEventRecord[]> {
     return this.remediationEvents.filter((event) =>
       event.workspaceId === workspaceId && event.remediationId === remediationId

@@ -37,6 +37,7 @@ export interface ProjectKnowledgeQuality {
   pendingFeedbackCount: number;
   indexedTextBytes: number;
   knowledge: { pageCount: number; chunkCount: number; citationCount: number };
+  remediation: { open: number; accepted: number; rebuilding: number; resolved: number; dismissed: number };
   change: SnapshotChangeSummary | null;
   diagnostics: Array<{ code: "SOURCE_MISSING" | "SNAPSHOT_MISSING" | "BUILD_FAILED" | "RELEASE_MISSING" | "REBUILD_RECOMMENDED" | "PUBLISHED" }>;
 }

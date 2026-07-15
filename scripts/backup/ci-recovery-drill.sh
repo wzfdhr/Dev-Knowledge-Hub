@@ -17,9 +17,16 @@ evidence_directory="$evidence_root/run-${GITHUB_RUN_ID:-$$}-${GITHUB_RUN_ATTEMPT
 password_file="$temporary_root/restic-password"
 
 cleanup() {
-  rm -rf "$temporary_root"
+  local exit_code="$1"
+  if (( exit_code == 0 )); then
+    rm -rf "$temporary_root"
+  else
+    printf 'CI recovery drill failed; retained temporary root: %s\n' "$temporary_root" >&2
+  fi
 }
-trap cleanup EXIT INT TERM
+trap 'exit_code=$?; cleanup "$exit_code"; exit "$exit_code"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 mkdir -p "$evidence_directory"
 printf 'ci-ephemeral-restic-password\n' > "$password_file"

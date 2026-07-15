@@ -26,6 +26,7 @@ test("documents all four durable backup volumes", () => {
 
 function createFixture({
   dockerStopExit = "0",
+  dockerCleanupExit = "0",
   resticBackupExit = "0",
   resticBackupDelay = "0",
   resticRestoreDelay = "0",
@@ -49,6 +50,7 @@ function createFixture({
 printf 'docker %s\n' "$*" >> "$CALL_LOG"
 case " $* " in
   *" compose "*" stop app "*) exit "$DOCKER_STOP_EXIT" ;;
+  *" rm -f "*|*" network rm "*) exit "$DOCKER_CLEANUP_EXIT" ;;
   *" compose "*" exec "*) printf 'fake-pgdump\n' ;;
   *" compose "*" images -q app "*) printf 'devkh-recovery-image\n' ;;
   *" pg_restore "*) printf 'pg_restore %s\n' "$*" >> "$CALL_LOG" ;;
@@ -111,6 +113,7 @@ esac
       PATH: `${bin}:${process.env.PATH}`,
       CALL_LOG: log,
       DOCKER_STOP_EXIT: dockerStopExit,
+      DOCKER_CLEANUP_EXIT: dockerCleanupExit,
       RESTIC_BACKUP_EXIT: resticBackupExit,
       RESTIC_BACKUP_DELAY: resticBackupDelay,
       RESTIC_RESTORE_DELAY: resticRestoreDelay,
@@ -397,6 +400,25 @@ test("restore drill never writes production Docker volumes", () => {
     }
     assert.equal(evidence.artifactContentVerifiedCount, 1);
     assert.equal(evidence.resticSnapshotId, latestSnapshotId);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("preserves the restored fixture when cleanup cannot remove recovery resources", () => {
+  const fixture = createFixture({ dockerCleanupExit: "19" });
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], {
+      env: fixture.environment,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /recovery cleanup failed/);
+    assert.match(execFileSync("find", [fixture.environment.BACKUP_STATE_DIR, "-type", "d", "-name", "restore-check.*"], { encoding: "utf8" }), /restore-check/);
+    const status = JSON.parse(readFileSync(join(fixture.environment.BACKUP_STATE_DIR, "status.json"), "utf8"));
+    assert.equal(status.result, "failed");
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

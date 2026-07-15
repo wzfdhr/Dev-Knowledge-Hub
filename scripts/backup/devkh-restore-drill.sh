@@ -12,25 +12,32 @@ snapshot_id=""
 network_name=""
 database_container=""
 application_container=""
+cleanup_failed=0
 
 finish() {
   local exit_code="$1"
 
   trap - EXIT INT TERM
 
-  if [[ -n "$application_container" ]]; then
-    docker rm -f "$application_container" >/dev/null 2>&1 || true
+  if [[ -n "$application_container" ]] && ! docker rm -f "$application_container" >/dev/null 2>&1; then
+    printf 'recovery cleanup failed for application container: %s\n' "$application_container" >&2
+    cleanup_failed=1
   fi
 
-  if [[ -n "$database_container" ]]; then
-    docker rm -f "$database_container" >/dev/null 2>&1 || true
+  if [[ -n "$database_container" ]] && ! docker rm -f "$database_container" >/dev/null 2>&1; then
+    printf 'recovery cleanup failed for database container: %s\n' "$database_container" >&2
+    cleanup_failed=1
   fi
 
-  if [[ -n "$network_name" ]]; then
-    docker network rm "$network_name" >/dev/null 2>&1 || true
+  if [[ -n "$network_name" ]] && ! docker network rm "$network_name" >/dev/null 2>&1; then
+    printf 'recovery cleanup failed for network: %s\n' "$network_name" >&2
+    cleanup_failed=1
   fi
 
-  if [[ -n "$target" ]]; then
+  if (( cleanup_failed )); then
+    printf 'recovery cleanup failed; retained fixture: %s\n' "$target" >&2
+    exit_code=1
+  elif [[ -n "$target" ]]; then
     rm -rf "$target"
   fi
 

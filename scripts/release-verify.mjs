@@ -23,8 +23,13 @@ export const VERIFY_STEPS = Object.freeze([
 export const CONTAINER_STEPS = Object.freeze([
   { name: "container-build", command: "docker", args: ["build", "--target", "runtime", "-t", "devkh:ci", "."] },
   { name: "compose-config", command: "docker", args: [...compose, "config", "--quiet"] },
-  { name: "compose-up", command: "docker", args: [...compose, "up", "-d", "--build", "postgres", "app"] },
-  { name: "application-health", healthUrl: "http://127.0.0.1:3000/api/health" },
+  { name: "compose-up", command: "docker", args: [...compose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "postgres", "app"] },
+  {
+    name: "application-health",
+    command: "docker",
+    args: [...compose, "exec", "-T", "app", "node", "-e",
+      "fetch('http://127.0.0.1:3000/api/health').then(async(response)=>{console.log(await response.text());process.exit(response.ok?0:1)}).catch(()=>process.exit(1))"]
+  },
   { name: "recovery-drill", command: "bash", args: ["scripts/backup/ci-recovery-drill.sh"] }
 ]);
 

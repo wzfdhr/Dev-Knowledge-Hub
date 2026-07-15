@@ -16,6 +16,9 @@ describe("release verification orchestrator", () => {
     expect(CONTAINER_STEPS.map((step) => step.name)).toEqual([
       "container-build", "compose-config", "compose-up", "application-health", "recovery-drill"
     ]);
+    expect(CONTAINER_STEPS.find((step) => step.name === "compose-up")?.args).toContain("--wait");
+    expect(CONTAINER_STEPS.find((step) => step.name === "application-health")?.args.join(" "))
+      .toContain("compose -f docker-compose.yml exec -T app node");
   });
 
   test("uses all checks by default and rejects unknown scopes", () => {

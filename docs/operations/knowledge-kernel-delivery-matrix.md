@@ -22,7 +22,7 @@ The supplemental commits remain separate commits in Phase A. They are existing w
 | Item | Result |
 | --- | --- |
 | Authoritative review target | [Phase A PR #3](https://github.com/wzfdhr/Dev-Knowledge-Hub/pull/3) current head at user approval |
-| Head binding | `phase:merge` dispatches `phase-merge.yml` for the approved 40-character head SHA; its final job uses GitHub `--match-head-commit` |
+| Commit binding | `phase:merge` captures the approved 40-character `main` base and PR head SHAs; fresh checks require base ancestry, and the final job rejects base/head drift before using GitHub `--match-head-commit` |
 | GitHub checks | The trusted merge workflow reruns `verify` and `container-smoke` against the approved head; only those fresh jobs can unlock its merge job |
 | `verify` | Passed, including real PostgreSQL integration, build, acceptance, and E2E |
 | `container-smoke` | Passed, including container health and isolated recovery rehearsal |

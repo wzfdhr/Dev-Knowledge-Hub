@@ -40,5 +40,5 @@ write_checksums() {
 }
 
 latest_snapshot_id() {
-  restic snapshots --latest 1 --json | node -e 'let raw=""; process.stdin.on("data", (chunk) => { raw += chunk; }); process.stdin.on("end", () => { const snapshot=JSON.parse(raw)[0]; if (!snapshot?.short_id) process.exit(1); process.stdout.write(snapshot.short_id); });'
+  restic snapshots --latest 1 --json | node -e 'let raw=""; process.stdin.on("data", (chunk) => { raw += chunk; }); process.stdin.on("end", () => { const snapshot=JSON.parse(raw)[0]; if (!/^[a-f0-9]{64}$/.test(snapshot?.id ?? "")) process.exit(1); process.stdout.write(snapshot.id); });'
 }

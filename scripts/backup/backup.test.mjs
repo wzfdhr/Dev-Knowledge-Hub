@@ -10,6 +10,9 @@ const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(scriptDirectory, "../..");
 const backupScript = join(scriptDirectory, "devkh-backup.sh");
 const restoreDrillScript = join(scriptDirectory, "devkh-restore-drill.sh");
+const ciRecoveryDrillScript = join(scriptDirectory, "ci-recovery-drill.sh");
+const backupSnapshotId = "a".repeat(64);
+const latestSnapshotId = "b".repeat(64);
 
 function createFixture({
   dockerStopExit = "0",
@@ -26,6 +29,7 @@ function createFixture({
   const stateDirectory = join(root, "state");
   const passwordFile = join(root, "restic-password");
   execFileSync("mkdir", ["-p", bin]);
+  writeFileSync(log, "");
   writeFileSync(passwordFile, "test-only-password\n", { mode: 0o600 });
   writeFileSync(join(bin, "docker"), String.raw`#!/usr/bin/env sh
 printf 'docker %s\n' "$*" >> "$CALL_LOG"
@@ -50,8 +54,12 @@ esac
   writeFileSync(join(bin, "restic"), String.raw`#!/usr/bin/env sh
 printf 'restic %s\n' "$*" >> "$CALL_LOG"
 case "$1" in
-  backup) sleep "$RESTIC_BACKUP_DELAY"; exit "$RESTIC_BACKUP_EXIT" ;;
-  snapshots) printf '[{"short_id":"abc123"}]' ;;
+  backup)
+    sleep "$RESTIC_BACKUP_DELAY"
+    if [ "$RESTIC_BACKUP_EXIT" != "0" ]; then exit "$RESTIC_BACKUP_EXIT"; fi
+    printf '{"message_type":"summary","snapshot_id":"%s"}\n' "$RESTIC_BACKUP_SNAPSHOT_ID"
+    ;;
+  snapshots) printf '[{"id":"%s"}]' "$RESTIC_LATEST_SNAPSHOT_ID" ;;
   restore)
     sleep "$RESTIC_RESTORE_DELAY"
     target=""
@@ -90,6 +98,8 @@ esac
       RESTIC_BACKUP_EXIT: resticBackupExit,
       RESTIC_BACKUP_DELAY: resticBackupDelay,
       RESTIC_RESTORE_DELAY: resticRestoreDelay,
+      RESTIC_BACKUP_SNAPSHOT_ID: backupSnapshotId,
+      RESTIC_LATEST_SNAPSHOT_ID: latestSnapshotId,
       FAKE_INTEGRITY_RESULT: integrityResult,
       FAKE_ARTIFACT_STORAGE_KEY: artifactStorageKey,
       FAKE_ARTIFACT_CONTENT: artifactContent,
@@ -167,13 +177,35 @@ test("uploads one encrypted set before applying retention", () => {
 
     assert.equal(result.status, 0, result.stderr);
     const calls = readFileSync(fixture.log, "utf8");
-    assert.match(calls, /restic backup .*--tag daily/);
+    assert.match(calls, /restic backup --json .*--tag daily/);
+    assert.doesNotMatch(calls, /restic snapshots/);
     assert.match(calls, /restic forget --keep-daily 30 --keep-monthly 12 --prune/);
     const status = JSON.parse(readFileSync(join(fixture.environment.BACKUP_STATE_DIR, "status.json"), "utf8"));
     assert.deepEqual(
       { operation: status.operation, result: status.result, snapshotId: status.snapshotId },
-      { operation: "backup", result: "success", snapshotId: "abc123" }
+      { operation: "backup", result: "success", snapshotId: backupSnapshotId }
     );
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("refuses to seed recovery fixtures outside an isolated CI compose project", () => {
+  const fixture = createFixture();
+
+  try {
+    const result = spawnSync(ciRecoveryDrillScript, [], {
+      env: {
+        ...fixture.environment,
+        DEVKH_CONTAINER_SMOKE: "true",
+        COMPOSE_PROJECT_NAME: "dev-knowledge-hub"
+      },
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 64);
+    assert.match(result.stderr, /isolated CI Compose project/);
+    assert.equal(readFileSync(fixture.log, "utf8"), "");
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -218,7 +250,7 @@ test("restore drill never writes production Docker volumes", () => {
 
     assert.equal(result.status, 0, result.stderr);
     const calls = readFileSync(fixture.log, "utf8");
-    assert.match(calls, /restic snapshots --latest 1 --json[\s\S]*restic restore abc123 --target/);
+    assert.match(calls, new RegExp(`restic snapshots --latest 1 --json[\\s\\S]*restic restore ${latestSnapshotId} --target`));
     assert.match(calls, /docker run .*postgres:16-bookworm pg_restore --list \/backup\/database\.pgdump/);
     assert.match(calls, /docker network create devkh-restore-drill-/);
     assert.match(calls, /docker exec -i devkh-restore-drill-.* pg_restore .*--exit-on-error/);
@@ -262,6 +294,7 @@ test("restore drill never writes production Docker volumes", () => {
       assert.match(evidence.volumeArchiveSha256[archive], /^[a-f0-9]{64}$/);
     }
     assert.equal(evidence.artifactContentVerifiedCount, 1);
+    assert.equal(evidence.resticSnapshotId, latestSnapshotId);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

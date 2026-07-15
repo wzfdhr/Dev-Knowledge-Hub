@@ -11,6 +11,10 @@ on:
         description: Reviewed 40-character pull request head SHA
         required: true
         type: string
+      approved_base:
+        description: Reviewed 40-character main branch base SHA
+        required: true
+        type: string
       user_approved:
         description: User explicitly approved this exact head
         required: true
@@ -48,7 +52,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.approved_head }}
+          fetch-depth: 0
           persist-credentials: false
+      - name: Validate approved base ancestry
+        env:
+          APPROVED_BASE: ${{ inputs.approved_base }}
+          APPROVED_HEAD: ${{ inputs.approved_head }}
+        run: git merge-base --is-ancestor "$APPROVED_BASE" "$APPROVED_HEAD"
       - uses: actions/setup-node@v4
         with:
           node-version: 22.13.0
@@ -85,7 +95,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.approved_head }}
+          fetch-depth: 0
           persist-credentials: false
+      - name: Validate approved base ancestry
+        env:
+          APPROVED_BASE: ${{ inputs.approved_base }}
+          APPROVED_HEAD: ${{ inputs.approved_head }}
+        run: git merge-base --is-ancestor "$APPROVED_BASE" "$APPROVED_HEAD"
       - uses: actions/setup-node@v4
         with:
           node-version: 22.13.0
@@ -111,15 +127,18 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       PR_NUMBER: ${{ inputs.pr_number }}
       APPROVED_HEAD: ${{ inputs.approved_head }}
+      APPROVED_BASE: ${{ inputs.approved_base }}
     steps:
       - name: Validate approved pull request
         run: |
           set -euo pipefail
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || { echo "invalid pull request number" >&2; exit 64; }
           [[ "$APPROVED_HEAD" =~ ^[a-fA-F0-9]{40}$ ]] || { echo "invalid approved head" >&2; exit 64; }
+          [[ "$APPROVED_BASE" =~ ^[a-fA-F0-9]{40}$ ]] || { echo "invalid approved base" >&2; exit 64; }
           test "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "false"
           test "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq .state)" = "OPEN"
           test "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)" = "main"
+          test "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json baseRefOid --jq .baseRefOid)" = "$APPROVED_BASE"
           test "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)" = "$APPROVED_HEAD"
       - name: Merge approved head
         run: >-

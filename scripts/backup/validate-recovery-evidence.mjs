@@ -21,9 +21,18 @@ const integrityNames = [
   "orphanedArtifacts"
 ];
 const sha256 = /^[a-f0-9]{64}$/;
+const utcIsoTimestamp = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?Z$/;
 
 function requireEvidence(condition, message) {
   if (!condition) throw new Error(`recovery evidence validation failed: ${message}`);
+}
+
+function parseUtcTimestamp(value, name) {
+  requireEvidence(typeof value === "string" && utcIsoTimestamp.test(value), `${name} must be a UTC ISO timestamp`);
+  const parsed = new Date(value);
+  const canonical = value.includes(".") ? value : value.replace("Z", ".000Z");
+  requireEvidence(Number.isFinite(parsed.getTime()) && parsed.toISOString() === canonical, `${name} must be a valid UTC ISO timestamp`);
+  return parsed.getTime();
 }
 
 export function validateRecoveryEvidence(evidence) {
@@ -31,9 +40,10 @@ export function validateRecoveryEvidence(evidence) {
   requireEvidence(evidence.schemaVersion === 2, "schemaVersion must be 2");
   requireEvidence(evidence.operation === "restore-drill", "operation must be restore-drill");
   requireEvidence(evidence.result === "success", "result must be success");
-  requireEvidence(Number.isFinite(Date.parse(evidence.startedAt)), "startedAt must be an ISO timestamp");
-  requireEvidence(Number.isFinite(Date.parse(evidence.finishedAt)), "finishedAt must be an ISO timestamp");
-  requireEvidence(/^[a-f0-9]{8,64}$/.test(evidence.resticSnapshotId ?? ""), "resticSnapshotId is invalid");
+  const startedAt = parseUtcTimestamp(evidence.startedAt, "startedAt");
+  const finishedAt = parseUtcTimestamp(evidence.finishedAt, "finishedAt");
+  requireEvidence(finishedAt >= startedAt, "finishedAt must not be earlier than startedAt");
+  requireEvidence(sha256.test(evidence.resticSnapshotId ?? ""), "resticSnapshotId is invalid");
   requireEvidence(sha256.test(evidence.databaseArchiveSha256 ?? ""), "database archive digest is invalid");
   requireEvidence(
     JSON.stringify(evidence.volumeArchives) === JSON.stringify(volumeArchives),

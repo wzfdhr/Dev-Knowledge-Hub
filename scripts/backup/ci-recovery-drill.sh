@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+[[ "${DEVKH_CONTAINER_SMOKE:-}" == "true" ]] || {
+  printf 'CI recovery drill requires DEVKH_CONTAINER_SMOKE=true\n' >&2
+  exit 64
+}
+[[ "${COMPOSE_PROJECT_NAME:-}" =~ ^devkh-ci(-[a-z0-9]+)*$ ]] || {
+  printf 'CI recovery drill requires an isolated CI Compose project named devkh-ci or devkh-ci-<suffix>\n' >&2
+  exit 64
+}
+
 project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 temporary_root="$(mktemp -d "${RUNNER_TEMP:-/tmp}/devkh-recovery-drill.XXXXXX")"
 evidence_root="${RECOVERY_EVIDENCE_DIR:-${RUNNER_TEMP:-/tmp}/devkh-recovery-evidence}"
@@ -17,7 +26,7 @@ printf 'ci-ephemeral-restic-password\n' > "$password_file"
 chmod 600 "$password_file"
 
 export COMPOSE_DIR="$project_root"
-export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-devkh-ci}"
+export COMPOSE_PROJECT_NAME
 export SNAPSHOT_VOLUME="${COMPOSE_PROJECT_NAME}_snapshot_data"
 export REPOSITORY_VOLUME="${COMPOSE_PROJECT_NAME}_repository_mirrors"
 export UPLOADED_SOURCES_VOLUME="${COMPOSE_PROJECT_NAME}_uploaded_sources"

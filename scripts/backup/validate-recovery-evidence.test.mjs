@@ -17,7 +17,7 @@ function validEvidence() {
     result: "success",
     startedAt: "2026-07-15T00:00:00.000Z",
     finishedAt: "2026-07-15T00:01:00.000Z",
-    resticSnapshotId: "abc123ef",
+    resticSnapshotId: "f".repeat(64),
     databaseArchiveSha256: digest,
     volumeArchives: ["snapshots.tgz", "repositories.tgz", "sources.tgz", "artifacts.tgz"],
     volumeArchiveSha256: {
@@ -76,7 +76,11 @@ test("rejects incomplete or inconsistent recovery evidence", () => {
     (value) => { delete value.integrity; },
     (value) => { delete value.integrity.orphanedArtifacts; },
     (value) => { value.databaseArchiveSha256 = "invalid"; },
-    (value) => { value.artifactContentVerifiedCount = 0; }
+    (value) => { value.artifactContentVerifiedCount = 0; },
+    (value) => { value.resticSnapshotId = "abc123ef"; },
+    (value) => { value.startedAt = 0; },
+    (value) => { value.startedAt = "July 15, 2026"; },
+    (value) => { value.finishedAt = "2026-07-14T23:59:59.000Z"; }
   ];
 
   for (const mutate of mutations) {
@@ -91,4 +95,12 @@ test("rejects incomplete or inconsistent recovery evidence", () => {
 test("the CI recovery drill uses the strict validator", () => {
   const script = readFileSync(join(scriptDirectory, "ci-recovery-drill.sh"), "utf8");
   assert.match(script, /validate-recovery-evidence\.mjs/);
+});
+
+test("the documented recovery evidence example passes the strict validator", () => {
+  const document = readFileSync(join(scriptDirectory, "../../docs/operations/recovery-evidence.md"), "utf8");
+  const json = document.match(/```json\n([\s\S]*?)\n```/)?.[1];
+  assert.ok(json);
+  const result = runValidator(JSON.parse(json));
+  assert.equal(result.status, 0, result.stderr);
 });

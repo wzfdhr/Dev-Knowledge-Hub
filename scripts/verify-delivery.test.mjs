@@ -96,6 +96,7 @@ describe("delivery database isolation", () => {
     const mergeJob = workflow.jobs.merge;
 
     expect(workflow.on).toHaveProperty("workflow_dispatch");
+    expect(workflow.on.workflow_dispatch.inputs).toHaveProperty("approved_base");
     expect(workflow.permissions.contents).toBe("read");
     expect(workflow.jobs.verify.permissions.contents).toBe("read");
     expect(workflow.jobs["container-smoke"].permissions.contents).toBe("read");
@@ -117,9 +118,15 @@ describe("delivery database isolation", () => {
         with: expect.objectContaining({ ref: "${{ inputs.approved_head }}" })
       })
     ]));
+    const verifyCommands = workflow.jobs.verify.steps.map((step) => step.run).filter(Boolean).join("\n");
+    const containerCommands = workflow.jobs["container-smoke"].steps
+      .map((step) => step.run).filter(Boolean).join("\n");
+    expect(verifyCommands).toContain("git merge-base --is-ancestor");
+    expect(containerCommands).toContain("git merge-base --is-ancestor");
     const mergeCommands = mergeJob.steps.map((step) => step.run).filter(Boolean).join("\n");
     expect(mergeCommands).toContain("--match-head-commit");
     expect(mergeCommands).toContain("$APPROVED_HEAD");
+    expect(mergeCommands).toContain("$APPROVED_BASE");
   });
 
   test("seeds representative durable state before the CI recovery rehearsal", async () => {

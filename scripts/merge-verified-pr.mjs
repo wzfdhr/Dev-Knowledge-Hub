@@ -33,6 +33,9 @@ export function assertMergeReady(pullRequest, approvedHead) {
   if (pullRequest.baseRefName !== "main") {
     throw new Error(`PR #${pullRequest.number} must target main`);
   }
+  if (!/^[a-f0-9]{40}$/i.test(pullRequest.baseRefOid ?? "")) {
+    throw new Error(`PR #${pullRequest.number} has an invalid base commit`);
+  }
   if (pullRequest.headRefOid !== approvedHead) {
     throw new Error(`PR #${pullRequest.number} changed after user approval`);
   }
@@ -44,7 +47,7 @@ export async function mergeVerifiedPullRequest(input, options = {}) {
     throw new Error("A valid approved head commit is required");
   }
   const execute = options.execute ?? executeGh;
-  const fields = "number,isDraft,baseRefName,headRefName,headRefOid";
+  const fields = "number,isDraft,baseRefName,baseRefOid,headRefName,headRefOid";
   const raw = await execute(["pr", "view", String(input.pullRequest), "--json", fields]);
   const pullRequest = JSON.parse(raw);
   assertMergeReady(pullRequest, input.approvedHead.toLowerCase());
@@ -52,6 +55,7 @@ export async function mergeVerifiedPullRequest(input, options = {}) {
     "workflow", "run", "phase-merge.yml", "--ref", "main",
     "--field", `pr_number=${input.pullRequest}`,
     "--field", `approved_head=${input.approvedHead.toLowerCase()}`,
+    "--field", `approved_base=${pullRequest.baseRefOid.toLowerCase()}`,
     "--field", "user_approved=true"
   ]);
 }

@@ -10,6 +10,7 @@ const greenPullRequest = {
   number: 3,
   isDraft: false,
   baseRefName: "main",
+  baseRefOid: "c".repeat(40),
   headRefName: "codex/phase-a-release-baseline",
   headRefOid: "a".repeat(40)
 };
@@ -30,6 +31,7 @@ describe("private-repository merge gate", () => {
   test("rejects drafts, non-main targets, and changed heads", () => {
     expect(() => assertMergeReady({ ...greenPullRequest, isDraft: true })).toThrow("Draft");
     expect(() => assertMergeReady({ ...greenPullRequest, baseRefName: "develop" })).toThrow("main");
+    expect(() => assertMergeReady({ ...greenPullRequest, baseRefOid: "invalid" }, "a".repeat(40))).toThrow("base");
     expect(() => assertMergeReady(greenPullRequest, "b".repeat(40))).toThrow("changed after user approval");
   });
 
@@ -46,12 +48,13 @@ describe("private-repository merge gate", () => {
 
     expect(execute).toHaveBeenNthCalledWith(1, [
       "pr", "view", "3", "--json",
-      "number,isDraft,baseRefName,headRefName,headRefOid"
+      "number,isDraft,baseRefName,baseRefOid,headRefName,headRefOid"
     ]);
     expect(execute).toHaveBeenNthCalledWith(2, [
       "workflow", "run", "phase-merge.yml", "--ref", "main",
       "--field", "pr_number=3",
       "--field", `approved_head=${"a".repeat(40)}`,
+      "--field", `approved_base=${"c".repeat(40)}`,
       "--field", "user_approved=true"
     ]);
     expect(execute.mock.calls.flat().flat()).not.toContain("merge");

@@ -80,6 +80,17 @@ if [[ "$(date +%d)" == "01" ]]; then
   backup_tags+=(--tag monthly)
 fi
 
-restic backup "$stage" "${backup_tags[@]}"
-snapshot_id="$(latest_snapshot_id)"
+backup_output="$(restic backup --json "$stage" "${backup_tags[@]}")"
+printf '%s\n' "$backup_output"
+snapshot_id="$(printf '%s\n' "$backup_output" | node -e '
+  let raw="";
+  process.stdin.on("data", (chunk) => { raw += chunk; });
+  process.stdin.on("end", () => {
+    const summaries=raw.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line))
+      .filter((event) => event.message_type === "summary");
+    const snapshotId=summaries.at(-1)?.snapshot_id;
+    if (!/^[a-f0-9]{64}$/.test(snapshotId ?? "")) process.exit(1);
+    process.stdout.write(snapshotId);
+  });
+')"
 restic forget --keep-daily 30 --keep-monthly 12 --prune

@@ -109,6 +109,11 @@ integration("PostgreSQL cited knowledge integration", () => {
     await runFixture([{ workspaceId, sourceBuildId, issue: {} }], async (client) => {
       await expect(client.query(migrationSql)).rejects.toThrow("missing a non-empty issue.id");
     });
+    for (const issue of [{ id: 42 }, { id: "" }, { id: "   " }]) {
+      await runFixture([{ workspaceId, sourceBuildId, issue }], async (client) => {
+        await expect(client.query(migrationSql)).rejects.toThrow("missing a non-empty issue.id");
+      });
+    }
     await runFixture([
       { workspaceId, sourceBuildId, issue: { id: "lint-duplicate" } },
       { workspaceId, sourceBuildId, issue: { id: "lint-duplicate" } }

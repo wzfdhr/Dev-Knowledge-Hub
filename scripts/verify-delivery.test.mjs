@@ -59,6 +59,7 @@ describe("delivery database isolation", () => {
     expect(ci.jobs["container-smoke"].env.DEVKH_DOMAIN).toBe("hub.example.test");
     expect(ci.jobs["container-smoke"].env.ACME_EMAIL).toBe("ci@example.test");
     expect(ci.jobs["container-smoke"].env.COMPOSE_PROJECT_NAME).toBe("devkh-ci");
+    expect(ci.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DIR).toBe("/tmp/devkh-recovery-evidence");
     expect(verifySteps).toContain("npx playwright install --with-deps chromium");
     expect(verifySteps).toContain("npm run release:verify -- --scope verify");
     expect(smokeSteps).toContain("apt-get install -y restic");

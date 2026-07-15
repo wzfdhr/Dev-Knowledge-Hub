@@ -151,7 +151,8 @@ Build before stdio use with `npm run build`. Both transports expose the same eig
 
 Use the automated encrypted OSS backup and restore procedure in
 [encrypted offsite backups](docs/operations/encrypted-offsite-backups.md). Back up the
-database and all three app volumes as one set, test restores regularly, and keep
+database and four durable application volumes (snapshots, repository mirrors, uploaded sources,
+and artifacts) as one set, test restores regularly, and keep
 `DEVKH_MASTER_KEY` separately from the restic repository: it is required to decrypt restored
 provider and repository credentials. Never put `.env`, database dumps, master keys, session
 secrets, tokens, or generated passwords in chat, tickets, or source control.

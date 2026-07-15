@@ -102,8 +102,11 @@ export async function bootstrapServer(
       ? anthropicEnhancer({ apiKey, model: config.model })
       : openAiCompatibleEnhancer({ apiKey, model: config.model });
   };
-  const qualityWorker = dependencies.createQualityPipelineWorker(env.databaseUrl, store, artifactStore);
+  const qualityWorker = env.knowledgePipelineV2
+    ? dependencies.createQualityPipelineWorker(env.databaseUrl, store, artifactStore)
+    : undefined;
   const schedulePostBuild = async (build: BuildRecord) => {
+    if (!qualityWorker) return;
     const repository = await store.getRepository(build.workspaceId, build.repositoryId);
     const snapshot = await store.findSnapshotById(build.workspaceId, build.snapshotId);
     if (!repository || !snapshot) throw new Error("Quality stage source is unavailable");
@@ -120,11 +123,11 @@ export async function bootstrapServer(
     });
   };
   const buildService = dependencies.createBuildService(store, queue, enhancerForWorkspace, schedulePostBuild);
-  await qualityWorker.start();
+  await qualityWorker?.start();
   try {
     await buildService.start();
   } catch (error) {
-    await qualityWorker.stop();
+    await qualityWorker?.stop();
     throw error;
   }
   const server = dependencies.buildServer({
@@ -219,7 +222,7 @@ export async function bootstrapServer(
   server.addHook("onClose", async () => {
     clearCleanup(cleanupInterval);
     await buildService.stop();
-    await qualityWorker.stop();
+    await qualityWorker?.stop();
     await database.pool.end();
   });
   return server;

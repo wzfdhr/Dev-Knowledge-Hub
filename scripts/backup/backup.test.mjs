@@ -15,6 +15,15 @@ const seedRecoveryFixtureScript = join(scriptDirectory, "seed-ci-recovery-fixtur
 const backupSnapshotId = "a".repeat(64);
 const latestSnapshotId = "b".repeat(64);
 
+test("documents all four durable backup volumes", () => {
+  const readme = readFileSync(join(projectRoot, "README.md"), "utf8");
+
+  assert.match(
+    readme,
+    /four durable application volumes \(snapshots, repository mirrors, uploaded sources,\s+and artifacts\)/
+  );
+});
+
 function createFixture({
   dockerStopExit = "0",
   resticBackupExit = "0",

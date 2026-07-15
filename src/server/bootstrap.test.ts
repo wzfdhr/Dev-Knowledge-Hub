@@ -43,7 +43,7 @@ describe("production bootstrap", () => {
     expect(deps.buildServer).not.toHaveBeenCalled();
   });
 
-  test("migrates and builds the server with the PostgreSQL store", async () => {
+  test("starts the staged quality worker only when the pipeline is explicitly enabled", async () => {
     const deps = dependencies();
     const artifactStore = { initialize: vi.fn(async () => {}) };
     (deps as BootstrapDependencies & { createArtifactStore: (directory: string) => typeof artifactStore }).createArtifactStore = vi.fn(() => artifactStore);
@@ -52,7 +52,8 @@ describe("production bootstrap", () => {
       DATABASE_URL: "postgres://localhost/devkh",
       DEVKH_MASTER_KEY: masterKey,
       DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars",
-      DATA_DIR: "/var/lib/devkh"
+      DATA_DIR: "/var/lib/devkh",
+      KNOWLEDGE_PIPELINE_V2: "true"
     }, deps);
 
     const database = vi.mocked(deps.createDatabase).mock.results[0].value;
@@ -84,12 +85,26 @@ describe("production bootstrap", () => {
     expect(server).toBe(vi.mocked(deps.buildServer).mock.results[0].value);
   });
 
-  test("queues one deterministic quality stage after a durable build", async () => {
+  test("keeps the staged quality worker inactive in the legacy default", async () => {
     const deps = dependencies();
     await bootstrapProductionServer({
       DATABASE_URL: "postgres://localhost/devkh",
       DEVKH_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
       DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars"
+    }, deps);
+
+    expect(deps.createQualityPipelineWorker).not.toHaveBeenCalled();
+    const schedulePostBuild = vi.mocked(deps.createBuildService).mock.calls[0]![3]!;
+    await expect(schedulePostBuild({ id: "build-1" } as BuildRecord)).resolves.toBeUndefined();
+  });
+
+  test("queues one deterministic quality stage after a durable build", async () => {
+    const deps = dependencies();
+    await bootstrapProductionServer({
+      DATABASE_URL: "postgres://localhost/devkh",
+      DEVKH_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
+      DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars",
+      KNOWLEDGE_PIPELINE_V2: "true"
     }, deps);
 
     const persistedStore = vi.mocked(deps.createStore).mock.results[0].value as {

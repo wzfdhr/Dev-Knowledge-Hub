@@ -281,6 +281,74 @@ describe("team projects and members", () => {
     });
   });
 
+  test("scopes remediation reads to project readers and transitions to project administrators", async () => {
+    const { app, store, cookie } = await authenticatedTeam();
+    const workspace = (await store.defaultWorkspace())!;
+    const admin = (await store.findAdminByEmail("admin@example.com"))!;
+    const project = (await app.inject({
+      method: "POST", url: "/api/projects", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { name: "质量项目", slug: "quality-project" }
+    })).json<{ project: { id: string } }>().project;
+    const repository = (await app.inject({
+      method: "POST", url: `/api/projects/${project.id}/repositories`, headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { kind: "upload", name: "质量资料" }
+    })).json<{ repository: { id: string } }>().repository;
+    const sourceBuild = await store.createBuild({
+      workspaceId: workspace.id, repositoryId: repository.id, snapshotId: "quality-snapshot",
+      snapshotPath: "/tmp/quality-snapshot", commitSha: "a".repeat(40)
+    });
+    const remediation = await store.createRemediation({
+      workspaceId: workspace.id, projectId: project.id, repositoryId: repository.id,
+      sourceBuildId: sourceBuild.build.id,
+      issue: {
+        id: "lint-quality", buildId: sourceBuild.build.id, rule: "KNOWLEDGE_LOW_COVERAGE",
+        severity: "warning", targetKind: "knowledge", targetId: "overview",
+        message: "Knowledge coverage is low", sourceRefs: [], remediationState: "open"
+      }
+    });
+    const reader = (await app.inject({
+      method: "POST", url: "/api/members", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { email: "quality-reader@example.com", password: "a secure reader password", role: "reader" }
+    })).json<{ member: { id: string } }>().member;
+    await app.inject({
+      method: "POST", url: `/api/projects/${project.id}/members`, headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { userId: reader.id, role: "reader" }
+    });
+    const login = await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "quality-reader@example.com", password: "a secure reader password" }
+    });
+    const readerCookie = authenticatedCookie(login);
+
+    const visible = await app.inject({
+      method: "GET", url: `/api/projects/${project.id}/remediations`,
+      headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) }
+    });
+    expect(visible.statusCode).toBe(200);
+    expect(visible.json()).toMatchObject({ remediations: [expect.objectContaining({ id: remediation.id, state: "open" })] });
+    expect((await app.inject({
+      method: "PATCH", url: `/api/projects/${project.id}/remediations/${remediation.id}`,
+      headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) }, payload: { state: "accepted" }
+    })).statusCode).toBe(403);
+
+    const accepted = await app.inject({
+      method: "PATCH", url: `/api/projects/${project.id}/remediations/${remediation.id}`,
+      headers: { cookie, ...csrfHeaders(cookie) }, payload: { state: "accepted" }
+    });
+    expect(accepted.statusCode).toBe(200);
+    expect(accepted.json()).toMatchObject({ remediation: { id: remediation.id, state: "accepted" } });
+    expect((await app.inject({
+      method: "POST", url: `/api/projects/${project.id}/remediations/${remediation.id}/rebuild`,
+      headers: { cookie, ...csrfHeaders(cookie) }
+    })).statusCode).toBe(503);
+    const events = await app.inject({
+      method: "GET", url: `/api/projects/${project.id}/remediations/${remediation.id}/events`,
+      headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) }
+    });
+    expect(events.statusCode).toBe(200);
+    expect(events.json()).toMatchObject({ events: [expect.objectContaining({ fromState: "open", toState: "accepted", actorId: admin.id })] });
+  });
+
   test("uses the requested project when resolving the current repository", async () => {
     const { app, cookie } = await authenticatedTeam();
     await app.inject({

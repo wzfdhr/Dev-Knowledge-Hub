@@ -1073,6 +1073,102 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     };
   });
 
+  server.get("/api/projects/:projectId/remediations", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    const query = z.object(paginationQuerySchema).safeParse(request.query);
+    if (!params.success || !query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid remediation query");
+    await requireProjectRole("reader", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const remediations = await options.store.listRemediations(
+      admin.workspaceId, params.data.projectId, query.data
+    );
+    return { remediations };
+  });
+
+  server.get("/api/projects/:projectId/remediations/:remediationId/events", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid(), remediationId: z.uuid() }).safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid remediation event query");
+    await requireProjectRole("reader", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const remediation = await options.store.getRemediation(admin.workspaceId, params.data.remediationId);
+    if (!remediation || remediation.projectId !== params.data.projectId) {
+      return sendError(reply, 404, "REMEDIATION_NOT_FOUND", "Remediation was not found");
+    }
+    return { events: await options.store.listRemediationEvents(admin.workspaceId, remediation.id) };
+  });
+
+  server.patch("/api/projects/:projectId/remediations/:remediationId", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid(), remediationId: z.uuid() }).safeParse(request.params);
+    const body = z.object({ state: z.enum(["accepted", "dismissed", "resolved"]) }).safeParse(request.body);
+    if (!params.success || !body.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid remediation transition");
+    await requireProjectRole("admin", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const existing = await options.store.getRemediation(admin.workspaceId, params.data.remediationId);
+    if (!existing || existing.projectId !== params.data.projectId) {
+      return sendError(reply, 404, "REMEDIATION_NOT_FOUND", "Remediation was not found");
+    }
+    try {
+      const remediation = await options.store.transitionRemediationWithAudit(
+        admin.workspaceId, existing.id, body.data.state, admin.id
+      );
+      return { remediation };
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Invalid remediation transition:")) {
+        return sendError(reply, 409, "INVALID_REMEDIATION_TRANSITION", "Remediation transition is not allowed");
+      }
+      return sendError(reply, 500, "REMEDIATION_OPERATION_FAILED", "Remediation transition failed");
+    }
+  });
+
+  server.post("/api/projects/:projectId/remediations/:remediationId/rebuild", { preHandler: requireAdmin }, async (request, reply) => {
+    if (!options.buildService) {
+      return sendError(reply, 503, "BUILD_SERVICE_UNAVAILABLE", "Build service is unavailable");
+    }
+    const params = z.object({ projectId: z.uuid(), remediationId: z.uuid() }).safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid remediation rebuild");
+    await requireProjectRole("admin", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const remediation = await options.store.getRemediation(admin.workspaceId, params.data.remediationId);
+    if (!remediation || remediation.projectId !== params.data.projectId) {
+      return sendError(reply, 404, "REMEDIATION_NOT_FOUND", "Remediation was not found");
+    }
+    if (remediation.state !== "accepted") {
+      return sendError(reply, 409, "REMEDIATION_NOT_ACCEPTED", "Remediation must be accepted first");
+    }
+    const sourceBuild = await options.store.getBuild(admin.workspaceId, remediation.sourceBuildId);
+    const snapshot = sourceBuild
+      ? await options.store.findSnapshotById(admin.workspaceId, sourceBuild.snapshotId)
+      : null;
+    if (!sourceBuild || sourceBuild.repositoryId !== remediation.repositoryId || !snapshot) {
+      return sendError(reply, 409, "REMEDIATION_SOURCE_UNAVAILABLE", "Remediation source snapshot is unavailable");
+    }
+    try {
+      const result = await options.store.requestRemediationBuildWithAudit({
+        workspaceId: admin.workspaceId,
+        remediationId: remediation.id,
+        actorId: admin.id,
+        build: {
+          workspaceId: admin.workspaceId,
+          repositoryId: remediation.repositoryId,
+          snapshotId: snapshot.id,
+          snapshotPath: snapshot.storagePath,
+          commitSha: snapshot.commitSha
+        }
+      });
+      await options.buildService.enqueueBuild(result);
+      return reply.code(result.created ? 202 : 200).send(result);
+    } catch (error) {
+      if (error instanceof Error && error.message === "Remediation must be accepted first") {
+        return sendError(reply, 409, "REMEDIATION_NOT_ACCEPTED", "Remediation must be accepted first");
+      }
+      return sendError(reply, 500, "REMEDIATION_OPERATION_FAILED", "Remediation rebuild failed");
+    }
+  });
+
   server.post("/api/projects/:projectId/repositories", { preHandler: requireAdmin }, async (request, reply) => {
     const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
     const parsed = repositorySchema.safeParse(request.body);

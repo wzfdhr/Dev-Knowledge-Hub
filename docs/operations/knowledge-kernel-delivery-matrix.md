@@ -33,7 +33,7 @@ The supplemental commits remain separate commits in Phase A. They are existing w
 ## Release-gate policy
 
 - Existing implementations are audited and completed in place; they are not rewritten without a failed requirement or test.
-- A phase cannot merge while either `verify` or `container-smoke` is red.
+- A phase cannot merge while either `verify` or `container-smoke` is red. The private repository currently enforces this through `npm run phase:merge` because its GitHub account plan does not provide private branch protection.
 - PostgreSQL integration tests must execute with a real database for a release result; a conditional skip is not a release pass.
 - A production change requires a separate user authorization during Phase F.
 - `docker-compose.override.yml` is a local operator file and must remain untracked.

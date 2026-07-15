@@ -41,6 +41,10 @@ describe("delivery database isolation", () => {
     const dockerfile = await readFile("Dockerfile", "utf8");
     const deliveryCheck = await readFile("scripts/verify-delivery.mjs", "utf8");
     const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
+    const verifySteps = ci.jobs.verify.steps
+      .map((step) => step.run)
+      .filter(Boolean)
+      .join("\n");
     const smokeSteps = ci.jobs["container-smoke"].steps
       .map((step) => step.run)
       .filter(Boolean)
@@ -54,10 +58,9 @@ describe("delivery database isolation", () => {
     expect(ci.on.push.branches).toEqual(expect.arrayContaining(["main", "codex/mvp"]));
     expect(ci.jobs["container-smoke"].env.DEVKH_DOMAIN).toBe("hub.example.test");
     expect(ci.jobs["container-smoke"].env.ACME_EMAIL).toBe("ci@example.test");
-    expect(smokeSteps).toContain("docker build --target runtime");
-    expect(smokeSteps).toContain("docker compose -f docker-compose.yml config --quiet");
-    expect(smokeSteps).toContain("docker compose -f docker-compose.yml up -d");
-    expect(smokeSteps).toContain("docker compose -f docker-compose.yml down --volumes");
+    expect(verifySteps).toContain("npx playwright install --with-deps chromium");
+    expect(verifySteps).toContain("npm run release:verify -- --scope verify");
+    expect(smokeSteps).toContain("npm run release:verify -- --scope container");
   });
 
   test("requires a real PostgreSQL URL before running the integration release gate", async () => {
@@ -66,6 +69,13 @@ describe("delivery database isolation", () => {
     expect(packageJson.scripts["test:integration"]).toContain(
       "node scripts/require-env.mjs TEST_DATABASE_URL"
     );
+  });
+
+  test("exposes one release verification entrypoint", async () => {
+    const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+
+    expect(packageJson.scripts["release:verify"]).toBe("node scripts/release-verify.mjs");
+    expect(packageJson.scripts["phase:merge"]).toBe("node scripts/merge-verified-pr.mjs");
   });
 
   test("does not retain a legacy resumable upload staging volume", async () => {

@@ -30,7 +30,9 @@
     "licenses:check": "node scripts/licenses-check.mjs",
     "licenses:report": "node scripts/licenses-check.mjs --report",
     "secrets:scan": "node scripts/secrets-scan.mjs",
-    "runtime:verify": "node scripts/security/verify-runtime.mjs"
+    "runtime:verify": "node scripts/security/verify-runtime.mjs",
+    "release:verify": "node scripts/release-verify.mjs",
+    "phase:merge": "node scripts/merge-verified-pr.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.12",

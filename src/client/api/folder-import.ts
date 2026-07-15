@@ -1,11 +1,8 @@
-import { BlobReader, BlobWriter, ZipWriter } from "@zip.js/zip.js";
-
 import { filterImportFile, isExcludedImportDirectory } from "../../shared/import-filter";
 import type { ImportProgress } from "./types";
 
 export const MAX_FOLDER_IMPORT_FILES = 50_000;
 export const MAX_FOLDER_IMPORT_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024;
-export const MAX_FOLDER_IMPORT_ARCHIVE_BYTES = 500 * 1024 * 1024;
 
 export interface DirectoryFileHandle {
   kind: "file";
@@ -183,40 +180,4 @@ export async function scanSelectedFiles(
     detail: `已完成过滤，准备上传 ${report.acceptedFiles.length} 个文件`
   });
   return report;
-}
-
-export async function packageFolderImport(
-  report: FolderImportReport,
-  options: FolderImportOptions = {}
-): Promise<File> {
-  if (report.acceptedFiles.length === 0) {
-    throw new FolderImportError("没有可采集的源码或文档，请选择另一个项目文件夹");
-  }
-  const writer = new BlobWriter("application/zip");
-  const archive = new ZipWriter(writer);
-  let completedBytes = 0;
-  for (const [index, item] of report.acceptedFiles.entries()) {
-    await archive.add(item.path, new BlobReader(item.file), {
-      onprogress: (processedBytes) => options.onProgress?.({
-        phase: "packaging", status: "running",
-        percent: report.acceptedBytes ? Math.round(((completedBytes + processedBytes) / report.acceptedBytes) * 100) : 0,
-        processedFiles: index, totalFiles: report.acceptedFiles.length,
-        processedBytes: completedBytes + processedBytes, totalBytes: report.acceptedBytes,
-        detail: `正在压缩 ${item.path}`
-      })
-    });
-    completedBytes += item.file.size;
-  }
-  await archive.close();
-  const zip = await writer.getData();
-  if (zip.size > MAX_FOLDER_IMPORT_ARCHIVE_BYTES) {
-    throw new FolderImportError("过滤后的项目包超过 500 MiB，请拆分项目后重试");
-  }
-  options.onProgress?.({
-    phase: "packaging", status: "completed", percent: 100,
-    processedFiles: report.acceptedFiles.length, totalFiles: report.acceptedFiles.length,
-    processedBytes: report.acceptedBytes, totalBytes: report.acceptedBytes,
-    detail: "项目包已准备完成"
-  });
-  return new File([zip], "devkh-filtered-project.zip", { type: "application/zip" });
 }

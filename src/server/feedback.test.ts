@@ -1,3 +1,4 @@
+import { authenticatedCookie, csrfHeaders } from "./test-support/csrf";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -55,7 +56,7 @@ async function context(store: MemoryAppStore = new MemoryAppStore()) {
     method: "POST", url: "/api/session",
     payload: { email: "admin@example.com", password: "correct horse battery staple" }
   });
-  const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+  const cookie = authenticatedCookie(login);
   const workspaceId = (await store.defaultWorkspace())!.id;
   const repository = (await store.createRepository(workspaceId, {
     kind: "local", name: "Fixture", path: fixtureRoot
@@ -99,7 +100,7 @@ describe("manual feedback workflow", () => {
     });
 
     const open = await app.inject({
-      method: "GET", url: "/api/feedback?status=open", headers: { cookie }
+      method: "GET", url: "/api/feedback?status=open", headers: { cookie, ...csrfHeaders(cookie) }
     });
     expect(open.json().feedback).toHaveLength(1);
     expect(open.json().feedback[0].citations).toEqual([
@@ -108,19 +109,19 @@ describe("manual feedback workflow", () => {
 
     expect((await app.inject({
       method: "PATCH", url: `/api/feedback/${feedback.id}`,
-      headers: { cookie }, payload: { status: "fixed" }
+      headers: { cookie, ...csrfHeaders(cookie) }, payload: { status: "fixed" }
     })).statusCode).toBe(409);
     expect((await app.inject({
       method: "PATCH", url: `/api/feedback/${feedback.id}`,
-      headers: { cookie }, payload: { status: "acknowledged" }
+      headers: { cookie, ...csrfHeaders(cookie) }, payload: { status: "acknowledged" }
     })).statusCode).toBe(200);
     expect((await app.inject({
       method: "PATCH", url: `/api/feedback/${feedback.id}`,
-      headers: { cookie }, payload: { status: "fixed" }
+      headers: { cookie, ...csrfHeaders(cookie) }, payload: { status: "fixed" }
     })).statusCode).toBe(200);
     expect((await app.inject({
       method: "PATCH", url: `/api/feedback/${feedback.id}`,
-      headers: { cookie }, payload: { status: "open" }
+      headers: { cookie, ...csrfHeaders(cookie) }, payload: { status: "open" }
     })).statusCode).toBe(409);
     expect(store.auditEvents.filter((event) => event.action === "feedback.transitioned"))
       .toHaveLength(2);
@@ -140,7 +141,7 @@ describe("manual feedback workflow", () => {
     await persistence.transitionFeedback(workspaceId, feedback.id, "acknowledged");
 
     const response = await app.inject({
-      method: "POST", url: `/api/feedback/${feedback.id}/rebuild`, headers: { cookie }
+      method: "POST", url: `/api/feedback/${feedback.id}/rebuild`, headers: { cookie, ...csrfHeaders(cookie) }
     });
     expect(response.statusCode).toBe(202);
     const buildId = response.json().build.id as string;
@@ -181,10 +182,10 @@ describe("manual feedback workflow", () => {
     await store.transitionFeedback(workspaceId, second.id, "acknowledged");
 
     const firstResponse = await app.inject({
-      method: "POST", url: `/api/feedback/${first.id}/rebuild`, headers: { cookie }
+      method: "POST", url: `/api/feedback/${first.id}/rebuild`, headers: { cookie, ...csrfHeaders(cookie) }
     });
     const secondResponse = await app.inject({
-      method: "POST", url: `/api/feedback/${second.id}/rebuild`, headers: { cookie }
+      method: "POST", url: `/api/feedback/${second.id}/rebuild`, headers: { cookie, ...csrfHeaders(cookie) }
     });
 
     expect(firstResponse.statusCode).toBe(202);
@@ -202,7 +203,7 @@ describe("audited mutation atomicity", () => {
     store.failAudit = true;
 
     const response = await app.inject({
-      method: "POST", url: "/api/mcp/tokens", headers: { cookie }, payload: { name: "CI" }
+      method: "POST", url: "/api/mcp/tokens", headers: { cookie, ...csrfHeaders(cookie) }, payload: { name: "CI" }
     });
 
     expect(response.statusCode).toBe(500);
@@ -221,7 +222,7 @@ describe("audited mutation atomicity", () => {
     store.failAudit = true;
 
     const response = await app.inject({
-      method: "POST", url: `/api/mcp/tokens/${token.id}/revoke`, headers: { cookie }
+      method: "POST", url: `/api/mcp/tokens/${token.id}/revoke`, headers: { cookie, ...csrfHeaders(cookie) }
     });
 
     expect(response.statusCode).toBe(500);
@@ -267,7 +268,7 @@ describe("audited mutation atomicity", () => {
 
     const response = await app.inject({
       method: "PATCH", url: `/api/feedback/${feedback.id}`,
-      headers: { cookie }, payload: { status: "acknowledged" }
+      headers: { cookie, ...csrfHeaders(cookie) }, payload: { status: "acknowledged" }
     });
 
     expect(response.statusCode).toBe(500);
@@ -290,7 +291,7 @@ describe("audited mutation atomicity", () => {
     store.failAudit = true;
 
     const response = await app.inject({
-      method: "POST", url: `/api/feedback/${feedback.id}/rebuild`, headers: { cookie }
+      method: "POST", url: `/api/feedback/${feedback.id}/rebuild`, headers: { cookie, ...csrfHeaders(cookie) }
     });
 
     expect(response.statusCode).toBe(500);

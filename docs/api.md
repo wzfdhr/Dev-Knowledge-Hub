@@ -14,13 +14,17 @@ The administration API uses JSON under `/api`. Except health, setup status, setu
 | POST | `/api/session` | `{email,password}`; set session cookie |
 | GET/DELETE | `/api/session` | Read or clear session |
 | GET/PUT | `/api/settings/model` | Sanitized config; PUT `{provider,model,apiKey?}` |
+| GET | `/api/settings/mfa` | Administrator MFA state: enabled, pending enrollment, and temporary lock |
+| POST | `/api/settings/mfa/enroll` | Verify `{currentPassword}` and issue a one-time TOTP enrollment secret |
+| POST | `/api/settings/mfa/verify` | Confirm pending `{code}` and return one-time recovery codes |
+| DELETE | `/api/settings/mfa` | Disable MFA using `{currentPassword,code}`; revokes all sessions |
 | GET/POST | `/api/projects` | List projects or create `{name,slug}` |
 | GET | `/api/projects/:projectId/summary` | Project source, latest snapshot/build, current release, and team count |
 | GET | `/api/projects/:projectId/activity` | Paginated project-isolated audit activity plus workspace members |
 | POST | `/api/projects/:projectId/repositories` | Attach the project's initial upload, Git HTTPS, or server-local source |
 | GET | `/api/projects/:projectId/codex-connection` | Generated project-scoped Codex config and `AGENTS.md` templates |
 | GET/POST | `/api/members` | List workspace members or create `{email,password,role}` as administrator |
-| GET/POST | `/api/mcp/tokens` | List sanitized tokens, optionally by `projectId`; create `{name,projectId}` with one-time plaintext |
+| GET/POST | `/api/mcp/tokens` | List sanitized tokens, optionally by `projectId`; create `{name,projectId,scopes?}` with one-time plaintext, fixed 90-day expiry, and only `search` / `source.read` scopes |
 | POST | `/api/mcp/tokens/:id/revoke` | Revoke token |
 | GET | `/api/mcp/connection` | Transport/tool metadata |
 | POST | `/api/repositories` | Local `{kind,path,name}`, Git `{kind,url,name,token?}`, or upload `{kind:"upload",name}` |
@@ -29,13 +33,8 @@ The administration API uses JSON under `/api`. Except health, setup status, setu
 | GET | `/api/repositories/current` | Current sanitized repository |
 | GET | `/api/repositories/current/status` | Repository and latest snapshot |
 | POST | `/api/repositories/current/sync` | Create/reuse immutable snapshot |
-| POST | `/api/repositories/current/uploads` | Multipart `file`: import one ZIP into the active upload repository |
-| POST | `/api/repositories/:repositoryId/uploads` | Multipart `file`: complete a pending upload replacement and atomically activate it |
-| POST | `/api/uploads/resumable` | Start a resumable filtered archive upload |
-| GET | `/api/uploads/resumable/:id` | Read received chunk state for resume |
-| PUT | `/api/uploads/resumable/:id/chunks/:index` | Upload one idempotent binary chunk |
-| DELETE | `/api/uploads/resumable/:id` | Cancel and remove upload staging |
-| POST | `/api/projects/:projectId/uploads/resumable/:id/import` | Validate and import a completed archive into the project |
+| POST | `/api/projects/:projectId/folder-import` | Multipart `files`: import a pre-filtered project folder into its active upload source |
+| POST | `/api/repositories/:repositoryId/folder-import` | Multipart `files`: import a pre-filtered pending replacement and atomically activate it |
 | GET/POST | `/api/builds` | List newest-first or start `{snapshotId}` |
 | GET | `/api/builds/:id` | Build details |
 | POST | `/api/builds/:id/cancel` | Request cancellation |
@@ -54,15 +53,19 @@ The administration API uses JSON under `/api`. Except health, setup status, setu
 | POST | `/api/feedback/:id/rebuild` | Rebuild acknowledged feedback against published snapshot |
 | * | `/mcp` | Bearer-authenticated Streamable HTTP MCP |
 
-Rate-limited write buckets are setup, login, MCP, ZIP upload, and feedback transition/rebuild. A limit response is HTTP 429 with `Retry-After` and error code `RATE_LIMITED`.
+Rate-limited write buckets are setup, login, MCP, folder upload, and feedback transition/rebuild. A limit response is HTTP 429 with `Retry-After` and error code `RATE_LIMITED`.
 
-## ZIP uploads
+## Folder uploads
 
-The console's recommended path is folder import. It scans and filters the selected directory in the browser, packages only accepted files, and sends the resulting ZIP through the resumable chunk API. Raw local directory contents are never sent. The server repeats all ZIP safety and source filtering checks before creating a snapshot.
+The console scans and filters the selected directory in the browser, then sends only the accepted source and documentation files as multipart file parts with validated relative paths. Dependency directories such as `node_modules`, build output, binary files, generated files, secrets, and files over 1 MiB are excluded before transfer and are not included in snapshots, builds, or knowledge algorithms. The server repeats the path and content filtering before creating a snapshot.
 
-`POST /api/repositories/current/uploads` requires an authenticated session and exactly one `multipart/form-data` file part named `file`. The compressed ZIP limit is 500 MiB. Archives are rejected when they exceed 50,000 entries or 2 GiB expanded, are encrypted, contain symbolic links, or contain absolute, traversal, backslash, duplicate, or conflicting file/directory paths. Accepted snapshots apply the Git snapshot source filters, including exclusion of `.env`, binary, generated, and text files over 1 MiB. A successful response is `{snapshotId,sourceVersion,fileCount,unchanged,ignored}`, where `ignored` reports the count and reason summary for excluded files, and `sourceVersion` is a deterministic 40-character hash of sorted accepted paths and contents. New snapshots return HTTP 201 and identical content returns HTTP 200. Raw ZIP bytes and upload staging are removed after every attempt.
+Folder upload accepts at most 50,000 files and 2 GiB of accepted text. Every part must be named `files` and carry a safe, non-duplicate relative path. A successful response is `{snapshotId,sourceVersion,fileCount,unchanged,ignored}`, where `ignored` reports the server-side reason summary and `sourceVersion` is a deterministic 40-character hash of sorted accepted paths and contents. New snapshots return HTTP 201 and identical content returns HTTP 200. No ZIP archive is created or retained.
 
-The endpoint returns HTTP 409 `UPLOAD_REPOSITORY_REQUIRED` when no active repository exists or the active repository is not kind `upload`. A Git/local replacement is immediately archived and switched. An upload replacement first returns HTTP 202 with `{repository,pendingUpload:true}` while the existing repository remains current; upload the ZIP to `/api/repositories/:repositoryId/uploads` to atomically activate the candidate. Failed imports discard the empty candidate and leave the former repository current.
+The endpoint returns HTTP 409 `UPLOAD_REPOSITORY_REQUIRED` when no active repository exists or the active repository is not kind `upload`. A Git/local replacement is immediately archived and switched. An upload replacement first returns HTTP 202 with `{repository,pendingUpload:true}` while the existing repository remains current; send its accepted folder files to `/api/repositories/:repositoryId/folder-import` to atomically activate the candidate. Failed imports discard the empty candidate and leave the former repository current.
+
+## Git outbound policy
+
+Git synchronization only permits credential-free public `https` remotes on port `443`. The server validates literal IP hosts and every DNS answer before repository preparation, validates again immediately before `clone` or `fetch`, and disables Git HTTP redirect following. Loopback, link-local, private, carrier-grade NAT, unique-local IPv6, and unspecified addresses return `GIT_EGRESS_DENIED` without exposing the resolved address.
 
 ## MCP tools
 

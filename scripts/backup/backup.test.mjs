@@ -49,7 +49,8 @@ case "$1" in
     tar -C "$empty_directory" -czf "$set_directory/repositories.tgz" .
     tar -C "$empty_directory" -czf "$set_directory/sources.tgz" .
     tar -C "$empty_directory" -czf "$set_directory/uploads.tgz" .
-    (cd "$set_directory" && sha256sum database.pgdump snapshots.tgz repositories.tgz sources.tgz uploads.tgz > checksums.sha256)
+    tar -C "$empty_directory" -czf "$set_directory/artifacts.tgz" .
+    (cd "$set_directory" && sha256sum database.pgdump snapshots.tgz repositories.tgz sources.tgz uploads.tgz artifacts.tgz > checksums.sha256)
     printf '{"schemaVersion":1}\n' > "$set_directory/manifest.json"
     ;;
 esac
@@ -71,6 +72,7 @@ esac
       REPOSITORY_VOLUME: "devkh_repositories",
       UPLOADED_SOURCES_VOLUME: "devkh_sources",
       UPLOAD_VOLUME: "devkh_uploads",
+      ARTIFACT_VOLUME: "devkh_artifacts",
       RESTIC_REPOSITORY: "s3:https://example.invalid/devkh",
       RESTIC_PASSWORD_FILE: passwordFile,
       BACKUP_STATE_DIR: stateDirectory
@@ -137,6 +139,13 @@ test("restore drill never writes production Docker volumes", () => {
     assert.doesNotMatch(calls, /docker compose .* stop/);
     assert.doesNotMatch(calls, /docker compose .* exec/);
     assert.doesNotMatch(calls, /pg_restore .*--clean/);
+    const evidenceDirectory = join(fixture.environment.BACKUP_STATE_DIR, "recovery-evidence");
+    const [evidenceFile] = execFileSync("find", [evidenceDirectory, "-type", "f"], { encoding: "utf8" }).trim().split("\n");
+    const evidence = JSON.parse(readFileSync(evidenceFile, "utf8"));
+    assert.deepEqual(
+      { operation: evidence.operation, productionVolumeTouched: evidence.productionVolumeTouched, restoredSnapshotCount: evidence.restoredSnapshotCount, pgRestoreListValidated: evidence.pgRestoreListValidated, volumeArchives: evidence.volumeArchives },
+      { operation: "restore-drill", productionVolumeTouched: false, restoredSnapshotCount: 1, pgRestoreListValidated: true, volumeArchives: ["snapshots.tgz", "repositories.tgz", "sources.tgz", "uploads.tgz", "artifacts.tgz"] }
+    );
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -156,12 +165,15 @@ test("systemd backup timer keeps credentials outside its unit file", () => {
   assert.match(environment, /RESTIC_CACHE_DIR=\/var\/lib\/devkh-backup\/restic-cache/);
 });
 
-test("backs up the durable uploaded source volume separately from upload staging", () => {
+test("backs up durable sources and content-addressed artifacts separately from upload staging", () => {
   const backup = readFileSync(backupScript, "utf8");
   const restore = readFileSync(restoreDrillScript, "utf8");
   const environment = readFileSync(join(projectRoot, "deployment/backup/backup.env.example"), "utf8");
 
   assert.match(environment, /UPLOADED_SOURCES_VOLUME=/);
+  assert.match(environment, /ARTIFACT_VOLUME=/);
   assert.match(backup, /sources:\$UPLOADED_SOURCES_VOLUME/);
+  assert.match(backup, /artifacts:\$ARTIFACT_VOLUME/);
   assert.match(restore, /sources\.tgz/);
+  assert.match(restore, /artifacts\.tgz/);
 });

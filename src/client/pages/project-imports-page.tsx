@@ -6,18 +6,11 @@ import { useParams } from "react-router-dom";
 
 import { ApiError, errorMessage, type ApiClient } from "../api/client";
 import {
-  packageFolderImport,
   scanDirectory,
   scanSelectedFiles,
   type DirectoryDirectoryHandle,
   type FolderImportReport
 } from "../api/folder-import";
-import {
-  createUploadController,
-  uploadProjectZipResumably,
-  uploadReplacementZipResumably,
-  type UploadController
-} from "../api/resumable-upload";
 import type { ImportProgress as ImportProgressValue, Repository, UploadSnapshotSummary } from "../api/types";
 import { FolderFilterReport, formatBytes, ImportResultReport } from "../components/import-report";
 import { ImportProgress } from "../components/import-progress";
@@ -35,7 +28,6 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
   const projectId = explicitProjectId ?? params.projectId ?? "";
   const queryClient = useQueryClient();
   const folderInput = useRef<HTMLInputElement>(null);
-  const controller = useRef<UploadController | null>(null);
   const repository = useQuery({ queryKey: projectKeys.repository(projectId), queryFn: api.getRepository, retry: false });
   const importHistory = useQuery({
     queryKey: ["import-reports", projectId],
@@ -49,7 +41,6 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
   const [report, setReport] = useState<FolderImportReport | null>(null);
   const [progress, setProgress] = useState<ImportProgressValue>(idleProgress());
   const [result, setResult] = useState<UploadSnapshotSummary | null>(null);
-  const [paused, setPaused] = useState(false);
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [location, setLocation] = useState("");
   const [token, setToken] = useState("");
@@ -87,17 +78,20 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
   };
 
   const upload = useMutation({
-    mutationFn: async (file: File) => {
+    mutationFn: async (files: FolderImportReport["acceptedFiles"]) => {
       const source = await ensureUploadSource();
-      const nextController = createUploadController();
-      controller.current = nextController;
-      const options = { controller: nextController, onTransferProgress: setProgress };
-      return source.replacement
-        ? uploadReplacementZipResumably(api, source.repository.id, file, options)
-        : uploadProjectZipResumably(api, source.repository.projectId || projectId, file, options);
+      setProgress({ phase: "uploading", status: "running", percent: 0, processedFiles: 0, totalFiles: files.length, detail: `正在直传 ${files.length} 个已过滤文件` });
+      const summary = source.replacement
+        ? await api.uploadReplacementFolder(source.repository.id, files)
+        : await api.uploadFolder(source.repository.projectId || projectId, files);
+      setProgress({ phase: "validating", status: "running", percent: 100, processedFiles: files.length, totalFiles: files.length, detail: "服务端已完成安全校验" });
+      return summary;
     },
-    onSuccess: (value) => { controller.current = null; setPaused(false); void rememberSnapshot(value); },
-    onError: () => { controller.current = null; setPaused(false); setProgress((value) => ({ ...value, status: "failed" })); }
+    onSuccess: (value) => {
+      setProgress((current) => ({ ...current, phase: "snapshot", status: "completed", percent: 100, detail: value.unchanged ? "内容没有变化" : "已创建新的内容版本" }));
+      void rememberSnapshot(value);
+    },
+    onError: () => { setProgress((value) => ({ ...value, status: "failed" })); }
   });
 
   const inspect = async (action: () => Promise<FolderImportReport>) => {
@@ -120,15 +114,7 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
     }
   };
 
-  const packageAndUpload = async () => {
-    if (!report) return;
-    try {
-      const file = await packageFolderImport(report, { onProgress: setProgress });
-      upload.mutate(file);
-    } catch (value) {
-      setProgress((current) => ({ ...current, status: "failed", detail: errorMessage(value) }));
-    }
-  };
+  const uploadFolder = () => { if (report) upload.mutate(report.acceptedFiles); };
 
   const connectAlternative = useMutation({
     mutationFn: () => {
@@ -159,9 +145,9 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
         }} />
         <Button type="primary" size="large" icon={<FolderOpen aria-hidden="true" />} onClick={chooseFolder}>选择项目文件夹</Button>
       </section>
-      <ImportProgress progress={progress} paused={paused} onPause={() => { controller.current?.pause(); setPaused(true); }} onResume={() => { controller.current?.resume(); setPaused(false); }} onCancel={() => controller.current?.cancel()} />
+      <ImportProgress progress={progress} />
     </div>
-    {report && <div className="import-report-row"><FolderFilterReport report={report} /><div className="import-confirm-panel"><h2>确认上传这些资料</h2><p>{currentRepository && currentRepository.kind !== "upload" ? "当前资料来源会保留为只读归档，完成上传后切换到新内容版本。" : "上传完成后仍需人工构建并发布，当前线上知识不会自动变化。"}</p><Button type="primary" loading={upload.isPending} disabled={!report.acceptedFiles.length} onClick={() => void packageAndUpload()}>确认并开始上传</Button></div></div>}
+    {report && <div className="import-report-row"><FolderFilterReport report={report} /><div className="import-confirm-panel"><h2>确认上传这些资料</h2><p>{currentRepository && currentRepository.kind !== "upload" ? "当前资料来源会保留为只读归档，完成上传后切换到新内容版本。" : "上传完成后仍需人工构建并发布，当前线上知识不会自动变化。"}</p><Button type="primary" loading={upload.isPending} disabled={!report.acceptedFiles.length} onClick={uploadFolder}>确认并开始上传</Button></div></div>}
     {result && <ImportResultReport upload={result} />}
     {upload.error && <ErrorState message={errorMessage(upload.error)} />}
     <section className="import-history" aria-labelledby="import-history-title">

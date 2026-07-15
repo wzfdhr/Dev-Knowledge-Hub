@@ -17,6 +17,7 @@ import { APP_VERSION, SERVICE_NAME } from "../../shared/contracts.js";
 import type { Citation } from "../knowledge/intelligence.js";
 import type {
   AppStore,
+  KnowledgeGraphRecord,
   KnowledgePageRecord,
   KnowledgeSearchResult,
   ReleaseRecord
@@ -27,6 +28,7 @@ import {
   MAX_KNOWLEDGE_PAGE_BODY_CHARACTERS,
   MAX_KNOWLEDGE_PAGE_CHUNKS
 } from "../persistence/store.js";
+import { exportKnowledgeGraph } from "../knowledge/pipeline/viz.js";
 
 export const MCP_TOOL_NAMES = [
   "dkh_search",
@@ -34,6 +36,7 @@ export const MCP_TOOL_NAMES = [
   "dkh_get_module",
   "dkh_get_symbol",
   "dkh_get_change_context",
+  "dkh_get_graph",
   "dkh_get_source",
   "dkh_get_release",
   "dkh_report_gap"
@@ -43,6 +46,7 @@ export interface McpToolContext {
   store: AppStore;
   workspaceId: string;
   projectId: string;
+  scopes?: readonly ("search" | "source.read")[];
   authorize?: () => Promise<boolean>;
   onUnauthorized?: () => Promise<void> | void;
 }
@@ -75,6 +79,16 @@ function uniqueCitations(citations: Citation[]): Citation[] {
 
 function pageCitations(page: KnowledgePageRecord): Citation[] {
   return uniqueCitations(page.chunks.flatMap((chunk) => chunk.citations));
+}
+
+function graphCitations(
+  graph: KnowledgeGraphRecord,
+  commitSha: string
+): Citation[] {
+  return uniqueCitations([...graph.nodes, ...graph.edges].flatMap((item) => item.sourceRefs.map((sourceRef) => ({
+    ...sourceRef,
+    commitSha
+  }))));
 }
 
 function boundedPage(page: KnowledgePageRecord): KnowledgePageRecord {
@@ -248,6 +262,7 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     description: string;
     schema: z.ZodType;
     annotations: ToolAnnotations;
+    scope: "search" | "source.read" | null;
     callback: (input: unknown) => Promise<CallToolResult>;
   }
   const tools: ToolDefinition[] = [];
@@ -256,13 +271,15 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     description: string,
     schema: T,
     annotations: ToolAnnotations,
-    callback: (input: z.infer<T>) => Promise<CallToolResult>
+    callback: (input: z.infer<T>) => Promise<CallToolResult>,
+    scope: "search" | "source.read" | null = "search"
   ) {
     tools.push({
       name,
       description,
       schema,
       annotations,
+      scope,
       callback: (input) => callback(input as z.infer<T>)
     });
   }
@@ -449,6 +466,40 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
   );
 
   register(
+    "dkh_get_graph",
+    "Get the current published knowledge graph as JSON, tree, Mermaid, or Markmap",
+    z.strictObject({ format: z.enum(["json", "tree", "mermaid", "markmap"]).default("json") }),
+    readOnly,
+    async ({ format }) => {
+      try {
+        const selected = await published(context);
+        const graph = await selected.context.store.getKnowledgeGraph(
+          selected.context.workspaceId,
+          selected.repository.projectId,
+          selected.release.buildId
+        );
+        if (!graph) throw new McpToolError("NOT_FOUND", "Published knowledge graph was not found");
+        const exported = exportKnowledgeGraph(graph);
+        const result = format === "mermaid"
+          ? exported.mermaid
+          : format === "markmap"
+            ? exported.markmap
+            : format === "tree"
+              ? exported.tree
+              : exported.graph;
+        return successful(
+          selected.release,
+          selected.snapshot.commitSha,
+          { format, data: result },
+          graphCitations(graph, selected.snapshot.commitSha)
+        );
+      } catch (error) {
+        return failed(error);
+      }
+    }
+  );
+
+  register(
     "dkh_get_source",
     "Read a bounded source excerpt from the current published snapshot",
     z.strictObject({
@@ -474,7 +525,8 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     } catch (error) {
       return failed(error);
     }
-    }
+    },
+    "source.read"
   );
 
   register(
@@ -570,12 +622,17 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     } catch (error) {
       return failed(error);
     }
-    }
+    },
+    null
   );
 
+  const allowedScopes = context?.scopes ? new Set(context.scopes) : null;
+  const visibleTools = allowedScopes
+    ? tools.filter((tool) => tool.scope !== null && allowedScopes.has(tool.scope))
+    : tools;
   server.server.registerCapabilities({ tools: {} });
   server.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: tools.map((tool) => ({
+    tools: visibleTools.map((tool) => ({
       name: tool.name,
       description: tool.description,
       inputSchema: z.toJSONSchema(tool.schema) as { type: "object" },
@@ -583,7 +640,7 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
     }))
   }));
   server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const tool = tools.find((candidate) => candidate.name === request.params.name);
+    const tool = visibleTools.find((candidate) => candidate.name === request.params.name);
     if (!tool) throw new McpError(ErrorCode.MethodNotFound, "Unknown MCP tool");
     if (context?.authorize && !await context.authorize()) {
       void context.onUnauthorized?.();

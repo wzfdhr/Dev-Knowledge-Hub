@@ -1,8 +1,11 @@
 import type { KnowledgeMetadata, SnapshotChangeSummary } from "../persistence/store.js";
+import { buildImpactMindmap } from "./pipeline/mindmap.js";
+import type { KnowledgeGraphRecord } from "../persistence/store.js";
 
 export function deriveChangeImpact(
   change: SnapshotChangeSummary,
-  metadata: KnowledgeMetadata
+  metadata: KnowledgeMetadata,
+  graph?: KnowledgeGraphRecord | null
 ): SnapshotChangeSummary {
   const changedPaths = new Set([...change.added, ...change.modified, ...change.deleted]);
   const related = metadata.dependencies.filter((edge) =>
@@ -17,9 +20,12 @@ export function deriveChangeImpact(
       suggestedTests.add(edge.path);
     }
   }
+  const impact = graph ? buildImpactMindmap({ changedPaths: [...changedPaths], graph }) : undefined;
+  for (const path of impact?.affectedModulePaths ?? []) affectedModules.add(path);
   return {
     ...change,
     affectedModules: [...affectedModules].sort(),
-    suggestedTests: [...suggestedTests].sort()
+    suggestedTests: [...suggestedTests].sort(),
+    ...(impact ? { impact } : {})
   };
 }

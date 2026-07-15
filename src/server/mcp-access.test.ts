@@ -1,3 +1,4 @@
+import { authenticatedCookie, csrfHeaders } from "./test-support/csrf";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -50,7 +51,7 @@ async function adminContext() {
   return {
     app,
     store,
-    cookie: String(login.headers["set-cookie"]).split(";", 1)[0],
+    cookie: authenticatedCookie(login),
     workspaceId: (await store.defaultWorkspace())!.id
   };
 }
@@ -91,6 +92,38 @@ async function publishedContext(root = fixtureRoot) {
     commitSha: index.commitSha
   })).build;
   await context.store.saveKnowledge({ build, index, output: await generateKnowledge(index) });
+  const source = index.files[0]!;
+  const sourceRef = {
+    snapshotId,
+    path: source.path,
+    startLine: source.startLine,
+    endLine: source.endLine,
+    blobHash: source.blobHash
+  };
+  await context.store.saveKnowledgeGraph({
+    workspaceId: context.workspaceId,
+    projectId: repository.projectId,
+    snapshotId,
+    buildId: build.id,
+    graph: {
+      nodes: [
+        {
+          id: "a".repeat(64), projectId: repository.projectId, snapshotId, kind: "module",
+          name: source.path, qualifiedName: source.path, candidate: false,
+          sourceRefs: [sourceRef], attributes: {}
+        },
+        {
+          id: "b".repeat(64), projectId: repository.projectId, snapshotId, kind: "symbol",
+          name: "fixture", qualifiedName: `${source.path}:fixture`, candidate: false,
+          sourceRefs: [sourceRef], attributes: {}
+        }
+      ],
+      edges: [{
+        id: "c".repeat(64), fromNodeId: "a".repeat(64), toNodeId: "b".repeat(64),
+        kind: "contains", candidate: false, confidence: 1, sourceRefs: [sourceRef]
+      }]
+    }
+  });
   await context.store.transitionBuild(build.id, "queued", "ready");
   const release = await context.store.createReleaseDraft(
     context.workspaceId, repository.id, build.id, "1.0.0"
@@ -116,7 +149,7 @@ describe("MCP bearer tokens", () => {
   test("shows plaintext once, persists only its hash, lists sanitized metadata, and rejects revocation", async () => {
     const { app, store, cookie } = await adminContext();
     const created = await app.inject({
-      method: "POST", url: "/api/mcp/tokens", headers: { cookie }, payload: { name: "CI agent" }
+      method: "POST", url: "/api/mcp/tokens", headers: { cookie, ...csrfHeaders(cookie) }, payload: { name: "CI agent" }
     });
 
     expect(created.statusCode).toBe(201);
@@ -127,14 +160,14 @@ describe("MCP bearer tokens", () => {
     expect(persisted.tokenHash).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(persisted)).not.toContain(plaintext);
 
-    const listed = await app.inject({ method: "GET", url: "/api/mcp/tokens", headers: { cookie } });
+    const listed = await app.inject({ method: "GET", url: "/api/mcp/tokens", headers: { cookie, ...csrfHeaders(cookie) } });
     expect(listed.json().tokens[0].tokenPrefix).toBe(plaintext.slice(0, 12));
     expect(listed.json().tokens[0]).not.toHaveProperty("prefix");
     expect(listed.json().tokens[0]).not.toHaveProperty("token");
     expect(listed.json().tokens[0]).not.toHaveProperty("tokenHash");
 
     expect((await app.inject({
-      method: "GET", url: "/api/mcp/connection", headers: { cookie }
+      method: "GET", url: "/api/mcp/connection", headers: { cookie, ...csrfHeaders(cookie) }
     })).json()).toMatchObject({ endpoint: "/mcp", transport: "streamable-http" });
 
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
@@ -145,11 +178,11 @@ describe("MCP bearer tokens", () => {
     expect((await httpClient.listTools()).tools.map((tool) => tool.name).sort()).toEqual([
       "dkh_get_architecture",
       "dkh_get_change_context",
+      "dkh_get_graph",
       "dkh_get_module",
       "dkh_get_release",
       "dkh_get_source",
       "dkh_get_symbol",
-      "dkh_report_gap",
       "dkh_search"
     ]);
     await httpClient.close();
@@ -168,9 +201,33 @@ describe("MCP bearer tokens", () => {
 
     const tokenId = created.json().id as string;
     expect((await app.inject({
-      method: "POST", url: `/api/mcp/tokens/${tokenId}/revoke`, headers: { cookie }
+      method: "POST", url: `/api/mcp/tokens/${tokenId}/revoke`, headers: { cookie, ...csrfHeaders(cookie) }
     })).statusCode).toBe(200);
     expect((await mcpRequest(plaintext, 2)).status).toBe(401);
+    await app.close();
+  });
+
+  test("enforces the read-only scope allowlist and rejects expired tokens explicitly", async () => {
+    const { app, store, cookie } = await adminContext();
+    const created = await app.inject({
+      method: "POST", url: "/api/mcp/tokens", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { name: "Search only", scopes: ["search"] }
+    });
+    const plaintext = created.json<{ token: string }>().token;
+    expect(created.json()).toMatchObject({ scopes: ["search"], expiresAt: expect.any(String) });
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const mcpRequest = (method: string, id: number) => fetch(`${address}/mcp`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${plaintext}`, accept: "application/json, text/event-stream", "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id, method, params: {} })
+    });
+    const tools = await mcpRequest("tools/list", 1).then((response) => response.json()) as { result: { tools: Array<{ name: string }> } };
+    expect(tools.result.tools.map((tool) => tool.name)).not.toContain("dkh_get_source");
+    expect(tools.result.tools.map((tool) => tool.name)).not.toContain("dkh_report_gap");
+    (store as unknown as { mcpTokens: Array<{ expiresAt: Date }> }).mcpTokens[0].expiresAt = new Date(Date.now() - 1_000);
+    const expired = await mcpRequest("tools/list", 2);
+    expect(expired.status).toBe(401);
+    expect(await expired.json()).toMatchObject({ error: { code: "MCP_TOKEN_EXPIRED" } });
     await app.close();
   });
 
@@ -187,10 +244,10 @@ describe("MCP bearer tokens", () => {
     }
 
     const first = await app.inject({
-      method: "GET", url: "/api/mcp/tokens?limit=100&offset=0", headers: { cookie }
+      method: "GET", url: "/api/mcp/tokens?limit=100&offset=0", headers: { cookie, ...csrfHeaders(cookie) }
     });
     const second = await app.inject({
-      method: "GET", url: "/api/mcp/tokens?limit=100&offset=100", headers: { cookie }
+      method: "GET", url: "/api/mcp/tokens?limit=100&offset=100", headers: { cookie, ...csrfHeaders(cookie) }
     });
 
     expect(first.json()).toMatchObject({ total: 125, nextOffset: 100 });
@@ -202,7 +259,67 @@ describe("MCP bearer tokens", () => {
 });
 
 describe("MCP tool contract", () => {
-  test("returns the exact common release envelope from all eight tools", async () => {
+  test("returns a published graph only through the authorized project route", async () => {
+    const { app, cookie, repository, release } = await publishedContext();
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/projects/${repository.projectId}/graph?format=json`,
+      headers: { cookie }
+    });
+
+    expect(response.statusCode).toBe(200);
+    const graphResponse = response.json<{
+      release: { id: string };
+      format: string;
+      data: { nodes: Array<{ qualifiedName: string }>; edges: Array<{ kind: string; sourceRefs: unknown[] }> };
+    }>();
+    expect(graphResponse.release.id).toBe(release.id);
+    expect(graphResponse.format).toBe("json");
+    expect(graphResponse.data.nodes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ qualifiedName: expect.any(String) })
+    ]));
+    expect(graphResponse.data.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "contains", sourceRefs: expect.any(Array) })
+    ]));
+    const mermaid = await app.inject({
+      method: "GET",
+      url: `/api/projects/${repository.projectId}/graph?format=mermaid`,
+      headers: { cookie }
+    });
+    expect(mermaid.statusCode).toBe(200);
+    expect(mermaid.json()).toMatchObject({ release: { id: release.id }, format: "mermaid" });
+    expect(mermaid.json().data).toContain("flowchart TD");
+    const tree = await app.inject({
+      method: "GET",
+      url: `/api/projects/${repository.projectId}/graph?format=tree`,
+      headers: { cookie }
+    });
+    expect(tree.statusCode).toBe(200);
+    expect(tree.json()).toMatchObject({
+      release: { id: release.id },
+      format: "tree",
+      data: { roots: expect.any(Array), crossLinks: expect.any(Array) }
+    });
+    await app.close();
+  });
+
+  test("does not expose unpublished graph state from the project route", async () => {
+    const { app, cookie, workspaceId, store } = await adminContext();
+    const project = (await store.listProjects(workspaceId))[0]!;
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/projects/${project.id}/graph`,
+      headers: { cookie }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ release: null, format: "json", data: null });
+    await app.close();
+  });
+
+  test("returns the exact common release envelope from all nine tools", async () => {
     const { store, workspaceId, release, index, app } = await publishedContext();
     const client = await connectMcp(store, workspaceId);
     const calls: Array<[string, Record<string, unknown>]> = [
@@ -211,6 +328,7 @@ describe("MCP tool contract", () => {
       ["dkh_get_module", { moduleId: "src/math.ts" }],
       ["dkh_get_symbol", { name: "add", path: "src/math.ts" }],
       ["dkh_get_change_context", { task: "change add", paths: ["src/math.ts"] }],
+      ["dkh_get_graph", {}],
       ["dkh_get_source", { path: "src/math.ts", startLine: 16, endLine: 18 }],
       ["dkh_get_release", {}],
       ["dkh_report_gap", {
@@ -516,7 +634,7 @@ describe("MCP tool contract", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  test("keeps seven tools read-only and lets only report-gap create feedback", async () => {
+  test("keeps graph and knowledge reads read-only while report-gap creates feedback", async () => {
     const { store, workspaceId, app } = await publishedContext();
     const client = await connectMcp(store, workspaceId);
     const before = JSON.stringify({
@@ -530,6 +648,7 @@ describe("MCP tool contract", () => {
       ["dkh_get_module", { moduleId: "src/math.ts" }],
       ["dkh_get_symbol", { name: "add" }],
       ["dkh_get_change_context", { task: "change add" }],
+      ["dkh_get_graph", {}],
       ["dkh_get_source", { path: "src/math.ts" }],
       ["dkh_get_release", {}]
     ] as Array<[string, Record<string, unknown>]>) {

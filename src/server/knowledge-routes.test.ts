@@ -1,3 +1,4 @@
+import { authenticatedCookie, csrfHeaders } from "./test-support/csrf";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -40,9 +41,9 @@ async function authenticatedApp() {
     method: "POST", url: "/api/session",
     payload: { email: "admin@example.com", password: "correct horse battery staple" }
   });
-  const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+  const cookie = authenticatedCookie(login);
   const connected = await app.inject({
-    method: "POST", url: "/api/repositories", headers: { cookie },
+    method: "POST", url: "/api/repositories", headers: { cookie, ...csrfHeaders(cookie) },
     payload: { kind: "local", name: "Fixture", path: fixtureRoot }
   });
   const repositoryId = connected.json().repository.id as string;
@@ -76,21 +77,21 @@ describe("knowledge API contracts", () => {
   test("starts, lists, reads, cancels, and streams build state", async () => {
     const { app, cookie } = await authenticatedApp();
     const started = await app.inject({
-      method: "POST", url: "/api/builds", headers: { cookie },
+      method: "POST", url: "/api/builds", headers: { cookie, ...csrfHeaders(cookie) },
       payload: { snapshotId: "11111111-1111-4111-8111-111111111111" }
     });
     expect(started.statusCode).toBe(202);
     const buildId = started.json().build.id as string;
 
-    expect((await app.inject({ method: "GET", url: "/api/builds", headers: { cookie } })).json().builds)
+    expect((await app.inject({ method: "GET", url: "/api/builds", headers: { cookie, ...csrfHeaders(cookie) } })).json().builds)
       .toHaveLength(1);
-    expect((await app.inject({ method: "GET", url: `/api/builds/${buildId}`, headers: { cookie } })).statusCode)
+    expect((await app.inject({ method: "GET", url: `/api/builds/${buildId}`, headers: { cookie, ...csrfHeaders(cookie) } })).statusCode)
       .toBe(200);
     expect((await app.inject({
-      method: "POST", url: `/api/builds/${buildId}/cancel`, headers: { cookie }
+      method: "POST", url: `/api/builds/${buildId}/cancel`, headers: { cookie, ...csrfHeaders(cookie) }
     })).json().build.cancelRequested).toBe(true);
     const events = await app.inject({
-      method: "GET", url: `/api/builds/${buildId}/events?once=true`, headers: { cookie }
+      method: "GET", url: `/api/builds/${buildId}/events?once=true`, headers: { cookie, ...csrfHeaders(cookie) }
     });
     expect(events.headers["content-type"]).toContain("text/event-stream");
     expect(events.body).toContain("event: build");
@@ -101,7 +102,7 @@ describe("knowledge API contracts", () => {
   test("subscribes before replay and merges a racing live event exactly once", async () => {
     const { app, store, buildService, cookie } = await authenticatedApp();
     const started = await app.inject({
-      method: "POST", url: "/api/builds", headers: { cookie },
+      method: "POST", url: "/api/builds", headers: { cookie, ...csrfHeaders(cookie) },
       payload: { snapshotId: "11111111-1111-4111-8111-111111111111" }
     });
     const buildId = started.json().build.id as string;
@@ -117,7 +118,7 @@ describe("knowledge API contracts", () => {
     }) as typeof store.listBuildEvents;
 
     const response = await app.inject({
-      method: "GET", url: `/api/builds/${buildId}/events?once=true`, headers: { cookie }
+      method: "GET", url: `/api/builds/${buildId}/events?once=true`, headers: { cookie, ...csrfHeaders(cookie) }
     });
 
     expect(response.body.match(/^id: 1$/gm)).toHaveLength(1);
@@ -129,7 +130,7 @@ describe("knowledge API contracts", () => {
   test("closes immediately when replay already contains a terminal event", async () => {
     const { app, store, buildService, cookie, workspaceId } = await authenticatedApp();
     const started = await app.inject({
-      method: "POST", url: "/api/builds", headers: { cookie },
+      method: "POST", url: "/api/builds", headers: { cookie, ...csrfHeaders(cookie) },
       payload: { snapshotId: "11111111-1111-4111-8111-111111111111" }
     });
     const buildId = started.json().build.id as string;
@@ -141,12 +142,95 @@ describe("knowledge API contracts", () => {
     buildService.subscribe = (() => () => {}) as typeof buildService.subscribe;
 
     const response = await app.inject({
-      method: "GET", url: `/api/builds/${buildId}/events`, headers: { cookie }
+      method: "GET", url: `/api/builds/${buildId}/events`, headers: { cookie, ...csrfHeaders(cookie) }
     });
 
     expect(response.statusCode).toBe(200);
     expect(response.body).toContain("\"status\":\"ready\"");
     expect(response.body).toContain("id: 2");
+    await app.close();
+  });
+
+  test("returns persisted stage snapshots and reconnectable stage events for the build project", async () => {
+    const { app, store, cookie, repositoryId, workspaceId } = await authenticatedApp();
+    const started = await app.inject({
+      method: "POST", url: "/api/builds", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { snapshotId: "11111111-1111-4111-8111-111111111111" }
+    });
+    const buildId = started.json().build.id as string;
+    const repository = await store.getRepository(workspaceId, repositoryId);
+    const stage = await store.createStageRun({
+      workspaceId,
+      projectId: repository!.projectId,
+      snapshotId: "11111111-1111-4111-8111-111111111111",
+      buildId,
+      stage: "convert",
+      attempt: 1,
+      inputDigest: "a".repeat(64)
+    });
+    await store.transitionStageRun(
+      workspaceId,
+      repository!.projectId,
+      stage.id,
+      "queued",
+      "running"
+    );
+
+    const stages = await app.inject({
+      method: "GET", url: `/api/builds/${buildId}/stages`, headers: { cookie }
+    });
+    expect(stages.statusCode).toBe(200);
+    expect(stages.json()).toMatchObject({
+      buildId,
+      stages: [expect.objectContaining({ stage: "convert", status: "running" })]
+    });
+
+    const events = await app.inject({
+      method: "GET",
+      url: `/api/builds/${buildId}/stages/events?once=true`,
+      headers: { cookie, "last-event-id": "1" }
+    });
+    expect(events.statusCode).toBe(200);
+    expect(events.headers["content-type"]).toContain("text/event-stream");
+    expect(events.body).not.toContain("id: 1");
+    expect(events.body).toContain("id: 2");
+    expect(events.body).toContain("event: stage.updated");
+    await app.close();
+  });
+
+  test("rejects invalid stage cursors and users without access to the build project", async () => {
+    const { app, store, cookie, repositoryId, workspaceId } = await authenticatedApp();
+    const started = await app.inject({
+      method: "POST", url: "/api/builds", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { snapshotId: "11111111-1111-4111-8111-111111111111" }
+    });
+    const buildId = started.json().build.id as string;
+    const repository = await store.getRepository(workspaceId, repositoryId);
+    await store.createStageRun({
+      workspaceId, projectId: repository!.projectId, snapshotId: "11111111-1111-4111-8111-111111111111",
+      buildId, stage: "convert", attempt: 1, inputDigest: "a".repeat(64)
+    });
+    const invalidCursor = await app.inject({
+      method: "GET", url: `/api/builds/${buildId}/stages/events?once=true`,
+      headers: { cookie, "last-event-id": "not-a-cursor" }
+    });
+    expect(invalidCursor.statusCode).toBe(400);
+    expect(invalidCursor.json().error.code).toBe("INVALID_EVENT_CURSOR");
+
+    const created = await app.inject({
+      method: "POST", url: "/api/members", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { email: "reader@example.com", password: "another correct horse battery", role: "reader" }
+    });
+    expect(created.statusCode).toBe(201);
+    const memberLogin = await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "reader@example.com", password: "another correct horse battery" }
+    });
+    const denied = await app.inject({
+      method: "GET", url: `/api/builds/${buildId}/stages`, headers: { cookie: authenticatedCookie(memberLogin) }
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().error.code).toBe("PROJECT_ACCESS_DENIED");
     await app.close();
   });
 
@@ -163,23 +247,23 @@ describe("knowledge API contracts", () => {
     await store.transitionBuild(build.id, "queued", "ready");
 
     const draft = await app.inject({
-      method: "POST", url: "/api/releases", headers: { cookie },
+      method: "POST", url: "/api/releases", headers: { cookie, ...csrfHeaders(cookie) },
       payload: { buildId: build.id, version: "1.0.0" }
     });
     expect(draft.statusCode).toBe(201);
     expect((await app.inject({
-      method: "GET", url: "/api/releases/current", headers: { cookie }
+      method: "GET", url: "/api/releases/current", headers: { cookie, ...csrfHeaders(cookie) }
     })).statusCode).toBe(404);
     const releaseId = draft.json().release.id as string;
     const exactRelease = await app.inject({
-      method: "GET", url: `/api/releases/${releaseId}`, headers: { cookie }
+      method: "GET", url: `/api/releases/${releaseId}`, headers: { cookie, ...csrfHeaders(cookie) }
     });
     expect(exactRelease.statusCode).toBe(200);
     expect(exactRelease.json().release).toMatchObject({ id: releaseId, commitSha: index.commitSha });
     const missingRelease = await app.inject({
       method: "GET",
       url: "/api/releases/99999999-9999-4999-8999-999999999999",
-      headers: { cookie }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
     expect(missingRelease.statusCode).toBe(404);
     expect(missingRelease.json().error).toEqual({
@@ -187,41 +271,41 @@ describe("knowledge API contracts", () => {
       message: "Release was not found"
     });
     expect((await app.inject({
-      method: "POST", url: `/api/releases/${releaseId}/publish`, headers: { cookie }
+      method: "POST", url: `/api/releases/${releaseId}/publish`, headers: { cookie, ...csrfHeaders(cookie) }
     })).statusCode).toBe(200);
 
-    const pages = await app.inject({ method: "GET", url: "/api/knowledge/pages", headers: { cookie } });
+    const pages = await app.inject({ method: "GET", url: "/api/knowledge/pages", headers: { cookie, ...csrfHeaders(cookie) } });
     expect(pages.json().pages.length).toBeGreaterThan(4);
     const pageId = pages.json().pages[0].id as string;
     expect((await app.inject({
-      method: "GET", url: `/api/knowledge/pages/${encodeURIComponent(pageId)}`, headers: { cookie }
+      method: "GET", url: `/api/knowledge/pages/${encodeURIComponent(pageId)}`, headers: { cookie, ...csrfHeaders(cookie) }
     })).statusCode).toBe(200);
     expect((await app.inject({
-      method: "GET", url: "/api/knowledge/search?q=add", headers: { cookie }
+      method: "GET", url: "/api/knowledge/search?q=add", headers: { cookie, ...csrfHeaders(cookie) }
     })).json().results[0].kind).toBe("symbol");
     const source = await app.inject({
       method: "GET",
       url: "/api/knowledge/source?path=src/math.ts&startLine=16&endLine=18",
-      headers: { cookie }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
     expect(source.json()).toEqual(expect.objectContaining({
       path: "src/math.ts", startLine: 16, endLine: 18
     }));
     expect(source.json().content).toContain("export function add");
-    expect((await app.inject({ method: "GET", url: "/api/releases", headers: { cookie } })).json().releases)
+    expect((await app.inject({ method: "GET", url: "/api/releases", headers: { cookie, ...csrfHeaders(cookie) } })).json().releases)
       .toHaveLength(1);
     const status = await app.inject({
-      method: "GET", url: "/api/repositories/current/status", headers: { cookie }
+      method: "GET", url: "/api/repositories/current/status", headers: { cookie, ...csrfHeaders(cookie) }
     });
     expect(status.json().latestSnapshot).toMatchObject({
       id: "11111111-1111-4111-8111-111111111111",
       commitSha: index.commitSha,
       ref: "main"
     });
-    const releaseList = await app.inject({ method: "GET", url: "/api/releases", headers: { cookie } });
+    const releaseList = await app.inject({ method: "GET", url: "/api/releases", headers: { cookie, ...csrfHeaders(cookie) } });
     expect(releaseList.json().releases[0].commitSha).toBe(index.commitSha);
     const metadata = await app.inject({
-      method: "GET", url: `/api/knowledge/metadata?releaseId=${releaseId}`, headers: { cookie }
+      method: "GET", url: `/api/knowledge/metadata?releaseId=${releaseId}`, headers: { cookie, ...csrfHeaders(cookie) }
     });
     expect(metadata.json().symbols).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: "add", kind: "function", path: "src/math.ts" })
@@ -237,7 +321,7 @@ describe("knowledge API contracts", () => {
     const response = await app.inject({
       method: "GET",
       url: "/api/releases/not-a-uuid",
-      headers: { cookie }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
 
     expect(response.statusCode).toBe(400);
@@ -266,12 +350,12 @@ describe("knowledge API contracts", () => {
     const fiveHundred = await app.inject({
       method: "GET",
       url: "/api/knowledge/source?path=src/math.ts&startLine=1&endLine=500",
-      headers: { cookie }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
     const fiveHundredOne = await app.inject({
       method: "GET",
       url: "/api/knowledge/source?path=src/math.ts&startLine=1&endLine=501",
-      headers: { cookie }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
 
     expect(fiveHundred.json().error.code).toBe("INVALID_SOURCE_RANGE");

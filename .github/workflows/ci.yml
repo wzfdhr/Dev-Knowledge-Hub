@@ -36,6 +36,9 @@ jobs:
       - run: npm ci
       - run: npm run secrets:scan
       - run: npm run licenses:check
+      - run: npm run runtime:verify
+      - run: npm run test:runtime
+      - run: npm run test:backup
       - name: Verify isolated delivery configuration
         run: npm run delivery:verify
       - run: npm run typecheck

@@ -8,8 +8,14 @@ describe("loadEnv", () => {
       nodeEnv: "test",
       host: "127.0.0.1",
       port: 3000,
-      dataDir: "./data"
+      dataDir: "./data",
+      knowledgePipelineV2: false
     });
+  });
+
+  test("enables the new knowledge pipeline only for an explicit true flag", () => {
+    expect(loadEnv({ mode: "development", env: { KNOWLEDGE_PIPELINE_V2: "true" } }).knowledgePipelineV2).toBe(true);
+    expect(loadEnv({ mode: "development", env: { KNOWLEDGE_PIPELINE_V2: "false" } }).knowledgePipelineV2).toBe(false);
   });
 
   test("production mode rejects missing required secrets", () => {
@@ -29,6 +35,20 @@ describe("loadEnv", () => {
       masterKey: Buffer.alloc(32).toString("base64"),
       sessionSecret: "development-session-secret"
     });
+  });
+
+  test("loads a bounded legacy session read window as a date", () => {
+    expect(loadEnv({
+      mode: "development",
+      env: { DEVKH_LEGACY_SESSION_READ_UNTIL: "2026-07-15T00:00:00.000Z" }
+    }).legacySessionReadUntil).toEqual(new Date("2026-07-15T00:00:00.000Z"));
+  });
+
+  test("rejects a legacy session window longer than 24 hours", () => {
+    expect(() => loadEnv({
+      mode: "development",
+      env: { DEVKH_LEGACY_SESSION_READ_UNTIL: new Date(Date.now() + 25 * 60 * 60 * 1_000).toISOString() }
+    })).toThrow(/24 hours/);
   });
 
   test("production mode rejects a master key that is not exactly 32 base64 bytes", () => {

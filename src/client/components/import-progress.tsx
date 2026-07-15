@@ -1,13 +1,12 @@
-import { Button, Progress } from "antd";
-import { Check, Circle, Pause, Play, X } from "lucide-react";
+import { Progress } from "antd";
+import { Check, Circle } from "lucide-react";
 
 import type { ImportPhase, ImportProgress as ImportProgressValue } from "../api/types";
 
 const stages: Array<{ phase: ImportPhase; label: string }> = [
   { phase: "reading", label: "读取文件" },
   { phase: "filtering", label: "安全过滤" },
-  { phase: "packaging", label: "本地压缩" },
-  { phase: "uploading", label: "分块上传" },
+  { phase: "uploading", label: "文件夹直传" },
   { phase: "validating", label: "服务端校验" },
   { phase: "snapshot", label: "创建内容版本" }
 ];
@@ -26,16 +25,8 @@ function formatEta(seconds?: number): string | null {
 
 export function ImportProgress({
   progress,
-  paused = false,
-  onPause,
-  onResume,
-  onCancel
 }: {
   progress: ImportProgressValue | null;
-  paused?: boolean;
-  onPause?(): void;
-  onResume?(): void;
-  onCancel?(): void;
 }) {
   const activeIndex = progress ? stages.findIndex((stage) => stage.phase === progress.phase) : -1;
   const rate = formatRate(progress?.bytesPerSecond);
@@ -58,14 +49,8 @@ export function ImportProgress({
     </div>
     <Progress percent={progress?.percent ?? 0} showInfo={false} status={progress?.status === "failed" ? "exception" : undefined} />
     <div className="import-progress-meta" aria-live="polite">
-      <span>{progress?.detail ?? "选择项目文件夹后，将在本机完成读取、过滤和压缩。"}</span>
+      <span>{progress?.detail ?? "选择项目文件夹后，将在本机完成读取和过滤，仅上传可采集文件。"}</span>
       {(rate || eta) && <span>{[rate, eta].filter(Boolean).join(" · ")}</span>}
     </div>
-    {progress?.phase === "uploading" && progress.status === "running" && <div className="import-transfer-actions">
-      {paused
-        ? <Button icon={<Play aria-hidden="true" />} onClick={onResume}>继续上传</Button>
-        : <Button icon={<Pause aria-hidden="true" />} onClick={onPause}>暂停上传</Button>}
-      <Button danger icon={<X aria-hidden="true" />} onClick={onCancel}>取消上传</Button>
-    </div>}
   </section>;
 }

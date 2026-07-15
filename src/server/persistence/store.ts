@@ -6,12 +6,85 @@ import type {
   PersistedKnowledge
 } from "../knowledge/build-service.js";
 import type { Citation } from "../knowledge/intelligence.js";
+import type {
+  ArtifactManifest,
+  BuildStage,
+  GraphEdge,
+  GraphNode,
+  StageRun,
+  StageStatus
+} from "../knowledge/pipeline/contracts.js";
+import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
+import type { ImpactMindmap } from "../knowledge/pipeline/mindmap.js";
 import type { AGENT_FEEDBACK_STATUSES } from "../../shared/contracts.js";
+import type { LintIssue } from "../../shared/api-contracts.js";
+import type { RemediationState } from "../knowledge/remediation.js";
 
 export interface WorkspaceRecord {
   id: string;
   name: string;
   slug: string;
+}
+
+export interface PipelineStageRunRecord extends StageRun {
+  workspaceId: string;
+  projectId: string;
+  snapshotId: string;
+}
+
+export interface CreateStageRunInput {
+  workspaceId: string;
+  projectId: string;
+  snapshotId: string;
+  buildId: string;
+  stage: BuildStage;
+  attempt: number;
+  inputDigest: string;
+}
+
+export interface PipelineArtifactStore {
+  createStageRun(input: CreateStageRunInput): Promise<PipelineStageRunRecord>;
+  claimNextStageRun(
+    workspaceId: string,
+    projectId: string,
+    scope?: { buildId?: string; stage?: BuildStage }
+  ): Promise<PipelineStageRunRecord | null>;
+  transitionStageRun(
+    workspaceId: string,
+    projectId: string,
+    stageRunId: string,
+    expectedStatus: StageStatus,
+    status: StageStatus,
+    details?: { outputManifestIds?: string[]; errorCode?: string; errorDetail?: string }
+  ): Promise<PipelineStageRunRecord | null>;
+  createArtifactWithAudit(manifest: ArtifactManifest, actorId?: string): Promise<ArtifactManifest>;
+  findReusableArtifact(
+    workspaceId: string,
+    projectId: string,
+    snapshotId: string,
+    stage: BuildStage,
+    kind: string,
+    inputDigest: string
+  ): Promise<ArtifactManifest | null>;
+}
+
+export interface KnowledgeGraphRecord {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+export interface SaveKnowledgeGraphInput {
+  workspaceId: string;
+  projectId: string;
+  snapshotId: string;
+  buildId: string;
+  graph: KnowledgeGraphRecord;
+  actorId?: string;
+}
+
+export interface GraphStore {
+  saveKnowledgeGraph(input: SaveKnowledgeGraphInput): Promise<void>;
+  getKnowledgeGraph(workspaceId: string, projectId: string, buildId: string): Promise<KnowledgeGraphRecord | null>;
 }
 
 export interface AdminRecord {
@@ -36,6 +109,21 @@ export interface TeamMemberRecord {
   createdAt: Date;
   disabledAt: Date | null;
   sessionVersion: number;
+}
+
+export interface AdminMfaRecord {
+  userId: string;
+  workspaceId: string;
+  encryptedSecret: string;
+  enabledAt: Date | null;
+  failedAttempts: number;
+  lockedUntil: Date | null;
+}
+
+export interface AdminMfaRecoveryCodeRecord {
+  id: string;
+  codeHash: string;
+  usedAt: Date | null;
 }
 
 export interface ProjectRecord {
@@ -113,9 +201,19 @@ export interface McpTokenRecord {
   name: string;
   tokenHash: string;
   tokenPrefix: string;
+  scopes: McpTokenScope[];
+  expiresAt: Date;
   createdAt: Date;
   lastUsedAt: Date | null;
   revokedAt: Date | null;
+}
+
+export const MCP_TOKEN_SCOPES = ["search", "source.read"] as const;
+export type McpTokenScope = (typeof MCP_TOKEN_SCOPES)[number];
+
+export interface CreateMcpTokenInput extends Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt" | "scopes" | "expiresAt"> {
+  scopes?: McpTokenScope[];
+  expiresAt?: Date;
 }
 
 export interface McpTokenRotation {
@@ -166,6 +264,44 @@ export interface FeedbackRebuildInput {
   workspaceId: string;
   feedbackId: string;
   releaseId: string;
+  actorId: string;
+  build: BuildInput;
+}
+
+export interface RemediationRecord {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  repositoryId: string;
+  sourceBuildId: string;
+  issue: LintIssue;
+  state: RemediationState;
+  rebuildBuildId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface RemediationEventRecord {
+  id: string;
+  workspaceId: string;
+  remediationId: string;
+  fromState: RemediationState;
+  toState: RemediationState;
+  actorId: string | null;
+  createdAt: Date;
+}
+
+export interface CreateRemediationInput {
+  workspaceId: string;
+  projectId: string;
+  repositoryId: string;
+  sourceBuildId: string;
+  issue: LintIssue;
+}
+
+export interface RemediationBuildInput {
+  workspaceId: string;
+  remediationId: string;
   actorId: string;
   build: BuildInput;
 }
@@ -238,6 +374,7 @@ export interface SnapshotChangeSummary {
   requiresBuild: boolean;
   affectedModules: string[];
   suggestedTests: string[];
+  impact?: ImpactMindmap;
 }
 
 export type ImportReportStatus = "running" | "succeeded" | "failed" | "cancelled";
@@ -425,11 +562,36 @@ export interface KnowledgeStore {
   ): Promise<ReleaseRecord[]>;
 }
 
-export interface AppStore extends BuildPersistence, KnowledgeStore {
+export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore {
+  listPipelineStageRuns(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineStageRunRecord[]>;
+  listPipelineStageEvents(
+    workspaceId: string,
+    projectId: string,
+    buildId: string,
+    afterSequence: number,
+    limit?: number
+  ): Promise<PipelineStageEvent[]>;
   isSetupComplete(): Promise<boolean>;
   createInitialSetup(email: string, passwordHash: string): Promise<SetupResult | null>;
   findAdminByEmail(email: string): Promise<AdminRecord | null>;
   findAdminById(id: string, workspaceId: string): Promise<AdminRecord | null>;
+  getAdminMfa(workspaceId: string, userId: string): Promise<AdminMfaRecord | null>;
+  savePendingAdminMfa(workspaceId: string, userId: string, encryptedSecret: string): Promise<AdminMfaRecord>;
+  enableAdminMfa(
+    workspaceId: string,
+    userId: string,
+    recoveryCodeHashes: string[],
+    actorId: string
+  ): Promise<AdminMfaRecord | null>;
+  clearAdminMfaFailures(workspaceId: string, userId: string): Promise<void>;
+  recordAdminMfaFailure(workspaceId: string, userId: string, now?: Date): Promise<AdminMfaRecord | null>;
+  listActiveAdminMfaRecoveryCodes(workspaceId: string, userId: string): Promise<AdminMfaRecoveryCodeRecord[]>;
+  consumeAdminMfaRecoveryCode(workspaceId: string, userId: string, id: string): Promise<boolean>;
+  disableAdminMfa(workspaceId: string, userId: string, actorId: string): Promise<boolean>;
   listTeamMembers(workspaceId: string, pagination?: Pagination): Promise<TeamMemberRecord[]>;
   countTeamMembers(workspaceId: string): Promise<number>;
   createTeamMember(
@@ -513,10 +675,10 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   listImportReports(workspaceId: string, projectId: string, pagination?: Pagination): Promise<ImportReportRecord[]>;
   countImportReports(workspaceId: string, projectId: string): Promise<number>;
   deleteExpiredImportReports(cutoff: Date): Promise<number>;
-  createMcpToken(input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">):
+  createMcpToken(input: CreateMcpTokenInput):
     Promise<McpTokenRecord>;
   createMcpTokenWithAudit(
-    input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">,
+    input: CreateMcpTokenInput,
     actorId: string
   ): Promise<McpTokenRecord>;
   listMcpTokens(workspaceId: string, pagination?: Pagination, projectId?: string): Promise<McpTokenRecord[]>;
@@ -532,7 +694,7 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   rotateMcpTokenWithAudit(
     workspaceId: string,
     tokenId: string,
-    replacement: Pick<McpTokenRecord, "tokenHash" | "tokenPrefix">,
+    replacement: Pick<McpTokenRecord, "tokenHash" | "tokenPrefix"> & { scopes?: McpTokenScope[] },
     actorId: string
   ): Promise<McpTokenRotation | null>;
   createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord>;
@@ -562,6 +724,28 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   ): Promise<AgentFeedbackRecord | null>;
   requestFeedbackRebuildWithAudit(
     input: FeedbackRebuildInput
+  ): Promise<{ build: BuildRecord; created: boolean }>;
+  createRemediation(input: CreateRemediationInput): Promise<RemediationRecord>;
+  getRemediation(workspaceId: string, remediationId: string): Promise<RemediationRecord | null>;
+  listRemediations(
+    workspaceId: string,
+    projectId: string,
+    pagination?: Pagination
+  ): Promise<RemediationRecord[]>;
+  countRemediations(
+    workspaceId: string,
+    projectId: string,
+    state?: RemediationState
+  ): Promise<number>;
+  listRemediationEvents(workspaceId: string, remediationId: string): Promise<RemediationEventRecord[]>;
+  transitionRemediationWithAudit(
+    workspaceId: string,
+    remediationId: string,
+    state: RemediationState,
+    actorId: string
+  ): Promise<RemediationRecord | null>;
+  requestRemediationBuildWithAudit(
+    input: RemediationBuildInput
   ): Promise<{ build: BuildRecord; created: boolean }>;
   createRepository(
     workspaceId: string,
@@ -600,6 +784,7 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
     commitSha: string
   ): Promise<SourceSnapshotRecord | null>;
   findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null>;
+  listSnapshotFiles(workspaceId: string, snapshotId: string): Promise<SourceFileRecord[]>;
   latestSnapshot(workspaceId: string, repositoryId: string): Promise<SourceSnapshotRecord | null>;
   snapshotChangeSummary(workspaceId: string, repositoryId: string, snapshotId: string): Promise<SnapshotChangeSummary | null>;
   findSourceFile(
@@ -621,6 +806,7 @@ export interface AppStore extends BuildPersistence, KnowledgeStore {
   countBuilds(workspaceId: string, repositoryId: string): Promise<number>;
   countReleases(workspaceId: string, repositoryId: string): Promise<number>;
   countKnowledgePages(workspaceId: string, releaseId?: string): Promise<number>;
+  countKnowledgePagesForBuild(workspaceId: string, buildId: string): Promise<number>;
 }
 
 export type { BuildPurpose, BuildRecord };

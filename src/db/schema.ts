@@ -19,7 +19,9 @@ import {
   BUILD_JOB_STATUSES
 } from "../shared/contracts.js";
 import type { Citation } from "../server/knowledge/intelligence.js";
-import type { FeedbackGenerationContext } from "../server/knowledge/build-service.js";
+import type { FeedbackGenerationContext, RemediationGenerationContext } from "../server/knowledge/build-service.js";
+import type { LintIssue } from "../shared/api-contracts.js";
+import type { RemediationState } from "../server/knowledge/remediation.js";
 
 export { AGENT_FEEDBACK_STATUSES, BUILD_JOB_STATUSES } from "../shared/contracts.js";
 
@@ -237,6 +239,8 @@ export const buildJobs = pgTable("build_jobs", {
   feedbackIds: uuid("feedback_ids").array().notNull().default(sql`'{}'::uuid[]`),
   feedbackContext: jsonb("feedback_context").$type<FeedbackGenerationContext[]>()
     .notNull().default([]),
+  remediationContext: jsonb("remediation_context").$type<RemediationGenerationContext[]>()
+    .notNull().default([]),
   ...timestamps
 }, (table) => [
   uniqueIndex("build_jobs_id_workspace_idx").on(table.id, table.workspaceId),
@@ -432,4 +436,63 @@ export const auditEvents = pgTable("audit_events", {
     foreignColumns: [adminUsers.id, adminUsers.workspaceId],
     name: "audit_events_actor_workspace_fk"
   })
+]);
+
+export const remediationCases = pgTable("remediation_cases", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  projectId: uuid("project_id").notNull(),
+  repositoryId: uuid("repository_id").notNull(),
+  sourceBuildId: uuid("source_build_id").notNull(),
+  issue: jsonb("issue").$type<LintIssue>().notNull(),
+  state: text("state").$type<RemediationState>().notNull().default("open"),
+  rebuildBuildId: uuid("rebuild_build_id"),
+  ...timestamps
+}, (table) => [
+  uniqueIndex("remediation_cases_id_workspace_idx").on(table.id, table.workspaceId),
+  index("remediation_cases_project_state_idx").on(table.workspaceId, table.projectId, table.state, table.createdAt),
+  foreignKey({
+    columns: [table.projectId, table.workspaceId],
+    foreignColumns: [projects.id, projects.workspaceId],
+    name: "remediation_cases_project_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.repositoryId, table.workspaceId],
+    foreignColumns: [repositories.id, repositories.workspaceId],
+    name: "remediation_cases_repository_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.sourceBuildId, table.workspaceId],
+    foreignColumns: [buildJobs.id, buildJobs.workspaceId],
+    name: "remediation_cases_source_build_workspace_fk"
+  }).onDelete("restrict"),
+  foreignKey({
+    columns: [table.rebuildBuildId, table.workspaceId],
+    foreignColumns: [buildJobs.id, buildJobs.workspaceId],
+    name: "remediation_cases_rebuild_build_workspace_fk"
+  }).onDelete("restrict")
+]);
+
+export const remediationEvents = pgTable("remediation_events", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  sequence: bigserial("sequence", { mode: "number" }).notNull(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  remediationId: uuid("remediation_id").notNull(),
+  fromState: text("from_state").$type<RemediationState>().notNull(),
+  toState: text("to_state").$type<RemediationState>().notNull(),
+  actorId: uuid("actor_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+}, (table) => [
+  uniqueIndex("remediation_events_id_workspace_idx").on(table.id, table.workspaceId),
+  index("remediation_events_case_idx").on(table.workspaceId, table.remediationId, table.sequence),
+  foreignKey({
+    columns: [table.remediationId, table.workspaceId],
+    foreignColumns: [remediationCases.id, remediationCases.workspaceId],
+    name: "remediation_events_case_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.actorId, table.workspaceId],
+    foreignColumns: [adminUsers.id, adminUsers.workspaceId],
+    name: "remediation_events_actor_workspace_fk"
+  }).onDelete("restrict")
 ]);

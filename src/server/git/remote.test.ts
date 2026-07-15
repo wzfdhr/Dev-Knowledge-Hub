@@ -62,10 +62,12 @@ describe("HTTPS Git authentication", () => {
     });
 
     try {
-      const target = await prepareRemoteRepository({ repository, dataDir, token, runner });
+      const assertEgress = vi.fn(async () => undefined);
+      const target = await prepareRemoteRepository({ repository, dataDir, token, runner, assertEgress });
 
       expect(target).toBe(path.join(dataDir, "repos", repository.id));
       expect(runner).toHaveBeenCalledOnce();
+      expect(assertEgress).toHaveBeenCalledTimes(2);
       await expect(access(askPassPath)).resolves.toBeUndefined();
       expect(await readFile(askPassPath, "utf8")).not.toContain(token);
     } finally {
@@ -119,11 +121,13 @@ describe("HTTPS Git authentication", () => {
     });
 
     try {
+      const assertEgress = vi.fn(async () => undefined);
       await prepareRemoteRepository({
         repository,
         dataDir,
         token,
         runner,
+        assertEgress,
         environment: {
           ...process.env,
           HOME: homeDir,

@@ -1,3 +1,4 @@
+import { authenticatedCookie, csrfHeaders } from "../test-support/csrf";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -17,6 +18,7 @@ import { syncRepository } from "../git/snapshot";
 import { BuildService } from "../knowledge/build-service";
 import { PgBossBuildJobQueue } from "../knowledge/job-queue";
 import { hashMcpToken } from "../mcp/auth";
+import { PostgresSessionStore } from "../security/session-store";
 import { LastProjectAdminError } from "./store";
 import { PostgresAppStore } from "./postgres-store";
 
@@ -51,15 +53,157 @@ integration("PostgreSQL cited knowledge integration", () => {
       `SELECT json_agg(table_name ORDER BY table_name) AS names
        FROM information_schema.tables
        WHERE table_schema = 'public'
-         AND table_name IN ('build_events', 'build_jobs', 'import_reports', 'knowledge_chunks', 'project_members', 'releases')`
+         AND table_name IN ('auth_sessions', 'build_events', 'build_jobs', 'build_stage_runs', 'import_reports', 'knowledge_artifacts', 'knowledge_chunks', 'knowledge_graph_edges', 'knowledge_graph_nodes', 'project_members', 'releases', 'remediation_cases', 'remediation_events')`
     );
     expect(rows[0].names).toEqual([
-      "build_events", "build_jobs", "import_reports", "knowledge_chunks", "project_members", "releases"
+      "auth_sessions", "build_events", "build_jobs", "build_stage_runs", "import_reports", "knowledge_artifacts", "knowledge_chunks", "knowledge_graph_edges", "knowledge_graph_nodes", "project_members", "releases", "remediation_cases", "remediation_events"
     ]);
     const extension = await pool.query(
       "SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'"
     );
     expect(extension.rows).toHaveLength(1);
+  }, 30_000);
+
+  test(databaseUrl
+    ? "persists only hashed opaque session records and revokes them transactionally"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("admin@example.com", "hash");
+    const sessions = new PostgresSessionStore(pool);
+    const idHash = createHash("sha256").update("opaque-session-id").digest("hex");
+    await sessions.create({
+      idHash,
+      userId: setup!.admin.id,
+      workspaceId: setup!.workspace.id,
+      csrfSecretHash: createHash("sha256").update("csrf-nonce").digest("hex"),
+      sessionVersion: setup!.admin.sessionVersion,
+      expiresAt: new Date(Date.now() + 60_000),
+      revokedAt: null
+    });
+
+    await expect(sessions.findActive(idHash)).resolves.toMatchObject({
+      userId: setup!.admin.id,
+      workspaceId: setup!.workspace.id
+    });
+    const persisted = await pool.query<{ id_hash: string; csrf_secret_hash: string }>(
+      "SELECT id_hash, csrf_secret_hash FROM auth_sessions WHERE id_hash = $1", [idHash]
+    );
+    expect(persisted.rows[0]).toMatchObject({ id_hash: idHash });
+    expect(JSON.stringify(persisted.rows[0])).not.toContain("opaque-session-id");
+    await sessions.revoke(idHash);
+    await expect(sessions.findActive(idHash)).resolves.toBeNull();
+  }, 30_000);
+
+  test(databaseUrl
+    ? "persists encrypted MFA state, one-time recovery hashes, and the lockout counter"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("admin@example.com", "hash");
+    const pending = await store.savePendingAdminMfa(setup!.workspace.id, setup!.admin.id, "encrypted-secret");
+    expect(pending).toMatchObject({ enabledAt: null, failedAttempts: 0 });
+    const enabled = await store.enableAdminMfa(
+      setup!.workspace.id, setup!.admin.id, ["scrypt$test$hash"], setup!.admin.id
+    );
+    expect(enabled).toMatchObject({ enabledAt: expect.any(Date) });
+    expect(await store.listActiveAdminMfaRecoveryCodes(setup!.workspace.id, setup!.admin.id))
+      .toHaveLength(1);
+    let state = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      state = await store.recordAdminMfaFailure(setup!.workspace.id, setup!.admin.id, new Date("2026-07-14T00:00:00.000Z"));
+    }
+    expect(state).toMatchObject({ failedAttempts: 5, lockedUntil: expect.any(Date) });
+    const [recovery] = await store.listActiveAdminMfaRecoveryCodes(setup!.workspace.id, setup!.admin.id);
+    await expect(store.consumeAdminMfaRecoveryCode(setup!.workspace.id, setup!.admin.id, recovery.id)).resolves.toBe(true);
+    await expect(store.consumeAdminMfaRecoveryCode(setup!.workspace.id, setup!.admin.id, recovery.id)).resolves.toBe(false);
+  }, 30_000);
+
+  test(databaseUrl
+    ? "isolates stage artifacts, claims queued work once, and retains published artifacts"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("pipeline@example.com", "hash");
+    const repository = await store.createRepository(setup!.workspace.id, { kind: "upload", name: "Pipeline" });
+    const snapshotId = randomUUID();
+    await store.createSnapshot({
+      snapshot: {
+        id: snapshotId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+        commitSha: "a".repeat(40), ref: "upload", remoteUrl: null,
+        commitTimestamp: new Date("2026-07-14T00:00:00.000Z"), storagePath: "/tmp/pipeline-snapshot"
+      },
+      files: []
+    });
+    const build = await store.createBuild({
+      workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId,
+      snapshotPath: "/tmp/pipeline-snapshot", commitSha: "a".repeat(40)
+    });
+    const baseStage = {
+      workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId, buildId: build.build.id,
+      attempt: 1, inputDigest: "b".repeat(64)
+    };
+    const convert = await store.createStageRun({ ...baseStage, stage: "convert" });
+    const replayedConvert = await store.createStageRun({ ...baseStage, stage: "convert" });
+    expect(replayedConvert.id).toBe(convert.id);
+    await store.createStageRun({ ...baseStage, stage: "extract" });
+    await expect(store.listPipelineStageEvents(
+      setup!.workspace.id, repository!.projectId, build.build.id, 0
+    )).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ stageRunId: convert.id, stage: "convert", status: "queued" })
+    ]));
+    const [firstClaim, secondClaim] = await Promise.all([
+      store.claimNextStageRun(setup!.workspace.id, repository!.projectId, {
+        buildId: build.build.id,
+        stage: "convert"
+      }),
+      store.claimNextStageRun(setup!.workspace.id, repository!.projectId)
+    ]);
+    expect(firstClaim).toMatchObject({ status: "running" });
+    expect(secondClaim).toMatchObject({ status: "running" });
+    expect(firstClaim?.id).not.toBe(secondClaim?.id);
+    const stageEvents = await store.listPipelineStageEvents(
+      setup!.workspace.id, repository!.projectId, build.build.id, 0
+    );
+    expect(stageEvents.map((event) => event.sequence)).toEqual([...stageEvents]
+      .map((event) => event.sequence).sort((left, right) => left - right));
+    expect(stageEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stageRunId: convert.id, status: "running" })
+    ]));
+
+    const artifact = {
+      id: randomUUID(), workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId, buildId: build.build.id,
+      stage: "convert" as const, kind: "normalized-source", schemaVersion: 1, inputDigest: "c".repeat(64), contentDigest: "d".repeat(64),
+      storageKey: `${repository!.projectId}/${snapshotId}/convert/${"d".repeat(64)}.json`, sourceRefs: [], producer: "deterministic" as const,
+      createdAt: "2026-07-14T00:00:00.000Z"
+    };
+    await expect(store.createArtifactWithAudit(artifact, setup!.admin.id)).resolves.toMatchObject({ id: artifact.id });
+    await expect(store.findReusableArtifact(
+      setup!.workspace.id, repository!.projectId, snapshotId, "convert", "normalized-source", artifact.inputDigest
+    )).resolves.toMatchObject({ id: artifact.id });
+    await expect(store.createArtifactWithAudit({ ...artifact, id: randomUUID() }, setup!.admin.id))
+      .resolves.toMatchObject({ id: artifact.id });
+
+    const otherProject = await store.createProject(
+      setup!.workspace.id, { name: "Other pipeline", slug: "other-pipeline" }, setup!.admin.id
+    );
+    await expect(store.createStageRun({ ...baseStage, projectId: otherProject!.id, stage: "tables" }))
+      .rejects.toThrow("Stage run does not match");
+
+    await store.transitionBuild(build.build.id, "queued", "ready");
+    const release = await store.createReleaseDraft(setup!.workspace.id, repository!.id, build.build.id, "1.0.0");
+    await store.publishRelease(setup!.workspace.id, release.id);
+    await expect(pool.query("DELETE FROM knowledge_artifacts WHERE id = $1", [artifact.id]))
+      .rejects.toThrow("Cannot delete artifacts from a published build");
   }, 30_000);
 
   test(databaseUrl
@@ -455,12 +599,12 @@ integration("PostgreSQL cited knowledge integration", () => {
         payload: { email: "admin@example.com", password: "correct horse battery staple" }
       });
       expect(login.statusCode).toBe(200);
-      const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+      const cookie = authenticatedCookie(login);
 
       const response = await app.inject({
         method: "GET",
         url: "/api/releases/not-a-uuid",
-        headers: { cookie }
+        headers: { cookie, ...csrfHeaders(cookie) }
       });
 
       expect(response.statusCode).toBe(400);
@@ -471,6 +615,68 @@ integration("PostgreSQL cited knowledge integration", () => {
     } finally {
       await app.close();
     }
+  }, 30_000);
+
+  test(databaseUrl
+    ? "persists an accepted remediation build without changing the published release"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("remediation@example.com", "hash");
+    const project = (await store.listProjects(setup!.workspace.id))[0];
+    const repository = await store.createRepository(
+      setup!.workspace.id, { kind: "upload", name: "Remediation source" }, project.id
+    );
+    const snapshotId = randomUUID();
+    await store.createSnapshot({
+      snapshot: {
+        id: snapshotId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+        commitSha: "a".repeat(40), ref: "upload", remoteUrl: null,
+        commitTimestamp: new Date("2026-07-15T00:00:00.000Z"), storagePath: "/tmp/remediation-snapshot"
+      },
+      files: []
+    });
+    const sourceBuild = await store.createBuild({
+      workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId,
+      snapshotPath: "/tmp/remediation-snapshot", commitSha: "a".repeat(40)
+    });
+    const remediation = await store.createRemediation({
+      workspaceId: setup!.workspace.id, projectId: project.id, repositoryId: repository!.id,
+      sourceBuildId: sourceBuild.build.id,
+      issue: {
+        id: "lint-coverage", buildId: sourceBuild.build.id, rule: "KNOWLEDGE_LOW_COVERAGE",
+        severity: "warning", targetKind: "knowledge", targetId: "overview",
+        message: "Knowledge coverage is low", sourceRefs: [], remediationState: "open"
+      }
+    });
+    await store.transitionRemediationWithAudit(
+      setup!.workspace.id, remediation.id, "accepted", setup!.admin.id
+    );
+    const rebuild = await store.requestRemediationBuildWithAudit({
+      workspaceId: setup!.workspace.id, remediationId: remediation.id, actorId: setup!.admin.id,
+      build: {
+        workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId,
+        snapshotPath: "/tmp/remediation-snapshot", commitSha: "a".repeat(40)
+      }
+    });
+
+    expect(rebuild.build.purpose).toMatchObject({
+      kind: "remediation",
+      remediationContext: [expect.objectContaining({ remediationId: remediation.id, issueId: "lint-coverage" })]
+    });
+    await expect(store.getRemediation(setup!.workspace.id, remediation.id)).resolves.toMatchObject({
+      state: "rebuilding", rebuildBuildId: rebuild.build.id
+    });
+    await expect(store.listRemediationEvents(setup!.workspace.id, remediation.id)).resolves.toEqual([
+      expect.objectContaining({ fromState: "open", toState: "accepted" }),
+      expect.objectContaining({ fromState: "accepted", toState: "rebuilding" })
+    ]);
+    await expect(store.currentRelease(setup!.workspace.id, repository!.id)).resolves.toBeNull();
+    await expect(store.getRemediation("00000000-0000-4000-8000-000000000000", remediation.id))
+      .resolves.toBeNull();
   }, 30_000);
 });
 

@@ -1,7 +1,6 @@
-import { createHash, randomUUID } from "node:crypto";
-import { createWriteStream, promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
+import { promises as fs } from "node:fs";
 import path from "node:path";
-import { pipeline } from "node:stream/promises";
 
 import cookie from "@fastify/cookie";
 import multipart from "@fastify/multipart";
@@ -15,6 +14,7 @@ import Fastify, {
 import { z } from "zod";
 
 import { AGENT_FEEDBACK_STATUSES, SERVICE_NAME } from "../shared/contracts.js";
+import { MAX_IMPORT_TABLE_WORKBOOK_BYTES } from "../shared/import-filter.js";
 import {
   FeedbackNotAcknowledgedError,
   InvalidFeedbackTransitionError,
@@ -31,18 +31,44 @@ import {
 } from "./persistence/store.js";
 import { decryptSecret, encryptSecret } from "./security/crypto.js";
 import { DirtyWorktreeError, syncRepository } from "./git/snapshot.js";
+import { GitEgressDeniedError } from "./security/egress-policy.js";
 import { hashPassword, verifyPassword } from "./security/password.js";
-import { createSessionToken, verifySessionToken } from "./security/session.js";
+import {
+  createRecoveryCodes,
+  createTotpSecret,
+  hashRecoveryCode,
+  totpUri,
+  verifyRecoveryCode,
+  verifyTotp
+} from "./security/mfa.js";
+import {
+  createCsrfToken,
+  createOpaqueSessionId,
+  hashSessionId,
+  SESSION_DURATION_SECONDS,
+  verifyCsrfToken,
+  verifySessionToken
+} from "./security/session.js";
+import { MemorySessionStore, type SessionStore } from "./security/session-store.js";
 import { createCodexConnectionPack } from "./codex/connection-pack.js";
 import type { BuildEvent, BuildService } from "./knowledge/build-service.js";
 import { deriveChangeImpact } from "./knowledge/change-impact.js";
+import { loadPublishedKnowledgeGraph } from "./knowledge/pipeline/graph-query.js";
+import { exportKnowledgeGraph } from "./knowledge/pipeline/viz.js";
+import { legacyBuildStatus } from "./knowledge/pipeline/contracts.js";
 import {
-  authenticateMcpToken,
+  InvalidStageEventCursorError,
+  parseLastStageEventId,
+  stageSseEvent
+} from "./knowledge/pipeline/events.js";
+import {
+  authenticateMcpTokenDetailed,
   createMcpAuthorizationGuard,
   generateMcpToken,
   hashMcpToken,
   sanitizedMcpToken
 } from "./mcp/auth.js";
+import { MCP_TOKEN_SCOPES } from "./persistence/store.js";
 import { createRegisteredMcpServer, MCP_TOOL_NAMES } from "./mcp/tools.js";
 import {
   DEFAULT_RATE_LIMITS,
@@ -51,23 +77,29 @@ import {
   type RateLimitPolicy
 } from "./security/http.js";
 import {
-  importZipArchive,
-  MAX_UPLOAD_COMPRESSED_BYTES,
-  UploadArchiveError
-} from "./uploads/zip-import.js";
-import {
-  ResumableUploadError,
-  ResumableUploadSessionManager
-} from "./uploads/resumable-upload.js";
+  FolderUploadError,
+  importFolderFiles,
+  MAX_FOLDER_UPLOAD_FILES,
+  type FolderUploadFile
+} from "./uploads/folder-import.js";
 
 const SESSION_COOKIE = "devkh_session";
+const CSRF_COOKIE = "devkh_csrf";
 const SESSION_MAX_AGE = 8 * 60 * 60;
 const CSP_NONCE_PLACEHOLDER = "<!-- devkh:csp-nonce -->";
+const MAX_STAGE_SSE_CONNECTIONS_PER_USER = 3;
 
 const credentialsSchema = z.object({
   email: z.email().transform((value) => value.toLowerCase()),
   password: z.string().min(12)
 });
+const loginSchema = credentialsSchema.extend({
+  code: z.string().regex(/^\d{6}$/).optional(),
+  recoveryCode: z.string().min(8).max(64).optional()
+}).refine((value) => !(value.code && value.recoveryCode), "Provide one MFA factor");
+const mfaEnrollmentSchema = z.object({ currentPassword: z.string().min(12) });
+const mfaCodeSchema = z.object({ code: z.string().regex(/^\d{6}$/) });
+const mfaDisableSchema = z.object({ currentPassword: z.string().min(12), code: z.string().regex(/^\d{6}$/) });
 
 const repositorySchema = z.discriminatedUnion("kind", [
   z.object({
@@ -153,6 +185,8 @@ export interface ServerOptions {
   clientDir?: string;
   rateLimits?: RateLimitPolicy;
   publicBaseUrl?: string;
+  sessionStore?: SessionStore;
+  legacySessionReadUntil?: Date;
 }
 
 function sseEvent(event: BuildEvent): string {
@@ -253,6 +287,26 @@ function requestedProjectId(request: FastifyRequest): string | undefined {
   return typeof value === "string" && z.uuid().safeParse(value).success ? value : undefined;
 }
 
+async function* directFolderParts(request: FastifyRequest): AsyncGenerator<FolderUploadFile> {
+  for await (const part of request.parts({
+    limits: {
+      files: MAX_FOLDER_UPLOAD_FILES,
+      fields: 0,
+      parts: MAX_FOLDER_UPLOAD_FILES,
+      fileSize: MAX_IMPORT_TABLE_WORKBOOK_BYTES
+    }
+  })) {
+    if (part.type !== "file" || part.fieldname !== "files" || !part.filename) {
+      throw new FolderUploadError("UNSAFE_FOLDER_PATH", "Folder uploads require file parts named files");
+    }
+    const content = await part.toBuffer();
+    if (part.file.truncated) {
+      throw new FolderUploadError("FOLDER_SIZE_LIMIT", "Folder upload contains a file larger than 50 MiB");
+    }
+    yield { path: part.filename, content };
+  }
+}
+
 export function buildServer(options: ServerOptions): FastifyInstance {
   const server = Fastify({
     bodyLimit: MAX_REQUEST_BODY_BYTES,
@@ -270,9 +324,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       }
     }
   });
-  const resumableUploads = new ResumableUploadSessionManager(
-    path.join(options.dataDir, "upload-staging")
-  );
+  const sessionStore = options.sessionStore ?? new MemorySessionStore();
+  const stageSseConnections = new Map<string, number>();
   registerHttpSecurity(server, options.rateLimits ?? DEFAULT_RATE_LIMITS);
   server.addContentTypeParser(
     "application/octet-stream",
@@ -284,22 +337,18 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       && typeof error.statusCode === "number"
       ? error.statusCode
       : 500;
-    if (statusCode === 413) {
-      if (/^\/api\/repositories\/(?:current|[^/]+)\/uploads$/.test(request.url.split("?", 1)[0])) {
-        return sendError(reply, 413, "ZIP_TOO_LARGE", "ZIP exceeds the 500 MiB compressed limit");
-      }
-      return sendError(reply, 413, "BODY_TOO_LARGE", "Request body exceeds 1 MiB");
-    }
+    if (statusCode === 413) return sendError(reply, 413, "BODY_TOO_LARGE", "Request body exceeds 1 MiB");
     request.log.error({ err: error }, "Request failed");
     return sendError(reply, statusCode, "REQUEST_FAILED", "Request failed");
   });
   void server.register(cookie);
   void server.register(multipart, {
+    preservePath: true,
     limits: {
-      files: 1,
+      files: MAX_FOLDER_UPLOAD_FILES,
       fields: 0,
-      parts: 1,
-      fileSize: MAX_UPLOAD_COMPRESSED_BYTES
+      parts: MAX_FOLDER_UPLOAD_FILES,
+      fileSize: MAX_IMPORT_TABLE_WORKBOOK_BYTES
     }
   });
   if (options.clientDir) {
@@ -331,20 +380,49 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     secure: options.nodeEnv === "production",
     maxAge: SESSION_MAX_AGE
   };
+  const csrfCookieOptions = { ...cookieOptions, httpOnly: false, sameSite: "strict" as const };
 
   async function requireAdmin(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-    const token = request.cookies[SESSION_COOKIE];
-    if (!token) {
+    const sessionId = request.cookies[SESSION_COOKIE];
+    if (!sessionId) {
       sendError(reply, 401, "UNAUTHORIZED", "Authentication required");
       return;
     }
     try {
-      const session = await verifySessionToken(token, options.sessionSecret);
-      const admin = await options.store.findAdminById(session.adminId, session.workspaceId);
-      if (!admin || admin.disabledAt || admin.sessionVersion !== session.sessionVersion) {
-        throw new Error("Unknown session administrator");
+      const session = await sessionStore.findActive(hashSessionId(sessionId));
+      if (session) {
+        const admin = await options.store.findAdminById(session.userId, session.workspaceId);
+        if (!admin || admin.disabledAt || admin.sessionVersion !== session.sessionVersion) {
+          throw new Error("Unknown session administrator");
+        }
+        if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
+          const csrfCookie = request.cookies[CSRF_COOKIE];
+          const csrfHeader = request.headers["x-devkh-csrf"];
+          if (!csrfCookie || typeof csrfHeader !== "string" || csrfHeader !== csrfCookie
+            || verifyCsrfToken(csrfHeader, sessionId, options.sessionSecret) !== session.csrfSecretHash) {
+            sendError(reply, 403, "CSRF_INVALID", "CSRF token is missing or invalid");
+            return;
+          }
+        }
+        (request as AuthenticatedRequest).sessionAdmin = admin;
+        return;
       }
-      (request as AuthenticatedRequest).sessionAdmin = admin;
+
+      if (options.legacySessionReadUntil && options.legacySessionReadUntil > new Date()) {
+        if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method)) {
+          sendError(reply, 401, "SESSION_REFRESH_REQUIRED", "Please sign in again to continue");
+          return;
+        }
+        const legacy = await verifySessionToken(sessionId, options.sessionSecret);
+        const admin = await options.store.findAdminById(legacy.adminId, legacy.workspaceId);
+        if (!admin || admin.disabledAt || admin.sessionVersion !== legacy.sessionVersion) {
+          throw new Error("Unknown legacy session administrator");
+        }
+        (request as AuthenticatedRequest).sessionAdmin = admin;
+        return;
+      }
+
+      throw new Error("Unknown session");
     } catch {
       sendError(reply, 401, "UNAUTHORIZED", "Authentication required");
     }
@@ -460,31 +538,65 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
 
   server.post("/api/session", async (request, reply) => {
-    const parsed = credentialsSchema.safeParse(request.body);
+    const parsed = loginSchema.safeParse(request.body);
     const workspace = await options.store.defaultWorkspace();
-    const admin = parsed.success ? await options.store.findAdminByEmail(parsed.data.email) : null;
-    const valid = parsed.success && admin && !admin.disabledAt
-      ? await verifyPassword(admin.passwordHash, parsed.data.password)
+    const credentials = parsed.success && parsed.data ? parsed.data : null;
+    const admin = credentials ? await options.store.findAdminByEmail(credentials.email) : null;
+    const valid = credentials && admin && !admin.disabledAt
+      ? await verifyPassword(admin.passwordHash, credentials.password)
       : false;
 
-    if (!valid || !admin) {
+    if (!credentials || !valid || !admin) {
       if (workspace) {
         void options.store.recordAudit({
           workspaceId: workspace.id,
           action: "session.login_failed",
           resourceType: "session",
-          metadata: { email: parsed.success ? parsed.data.email : "invalid" }
+          metadata: { email: credentials?.email ?? "invalid" }
         }).catch(() => undefined);
       }
       return sendError(reply, 401, "INVALID_CREDENTIALS", "Invalid email or password");
     }
 
-    const token = await createSessionToken(
-      // The version lets administrators invalidate issued tokens without storing tokens server-side.
-      { adminId: admin.id, workspaceId: admin.workspaceId, sessionVersion: admin.sessionVersion },
-      options.sessionSecret
-    );
-    reply.setCookie(SESSION_COOKIE, token, cookieOptions);
+    const mfa = await options.store.getAdminMfa(admin.workspaceId, admin.id);
+    if (mfa?.enabledAt) {
+      if (mfa.lockedUntil && mfa.lockedUntil > new Date()) {
+        return sendError(reply, 429, "MFA_LOCKED", "MFA is temporarily locked after repeated failed attempts");
+      }
+      let mfaValid = false;
+      if (credentials.code) {
+        mfaValid = verifyTotp(credentials.code, decryptSecret(mfa.encryptedSecret, options.masterKey));
+      } else if (credentials.recoveryCode) {
+        const candidates = await options.store.listActiveAdminMfaRecoveryCodes(admin.workspaceId, admin.id);
+        for (const candidate of candidates) {
+          if (await verifyRecoveryCode(credentials.recoveryCode, candidate.codeHash)) {
+            mfaValid = await options.store.consumeAdminMfaRecoveryCode(admin.workspaceId, admin.id, candidate.id);
+            break;
+          }
+        }
+      } else {
+        return sendError(reply, 401, "MFA_REQUIRED", "MFA verification is required");
+      }
+      if (!mfaValid) {
+        const failure = await options.store.recordAdminMfaFailure(admin.workspaceId, admin.id);
+        return sendError(
+          reply,
+          failure?.lockedUntil && failure.lockedUntil > new Date() ? 429 : 401,
+          failure?.lockedUntil && failure.lockedUntil > new Date() ? "MFA_LOCKED" : "INVALID_MFA_CODE",
+          "Invalid MFA verification code"
+        );
+      }
+      await options.store.clearAdminMfaFailures(admin.workspaceId, admin.id);
+    }
+
+    const sessionId = createOpaqueSessionId();
+    const csrf = createCsrfToken(sessionId, options.sessionSecret);
+    await sessionStore.create({
+      idHash: hashSessionId(sessionId), userId: admin.id, workspaceId: admin.workspaceId, csrfSecretHash: csrf.nonceHash,
+      sessionVersion: admin.sessionVersion, expiresAt: new Date(Date.now() + SESSION_DURATION_SECONDS * 1_000), revokedAt: null
+    });
+    reply.setCookie(SESSION_COOKIE, sessionId, cookieOptions);
+    reply.setCookie(CSRF_COOKIE, csrf.token, csrfCookieOptions);
     void options.store.recordAudit({
       workspaceId: admin.workspaceId,
       actorId: admin.id,
@@ -494,8 +606,11 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return { authenticated: true, admin: { id: admin.id, email: admin.email, role: admin.role } };
   });
 
-  server.delete("/api/session", async (_request, reply) => {
+  server.delete("/api/session", { preHandler: requireAdmin }, async (request, reply) => {
+    const sessionId = request.cookies[SESSION_COOKIE];
+    if (sessionId) await sessionStore.revoke(hashSessionId(sessionId));
     reply.clearCookie(SESSION_COOKIE, { path: "/" });
+    reply.clearCookie(CSRF_COOKIE, { path: "/" });
     return reply.code(204).send();
   });
 
@@ -504,83 +619,83 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return { authenticated: true, admin: { id: admin.id, email: admin.email, role: admin.role } };
   });
 
-  server.post("/api/uploads/resumable", { preHandler: requireContributor }, async (request, reply) => {
-    const parsed = z.object({
-      totalBytes: z.number().int().positive(),
-      chunkSize: z.number().int().positive()
-    }).safeParse(request.body);
-    if (!parsed.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload dimensions");
-    try {
-      const admin = (request as AuthenticatedRequest).sessionAdmin;
-      return reply.code(201).send(await resumableUploads.create({ ...parsed.data, ownerId: admin.id }));
-    } catch (error) {
-      if (error instanceof ResumableUploadError) {
-        return sendError(reply, 413, error.code, error.message);
-      }
-      request.log.error({ err: error }, "Resumable upload creation failed");
-      return sendError(reply, 500, "UPLOAD_FAILED", "Unable to create upload session");
+  server.post("/api/settings/mfa/enroll", { preHandler: requireAdministrator }, async (request, reply) => {
+    const parsed = mfaEnrollmentSchema.safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MFA enrollment request");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    if (!await verifyPassword(admin.passwordHash, parsed.data.currentPassword)) {
+      return sendError(reply, 401, "INVALID_CREDENTIALS", "Invalid credentials");
     }
+    const secret = createTotpSecret();
+    await options.store.savePendingAdminMfa(admin.workspaceId, admin.id, encryptSecret(secret, options.masterKey));
+    await options.store.recordAudit({
+      workspaceId: admin.workspaceId, actorId: admin.id, action: "mfa.enrollment_started", resourceType: "admin_mfa", resourceId: admin.id
+    });
+    return reply.code(201).send({ enabled: false, secret, otpauthUri: totpUri(admin.email, secret) });
   });
 
-  server.get("/api/uploads/resumable/:id", { preHandler: requireContributor }, async (request, reply) => {
-    const parsed = z.object({ id: z.uuid() }).safeParse(request.params);
-    if (!parsed.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload session");
-    try {
-      const admin = (request as AuthenticatedRequest).sessionAdmin;
-      return await resumableUploads.status(parsed.data.id, admin.id);
-    } catch (error) {
-      if (error instanceof ResumableUploadError) {
-        return sendError(reply, 404, error.code, error.message);
-      }
-      request.log.error({ err: error }, "Resumable upload status failed");
-      return sendError(reply, 500, "UPLOAD_FAILED", "Unable to read upload session");
-    }
+  server.get("/api/settings/mfa", { preHandler: requireAdministrator }, async (request) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const mfa = await options.store.getAdminMfa(admin.workspaceId, admin.id);
+    return {
+      enabled: Boolean(mfa?.enabledAt),
+      pending: Boolean(mfa && !mfa.enabledAt),
+      lockedUntil: mfa?.lockedUntil?.toISOString() ?? null
+    };
   });
 
-  server.put(
-    "/api/uploads/resumable/:id/chunks/:index",
-    { preHandler: requireContributor, bodyLimit: 16 * 1024 * 1024 + 1024 },
-    async (request, reply) => {
-      const params = z.object({ id: z.uuid(), index: z.coerce.number().int().min(0) }).safeParse(request.params);
-      const declaredSize = z.coerce.number().int().positive().safeParse(request.headers["x-upload-chunk-size"]);
-      if (!params.success || !declaredSize.success || !Buffer.isBuffer(request.body)) {
-        return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload chunk");
-      }
-      try {
-        const admin = (request as AuthenticatedRequest).sessionAdmin;
-        return await resumableUploads.uploadChunk(
-          params.data.id,
-          params.data.index,
-          request.body,
-          declaredSize.data,
-          admin.id
-        );
-      } catch (error) {
-        if (error instanceof ResumableUploadError) {
-          const statusCode = error.code === "SESSION_NOT_FOUND" ? 404 : 409;
-          return sendError(reply, statusCode, error.code, error.message);
-        }
-        request.log.error({ err: error }, "Resumable upload chunk failed");
-        return sendError(reply, 500, "UPLOAD_FAILED", "Unable to save upload chunk");
-      }
+  server.post("/api/settings/mfa/verify", { preHandler: requireAdministrator }, async (request, reply) => {
+    const parsed = mfaCodeSchema.safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MFA verification code");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const mfa = await options.store.getAdminMfa(admin.workspaceId, admin.id);
+    if (!mfa || mfa.enabledAt) return sendError(reply, 409, "MFA_ENROLLMENT_NOT_FOUND", "No pending MFA enrollment was found");
+    if (!verifyTotp(parsed.data.code, decryptSecret(mfa.encryptedSecret, options.masterKey))) {
+      await options.store.recordAdminMfaFailure(admin.workspaceId, admin.id);
+      return sendError(reply, 401, "INVALID_MFA_CODE", "Invalid MFA verification code");
     }
-  );
+    const recoveryCodes = createRecoveryCodes();
+    const enabled = await options.store.enableAdminMfa(
+      admin.workspaceId, admin.id, await Promise.all(recoveryCodes.map(hashRecoveryCode)), admin.id
+    );
+    if (!enabled) return sendError(reply, 409, "MFA_ENROLLMENT_NOT_FOUND", "No pending MFA enrollment was found");
+    reply.clearCookie(SESSION_COOKIE, { path: "/" });
+    reply.clearCookie(CSRF_COOKIE, { path: "/" });
+    return { enabled: true, recoveryCodes };
+  });
+
+  server.delete("/api/settings/mfa", { preHandler: requireAdministrator }, async (request, reply) => {
+    const parsed = mfaDisableSchema.safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MFA disable request");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const mfa = await options.store.getAdminMfa(admin.workspaceId, admin.id);
+    if (!mfa?.enabledAt) return sendError(reply, 404, "MFA_NOT_ENABLED", "MFA is not enabled");
+    if (!await verifyPassword(admin.passwordHash, parsed.data.currentPassword)
+      || !verifyTotp(parsed.data.code, decryptSecret(mfa.encryptedSecret, options.masterKey))) {
+      return sendError(reply, 401, "INVALID_MFA_CODE", "Invalid MFA verification code");
+    }
+    if (!await options.store.disableAdminMfa(admin.workspaceId, admin.id, admin.id)) {
+      return sendError(reply, 404, "MFA_NOT_ENABLED", "MFA is not enabled");
+    }
+    reply.clearCookie(SESSION_COOKIE, { path: "/" });
+    reply.clearCookie(CSRF_COOKIE, { path: "/" });
+    return reply.code(204).send();
+  });
 
   server.post(
-    "/api/projects/:projectId/uploads/resumable/:id/import",
+    "/api/projects/:projectId/folder-import",
     { preHandler: requireContributor },
     async (request, reply) => {
-      const params = z.object({ projectId: z.uuid(), id: z.uuid() }).safeParse(request.params);
-      if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload import");
+      const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+      if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid project folder upload");
       const admin = (request as AuthenticatedRequest).sessionAdmin;
       await requireProjectRole("member", params.data.projectId, request, reply);
       if (reply.sent) return;
       const repository = await options.store.currentRepository(admin.workspaceId, params.data.projectId);
       if (!repository || repository.kind !== "upload") {
-        return sendError(reply, 409, "UPLOAD_REPOSITORY_REQUIRED", "Project requires an upload source");
+        return sendError(reply, 409, "UPLOAD_REPOSITORY_REQUIRED", "Project requires a folder upload source");
       }
-      let finalizedPath: string | undefined;
-      const importReport = await options.store.createImportReport({
+      const report = await options.store.createImportReport({
         workspaceId: admin.workspaceId,
         projectId: params.data.projectId,
         repositoryId: repository.id,
@@ -588,17 +703,15 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         sourceKind: repository.kind
       });
       try {
-        const finalized = await resumableUploads.finalize(params.data.id, admin.id);
-        finalizedPath = finalized.path;
-        const summary = await importZipArchive({
-          archivePath: finalized.path,
+        const summary = await importFolderFiles({
+          files: directFolderParts(request),
           dataDir: options.dataDir,
           workspaceId: admin.workspaceId,
           repositoryId: repository.id,
           actorId: admin.id,
           store: options.store
         });
-        await options.store.finishImportReport(admin.workspaceId, importReport.id, {
+        await options.store.finishImportReport(admin.workspaceId, report.id, {
           status: "succeeded",
           collectedFileCount: summary.fileCount,
           collectedTextBytes: summary.textBytes,
@@ -606,36 +719,102 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           snapshotId: summary.snapshotId,
           failureCode: null
         });
-        reply.code(summary.unchanged ? 200 : 201);
-        return {
+        return reply.code(summary.unchanged ? 200 : 201).send({
           snapshotId: summary.snapshotId,
           sourceVersion: summary.sourceVersion,
           fileCount: summary.fileCount,
           unchanged: summary.unchanged,
           ignored: summary.ignored
-        };
+        });
       } catch (error) {
-        const failureCode = error instanceof ResumableUploadError || error instanceof UploadArchiveError
-          ? error.code
-          : "UPLOAD_FAILED";
-        await options.store.finishImportReport(admin.workspaceId, importReport.id, {
+        const code = error instanceof FolderUploadError ? error.code : "UPLOAD_FAILED";
+        await options.store.finishImportReport(admin.workspaceId, report.id, {
           status: "failed",
           collectedFileCount: 0,
           collectedTextBytes: 0,
           ignored: { total: 0, reasons: {} },
           snapshotId: null,
-          failureCode
+          failureCode: code
         }).catch(() => undefined);
-        if (error instanceof ResumableUploadError || error instanceof UploadArchiveError) {
-          const statusCode = error instanceof ResumableUploadError
-            ? (error.code === "SESSION_NOT_FOUND" ? 404 : 409)
-            : (error.code === "COMPRESSED_SIZE_LIMIT" ? 413 : 400);
+        if (error instanceof FolderUploadError) {
+          const statusCode = error.code === "FOLDER_SIZE_LIMIT" || error.code === "TOO_MANY_FILES" ? 413 : 400;
           return sendError(reply, statusCode, error.code, error.message);
         }
-        request.log.error({ err: error }, "Resumable ZIP import failed");
-        return sendError(reply, 500, "UPLOAD_FAILED", "Unable to import ZIP upload");
+        request.log.error({ err: error }, "Folder import failed");
+        return sendError(reply, 500, "UPLOAD_FAILED", "Unable to import project folder");
+      }
+    }
+  );
+
+  server.post(
+    "/api/repositories/:repositoryId/folder-import",
+    { preHandler: requireContributor },
+    async (request, reply) => {
+      const params = z.object({ repositoryId: z.uuid() }).safeParse(request.params);
+      if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid replacement folder upload");
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      const candidates = await options.store.listArchivedRepositories(admin.workspaceId);
+      const repository = candidates.find((candidate) => candidate.id === params.data.repositoryId && candidate.kind === "upload");
+      if (!repository || await options.store.latestSnapshot(admin.workspaceId, repository.id)) {
+        return sendError(reply, 404, "UPLOAD_REPLACEMENT_NOT_FOUND", "Folder upload replacement was not found");
+      }
+      await requireProjectRole("admin", repository.projectId, request, reply);
+      if (reply.sent) return;
+      const report = await options.store.createImportReport({
+        workspaceId: admin.workspaceId,
+        projectId: repository.projectId,
+        repositoryId: repository.id,
+        actorId: admin.id,
+        sourceKind: repository.kind
+      });
+      let activated = false;
+      try {
+        const summary = await importFolderFiles({
+          files: directFolderParts(request),
+          dataDir: options.dataDir,
+          workspaceId: admin.workspaceId,
+          repositoryId: repository.id,
+          actorId: admin.id,
+          store: options.store
+        });
+        const replacement = await options.store.activateUploadReplacementWithAudit(admin.workspaceId, repository.id, admin.id);
+        if (!replacement) return sendError(reply, 409, "UPLOAD_REPLACEMENT_NOT_FOUND", "Folder upload replacement was not found");
+        activated = true;
+        await options.store.finishImportReport(admin.workspaceId, report.id, {
+          status: "succeeded",
+          collectedFileCount: summary.fileCount,
+          collectedTextBytes: summary.textBytes,
+          ignored: summary.ignored,
+          snapshotId: summary.snapshotId,
+          failureCode: null
+        });
+        return reply.code(summary.unchanged ? 200 : 201).send({
+          snapshotId: summary.snapshotId,
+          sourceVersion: summary.sourceVersion,
+          fileCount: summary.fileCount,
+          unchanged: summary.unchanged,
+          ignored: summary.ignored
+        });
+      } catch (error) {
+        const code = error instanceof FolderUploadError ? error.code : "UPLOAD_FAILED";
+        await options.store.finishImportReport(admin.workspaceId, report.id, {
+          status: "failed",
+          collectedFileCount: 0,
+          collectedTextBytes: 0,
+          ignored: { total: 0, reasons: {} },
+          snapshotId: null,
+          failureCode: code
+        }).catch(() => undefined);
+        if (error instanceof FolderUploadError) {
+          const statusCode = error.code === "FOLDER_SIZE_LIMIT" || error.code === "TOO_MANY_FILES" ? 413 : 400;
+          return sendError(reply, statusCode, error.code, error.message);
+        }
+        request.log.error({ err: error }, "Folder replacement import failed");
+        return sendError(reply, 500, "UPLOAD_FAILED", "Unable to import replacement folder");
       } finally {
-        if (finalizedPath) await resumableUploads.discard(params.data.id, admin.id).catch(() => undefined);
+        if (!activated) {
+          await options.store.discardPendingUploadReplacement(admin.workspaceId, repository.id).catch(() => undefined);
+        }
       }
     }
   );
@@ -807,11 +986,46 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       : null;
     if (!change) return { change: null };
     const release = await options.store.currentRelease(admin.workspaceId, repository.id);
+    const metadata = release ? await options.store.knowledgeMetadata(admin.workspaceId, release.id) : null;
+    const graph = release
+      ? await options.store.getKnowledgeGraph(admin.workspaceId, params.data.projectId, release.buildId)
+      : null;
     return {
       change: release
-        ? deriveChangeImpact(change, await options.store.knowledgeMetadata(admin.workspaceId, release.id))
+        ? deriveChangeImpact(change, metadata!, graph)
         : change
     };
+  });
+
+  server.get("/api/projects/:projectId/graph", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    const query = z.object({
+      releaseId: z.uuid().optional(),
+      format: z.enum(["json", "tree", "mermaid", "markmap"]).default("json")
+    }).safeParse(request.query);
+    if (!params.success || !query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid graph query");
+    await requireProjectRole("reader", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repository = await options.store.currentRepository(admin.workspaceId, params.data.projectId);
+    if (!repository) return { release: null, format: query.data.format, data: null };
+    const selected = await loadPublishedKnowledgeGraph({
+      store: options.store,
+      workspaceId: admin.workspaceId,
+      projectId: params.data.projectId,
+      repositoryId: repository.id,
+      releaseId: query.data.releaseId
+    });
+    if (!selected) return { release: null, format: query.data.format, data: null };
+    const graph = exportKnowledgeGraph(selected.graph);
+    const data = query.data.format === "mermaid"
+      ? graph.mermaid
+      : query.data.format === "markmap"
+        ? graph.markmap
+        : query.data.format === "tree"
+          ? graph.tree
+          : graph.graph;
+    return { release: selected.release, format: query.data.format, data };
   });
 
   server.get("/api/projects/:projectId/knowledge-quality", { preHandler: requireAdmin }, async (request, reply) => {
@@ -832,10 +1046,19 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const metadata = release
       ? await options.store.knowledgeMetadata(admin.workspaceId, release.id)
       : null;
-    const enrichedChange = change && metadata ? deriveChangeImpact(change, metadata) : change;
+    const graph = release
+      ? await options.store.getKnowledgeGraph(admin.workspaceId, params.data.projectId, release.buildId)
+      : null;
+    const enrichedChange = change && metadata ? deriveChangeImpact(change, metadata, graph) : change;
     const knowledge = release
       ? await options.store.knowledgeReleaseSummary(admin.workspaceId, release.id)
       : { pageCount: 0, chunkCount: 0, citationCount: 0 };
+    const remediationStates = ["open", "accepted", "rebuilding", "resolved", "dismissed"] as const;
+    const remediationCounts = await Promise.all(remediationStates.map(async (state) => [
+      state,
+      await options.store.countRemediations(admin.workspaceId, params.data.projectId, state)
+    ] as const));
+    const remediation = Object.fromEntries(remediationCounts) as Record<(typeof remediationStates)[number], number>;
     const diagnostics: Array<{ code: string }> = [];
     if (!repository) diagnostics.push({ code: "SOURCE_MISSING" });
     else if (!snapshot) diagnostics.push({ code: "SNAPSHOT_MISSING" });
@@ -851,9 +1074,106 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       pendingFeedbackCount: overview.pendingFeedbackCount,
       indexedTextBytes: overview.indexedTextBytes,
       knowledge,
+      remediation,
       change: enrichedChange,
       diagnostics
     };
+  });
+
+  server.get("/api/projects/:projectId/remediations", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    const query = z.object(paginationQuerySchema).safeParse(request.query);
+    if (!params.success || !query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid remediation query");
+    await requireProjectRole("reader", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const remediations = await options.store.listRemediations(
+      admin.workspaceId, params.data.projectId, query.data
+    );
+    return { remediations };
+  });
+
+  server.get("/api/projects/:projectId/remediations/:remediationId/events", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid(), remediationId: z.uuid() }).safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid remediation event query");
+    await requireProjectRole("reader", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const remediation = await options.store.getRemediation(admin.workspaceId, params.data.remediationId);
+    if (!remediation || remediation.projectId !== params.data.projectId) {
+      return sendError(reply, 404, "REMEDIATION_NOT_FOUND", "Remediation was not found");
+    }
+    return { events: await options.store.listRemediationEvents(admin.workspaceId, remediation.id) };
+  });
+
+  server.patch("/api/projects/:projectId/remediations/:remediationId", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid(), remediationId: z.uuid() }).safeParse(request.params);
+    const body = z.object({ state: z.enum(["accepted", "dismissed", "resolved"]) }).safeParse(request.body);
+    if (!params.success || !body.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid remediation transition");
+    await requireProjectRole("admin", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const existing = await options.store.getRemediation(admin.workspaceId, params.data.remediationId);
+    if (!existing || existing.projectId !== params.data.projectId) {
+      return sendError(reply, 404, "REMEDIATION_NOT_FOUND", "Remediation was not found");
+    }
+    try {
+      const remediation = await options.store.transitionRemediationWithAudit(
+        admin.workspaceId, existing.id, body.data.state, admin.id
+      );
+      return { remediation };
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Invalid remediation transition:")) {
+        return sendError(reply, 409, "INVALID_REMEDIATION_TRANSITION", "Remediation transition is not allowed");
+      }
+      return sendError(reply, 500, "REMEDIATION_OPERATION_FAILED", "Remediation transition failed");
+    }
+  });
+
+  server.post("/api/projects/:projectId/remediations/:remediationId/rebuild", { preHandler: requireAdmin }, async (request, reply) => {
+    if (!options.buildService) {
+      return sendError(reply, 503, "BUILD_SERVICE_UNAVAILABLE", "Build service is unavailable");
+    }
+    const params = z.object({ projectId: z.uuid(), remediationId: z.uuid() }).safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid remediation rebuild");
+    await requireProjectRole("admin", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const remediation = await options.store.getRemediation(admin.workspaceId, params.data.remediationId);
+    if (!remediation || remediation.projectId !== params.data.projectId) {
+      return sendError(reply, 404, "REMEDIATION_NOT_FOUND", "Remediation was not found");
+    }
+    if (remediation.state !== "accepted") {
+      return sendError(reply, 409, "REMEDIATION_NOT_ACCEPTED", "Remediation must be accepted first");
+    }
+    const sourceBuild = await options.store.getBuild(admin.workspaceId, remediation.sourceBuildId);
+    const snapshot = sourceBuild
+      ? await options.store.findSnapshotById(admin.workspaceId, sourceBuild.snapshotId)
+      : null;
+    if (!sourceBuild || sourceBuild.repositoryId !== remediation.repositoryId || !snapshot) {
+      return sendError(reply, 409, "REMEDIATION_SOURCE_UNAVAILABLE", "Remediation source snapshot is unavailable");
+    }
+    try {
+      const result = await options.store.requestRemediationBuildWithAudit({
+        workspaceId: admin.workspaceId,
+        remediationId: remediation.id,
+        actorId: admin.id,
+        build: {
+          workspaceId: admin.workspaceId,
+          repositoryId: remediation.repositoryId,
+          snapshotId: snapshot.id,
+          snapshotPath: snapshot.storagePath,
+          commitSha: snapshot.commitSha
+        }
+      });
+      await options.buildService.enqueueBuild(result);
+      return reply.code(result.created ? 202 : 200).send(result);
+    } catch (error) {
+      if (error instanceof Error && error.message === "Remediation must be accepted first") {
+        return sendError(reply, 409, "REMEDIATION_NOT_ACCEPTED", "Remediation must be accepted first");
+      }
+      return sendError(reply, 500, "REMEDIATION_OPERATION_FAILED", "Remediation rebuild failed");
+    }
   });
 
   server.post("/api/projects/:projectId/repositories", { preHandler: requireAdmin }, async (request, reply) => {
@@ -1057,7 +1377,11 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
 
   server.post("/api/mcp/tokens", { preHandler: requireAdmin }, async (request, reply) => {
-    const parsed = z.object({ name: z.string().trim().min(1).max(100), projectId: z.uuid().optional() }).safeParse(request.body);
+    const parsed = z.object({
+      name: z.string().trim().min(1).max(100),
+      projectId: z.uuid().optional(),
+      scopes: z.array(z.enum(MCP_TOKEN_SCOPES)).min(1).max(MCP_TOKEN_SCOPES.length).optional()
+    }).safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid MCP token");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const projects = await options.store.listAccessibleProjects(admin.workspaceId, admin.id, { limit: 100 });
@@ -1074,7 +1398,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         projectId: project.id,
         name: parsed.data.name,
         tokenHash: hashMcpToken(plaintext),
-        tokenPrefix: plaintext.slice(0, 12)
+        tokenPrefix: plaintext.slice(0, 12),
+        scopes: parsed.data.scopes ?? [...MCP_TOKEN_SCOPES]
       }, admin.id);
       return reply.code(201).send({ ...sanitizedMcpToken(token), token: plaintext });
     } catch {
@@ -1137,7 +1462,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       const rotation = await options.store.rotateMcpTokenWithAudit(
         admin.workspaceId,
         candidate.id,
-        { tokenHash: hashMcpToken(plaintext), tokenPrefix: plaintext.slice(0, 12) },
+        { tokenHash: hashMcpToken(plaintext), tokenPrefix: plaintext.slice(0, 12), scopes: candidate.scopes },
         admin.id
       );
       if (!rotation) return sendError(reply, 409, "TOKEN_NOT_ACTIVE", "MCP token is already revoked");
@@ -1232,259 +1557,6 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
 
   server.post(
-    "/api/repositories/current/uploads",
-    {
-      preHandler: requireAdmin,
-      bodyLimit: MAX_UPLOAD_COMPRESSED_BYTES + 1024 * 1024
-    },
-    async (request, reply) => {
-      const admin = (request as AuthenticatedRequest).sessionAdmin;
-      const repository = await options.store.currentRepository(admin.workspaceId, requestedProjectId(request));
-      if (!repository || (repository as { kind: string }).kind !== "upload") {
-        return sendError(
-          reply,
-          409,
-          "UPLOAD_REPOSITORY_REQUIRED",
-          "Connect and activate an upload repository before importing a ZIP snapshot"
-        );
-      }
-      await requireProjectRole("member", repository.projectId, request, reply);
-      if (reply.sent) return;
-
-      const requestDirectory = path.join(options.dataDir, "uploads", randomUUID());
-      const archivePath = path.join(requestDirectory, "archive.zip");
-      const cleanup = () => fs.rm(requestDirectory, { recursive: true, force: true });
-      const uploadError = async (statusCode: number, code: string, message: string) => {
-        await cleanup();
-        return sendError(reply, statusCode, code, message);
-      };
-      await fs.mkdir(requestDirectory, { recursive: true, mode: 0o700 });
-      try {
-        let fileCount = 0;
-        for await (const part of request.parts()) {
-          if (part.type !== "file" || part.fieldname !== "file") {
-            return uploadError(
-              400,
-              "INVALID_UPLOAD",
-              "Provide exactly one ZIP file field named file"
-            );
-          }
-          fileCount += 1;
-          if (fileCount > 1) {
-            return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file");
-          }
-          await pipeline(part.file, createWriteStream(archivePath, { flags: "wx", mode: 0o600 }));
-          if (part.file.truncated) {
-            return uploadError(
-              413,
-              "ZIP_TOO_LARGE",
-              "ZIP exceeds the 500 MiB compressed limit"
-            );
-          }
-        }
-        if (fileCount !== 1) {
-          return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file");
-        }
-        const summary = await importZipArchive({
-          archivePath,
-          dataDir: options.dataDir,
-          workspaceId: admin.workspaceId,
-          repositoryId: repository.id,
-          actorId: admin.id,
-          store: options.store
-        });
-        const response = {
-          snapshotId: summary.snapshotId,
-          sourceVersion: summary.sourceVersion,
-          fileCount: summary.fileCount,
-          unchanged: summary.unchanged,
-          ignored: summary.ignored
-        };
-        await cleanup();
-        return reply.code(summary.unchanged ? 200 : 201).send(response);
-      } catch (error) {
-        const code = typeof error === "object" && error && "code" in error
-          ? String(error.code)
-          : "";
-        if (code === "FST_REQ_FILE_TOO_LARGE") {
-          return uploadError(413, "ZIP_TOO_LARGE", "ZIP exceeds the 500 MiB compressed limit");
-        }
-        if (code === "FST_FILES_LIMIT" || code === "FST_PARTS_LIMIT" || code === "FST_FIELDS_LIMIT") {
-          return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file");
-        }
-        if (error instanceof UploadArchiveError) {
-          if (error.code === "COMPRESSED_SIZE_LIMIT") {
-            return uploadError(
-              413,
-              "ZIP_TOO_LARGE",
-              "ZIP exceeds the 500 MiB compressed limit"
-            );
-          }
-          return uploadError(400, error.code, error.message);
-        }
-        request.log.error({ err: error }, "ZIP upload failed");
-        return uploadError(500, "UPLOAD_FAILED", "ZIP upload failed");
-      } finally {
-        await cleanup();
-      }
-    }
-  );
-
-  server.post(
-    "/api/repositories/:repositoryId/uploads",
-    {
-      preHandler: requireAdmin,
-      bodyLimit: MAX_UPLOAD_COMPRESSED_BYTES + 1024 * 1024
-    },
-    async (request, reply) => {
-      const admin = (request as AuthenticatedRequest).sessionAdmin;
-      const parsed = z.object({ repositoryId: z.uuid() }).safeParse(request.params);
-      if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid upload replacement");
-      const candidates = await options.store.listArchivedRepositories(admin.workspaceId);
-      const repository = candidates.find((candidate) =>
-        candidate.id === parsed.data.repositoryId && candidate.kind === "upload"
-      );
-      if (!repository || await options.store.latestSnapshot(admin.workspaceId, repository.id)) {
-        return sendError(reply, 404, "UPLOAD_REPLACEMENT_NOT_FOUND", "Upload replacement was not found");
-      }
-      await requireProjectRole("admin", repository.projectId, request, reply);
-      if (reply.sent) return;
-
-      const requestDirectory = path.join(options.dataDir, "uploads", randomUUID());
-      const archivePath = path.join(requestDirectory, "archive.zip");
-      let replacementActivated = false;
-      const cleanup = () => fs.rm(requestDirectory, { recursive: true, force: true });
-      const uploadError = async (statusCode: number, code: string, message: string) => {
-        await cleanup();
-        return sendError(reply, statusCode, code, message);
-      };
-      await fs.mkdir(requestDirectory, { recursive: true, mode: 0o700 });
-      try {
-        let fileCount = 0;
-        for await (const part of request.parts()) {
-          if (part.type !== "file" || part.fieldname !== "file") {
-            return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file field named file");
-          }
-          fileCount += 1;
-          if (fileCount > 1) return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file");
-          await pipeline(part.file, createWriteStream(archivePath, { flags: "wx", mode: 0o600 }));
-          if (part.file.truncated) {
-            return uploadError(413, "ZIP_TOO_LARGE", "ZIP exceeds the 500 MiB compressed limit");
-          }
-        }
-        if (fileCount !== 1) return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file");
-        const summary = await importZipArchive({
-          archivePath,
-          dataDir: options.dataDir,
-          workspaceId: admin.workspaceId,
-          repositoryId: repository.id,
-          actorId: admin.id,
-          store: options.store
-        });
-        const activated = await options.store.activateUploadReplacementWithAudit(
-          admin.workspaceId,
-          repository.id,
-          admin.id
-        );
-        if (!activated) {
-          return uploadError(409, "UPLOAD_REPLACEMENT_NOT_FOUND", "Upload replacement was not found");
-        }
-        replacementActivated = true;
-        await cleanup();
-        reply.code(summary.unchanged ? 200 : 201);
-        return {
-          snapshotId: summary.snapshotId,
-          sourceVersion: summary.sourceVersion,
-          fileCount: summary.fileCount,
-          unchanged: summary.unchanged,
-          ignored: summary.ignored
-        };
-      } catch (error) {
-        const code = typeof error === "object" && error && "code" in error ? String(error.code) : "";
-        if (code === "FST_REQ_FILE_TOO_LARGE" || code === "COMPRESSED_SIZE_LIMIT") {
-          return uploadError(413, "ZIP_TOO_LARGE", "ZIP exceeds the 500 MiB compressed limit");
-        }
-        if (code === "FST_FILES_LIMIT" || code === "FST_PARTS_LIMIT" || code === "FST_FIELDS_LIMIT") {
-          return uploadError(400, "INVALID_UPLOAD", "Provide exactly one ZIP file");
-        }
-        if (error instanceof UploadArchiveError) return uploadError(400, error.code, error.message);
-        request.log.error({ err: error }, "ZIP replacement upload failed");
-        return uploadError(500, "UPLOAD_FAILED", "ZIP upload failed");
-      } finally {
-        await cleanup();
-        if (!replacementActivated) {
-          await options.store.discardPendingUploadReplacement(admin.workspaceId, repository.id)
-            .catch(() => undefined);
-        }
-      }
-    }
-  );
-
-  server.post(
-    "/api/repositories/:repositoryId/uploads/resumable/:id/import",
-    { preHandler: requireContributor },
-    async (request, reply) => {
-      const params = z.object({ repositoryId: z.uuid(), id: z.uuid() }).safeParse(request.params);
-      if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload replacement");
-      const admin = (request as AuthenticatedRequest).sessionAdmin;
-      const candidates = await options.store.listArchivedRepositories(admin.workspaceId);
-      const repository = candidates.find((candidate) =>
-        candidate.id === params.data.repositoryId && candidate.kind === "upload"
-      );
-      if (!repository || await options.store.latestSnapshot(admin.workspaceId, repository.id)) {
-        return sendError(reply, 404, "UPLOAD_REPLACEMENT_NOT_FOUND", "Upload replacement was not found");
-      }
-
-      let finalizedPath: string | undefined;
-      let replacementActivated = false;
-      try {
-        const finalized = await resumableUploads.finalize(params.data.id, admin.id);
-        finalizedPath = finalized.path;
-        const summary = await importZipArchive({
-          archivePath: finalized.path,
-          dataDir: options.dataDir,
-          workspaceId: admin.workspaceId,
-          repositoryId: repository.id,
-          actorId: admin.id,
-          store: options.store
-        });
-        const activated = await options.store.activateUploadReplacementWithAudit(
-          admin.workspaceId,
-          repository.id,
-          admin.id
-        );
-        if (!activated) {
-          return sendError(reply, 409, "UPLOAD_REPLACEMENT_NOT_FOUND", "Upload replacement was not found");
-        }
-        replacementActivated = true;
-        reply.code(summary.unchanged ? 200 : 201);
-        return {
-          snapshotId: summary.snapshotId,
-          sourceVersion: summary.sourceVersion,
-          fileCount: summary.fileCount,
-          unchanged: summary.unchanged,
-          ignored: summary.ignored
-        };
-      } catch (error) {
-        if (error instanceof ResumableUploadError || error instanceof UploadArchiveError) {
-          const statusCode = error instanceof ResumableUploadError
-            ? (error.code === "SESSION_NOT_FOUND" ? 404 : 409)
-            : (error.code === "COMPRESSED_SIZE_LIMIT" ? 413 : 400);
-          return sendError(reply, statusCode, error.code, error.message);
-        }
-        request.log.error({ err: error }, "Resumable ZIP replacement import failed");
-        return sendError(reply, 500, "UPLOAD_FAILED", "Unable to import ZIP upload");
-      } finally {
-        if (finalizedPath) await resumableUploads.discard(params.data.id, admin.id).catch(() => undefined);
-        if (!replacementActivated) {
-          await options.store.discardPendingUploadReplacement(admin.workspaceId, repository.id)
-            .catch(() => undefined);
-        }
-      }
-    }
-  );
-
-  server.post(
     "/api/repositories/current/sync",
     { preHandler: requireAdmin },
     async (request, reply) => {
@@ -1496,7 +1568,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           reply,
           409,
           "UPLOAD_IMPORT_REQUIRED",
-          "Upload repositories receive new versions through ZIP import"
+          "Upload repositories receive new versions through folder import"
         );
       }
       const importReport = await options.store.createImportReport({
@@ -1530,7 +1602,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         });
         return summary;
       } catch (error) {
-        const code = error instanceof DirtyWorktreeError ? error.code : "SYNC_FAILED";
+        const code = error instanceof DirtyWorktreeError || error instanceof GitEgressDeniedError ? error.code : "SYNC_FAILED";
         await options.store.finishImportReport(admin.workspaceId, importReport.id, {
           status: "failed",
           collectedFileCount: 0,
@@ -1551,6 +1623,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           return reply.code(409).send({
             error: { code: error.code, message: error.message, changedPaths: error.changedPaths }
           });
+        }
+        if (error instanceof GitEgressDeniedError) {
+          return sendError(reply, 400, error.code, error.message);
         }
         return sendError(reply, 500, "SYNC_FAILED", "Repository synchronization failed");
       }
@@ -1688,6 +1763,105 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       closed = true;
       unsubscribe();
     });
+  });
+
+  server.get("/api/builds/:id/stages", { preHandler: requireAdmin }, async (request, reply) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const params = z.object({ id: z.string().min(1) }).safeParse(request.params);
+    const build = params.success ? await options.store.getBuild(admin.workspaceId, params.data.id) : null;
+    if (!build) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    const repository = await options.store.getRepository(admin.workspaceId, build.repositoryId);
+    if (!repository) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    await requireProjectRole("reader", repository.projectId, request, reply);
+    if (reply.sent) return;
+    const stages = await options.store.listPipelineStageRuns(
+      admin.workspaceId,
+      repository.projectId,
+      build.id
+    );
+    return {
+      buildId: build.id,
+      legacyStatus: stages.length > 0
+        ? legacyBuildStatus(stages, { published: build.status === "published" })
+        : build.status,
+      stages
+    };
+  });
+
+  server.get("/api/builds/:id/stages/events", { preHandler: requireAdmin }, async (request, reply) => {
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const params = z.object({ id: z.string().min(1) }).safeParse(request.params);
+    const query = z.object({ once: z.string().optional() }).safeParse(request.query);
+    if (!params.success || !query.success) {
+      return sendError(reply, 400, "INVALID_REQUEST", "Invalid stage event request");
+    }
+    const rawCursor = request.headers["last-event-id"];
+    let afterSequence: number;
+    try {
+      afterSequence = parseLastStageEventId(typeof rawCursor === "string" ? rawCursor : undefined);
+    } catch (error) {
+      if (error instanceof InvalidStageEventCursorError) {
+        return sendError(reply, 400, "INVALID_EVENT_CURSOR", error.message);
+      }
+      throw error;
+    }
+    const build = await options.store.getBuild(admin.workspaceId, params.data.id);
+    if (!build) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    const repository = await options.store.getRepository(admin.workspaceId, build.repositoryId);
+    if (!repository) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    await requireProjectRole("reader", repository.projectId, request, reply);
+    if (reply.sent) return;
+
+    const replay = await options.store.listPipelineStageEvents(
+      admin.workspaceId,
+      repository.projectId,
+      build.id,
+      afterSequence
+    );
+    reply.header("content-type", "text/event-stream; charset=utf-8");
+    reply.header("cache-control", "no-cache");
+    if (query.data.once === "true") return reply.send(replay.map(stageSseEvent).join(""));
+
+    const connectionCount = stageSseConnections.get(admin.id) ?? 0;
+    if (connectionCount >= MAX_STAGE_SSE_CONNECTIONS_PER_USER) {
+      return sendError(reply, 429, "SSE_CONNECTION_LIMIT", "Too many stage event connections");
+    }
+    stageSseConnections.set(admin.id, connectionCount + 1);
+    let closed = false;
+    let lastSequence = replay.at(-1)?.sequence ?? afterSequence;
+    const release = () => {
+      if (closed) return;
+      closed = true;
+      const remaining = (stageSseConnections.get(admin.id) ?? 1) - 1;
+      if (remaining > 0) stageSseConnections.set(admin.id, remaining);
+      else stageSseConnections.delete(admin.id);
+      clearInterval(poll);
+    };
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache",
+      connection: "keep-alive"
+    });
+    for (const event of replay) reply.raw.write(stageSseEvent(event));
+    const poll = setInterval(() => {
+      void options.store.listPipelineStageEvents(
+        admin.workspaceId,
+        repository.projectId,
+        build.id,
+        lastSequence
+      ).then((events) => {
+        for (const event of events) {
+          if (closed || event.sequence <= lastSequence) continue;
+          lastSequence = event.sequence;
+          reply.raw.write(stageSseEvent(event));
+        }
+      }).catch(() => {
+        release();
+        reply.raw.end();
+      });
+    }, 1_000);
+    request.raw.on("close", release);
   });
 
   server.get("/api/knowledge/search", { preHandler: requireAdmin }, async (request, reply) => {
@@ -2000,12 +2174,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   server.all("/mcp", async (request, reply) => {
     const authorization = request.headers.authorization;
     const match = /^Bearer (\S+)$/i.exec(authorization ?? "");
-    const token = match ? await authenticateMcpToken(options.store, match[1]) : null;
-    if (!token) return sendError(reply, 401, "UNAUTHORIZED", "Invalid or revoked MCP token");
+    const authentication = match ? await authenticateMcpTokenDetailed(options.store, match[1]) : { token: null, expired: false };
+    const token = authentication.token;
+    if (!token) return sendError(reply, 401, authentication.expired ? "MCP_TOKEN_EXPIRED" : "UNAUTHORIZED", authentication.expired ? "MCP token has expired" : "Invalid or revoked MCP token");
     const mcp = createRegisteredMcpServer({
       store: options.store,
       workspaceId: token.workspaceId,
       projectId: token.projectId,
+      scopes: token.scopes,
       authorize: createMcpAuthorizationGuard(options.store, match![1]),
       onUnauthorized: () => {
         setImmediate(() => void mcp.close());

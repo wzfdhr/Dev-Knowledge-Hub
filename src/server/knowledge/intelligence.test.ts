@@ -206,4 +206,22 @@ describe("analyzeSnapshot", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  test("keeps persisted XLSX bytes integrity-checked while excluding them from the legacy text index", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-xlsx-snapshot-"));
+    const workbook = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0xc3, 0x28]);
+    try {
+      await mkdir(path.join(root, "data"), { recursive: true });
+      await writeFile(path.join(root, "data", "usage.xlsx"), workbook);
+
+      const index = await analyzeSnapshot(root, commitSha, new Map([
+        ["data/usage.xlsx", createHash("sha256").update(workbook).digest("hex")]
+      ]));
+
+      expect(index.files).toEqual([]);
+      expect(index.symbols).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

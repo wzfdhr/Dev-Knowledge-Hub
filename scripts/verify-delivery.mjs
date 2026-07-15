@@ -14,10 +14,10 @@ requireValue(compose.services?.postgres?.image === "postgres:16-bookworm", "Post
 requireValue(compose.services?.postgres?.healthcheck, "PostgreSQL health check");
 requireValue(compose.services?.app?.depends_on?.postgres?.condition === "service_healthy", "healthy database dependency");
 requireValue(compose.services?.app?.read_only === true, "read-only app filesystem");
-requireValue(dockerfile.includes("/var/lib/devkh/upload-staging"), "upload staging runtime directory");
+requireValue(dockerfile.includes("/var/lib/devkh/artifacts"), "artifact runtime directory");
 requireValue(
-  compose.services?.app?.volumes?.includes("upload_staging:/var/lib/devkh/upload-staging"),
-  "upload staging mount"
+  compose.services?.app?.volumes?.includes("artifact_data:/var/lib/devkh/artifacts"),
+  "artifact storage mount"
 );
 requireValue(compose.services?.integration?.build?.target === "integration", "Compose integration test target");
 requireValue(compose.services?.integration?.environment?.TEST_DATABASE_URL?.endsWith("/devkh_test"), "isolated Compose test database");
@@ -26,7 +26,7 @@ requireValue(compose.services?.postgres?.volumes?.includes("./docker/postgres/in
 requireValue(compose.services?.e2e?.build?.target === "e2e", "Compose e2e test target");
 requireValue(
   Object.keys(compose.volumes ?? {}).sort().join(",")
-    === "caddy_config,caddy_data,postgres_data,repository_mirrors,snapshot_data,upload_staging,uploaded_sources",
+    === "artifact_data,caddy_config,caddy_data,postgres_data,repository_mirrors,snapshot_data,uploaded_sources",
   "persistent volumes"
 );
 

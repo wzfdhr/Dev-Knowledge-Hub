@@ -3,6 +3,7 @@ import type { BuildStatus } from "../../server/knowledge/build-service";
 
 export interface Admin { id: string; email: string; role?: "admin" | "member" | "reader" }
 export interface Session { authenticated: true; admin: Admin }
+export interface MfaStatus { enabled: boolean; pending: boolean; lockedUntil: string | null }
 export interface TeamMember {
   id: string;
   email: string;
@@ -36,6 +37,7 @@ export interface ProjectKnowledgeQuality {
   pendingFeedbackCount: number;
   indexedTextBytes: number;
   knowledge: { pageCount: number; chunkCount: number; citationCount: number };
+  remediation: { open: number; accepted: number; rebuilding: number; resolved: number; dismissed: number };
   change: SnapshotChangeSummary | null;
   diagnostics: Array<{ code: "SOURCE_MISSING" | "SNAPSHOT_MISSING" | "BUILD_FAILED" | "RELEASE_MISSING" | "REBUILD_RECOMMENDED" | "PUBLISHED" }>;
 }
@@ -123,6 +125,12 @@ export interface SnapshotChangeSummary {
   requiresBuild: boolean;
   affectedModules: string[];
   suggestedTests: string[];
+  impact?: {
+    roots: Array<{ id: string; path: string; kind: string; changed: boolean; children: unknown[] }>;
+    crossLinks: Array<{ id: string; kind: string; candidate: boolean }>;
+    affectedModulePaths: string[];
+    deletedPaths: string[];
+  };
 }
 export interface Build {
   id: string;
@@ -132,6 +140,21 @@ export interface Build {
   warnings: Array<{ code?: string; message?: string }>;
   cancelRequested: boolean;
   errorMessage?: string;
+}
+export type PipelineBuildStage = "convert" | "extract" | "tables" | "graph" | "synthesize" | "index" | "lint" | "viz" | "validate" | "package";
+export type PipelineStageStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "reused" | "skipped";
+export interface PipelineStageRun {
+  id: string;
+  buildId: string;
+  stage: PipelineBuildStage;
+  attempt: number;
+  status: PipelineStageStatus;
+  inputDigest: string;
+  outputManifestIds: string[];
+  startedAt: string | null;
+  finishedAt: string | null;
+  errorCode: string | null;
+  errorDetail: string | null;
 }
 export interface Release {
   id: string;
@@ -215,6 +238,8 @@ export interface McpToken {
   projectId: string;
   name: string;
   tokenPrefix: string;
+  scopes: Array<"search" | "source.read">;
+  expiresAt: string;
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;

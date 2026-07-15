@@ -24,6 +24,39 @@ describe("release API client", () => {
 });
 
 describe("project Codex API client", () => {
+  test("sends only the selected filtered folder files with their relative paths", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      snapshotId: "snapshot-1", sourceVersion: "a".repeat(40), fileCount: 1, unchanged: false, ignored: { total: 0, reasons: {} }
+    }), { status: 201, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetch);
+    vi.stubGlobal("document", { cookie: "devkh_csrf=signed-nonce" });
+    const file = new File(["export {};"], "index.ts", { type: "text/typescript" });
+
+    await api.uploadFolder("project-1", [{ path: "src/index.ts", file }]);
+
+    expect(fetch).toHaveBeenCalledWith("/api/projects/project-1/folder-import", expect.objectContaining({
+      method: "POST",
+      headers: expect.objectContaining({ "x-devkh-csrf": "signed-nonce" })
+    }));
+    const call = (fetch.mock.calls as unknown as Array<[string, RequestInit]>)[0];
+    const body = call?.[1].body as FormData;
+    expect(body.getAll("files").map((value) => (value as File).name)).toEqual(["src/index.ts"]);
+  });
+
+  test("attaches the double-submit CSRF header to cookie-authenticated writes", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      id: "token", projectId: "project-1", name: "Local Codex", token: "dkh_secret"
+    }), { status: 201, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetch);
+    vi.stubGlobal("document", { cookie: "devkh_csrf=signed-nonce" });
+
+    await api.createMcpToken("Local Codex", "project-1");
+
+    expect(fetch).toHaveBeenCalledWith("/api/mcp/tokens", expect.objectContaining({
+      headers: expect.objectContaining({ "x-devkh-csrf": "signed-nonce" })
+    }));
+  });
+
   test("creates an MCP token with an explicit project scope", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({
       id: "token", projectId: "project-1", name: "Local Codex", token: "dkh_secret"

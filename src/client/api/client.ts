@@ -1,12 +1,12 @@
 import type {
-  ApiErrorShape, Build, Feedback, McpConnection, McpToken, KnowledgePageRecord,
+  ApiErrorShape, Build, PipelineStageRun, Feedback, McpConnection, McpToken, KnowledgePageRecord,
   ArchivedRepository, KnowledgeMetadata, ProjectKnowledgeQuality, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotChangeSummary, SnapshotSummary, SourceExcerpt,
   UploadSnapshotSummary, ImportReport, TeamMember, ProjectMember, Project, ProjectSummary, ProjectActivity, CodexConnectionPack,
-  WorkspaceOverview, WorkspaceSearchResult
+  WorkspaceOverview, WorkspaceSearchResult, MfaStatus
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
-import type { ResumableUploadApi, ResumableUploadStatus } from "./resumable-upload";
+import type { FolderImportFile } from "./folder-import";
 
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly details?: ApiErrorShape["error"]) {
@@ -36,13 +36,20 @@ export function activeProjectId(): string | undefined {
   }
 }
 
+function csrfToken(): string | undefined {
+  if (typeof document === "undefined") return undefined;
+  return document.cookie.split(";").map((item) => item.trim()).find((item) => item.startsWith("devkh_csrf="))?.slice("devkh_csrf=".length);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const projectId = activeProjectId();
+  const csrf = init?.method && !["GET", "HEAD", "OPTIONS"].includes(init.method) ? csrfToken() : undefined;
   const response = await fetch(path, {
     credentials: "same-origin",
     ...init,
     headers: {
       ...(projectId ? { "x-devkh-project": projectId } : {}),
+      ...(csrf ? { "x-devkh-csrf": csrf } : {}),
       ...(typeof init?.body === "string" ? { "content-type": "application/json" } : {}),
       ...init?.headers
     }
@@ -54,10 +61,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.status === 204 ? undefined as T : response.json() as Promise<T>;
 }
 
-export interface ApiClient extends ResumableUploadApi {
+export interface ApiClient {
   setupStatus(): Promise<{ setupRequired: boolean }>;
   setup(input: { email: string; password: string }): Promise<unknown>;
-  login(input: { email: string; password: string }): Promise<Session>;
+  login(input: { email: string; password: string; code?: string; recoveryCode?: string }): Promise<Session>;
   session(): Promise<Session>;
   logout(): Promise<void>;
   listMembers(): Promise<{ members: TeamMember[] }>;
@@ -80,14 +87,16 @@ export interface ApiClient extends ResumableUploadApi {
   connectRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository }>;
   replaceRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository; pendingUpload?: boolean }>;
   listArchivedRepositories(): Promise<{ repositories: ArchivedRepository[] }>;
-  uploadZip(file: File): Promise<UploadSnapshotSummary>;
-  uploadReplacementZip(repositoryId: string, file: File): Promise<UploadSnapshotSummary>;
+  uploadFolder(projectId: string, files: FolderImportFile[]): Promise<UploadSnapshotSummary>;
+  uploadReplacementFolder(repositoryId: string, files: FolderImportFile[]): Promise<UploadSnapshotSummary>;
   getRepository(): Promise<{ repository: Repository | null }>;
   getRepositoryStatus(): Promise<RepositoryStatus>;
   syncRepository(): Promise<SnapshotSummary>;
   getProjectChanges(projectId: string): Promise<{ change: SnapshotChangeSummary | null }>;
+  getProjectGraph(projectId: string): Promise<{ release: { id: string; version: string } | null; format: "tree"; data: { roots: unknown[]; crossLinks: unknown[] } | null }>;
   getProjectKnowledgeQuality(projectId: string): Promise<ProjectKnowledgeQuality>;
   listBuilds(pagination: PaginationParams): Promise<{ builds: Build[] } & PaginatedResponse>;
+  getBuildStages(id: string): Promise<{ buildId: string; legacyStatus: Build["status"]; stages: PipelineStageRun[] }>;
   startBuild(snapshotId: string): Promise<{ build: Build; created: boolean }>;
   cancelBuild(id: string): Promise<{ build: Build }>;
   listReleases(pagination: PaginationParams): Promise<{ releases: Release[] } & PaginatedResponse>;
@@ -109,11 +118,15 @@ export interface ApiClient extends ResumableUploadApi {
   listMcpTokens(pagination: PaginationParams): Promise<{ tokens: McpToken[] } & PaginatedResponse>;
   listProjectMcpTokens(projectId: string, pagination: PaginationParams): Promise<{ tokens: McpToken[] } & PaginatedResponse>;
   getProjectCodexConnection(projectId: string): Promise<CodexConnectionPack>;
-  createMcpToken(name: string, projectId: string): Promise<McpToken & { token: string }>;
+  createMcpToken(name: string, projectId: string, scopes?: McpToken["scopes"]): Promise<McpToken & { token: string }>;
   revokeMcpToken(id: string): Promise<{ token: McpToken }>;
   rotateMcpToken(id: string): Promise<{ previous: McpToken; replacement: McpToken; token: string }>;
   getModelConfig(): Promise<{ config: ModelConfig | null }>;
   updateModelConfig(input: { provider: ModelProvider; model: string; apiKey: string }): Promise<{ config: ModelConfig }>;
+  getMfaStatus(): Promise<MfaStatus>;
+  enrollMfa(currentPassword: string): Promise<{ enabled: false; secret: string; otpauthUri: string }>;
+  verifyMfa(code: string): Promise<{ enabled: true; recoveryCodes: string[] }>;
+  disableMfa(input: { currentPassword: string; code: string }): Promise<void>;
 }
 
 const json = (value: unknown) => JSON.stringify(value);
@@ -171,43 +184,24 @@ export const api: ApiClient = {
   },
   replaceRepository: (input) => request("/api/repositories/current/replace", { method: "POST", body: json(input) }),
   listArchivedRepositories: () => request("/api/repositories/archived"),
-  uploadZip: (file) => {
+  uploadFolder: (projectId, files) => {
     const data = new FormData();
-    data.append("file", file, file.name);
-    return request("/api/repositories/current/uploads", { method: "POST", body: data });
+    for (const item of files) data.append("files", item.file, item.path);
+    return request(`/api/projects/${encodeURIComponent(projectId)}/folder-import`, { method: "POST", body: data });
   },
-  uploadReplacementZip: (repositoryId, file) => {
+  uploadReplacementFolder: (repositoryId, files) => {
     const data = new FormData();
-    data.append("file", file, file.name);
-    return request(`/api/repositories/${encodeURIComponent(repositoryId)}/uploads`, { method: "POST", body: data });
+    for (const item of files) data.append("files", item.file, item.path);
+    return request(`/api/repositories/${encodeURIComponent(repositoryId)}/folder-import`, { method: "POST", body: data });
   },
-  createResumableUpload: (input) => request<ResumableUploadStatus>("/api/uploads/resumable", { method: "POST", body: json(input) }),
-  getResumableUpload: (id) => request<ResumableUploadStatus>(`/api/uploads/resumable/${encodeURIComponent(id)}`),
-  uploadResumableChunk: (id, index, content) => request<ResumableUploadStatus>(
-    `/api/uploads/resumable/${encodeURIComponent(id)}/chunks/${index}`,
-    {
-      method: "PUT",
-      body: content,
-      headers: {
-        "content-type": "application/octet-stream",
-        "x-upload-chunk-size": String(content.size)
-      }
-    }
-  ),
-  importResumableUpload: (projectId, id) => request(
-    `/api/projects/${encodeURIComponent(projectId)}/uploads/resumable/${encodeURIComponent(id)}/import`,
-    { method: "POST" }
-  ),
-  importResumableReplacementUpload: (repositoryId, id) => request(
-    `/api/repositories/${encodeURIComponent(repositoryId)}/uploads/resumable/${encodeURIComponent(id)}/import`,
-    { method: "POST" }
-  ),
   getRepository: () => request("/api/repositories/current"),
   getRepositoryStatus: () => request("/api/repositories/current/status"),
   syncRepository: () => request("/api/repositories/current/sync", { method: "POST" }),
   getProjectChanges: (projectId) => request(`/api/projects/${projectId}/changes`),
+  getProjectGraph: (projectId) => request(`/api/projects/${encodeURIComponent(projectId)}/graph?format=tree`),
   getProjectKnowledgeQuality: (projectId) => request(`/api/projects/${projectId}/knowledge-quality`),
   listBuilds: (pagination) => request(listPath("/api/builds", pagination)),
+  getBuildStages: (id) => request(`/api/builds/${encodeURIComponent(id)}/stages`),
   startBuild: (snapshotId) => request("/api/builds", { method: "POST", body: json({ snapshotId }) }),
   cancelBuild: (id) => request(`/api/builds/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   listReleases: (pagination) => request(listPath("/api/releases", pagination)),
@@ -239,11 +233,15 @@ export const api: ApiClient = {
   listMcpTokens: (pagination) => request(listPath("/api/mcp/tokens", pagination)),
   listProjectMcpTokens: (projectId, pagination) => request(listPath("/api/mcp/tokens", pagination, { projectId })),
   getProjectCodexConnection: (projectId) => request(`/api/projects/${encodeURIComponent(projectId)}/codex-connection`),
-  createMcpToken: (name, projectId) => request("/api/mcp/tokens", { method: "POST", body: json({ name, projectId }) }),
+  createMcpToken: (name, projectId, scopes) => request("/api/mcp/tokens", { method: "POST", body: json({ name, projectId, ...(scopes ? { scopes } : {}) }) }),
   revokeMcpToken: (id) => request(`/api/mcp/tokens/${id}/revoke`, { method: "POST" }),
   rotateMcpToken: (id) => request(`/api/mcp/tokens/${encodeURIComponent(id)}/rotate`, { method: "POST" }),
   getModelConfig: () => request("/api/settings/model"),
-  updateModelConfig: (input) => request("/api/settings/model", { method: "PUT", body: json(input) })
+  updateModelConfig: (input) => request("/api/settings/model", { method: "PUT", body: json(input) }),
+  getMfaStatus: () => request("/api/settings/mfa"),
+  enrollMfa: (currentPassword) => request("/api/settings/mfa/enroll", { method: "POST", body: json({ currentPassword }) }),
+  verifyMfa: (code) => request("/api/settings/mfa/verify", { method: "POST", body: json({ code }) }),
+  disableMfa: (input) => request("/api/settings/mfa", { method: "DELETE", body: json(input) })
 };
 
 export function errorMessage(error: unknown): string {

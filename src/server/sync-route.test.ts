@@ -1,3 +1,4 @@
+import { authenticatedCookie, csrfHeaders } from "./test-support/csrf";
 import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -52,11 +53,11 @@ async function configuredApp(repositoryPath: string) {
     url: "/api/session",
     payload: { email: "admin@example.com", password: "a secure admin password" }
   });
-  const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+  const cookie = authenticatedCookie(login);
   await app.inject({
     method: "POST",
     url: "/api/repositories",
-    headers: { cookie },
+    headers: { cookie, ...csrfHeaders(cookie) },
     payload: { kind: "local", path: repositoryPath, name: "Fixture" }
   });
   return { app, store, cookie };
@@ -73,7 +74,7 @@ describe("repository sync route", () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/repositories/current/sync",
-      headers: { cookie }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
 
     expect(response.statusCode).toBe(200);
@@ -98,7 +99,7 @@ describe("repository sync route", () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/repositories/current/sync",
-      headers: { cookie }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
 
     expect(response.statusCode).toBe(409);

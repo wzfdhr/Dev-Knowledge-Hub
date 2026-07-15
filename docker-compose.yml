@@ -39,7 +39,7 @@ services:
       - snapshot_data:/var/lib/devkh/snapshots
       - repository_mirrors:/var/lib/devkh/repos
       - uploaded_sources:/var/lib/devkh/uploads
-      - upload_staging:/var/lib/devkh/upload-staging
+      - artifact_data:/var/lib/devkh/artifacts
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
     read_only: true
@@ -91,6 +91,6 @@ volumes:
   snapshot_data:
   repository_mirrors:
   uploaded_sources:
-  upload_staging:
+  artifact_data:
   caddy_data:
   caddy_config:

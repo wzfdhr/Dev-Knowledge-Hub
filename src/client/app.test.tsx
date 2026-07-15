@@ -81,10 +81,12 @@ describe("shared console copy", () => {
 
     renderAppAt(api, "/projects/project-1/collaboration");
 
-    expect(await screen.findByRole("heading", { name: "AHeart Admin" })).toBeVisible();
+    await waitFor(() => expect(api.listProjects).toHaveBeenCalledOnce(), { timeout: 5_000 });
+    expect(await screen.findByRole("heading", { name: "AHeart Admin" }, { timeout: 5_000 })).toBeVisible();
     expect(screen.getByRole("navigation", { name: "项目导航" })).toBeVisible();
     expect(screen.getByRole("link", { name: "项目概览" })).toHaveAttribute("href", "/projects/project-1/overview");
     expect(screen.getByRole("link", { name: "资料上传" })).toHaveAttribute("href", "/projects/project-1/imports");
+    expect(screen.getByRole("link", { name: "知识图谱" })).toHaveAttribute("href", "/projects/project-1/graph");
     expect(screen.getByRole("link", { name: "知识版本" })).toHaveAttribute("href", "/projects/project-1/versions");
     expect(screen.getByRole("link", { name: "团队协作" })).toHaveAttribute("href", "/projects/project-1/collaboration");
     expect(screen.getByRole("link", { name: "Codex 接入" })).toHaveAttribute("href", "/projects/project-1/codex");
@@ -107,8 +109,8 @@ describe("shared console copy", () => {
 
     expect(await screen.findByRole("heading", { name: "资料上传" })).toBeVisible();
     expect(screen.getByRole("button", { name: "选择项目文件夹" })).toBeVisible();
-    expect(["读取文件", "安全过滤", "本地压缩", "分块上传", "服务端校验", "创建内容版本"].map((label) => screen.getByText(label).textContent)).toEqual([
-      "读取文件", "安全过滤", "本地压缩", "分块上传", "服务端校验", "创建内容版本"
+    expect(["读取文件", "安全过滤", "文件夹直传", "服务端校验", "创建内容版本"].map((label) => screen.getByText(label).textContent)).toEqual([
+      "读取文件", "安全过滤", "文件夹直传", "服务端校验", "创建内容版本"
     ]);
   });
 
@@ -954,15 +956,7 @@ describe("repository replacement", () => {
       connectRepository: vi.fn().mockResolvedValue({ repository: {
         id: "upload", projectId: "project", kind: "upload", name: "Uploaded project", defaultBranch: "upload"
       } }),
-      createResumableUpload: vi.fn().mockResolvedValue({
-        id: "session", totalBytes: 3, chunkSize: 8 * 1024 * 1024, chunkCount: 1,
-        receivedBytes: 0, receivedChunks: 0, complete: false, finalized: false
-      }),
-      uploadResumableChunk: vi.fn().mockResolvedValue({
-        id: "session", totalBytes: 3, chunkSize: 8 * 1024 * 1024, chunkCount: 1,
-        receivedBytes: 3, receivedChunks: 1, complete: true, finalized: false
-      }),
-      importResumableUpload: vi.fn().mockResolvedValue({
+      uploadFolder: vi.fn().mockResolvedValue({
         snapshotId: "snapshot", sourceVersion: "a".repeat(40), fileCount: 2, unchanged: false,
         ignored: { total: 2, reasons: { binary: 1, generated: 1 } }
       }),
@@ -977,7 +971,9 @@ describe("repository replacement", () => {
     await user.upload(uploadInput, projectFile);
     await user.click(await screen.findByRole("button", { name: "确认并开始上传" }));
 
-    await waitFor(() => expect(api.importResumableUpload).toHaveBeenCalledWith("project", "session"));
+    await waitFor(() => expect(api.uploadFolder).toHaveBeenCalledWith(
+      "project", [expect.objectContaining({ path: "main.ts" })]
+    ));
     await waitFor(() => expect(sessionStorage.getItem("devkh:last-snapshot")).toContain("snapshot"));
     expect(await screen.findByText("已忽略 2 个文件")).toBeVisible();
   });

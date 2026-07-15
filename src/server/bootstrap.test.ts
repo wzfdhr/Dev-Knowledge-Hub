@@ -19,8 +19,8 @@ function dependencies(): BootstrapDependencies {
     createStore: vi.fn(() => store as never),
     createBuildQueue: vi.fn(() => queue as never),
     createBuildService: vi.fn(() => buildService as never),
+    createArtifactStore: vi.fn(() => ({ initialize: vi.fn(async () => {}) })),
     buildServer: vi.fn(() => server as never),
-    createUploadStagingCleaner: vi.fn(() => ({ cleanupExpired: vi.fn(async () => ({ sessions: 0, completed: 0 })) })),
     setInterval: vi.fn(() => ({})),
     clearInterval: vi.fn(() => {}),
     reportBackgroundError: vi.fn(() => {})
@@ -38,6 +38,8 @@ describe("production bootstrap", () => {
 
   test("migrates and builds the server with the PostgreSQL store", async () => {
     const deps = dependencies();
+    const artifactStore = { initialize: vi.fn(async () => {}) };
+    (deps as BootstrapDependencies & { createArtifactStore: (directory: string) => typeof artifactStore }).createArtifactStore = vi.fn(() => artifactStore);
     const masterKey = Buffer.alloc(32, 7).toString("base64");
     const server = await bootstrapProductionServer({
       DATABASE_URL: "postgres://localhost/devkh",
@@ -55,16 +57,19 @@ describe("production bootstrap", () => {
     expect(deps.createStore).toHaveBeenCalledWith(database.pool);
     expect(deps.createBuildQueue).toHaveBeenCalledWith("postgres://localhost/devkh");
     expect(deps.createBuildService).toHaveBeenCalledWith(store, queue, expect.any(Function));
+    expect(deps.createArtifactStore).toHaveBeenCalledWith("/var/lib/devkh/artifacts", store);
+    expect(artifactStore.initialize).toHaveBeenCalledOnce();
     expect(buildService.start).toHaveBeenCalledOnce();
-    expect(deps.buildServer).toHaveBeenCalledWith({
+    expect(deps.buildServer).toHaveBeenCalledWith(expect.objectContaining({
       store,
       buildService,
       masterKey,
       sessionSecret: "production-session-secret-at-least-32-chars",
       dataDir: "/var/lib/devkh",
       nodeEnv: "production",
-      clientDir: path.resolve("dist/client")
-    });
+      clientDir: path.resolve("dist/client"),
+      sessionStore: expect.anything()
+    }));
     expect(server.addHook).toHaveBeenCalledWith("onClose", expect.any(Function));
     expect(server).toBe(vi.mocked(deps.buildServer).mock.results[0].value);
   });
@@ -91,11 +96,9 @@ describe("production bootstrap", () => {
     expect(order).toEqual(["queue", "database"]);
   });
 
-  test("cleans upload staging at startup, schedules hourly retries, and clears the timer on shutdown", async () => {
+  test("cleans expired import reports at startup, schedules hourly retries, and clears the timer on shutdown", async () => {
     const deps = dependencies();
-    const cleaner = { cleanupExpired: vi.fn(async () => ({ sessions: 0, completed: 0 })) };
-    const interval = { id: "upload-cleanup" };
-    deps.createUploadStagingCleaner = vi.fn(() => cleaner);
+    const interval = { id: "maintenance" };
     deps.setInterval = vi.fn(() => interval);
     deps.clearInterval = vi.fn();
     deps.reportBackgroundError = vi.fn();
@@ -107,10 +110,9 @@ describe("production bootstrap", () => {
       DATA_DIR: "/var/lib/devkh"
     }, deps);
     const store = vi.mocked(deps.createStore).mock.results[0].value;
-    await vi.waitFor(() => expect(cleaner.cleanupExpired).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(store.deleteExpiredImportReports).toHaveBeenCalledWith(expect.any(Date)));
     expect(store.deleteExpiredImportReports).toHaveBeenCalledWith(expect.any(Date));
     expect(store.listActiveGitRepositories).toHaveBeenCalledOnce();
-    expect(deps.createUploadStagingCleaner).toHaveBeenCalledWith("/var/lib/devkh/upload-staging");
     expect(deps.setInterval).toHaveBeenCalledWith(expect.any(Function), 60 * 60 * 1000);
 
     const onClose = vi.mocked(server.addHook).mock.calls.find(([name]) => name === "onClose")?.[1];
@@ -120,19 +122,4 @@ describe("production bootstrap", () => {
     expect(deps.reportBackgroundError).not.toHaveBeenCalled();
   });
 
-  test("reports a staging cleanup failure without rejecting production startup", async () => {
-    const deps = dependencies();
-    const error = new Error("staging unavailable");
-    deps.createUploadStagingCleaner = vi.fn(() => ({ cleanupExpired: vi.fn(async () => { throw error; }) }));
-
-    await expect(bootstrapProductionServer({
-      DATABASE_URL: "postgres://localhost/devkh",
-      DEVKH_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
-      DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars"
-    }, deps)).resolves.toBeDefined();
-    await vi.waitFor(() => expect(deps.reportBackgroundError).toHaveBeenCalledWith(
-      "Upload staging cleanup failed",
-      error
-    ));
-  });
 });

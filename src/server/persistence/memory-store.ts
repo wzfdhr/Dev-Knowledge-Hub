@@ -12,28 +12,35 @@ import {
 
 import type {
   AdminRecord,
+  AdminMfaRecord,
+  AdminMfaRecoveryCodeRecord,
   AgentFeedbackRecord,
   AgentFeedbackStatus,
   AppStore,
   AuditEventInput,
   AuditEventRecord,
   CreateSnapshotInput,
+  CreateStageRunInput,
   CreateFeedbackInput,
+  CreateRemediationInput,
   EncryptedCredentialRecord,
   FeedbackRebuildInput,
   ImportReportRecord,
   KnowledgePageRecord,
   KnowledgeMetadata,
+  KnowledgeGraphRecord,
   KnowledgeSearchResult,
   ModelConfigRecord,
   ModelProvider,
   McpTokenRecord,
+  CreateMcpTokenInput,
   Pagination,
   ReleaseRecord,
   RepositoryConnectionInput,
   RepositoryRecord,
   SourceFileRecord,
   SourceSnapshotRecord,
+  SaveKnowledgeGraphInput,
   SetupResult,
   TeamMemberRecord,
   TeamRole,
@@ -41,10 +48,21 @@ import type {
   ProjectMemberRecord,
   ProjectRole,
   ProjectRecord,
+  RemediationBuildInput,
+  RemediationEventRecord,
+  RemediationRecord,
   WorkspaceKnowledgeSearchRecord,
   WorkspaceProjectOverviewRecord,
   WorkspaceRecord
 } from "./store.js";
+import type { PipelineStageRunRecord } from "./store.js";
+import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
+import {
+  artifactManifestSchema,
+  type ArtifactManifest,
+  type BuildStage,
+  type StageStatus
+} from "../knowledge/pipeline/contracts.js";
 import type {
   BuildInput,
   BuildEvent,
@@ -52,18 +70,25 @@ import type {
   PersistedKnowledge
 } from "../knowledge/build-service.js";
 import { standardBuildPurpose } from "../knowledge/build-service.js";
+import { transitionRemediation } from "../knowledge/remediation.js";
+import type { RemediationState } from "../knowledge/remediation.js";
 import type { CodeIndex } from "../knowledge/intelligence.js";
+import { validateKnowledgeGraph } from "../knowledge/pipeline/graph.js";
 
 export class MemoryAppStore implements AppStore {
   private workspace: WorkspaceRecord | null = null;
   private admin: AdminRecord | null = null;
   private readonly members: TeamMemberRecord[] = [];
+  readonly adminMfa: AdminMfaRecord[] = [];
+  readonly adminMfaRecoveryCodes: Array<AdminMfaRecoveryCodeRecord & { workspaceId: string; userId: string }> = [];
   private readonly projects: ProjectRecord[] = [];
   private readonly projectMembers: Array<ProjectMemberRecord & { userId: string }> = [];
   private readonly repositories: RepositoryRecord[] = [];
   readonly auditEvents: AuditEventRecord[] = [];
   readonly mcpTokens: McpTokenRecord[] = [];
   readonly feedback: AgentFeedbackRecord[] = [];
+  readonly remediations: RemediationRecord[] = [];
+  readonly remediationEvents: RemediationEventRecord[] = [];
   readonly encryptedCredentials: EncryptedCredentialRecord[] = [];
   readonly sourceSnapshots: SourceSnapshotRecord[] = [];
   readonly sourceFiles: SourceFileRecord[] = [];
@@ -71,9 +96,14 @@ export class MemoryAppStore implements AppStore {
   readonly builds: BuildRecord[] = [];
   readonly buildEvents: BuildEvent[] = [];
   private nextBuildEventSequence = 1;
+  readonly pipelineStageRuns: PipelineStageRunRecord[] = [];
+  readonly pipelineStageEvents: PipelineStageEvent[] = [];
+  readonly knowledgeArtifacts: ArtifactManifest[] = [];
+  private nextPipelineStageEventSequence = 1;
   readonly knowledgePages: KnowledgePageRecord[] = [];
   readonly releases: ReleaseRecord[] = [];
   private readonly indexes = new Map<string, CodeIndex>();
+  private readonly knowledgeGraphs = new Map<string, KnowledgeGraphRecord>();
   private readonly releaseChannels = new Map<string, string>();
 
   async isSetupComplete(): Promise<boolean> {
@@ -159,6 +189,86 @@ export class MemoryAppStore implements AppStore {
       disabledAt: member.disabledAt,
       sessionVersion: member.sessionVersion
     } : null;
+  }
+
+  async getAdminMfa(workspaceId: string, userId: string): Promise<AdminMfaRecord | null> {
+    const record = this.adminMfa.find((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId);
+    return record ? { ...record } : null;
+  }
+
+  async savePendingAdminMfa(workspaceId: string, userId: string, encryptedSecret: string): Promise<AdminMfaRecord> {
+    const previous = this.adminMfa.find((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId);
+    const record: AdminMfaRecord = {
+      userId, workspaceId, encryptedSecret, enabledAt: null, failedAttempts: 0, lockedUntil: null
+    };
+    if (previous) this.adminMfa[this.adminMfa.indexOf(previous)] = record;
+    else this.adminMfa.push(record);
+    for (const candidate of this.adminMfaRecoveryCodes.filter((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId)) {
+      this.adminMfaRecoveryCodes.splice(this.adminMfaRecoveryCodes.indexOf(candidate), 1);
+    }
+    return { ...record };
+  }
+
+  async enableAdminMfa(
+    workspaceId: string, userId: string, recoveryCodeHashes: string[], actorId: string
+  ): Promise<AdminMfaRecord | null> {
+    const record = this.adminMfa.find((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId);
+    if (!record) return null;
+    record.enabledAt = new Date();
+    record.failedAttempts = 0;
+    record.lockedUntil = null;
+    const member = this.members.find((candidate) => candidate.workspaceId === workspaceId && candidate.id === userId);
+    if (!member) return null;
+    member.sessionVersion += 1;
+    this.adminMfaRecoveryCodes.push(...recoveryCodeHashes.map((codeHash) => ({
+      id: randomUUID(), workspaceId, userId, codeHash, usedAt: null
+    })));
+    await this.recordAudit({ workspaceId, actorId, action: "mfa.enabled", resourceType: "admin_mfa", resourceId: userId });
+    return { ...record };
+  }
+
+  async clearAdminMfaFailures(workspaceId: string, userId: string): Promise<void> {
+    const record = this.adminMfa.find((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId);
+    if (!record) return;
+    record.failedAttempts = 0;
+    record.lockedUntil = null;
+  }
+
+  async recordAdminMfaFailure(workspaceId: string, userId: string, now = new Date()): Promise<AdminMfaRecord | null> {
+    const record = this.adminMfa.find((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId);
+    if (!record) return null;
+    if (record.lockedUntil && record.lockedUntil > now) return { ...record };
+    record.failedAttempts += 1;
+    if (record.failedAttempts >= 5) record.lockedUntil = new Date(now.getTime() + 15 * 60 * 1_000);
+    return { ...record };
+  }
+
+  async listActiveAdminMfaRecoveryCodes(workspaceId: string, userId: string): Promise<AdminMfaRecoveryCodeRecord[]> {
+    return this.adminMfaRecoveryCodes.filter((candidate) =>
+      candidate.workspaceId === workspaceId && candidate.userId === userId && !candidate.usedAt
+    ).map(({ id, codeHash, usedAt }) => ({ id, codeHash, usedAt }));
+  }
+
+  async consumeAdminMfaRecoveryCode(workspaceId: string, userId: string, id: string): Promise<boolean> {
+    const record = this.adminMfaRecoveryCodes.find((candidate) =>
+      candidate.id === id && candidate.workspaceId === workspaceId && candidate.userId === userId && !candidate.usedAt
+    );
+    if (!record) return false;
+    record.usedAt = new Date();
+    return true;
+  }
+
+  async disableAdminMfa(workspaceId: string, userId: string, actorId: string): Promise<boolean> {
+    const record = this.adminMfa.find((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId);
+    const member = this.members.find((candidate) => candidate.workspaceId === workspaceId && candidate.id === userId);
+    if (!record || !record.enabledAt || !member) return false;
+    this.adminMfa.splice(this.adminMfa.indexOf(record), 1);
+    for (const candidate of this.adminMfaRecoveryCodes.filter((candidate) => candidate.workspaceId === workspaceId && candidate.userId === userId)) {
+      this.adminMfaRecoveryCodes.splice(this.adminMfaRecoveryCodes.indexOf(candidate), 1);
+    }
+    member.sessionVersion += 1;
+    await this.recordAudit({ workspaceId, actorId, action: "mfa.disabled", resourceType: "admin_mfa", resourceId: userId });
+    return true;
   }
 
   async listTeamMembers(workspaceId: string, pagination?: Pagination): Promise<TeamMemberRecord[]> {
@@ -522,13 +632,14 @@ export class MemoryAppStore implements AppStore {
     return before - retained.length;
   }
 
-  async createMcpToken(
-    input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">
-  ): Promise<McpTokenRecord> {
+  async createMcpToken(input: CreateMcpTokenInput): Promise<McpTokenRecord> {
+    const now = new Date();
     const record: McpTokenRecord = {
       ...input,
       id: randomUUID(),
-      createdAt: new Date(),
+      scopes: input.scopes ?? ["search", "source.read"],
+      expiresAt: input.expiresAt ?? new Date(now.getTime() + 90 * 24 * 60 * 60 * 1_000),
+      createdAt: now,
       lastUsedAt: null,
       revokedAt: null
     };
@@ -537,7 +648,7 @@ export class MemoryAppStore implements AppStore {
   }
 
   async createMcpTokenWithAudit(
-    input: Omit<McpTokenRecord, "id" | "createdAt" | "lastUsedAt" | "revokedAt">,
+    input: CreateMcpTokenInput,
     actorId: string
   ): Promise<McpTokenRecord> {
     const tokenLength = this.mcpTokens.length;
@@ -624,7 +735,7 @@ export class MemoryAppStore implements AppStore {
   async rotateMcpTokenWithAudit(
     workspaceId: string,
     tokenId: string,
-    replacement: Pick<McpTokenRecord, "tokenHash" | "tokenPrefix">,
+    replacement: Pick<McpTokenRecord, "tokenHash" | "tokenPrefix"> & { scopes?: McpTokenRecord["scopes"] },
     actorId: string
   ): Promise<{ previous: McpTokenRecord; replacement: McpTokenRecord } | null> {
     const previous = this.mcpTokens.find((candidate) =>
@@ -640,7 +751,8 @@ export class MemoryAppStore implements AppStore {
         projectId: previous.projectId,
         name: previous.name,
         tokenHash: replacement.tokenHash,
-        tokenPrefix: replacement.tokenPrefix
+        tokenPrefix: replacement.tokenPrefix,
+        scopes: replacement.scopes ?? previous.scopes
       });
       previous.revokedAt = new Date();
       await this.recordAudit({
@@ -837,6 +949,164 @@ export class MemoryAppStore implements AppStore {
       this.nextBuildEventSequence = previousSequence;
       feedback.rebuildBuildId = previousFeedback.rebuildBuildId;
       feedback.updatedAt = previousFeedback.updatedAt;
+      throw error;
+    }
+  }
+
+  async createRemediation(input: CreateRemediationInput): Promise<RemediationRecord> {
+    const repository = this.repositories.find((candidate) =>
+      candidate.id === input.repositoryId
+      && candidate.workspaceId === input.workspaceId
+      && candidate.projectId === input.projectId
+    );
+    if (!repository) throw new Error("Remediation source does not match project");
+    const sourceBuild = this.builds.find((build) =>
+      build.id === input.sourceBuildId
+      && build.workspaceId === input.workspaceId
+      && build.repositoryId === input.repositoryId
+    );
+    if (!sourceBuild) throw new Error("Remediation source does not match project");
+    const now = new Date();
+    const remediation: RemediationRecord = {
+      id: randomUUID(),
+      workspaceId: input.workspaceId,
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      sourceBuildId: input.sourceBuildId,
+      issue: input.issue,
+      state: "open",
+      rebuildBuildId: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    this.remediations.push(remediation);
+    return remediation;
+  }
+
+  async getRemediation(workspaceId: string, remediationId: string): Promise<RemediationRecord | null> {
+    return this.remediations.find((record) =>
+      record.workspaceId === workspaceId && record.id === remediationId
+    ) ?? null;
+  }
+
+  async listRemediations(
+    workspaceId: string,
+    projectId: string,
+    pagination?: Pagination
+  ): Promise<RemediationRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    return this.remediations.filter((record) =>
+      record.workspaceId === workspaceId && record.projectId === projectId
+    ).sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()
+      || right.id.localeCompare(left.id)).slice(offset, offset + limit);
+  }
+
+  async countRemediations(
+    workspaceId: string,
+    projectId: string,
+    state?: RemediationState
+  ): Promise<number> {
+    return this.remediations.filter((record) =>
+      record.workspaceId === workspaceId
+      && record.projectId === projectId
+      && (!state || record.state === state)
+    ).length;
+  }
+
+  async listRemediationEvents(workspaceId: string, remediationId: string): Promise<RemediationEventRecord[]> {
+    return this.remediationEvents.filter((event) =>
+      event.workspaceId === workspaceId && event.remediationId === remediationId
+    );
+  }
+
+  private transitionRemediation(
+    workspaceId: string,
+    remediationId: string,
+    state: RemediationState,
+    actorId: string | null
+  ): RemediationRecord | null {
+    const remediation = this.remediations.find((record) =>
+      record.workspaceId === workspaceId && record.id === remediationId
+    );
+    if (!remediation) return null;
+    const fromState = remediation.state;
+    transitionRemediation(fromState, state);
+    remediation.state = state;
+    remediation.updatedAt = new Date();
+    this.remediationEvents.push({
+      id: randomUUID(), workspaceId, remediationId, fromState, toState: state, actorId,
+      createdAt: remediation.updatedAt
+    });
+    return remediation;
+  }
+
+  async transitionRemediationWithAudit(
+    workspaceId: string,
+    remediationId: string,
+    state: RemediationState,
+    actorId: string
+  ): Promise<RemediationRecord | null> {
+    const remediation = await this.getRemediation(workspaceId, remediationId);
+    if (!remediation) return null;
+    const previous = { state: remediation.state, updatedAt: remediation.updatedAt };
+    const eventLength = this.remediationEvents.length;
+    const auditLength = this.auditEvents.length;
+    try {
+      const updated = this.transitionRemediation(workspaceId, remediationId, state, actorId)!;
+      await this.recordAudit({
+        workspaceId, actorId, action: "remediation.transitioned", resourceType: "remediation",
+        resourceId: remediationId, metadata: { fromState: previous.state, toState: state }
+      });
+      return updated;
+    } catch (error) {
+      remediation.state = previous.state;
+      remediation.updatedAt = previous.updatedAt;
+      this.remediationEvents.splice(eventLength);
+      this.auditEvents.splice(auditLength);
+      throw error;
+    }
+  }
+
+  async requestRemediationBuildWithAudit(
+    input: RemediationBuildInput
+  ): Promise<{ build: BuildRecord; created: boolean }> {
+    const remediation = await this.getRemediation(input.workspaceId, input.remediationId);
+    if (!remediation || remediation.state !== "accepted") throw new Error("Remediation must be accepted first");
+    const buildLength = this.builds.length;
+    const buildEventLength = this.buildEvents.length;
+    const remediationEventLength = this.remediationEvents.length;
+    const auditLength = this.auditEvents.length;
+    const previousSequence = this.nextBuildEventSequence;
+    const previous = { state: remediation.state, rebuildBuildId: remediation.rebuildBuildId, updatedAt: remediation.updatedAt };
+    try {
+      const purpose = {
+        kind: "remediation" as const,
+        feedbackIds: [] as [],
+        feedbackContext: [] as [],
+        remediationContext: [{
+          remediationId: remediation.id,
+          issueId: remediation.issue.id,
+          sourceRefs: remediation.issue.sourceRefs
+        }]
+      };
+      const result = await this.createBuild({ ...input.build, purpose });
+      remediation.rebuildBuildId = result.build.id;
+      this.transitionRemediation(input.workspaceId, remediation.id, "rebuilding", input.actorId);
+      await this.recordAudit({
+        workspaceId: input.workspaceId, actorId: input.actorId,
+        action: "remediation.rebuild_requested", resourceType: "remediation",
+        resourceId: remediation.id, metadata: { buildId: result.build.id, issueId: remediation.issue.id }
+      });
+      return result;
+    } catch (error) {
+      this.builds.splice(buildLength);
+      this.buildEvents.splice(buildEventLength);
+      this.remediationEvents.splice(remediationEventLength);
+      this.auditEvents.splice(auditLength);
+      this.nextBuildEventSequence = previousSequence;
+      remediation.state = previous.state;
+      remediation.rebuildBuildId = previous.rebuildBuildId;
+      remediation.updatedAt = previous.updatedAt;
       throw error;
     }
   }
@@ -1127,6 +1397,12 @@ export class MemoryAppStore implements AppStore {
     ) ?? null;
   }
 
+  async listSnapshotFiles(workspaceId: string, snapshotId: string): Promise<SourceFileRecord[]> {
+    return this.sourceFiles.filter((file) => file.workspaceId === workspaceId && file.snapshotId === snapshotId)
+      .sort((left, right) => left.path.localeCompare(right.path) || left.id.localeCompare(right.id))
+      .map((file) => ({ ...file }));
+  }
+
   async latestSnapshot(workspaceId: string, repositoryId: string): Promise<SourceSnapshotRecord | null> {
     return this.sourceSnapshots.filter((snapshot) =>
       snapshot.workspaceId === workspaceId && snapshot.repositoryId === repositoryId
@@ -1235,6 +1511,7 @@ export class MemoryAppStore implements AppStore {
       && build.snapshotId === input.snapshotId
       && build.purpose.kind === purpose.kind
       && JSON.stringify(build.purpose.feedbackIds) === JSON.stringify(purpose.feedbackIds)
+      && JSON.stringify(build.purpose.remediationContext ?? []) === JSON.stringify(purpose.remediationContext ?? [])
       && !["ready", "published", "failed"].includes(build.status)
     );
     if (active) return { build: active, created: false };
@@ -1339,6 +1616,190 @@ export class MemoryAppStore implements AppStore {
     const { limit, offset } = normalizePagination(pagination);
     return build ? this.buildEvents.filter((event) => event.buildId === buildId)
       .slice(offset, offset + limit) : [];
+  }
+
+  async createStageRun(input: CreateStageRunInput): Promise<PipelineStageRunRecord> {
+    const existing = this.pipelineStageRuns.find((run) =>
+      run.buildId === input.buildId && run.stage === input.stage && run.attempt === input.attempt
+    );
+    if (existing) return existing;
+    const run: PipelineStageRunRecord = {
+      id: randomUUID(),
+      workspaceId: input.workspaceId,
+      projectId: input.projectId,
+      snapshotId: input.snapshotId,
+      buildId: input.buildId,
+      stage: input.stage,
+      attempt: input.attempt,
+      status: "queued",
+      inputDigest: input.inputDigest,
+      outputManifestIds: [],
+      startedAt: null,
+      finishedAt: null,
+      errorCode: null,
+      errorDetail: null
+    };
+    this.pipelineStageRuns.push(run);
+    this.recordPipelineStageEvent(run);
+    return run;
+  }
+
+  async claimNextStageRun(
+    workspaceId: string,
+    projectId: string,
+    scope: { buildId?: string; stage?: BuildStage } = {}
+  ): Promise<PipelineStageRunRecord | null> {
+    const run = this.pipelineStageRuns.find((candidate) =>
+      candidate.workspaceId === workspaceId
+      && candidate.projectId === projectId
+      && candidate.status === "queued"
+      && (!scope.buildId || candidate.buildId === scope.buildId)
+      && (!scope.stage || candidate.stage === scope.stage)
+    );
+    if (!run) return null;
+    run.status = "running";
+    run.startedAt = new Date().toISOString();
+    this.recordPipelineStageEvent(run);
+    return run;
+  }
+
+  async transitionStageRun(
+    workspaceId: string,
+    projectId: string,
+    stageRunId: string,
+    expectedStatus: StageStatus,
+    status: StageStatus,
+    details: { outputManifestIds?: string[]; errorCode?: string; errorDetail?: string } = {}
+  ): Promise<PipelineStageRunRecord | null> {
+    const run = this.pipelineStageRuns.find((candidate) =>
+      candidate.id === stageRunId && candidate.workspaceId === workspaceId
+      && candidate.projectId === projectId && candidate.status === expectedStatus
+    );
+    if (!run) return null;
+    const now = new Date().toISOString();
+    run.status = status;
+    run.startedAt ??= now;
+    run.finishedAt = ["succeeded", "failed", "cancelled", "reused", "skipped"].includes(status) ? now : null;
+    run.outputManifestIds = details.outputManifestIds ?? run.outputManifestIds;
+    run.errorCode = status === "failed" ? details.errorCode ?? null : null;
+    run.errorDetail = status === "failed" ? details.errorDetail ?? null : null;
+    this.recordPipelineStageEvent(run);
+    return run;
+  }
+
+  async createArtifactWithAudit(manifestInput: ArtifactManifest, actorId?: string): Promise<ArtifactManifest> {
+    const manifest = artifactManifestSchema.parse(manifestInput);
+    const build = this.builds.find((candidate) => candidate.id === manifest.buildId
+      && candidate.workspaceId === manifest.workspaceId && candidate.snapshotId === manifest.snapshotId);
+    const repository = build && this.repositories.find((candidate) => candidate.id === build.repositoryId
+      && candidate.workspaceId === manifest.workspaceId && candidate.projectId === manifest.projectId);
+    const snapshot = this.sourceSnapshots.find((candidate) => candidate.id === manifest.snapshotId
+      && candidate.workspaceId === manifest.workspaceId && candidate.repositoryId === build?.repositoryId);
+    if (!build || !repository || !snapshot) {
+      throw new Error("Artifact does not match the project build and snapshot");
+    }
+    const existing = this.knowledgeArtifacts.find((candidate) =>
+      candidate.workspaceId === manifest.workspaceId
+      && candidate.projectId === manifest.projectId
+      && candidate.snapshotId === manifest.snapshotId
+      && candidate.stage === manifest.stage
+      && candidate.kind === manifest.kind
+      && candidate.inputDigest === manifest.inputDigest
+    );
+    if (existing) {
+      if (existing.contentDigest !== manifest.contentDigest || existing.storageKey !== manifest.storageKey) {
+        throw new Error("Artifact cache collision");
+      }
+      return structuredClone(existing);
+    }
+    this.knowledgeArtifacts.push(structuredClone(manifest));
+    await this.recordAudit({
+      workspaceId: manifest.workspaceId,
+      actorId,
+      action: "knowledge_artifact.created",
+      resourceType: "knowledge_artifact",
+      resourceId: manifest.id,
+      metadata: { stage: manifest.stage, kind: manifest.kind, contentDigest: manifest.contentDigest }
+    });
+    return structuredClone(manifest);
+  }
+
+  async findReusableArtifact(
+    workspaceId: string,
+    projectId: string,
+    snapshotId: string,
+    stage: BuildStage,
+    kind: string,
+    inputDigest: string
+  ): Promise<ArtifactManifest | null> {
+    const artifact = this.knowledgeArtifacts.find((candidate) =>
+      candidate.workspaceId === workspaceId
+      && candidate.projectId === projectId
+      && candidate.snapshotId === snapshotId
+      && candidate.stage === stage
+      && candidate.kind === kind
+      && candidate.inputDigest === inputDigest
+    );
+    return artifact ? structuredClone(artifact) : null;
+  }
+
+  async listPipelineStageRuns(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineStageRunRecord[]> {
+    return this.pipelineStageRuns.filter((run) =>
+      run.workspaceId === workspaceId && run.projectId === projectId && run.buildId === buildId
+    );
+  }
+
+  async listPipelineStageEvents(
+    workspaceId: string,
+    projectId: string,
+    buildId: string,
+    afterSequence: number,
+    limit = 100
+  ): Promise<PipelineStageEvent[]> {
+    return this.pipelineStageEvents.filter((event) =>
+      event.buildId === buildId && event.sequence > afterSequence
+      && this.pipelineStageRuns.some((run) => run.id === event.stageRunId
+        && run.workspaceId === workspaceId && run.projectId === projectId)
+    ).slice(0, limit);
+  }
+
+  async saveKnowledgeGraph(input: SaveKnowledgeGraphInput): Promise<void> {
+    validateKnowledgeGraph(input.graph);
+    const build = this.builds.find((candidate) => candidate.id === input.buildId
+      && candidate.workspaceId === input.workspaceId && candidate.snapshotId === input.snapshotId);
+    const repository = build && this.repositories.find((candidate) => candidate.id === build.repositoryId
+      && candidate.workspaceId === input.workspaceId && candidate.projectId === input.projectId);
+    if (!build || !repository) throw new Error("Graph does not belong to the supplied project build");
+    if (this.knowledgeGraphs.has(input.buildId)) throw new Error("Knowledge graph is immutable for this build");
+    this.knowledgeGraphs.set(input.buildId, structuredClone(input.graph));
+    await this.recordAudit({
+      workspaceId: input.workspaceId, actorId: input.actorId, action: "knowledge_graph.created",
+      resourceType: "knowledge_graph", resourceId: input.buildId,
+      metadata: { nodeCount: input.graph.nodes.length, edgeCount: input.graph.edges.length }
+    });
+  }
+
+  async getKnowledgeGraph(workspaceId: string, projectId: string, buildId: string): Promise<KnowledgeGraphRecord | null> {
+    const build = this.builds.find((candidate) => candidate.id === buildId && candidate.workspaceId === workspaceId);
+    const repository = build && this.repositories.find((candidate) => candidate.id === build.repositoryId
+      && candidate.workspaceId === workspaceId && candidate.projectId === projectId);
+    const graph = repository ? this.knowledgeGraphs.get(buildId) : undefined;
+    return graph ? structuredClone(graph) : null;
+  }
+
+  private recordPipelineStageEvent(run: PipelineStageRunRecord): void {
+    this.pipelineStageEvents.push({
+      sequence: this.nextPipelineStageEventSequence++,
+      buildId: run.buildId,
+      stageRunId: run.id,
+      stage: run.stage,
+      status: run.status,
+      occurredAt: new Date().toISOString()
+    });
   }
 
   async saveKnowledge({ build, index, output }: PersistedKnowledge): Promise<void> {
@@ -1472,6 +1933,10 @@ export class MemoryAppStore implements AppStore {
     return release ? this.knowledgePages.filter((page) =>
       page.workspaceId === workspaceId && page.buildId === release.buildId
     ).length : 0;
+  }
+
+  async countKnowledgePagesForBuild(workspaceId: string, buildId: string): Promise<number> {
+    return this.knowledgePages.filter((page) => page.workspaceId === workspaceId && page.buildId === buildId).length;
   }
 
   async getKnowledgePage(workspaceId: string, pageId: string): Promise<KnowledgePageRecord | null> {

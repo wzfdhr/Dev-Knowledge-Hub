@@ -1,4 +1,5 @@
 export const MAX_IMPORT_SOURCE_FILE_BYTES = 1024 * 1024;
+export const MAX_IMPORT_TABLE_WORKBOOK_BYTES = 50 * 1024 * 1024;
 
 export type ImportIgnoreReason =
   | "binary"
@@ -22,7 +23,7 @@ const excludedDirectories = new Set([
   ".cache", ".parcel-cache", "out", "target", ".gradle", ".mvn", ".venv", "venv",
   "__pycache__", ".pytest_cache", ".mypy_cache", ".tox", ".ruff_cache", ".dart_tool", ".terraform"
 ]);
-const sourceExtensions = new Set(["ts", "tsx", "js", "jsx", "md", "json", "yaml", "yml"]);
+const sourceExtensions = new Set(["ts", "tsx", "js", "jsx", "md", "json", "yaml", "yml", "csv", "xlsx"]);
 
 function basename(filePath: string): string {
   return filePath.split("/").at(-1) ?? filePath;
@@ -42,6 +43,10 @@ function hasSupportedExtension(filePath: string): boolean {
   return sourceExtensions.has(name.split(".").at(-1)?.toLowerCase() ?? "");
 }
 
+function isTableWorkbook(filePath: string): boolean {
+  return basename(filePath).toLowerCase().endsWith(".xlsx");
+}
+
 function isUtf8(content: Uint8Array): boolean {
   try {
     new TextDecoder("utf-8", { fatal: true }).decode(content);
@@ -57,13 +62,14 @@ function isGenerated(content: Uint8Array): boolean {
 }
 
 export function filterImportFile(input: ImportFilterInput): ImportFilterResult {
-  if (input.byteSize > MAX_IMPORT_SOURCE_FILE_BYTES) return { accepted: false, reason: "file_too_large" };
+  const maximumBytes = isTableWorkbook(input.path) ? MAX_IMPORT_TABLE_WORKBOOK_BYTES : MAX_IMPORT_SOURCE_FILE_BYTES;
+  if (input.byteSize > maximumBytes) return { accepted: false, reason: "file_too_large" };
   if (input.path.split("/").some(isExcludedImportDirectory)) {
     return { accepted: false, reason: "excluded_directory" };
   }
   if (basename(input.path) === ".env") return { accepted: false, reason: "sensitive_file" };
   if (!hasSupportedExtension(input.path)) return { accepted: false, reason: "unsupported_extension" };
-  if (input.content && (input.content.includes(0) || !isUtf8(input.content))) return { accepted: false, reason: "binary" };
+  if (input.content && !isTableWorkbook(input.path) && (input.content.includes(0) || !isUtf8(input.content))) return { accepted: false, reason: "binary" };
   if (input.content && isGenerated(input.content)) return { accepted: false, reason: "generated" };
   return { accepted: true };
 }

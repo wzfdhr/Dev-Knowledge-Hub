@@ -1,3 +1,4 @@
+import { authenticatedCookie, csrfHeaders } from "./test-support/csrf";
 import { randomBytes } from "node:crypto";
 
 import { afterEach, describe, expect, test } from "vitest";
@@ -29,7 +30,7 @@ async function authenticatedApp() {
     url: "/api/session",
     payload: { email: "admin@example.com", password: "a secure admin password" }
   });
-  const cookie = String(login.headers["set-cookie"]).split(";", 1)[0];
+  const cookie = authenticatedCookie(login);
   return { app, store, masterKey, cookie };
 }
 
@@ -40,9 +41,9 @@ afterEach(async () => {
 describe("repository routes", () => {
   test("treats a project without a repository as an empty onboarding state", async () => {
     const { app, cookie } = await authenticatedApp();
-    const projects = await app.inject({ method: "GET", url: "/api/projects", headers: { cookie } });
+    const projects = await app.inject({ method: "GET", url: "/api/projects", headers: { cookie, ...csrfHeaders(cookie) } });
     const projectId = projects.json().projects[0].id as string;
-    const headers = { cookie, "x-devkh-project": projectId };
+    const headers = { cookie, ...csrfHeaders(cookie), "x-devkh-project": projectId };
 
     const [repository, status, builds, releases] = await Promise.all([
       app.inject({ method: "GET", url: "/api/repositories/current", headers }),
@@ -69,13 +70,13 @@ describe("repository routes", () => {
 
   test("returns a persisted project summary without fabricated defaults", async () => {
     const { app, cookie } = await authenticatedApp();
-    const projects = await app.inject({ method: "GET", url: "/api/projects", headers: { cookie } });
+    const projects = await app.inject({ method: "GET", url: "/api/projects", headers: { cookie, ...csrfHeaders(cookie) } });
     const projectId = projects.json().projects[0].id as string;
 
     const empty = await app.inject({
       method: "GET",
       url: `/api/projects/${projectId}/summary`,
-      headers: { cookie }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
     expect(empty.statusCode).toBe(200);
     expect(empty.json()).toMatchObject({
@@ -90,13 +91,13 @@ describe("repository routes", () => {
     await app.inject({
       method: "POST",
       url: `/api/projects/${projectId}/repositories`,
-      headers: { cookie },
+      headers: { cookie, ...csrfHeaders(cookie) },
       payload: { kind: "upload", name: "Uploaded project" }
     });
     const connected = await app.inject({
       method: "GET",
       url: `/api/projects/${projectId}/summary`,
-      headers: { cookie }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
     expect(connected.statusCode).toBe(200);
     expect(connected.json()).toMatchObject({
@@ -114,7 +115,7 @@ describe("repository routes", () => {
     const created = await app.inject({
       method: "POST",
       url: "/api/repositories",
-      headers: { cookie },
+      headers: { cookie, ...csrfHeaders(cookie) },
       payload: { kind: "local", path: "/tmp/example-repository", name: "Example" }
     });
 
@@ -126,7 +127,7 @@ describe("repository routes", () => {
     const current = await app.inject({
       method: "GET",
       url: "/api/repositories/current",
-      headers: { cookie }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
     expect(current.statusCode).toBe(200);
     expect(current.json()).toEqual(created.json());
@@ -134,7 +135,7 @@ describe("repository routes", () => {
     const second = await app.inject({
       method: "POST",
       url: "/api/repositories",
-      headers: { cookie },
+      headers: { cookie, ...csrfHeaders(cookie) },
       payload: { kind: "local", path: "/tmp/other", name: "Other" }
     });
     expect(second.statusCode).toBe(409);
@@ -147,7 +148,7 @@ describe("repository routes", () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/repositories",
-      headers: { cookie },
+      headers: { cookie, ...csrfHeaders(cookie) },
       payload: {
         kind: "git",
         url: "https://github.com/example/private.git",
@@ -174,7 +175,7 @@ describe("repository routes", () => {
     const duplicate = await app.inject({
       method: "POST",
       url: "/api/repositories",
-      headers: { cookie },
+      headers: { cookie, ...csrfHeaders(cookie) },
       payload: { kind: "git", url: "https://example.com/other.git", name: "Other", token }
     });
     expect(JSON.stringify(duplicate.json())).not.toContain(token);
@@ -186,7 +187,7 @@ describe("repository routes", () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/repositories",
-      headers: { cookie },
+      headers: { cookie, ...csrfHeaders(cookie) },
       payload: { kind: "git", url: "http://example.com/private.git", name: "Private", token }
     });
 
@@ -194,19 +195,34 @@ describe("repository routes", () => {
     expect(JSON.stringify(response.json())).not.toContain(token);
   });
 
+  test("rejects a Git sync to a private target without disclosing its resolved address", async () => {
+    const { app, cookie } = await authenticatedApp();
+    await app.inject({
+      method: "POST", url: "/api/repositories", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { kind: "git", url: "https://127.0.0.1/repo.git", name: "Blocked remote" }
+    });
+    const response = await app.inject({
+      method: "POST", url: "/api/repositories/current/sync", headers: { cookie, ...csrfHeaders(cookie) }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: { code: "GIT_EGRESS_DENIED", message: "Git remote is not allowed by the outbound network policy" } });
+    expect(JSON.stringify(response.json())).not.toContain("127.0.0.1");
+  });
+
   test("replaces the current repository and exposes only sanitized archived history", async () => {
     const { app, cookie } = await authenticatedApp();
     await app.inject({
       method: "POST",
       url: "/api/repositories",
-      headers: { cookie },
+      headers: { cookie, ...csrfHeaders(cookie) },
       payload: { kind: "local", path: "/tmp/original", name: "Original" }
     });
 
     const replacement = await app.inject({
       method: "POST",
       url: "/api/repositories/current/replace",
-      headers: { cookie },
+      headers: { cookie, ...csrfHeaders(cookie) },
       payload: { kind: "git", url: "https://github.com/example/replacement.git", name: "Replacement" }
     });
 
@@ -215,7 +231,7 @@ describe("repository routes", () => {
     const archived = await app.inject({
       method: "GET",
       url: "/api/repositories/archived",
-      headers: { cookie }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
     expect(archived.statusCode).toBe(200);
     expect(archived.json()).toMatchObject({ repositories: [{ name: "Original", kind: "local" }] });
@@ -227,14 +243,14 @@ describe("repository routes", () => {
     await app.inject({
       method: "POST",
       url: "/api/repositories",
-      headers: { cookie },
+      headers: { cookie, ...csrfHeaders(cookie) },
       payload: { kind: "local", path: "/tmp/original", name: "Original" }
     });
 
     const replacement = await app.inject({
       method: "POST",
       url: "/api/repositories/current/replace",
-      headers: { cookie },
+      headers: { cookie, ...csrfHeaders(cookie) },
       payload: { kind: "upload", name: "Uploaded replacement" }
     });
 
@@ -246,7 +262,7 @@ describe("repository routes", () => {
     const current = await app.inject({
       method: "GET",
       url: "/api/repositories/current",
-      headers: { cookie }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
     expect(current.json()).toMatchObject({ repository: { name: "Original", kind: "local" } });
   });
@@ -257,7 +273,7 @@ describe("repository routes", () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/repositories",
-      headers: { cookie },
+      headers: { cookie, ...csrfHeaders(cookie) },
       payload: { kind: "upload", name: "Uploaded project" }
     });
 
@@ -272,14 +288,14 @@ describe("repository routes", () => {
     await app.inject({
       method: "POST",
       url: "/api/repositories",
-      headers: { cookie },
+      headers: { cookie, ...csrfHeaders(cookie) },
       payload: { kind: "upload", name: "Uploaded project" }
     });
 
     const response = await app.inject({
       method: "POST",
       url: "/api/repositories/current/sync",
-      headers: { cookie }
+      headers: { cookie, ...csrfHeaders(cookie) }
     });
 
     expect(response.statusCode).toBe(409);

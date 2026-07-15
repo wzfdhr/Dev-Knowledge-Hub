@@ -12,13 +12,14 @@ import { PgBossBuildJobQueue } from "./knowledge/job-queue.js";
 import { anthropicEnhancer, openAiCompatibleEnhancer, type KnowledgeEnhancer } from "./knowledge/enhancer.js";
 import { decryptSecret } from "./security/crypto.js";
 import { syncRepository } from "./git/snapshot.js";
-import { ResumableUploadSessionManager } from "./uploads/resumable-upload.js";
+import { PostgresSessionStore } from "./security/session-store.js";
+import { ArtifactStore } from "./knowledge/pipeline/artifact-store.js";
+import type { PipelineArtifactStore } from "./persistence/store.js";
 
-const UPLOAD_STAGING_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const IMPORT_REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 
-interface UploadStagingCleaner {
-  cleanupExpired(): Promise<unknown>;
+interface ArtifactStoreInitializer {
+  initialize(): Promise<void>;
 }
 
 export interface BootstrapDependencies {
@@ -31,8 +32,8 @@ export interface BootstrapDependencies {
     queue: BuildJobQueue,
     enhancerForWorkspace: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>
   ) => BuildService;
+  createArtifactStore: (directory: string, persistence: PipelineArtifactStore) => ArtifactStoreInitializer;
   buildServer: typeof buildServer;
-  createUploadStagingCleaner?: (directory: string) => UploadStagingCleaner;
   setInterval?: (callback: () => void, delay: number) => unknown;
   clearInterval?: (timer: unknown) => void;
   reportBackgroundError?: (operation: string, error: unknown) => void;
@@ -45,6 +46,7 @@ const defaultDependencies: BootstrapDependencies = {
   createBuildQueue: (connectionString) => new PgBossBuildJobQueue(connectionString),
   createBuildService: (store, queue, enhancerForWorkspace) =>
     new BuildService(store, queue, { enhancerForWorkspace }),
+  createArtifactStore: (directory, persistence) => new ArtifactStore(directory, persistence),
   buildServer
 };
 
@@ -63,6 +65,11 @@ export async function bootstrapServer(
   const database = dependencies.createDatabase(env.databaseUrl);
   await dependencies.runMigrations(database.pool);
   const store = dependencies.createStore(database.pool);
+  const artifactStore = dependencies.createArtifactStore(
+    path.join(env.dataDir, "artifacts"),
+    store as AppStore & PipelineArtifactStore
+  );
+  await artifactStore.initialize();
   const queue = dependencies.createBuildQueue(env.databaseUrl);
   const enhancerForWorkspace = async (workspaceId: string): Promise<KnowledgeEnhancer | undefined> => {
     const config = await store.getModelConfig(workspaceId);
@@ -82,17 +89,12 @@ export async function bootstrapServer(
     dataDir: env.dataDir,
     nodeEnv: env.nodeEnv,
     ...(env.publicBaseUrl ? { publicBaseUrl: env.publicBaseUrl } : {}),
-    ...(mode === "production" ? { clientDir: path.resolve("dist/client") } : {})
+    ...(env.legacySessionReadUntil ? { legacySessionReadUntil: env.legacySessionReadUntil } : {}),
+    ...(mode === "production" ? { clientDir: path.resolve("dist/client") } : {}),
+    sessionStore: new PostgresSessionStore(database.pool)
   });
-  const cleaner = dependencies.createUploadStagingCleaner?.(path.join(env.dataDir, "upload-staging"))
-    ?? new ResumableUploadSessionManager(path.join(env.dataDir, "upload-staging"));
   const reportBackgroundError = dependencies.reportBackgroundError
     ?? ((operation: string, error: unknown) => server.log.error({ err: error }, operation));
-  const runUploadStagingCleanup = () => {
-    void cleaner.cleanupExpired().catch((error: unknown) => {
-      reportBackgroundError("Upload staging cleanup failed", error);
-    });
-  };
   const runImportReportCleanup = () => {
     void store.deleteExpiredImportReports(new Date(Date.now() - IMPORT_REPORT_RETENTION_MS))
       .catch((error: unknown) => {
@@ -156,7 +158,6 @@ export async function bootstrapServer(
     });
   };
   const runMaintenance = () => {
-    runUploadStagingCleanup();
     runImportReportCleanup();
     runGitSynchronization();
   };
@@ -167,7 +168,7 @@ export async function bootstrapServer(
     ?? ((timer: unknown) => globalThis.clearInterval(timer as never));
   const cleanupInterval = scheduleCleanup(
     runMaintenance,
-    UPLOAD_STAGING_CLEANUP_INTERVAL_MS
+    60 * 60 * 1000
   );
   server.addHook("onClose", async () => {
     clearCleanup(cleanupInterval);

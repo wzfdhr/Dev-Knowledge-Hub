@@ -175,8 +175,12 @@ async function waitForChildExit(child, timeoutMs = 10_000) {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(async () => {
       signalProcessGroup(child, "SIGKILL");
-      await waitForProcessGroupExit(child).catch(() => undefined);
-      reject(new Error(`Timed out waiting for child process exit after ${timeoutMs}ms`));
+      try {
+        await waitForProcessGroupExit(child);
+        reject(new Error(`Timed out waiting for child process exit after ${timeoutMs}ms`));
+      } catch (error) {
+        reject(error);
+      }
     }, timeoutMs);
     child.once("exit", (code, signal) => {
       clearTimeout(timeout);
@@ -331,7 +335,7 @@ test("interrupted backup and restore operations are recorded as failures", async
       assert.equal(status.result, "failed");
     } finally {
       signalProcessGroup(child, "SIGKILL");
-      await waitForProcessGroupExit(child).catch(() => undefined);
+      await waitForProcessGroupExit(child);
       rmSync(fixture.root, { recursive: true, force: true });
     }
   }

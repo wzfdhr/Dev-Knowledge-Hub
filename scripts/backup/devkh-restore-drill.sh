@@ -45,7 +45,9 @@ finish() {
 
     if (( cleanup_failed )); then
       if [[ -n "$evidence_path" ]]; then
-        rm -f "$evidence_path" || true
+        if ! rm -f "$evidence_path"; then
+          printf 'recovery cleanup failed to invalidate success evidence: %s\n' "$evidence_path" >&2
+        fi
       fi
       printf 'recovery cleanup failed; inspect recovery resources under: %s\n' "$target" >&2
       exit_code=1
@@ -55,7 +57,9 @@ finish() {
   if (( exit_code == 0 )); then
     write_status restore-drill success "$started_at" "$snapshot_id" ""
   else
-    write_status restore-drill failed "$started_at" "" restore_drill_failed || true
+    if ! write_status restore-drill failed "$started_at" "" restore_drill_failed "$target"; then
+      printf 'recovery drill failed to write failure status: %s\n' "$target" >&2
+    fi
   fi
 
   exit "$exit_code"

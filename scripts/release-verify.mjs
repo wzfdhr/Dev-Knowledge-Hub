@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { mkdir, rm, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
@@ -43,6 +44,20 @@ const cleanupStep = {
 
 function commandText(step) {
   return step.command ? [step.command, ...step.args].join(" ") : `GET ${step.healthUrl}`;
+}
+
+async function invalidateRecoveryEvidence(root, errorClass) {
+  if (!root) return;
+  await rm(root, { recursive: true, force: true });
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  await writeFile(join(root, "recovery-cleanup-failed.json"), `${JSON.stringify({
+    schemaVersion: 1,
+    operation: "restore-drill",
+    result: "failed",
+    errorClass,
+    retentionPath: root,
+    finishedAt: new Date().toISOString()
+  })}\n`, { mode: 0o600 });
 }
 
 export function parseReleaseScope(args) {
@@ -132,6 +147,7 @@ export async function runContainerVerification(options = {}) {
   const env = options.env ?? process.env;
   const execute = options.execute ?? executeStep;
   const logger = options.logger ?? console;
+  const invalidateEvidence = options.invalidateEvidence ?? invalidateRecoveryEvidence;
 
   assertContainerIsolation(env);
   let failure;
@@ -149,6 +165,7 @@ export async function runContainerVerification(options = {}) {
   try {
     await runReleaseSteps([cleanupStep], { execute, logger });
   } catch (cleanupError) {
+    await invalidateEvidence(env.RECOVERY_EVIDENCE_DIR, "compose_cleanup_failed");
     failure = cleanupError;
   }
   if (failure) throw failure;

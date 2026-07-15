@@ -107,6 +107,20 @@ describe("release verification orchestrator", () => {
     expect(execute).toHaveBeenCalledWith(expect.objectContaining({ name: "compose-cleanup" }));
   });
 
+  test("invalidates recovery evidence when outer Compose cleanup fails", async () => {
+    const execute = vi.fn(async (step) => {
+      if (step.name === "compose-cleanup") throw Object.assign(new Error("cleanup failed"), { exitCode: 1 });
+    });
+    const invalidateEvidence = vi.fn(async () => undefined);
+    await expect(runContainerVerification({
+      env: { DEVKH_CONTAINER_SMOKE: "true", COMPOSE_PROJECT_NAME: "devkh-ci", RECOVERY_EVIDENCE_DIR: "/tmp/evidence" },
+      execute,
+      invalidateEvidence,
+      logger: { error: vi.fn(), log: vi.fn() }
+    })).rejects.toThrow("compose-cleanup failed with exit code 1");
+    expect(invalidateEvidence).toHaveBeenCalledWith("/tmp/evidence", "compose_cleanup_failed");
+  });
+
   test("stops at the first failed step and reports its command and exit code", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce(undefined)

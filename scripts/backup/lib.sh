@@ -28,11 +28,12 @@ write_status() {
   local started_at="$3"
   local snapshot_id="$4"
   local error_class="$5"
+  local retention_path="${6:-}"
   local temporary="$BACKUP_STATE_DIR/status.json.tmp"
 
   mkdir -p "$BACKUP_STATE_DIR"
   chmod 700 "$BACKUP_STATE_DIR"
-  node -e 'const [operation,result,startedAt,snapshotId,errorClass]=process.argv.slice(1); process.stdout.write(JSON.stringify({schemaVersion:1,operation,result,startedAt,finishedAt:new Date().toISOString(),snapshotId:snapshotId||null,errorClass:errorClass||null})+"\n")' "$operation" "$result" "$started_at" "$snapshot_id" "$error_class" > "$temporary"
+  node -e 'const [operation,result,startedAt,snapshotId,errorClass,retentionPath]=process.argv.slice(1); process.stdout.write(JSON.stringify({schemaVersion:1,operation,result,startedAt,finishedAt:new Date().toISOString(),snapshotId:snapshotId||null,errorClass:errorClass||null,retentionPath:retentionPath||null})+"\n")' "$operation" "$result" "$started_at" "$snapshot_id" "$error_class" "$retention_path" > "$temporary"
   chmod 600 "$temporary"
   mv "$temporary" "$BACKUP_STATE_DIR/status.json"
 }

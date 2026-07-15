@@ -52,9 +52,20 @@ describe("delivery database isolation", () => {
     expect(String(ci.jobs.verify.steps.find((step) => step.uses === "actions/setup-node@v4")
       ?.with?.["node-version"])).toBe("22.13.0");
     expect(ci.on.push.branches).toEqual(expect.arrayContaining(["main", "codex/mvp"]));
+    expect(ci.jobs["container-smoke"].env.DEVKH_DOMAIN).toBe("hub.example.test");
+    expect(ci.jobs["container-smoke"].env.ACME_EMAIL).toBe("ci@example.test");
     expect(smokeSteps).toContain("docker build --target runtime");
-    expect(smokeSteps).toContain("docker compose config --quiet");
-    expect(smokeSteps).toContain("docker compose up -d");
+    expect(smokeSteps).toContain("docker compose -f docker-compose.yml config --quiet");
+    expect(smokeSteps).toContain("docker compose -f docker-compose.yml up -d");
+    expect(smokeSteps).toContain("docker compose -f docker-compose.yml down --volumes");
+  });
+
+  test("requires a real PostgreSQL URL before running the integration release gate", async () => {
+    const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+
+    expect(packageJson.scripts["test:integration"]).toContain(
+      "node scripts/require-env.mjs TEST_DATABASE_URL"
+    );
   });
 
   test("does not retain a legacy resumable upload staging volume", async () => {

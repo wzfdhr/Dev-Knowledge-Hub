@@ -52,6 +52,7 @@ jobs:
       POSTGRES_PASSWORD: devkh-container-password
       DEVKH_MASTER_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       DEVKH_SESSION_SECRET: container-smoke-session-secret-at-least-32-chars
+      PUBLIC_BASE_URL: https://hub.example.test
       DEVKH_PORT: 3000
       DEVKH_DOMAIN: hub.example.test
       ACME_EMAIL: ci@example.test

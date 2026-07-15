@@ -40,6 +40,7 @@ describe("delivery database isolation", () => {
   test("builds the static askpass helper and runs a Compose image smoke job on both branches", async () => {
     const dockerfile = await readFile("Dockerfile", "utf8");
     const deliveryCheck = await readFile("scripts/verify-delivery.mjs", "utf8");
+    const compose = parse(await readFile("docker-compose.yml", "utf8"));
     const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
     const verifySteps = ci.jobs.verify.steps
       .map((step) => step.run)
@@ -58,6 +59,8 @@ describe("delivery database isolation", () => {
     expect(ci.on.push.branches).toEqual(expect.arrayContaining(["main", "codex/mvp"]));
     expect(ci.jobs["container-smoke"].env.DEVKH_DOMAIN).toBe("hub.example.test");
     expect(ci.jobs["container-smoke"].env.ACME_EMAIL).toBe("ci@example.test");
+    expect(ci.jobs["container-smoke"].env.PUBLIC_BASE_URL).toBe("https://hub.example.test");
+    expect(compose.services.app.environment.PUBLIC_BASE_URL).toContain("set PUBLIC_BASE_URL");
     expect(ci.jobs["container-smoke"].env.COMPOSE_PROJECT_NAME).toBe("devkh-ci");
     expect(ci.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DIR).toBe("/tmp/devkh-recovery-evidence");
     expect(verifySteps).toContain("npx playwright install --with-deps chromium");

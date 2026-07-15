@@ -126,14 +126,15 @@ esac
   };
 }
 
-async function waitForLog(path, pattern) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+async function waitForLog(path, pattern, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     try {
       if (pattern.test(readFileSync(path, "utf8"))) return;
     } catch {
       // The command has not written its first log entry yet.
     }
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Timed out waiting for ${pattern}`);
 }

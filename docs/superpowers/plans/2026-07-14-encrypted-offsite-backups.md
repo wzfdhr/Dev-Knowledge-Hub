@@ -73,6 +73,7 @@ require_backup_env() {
   for name in COMPOSE_DIR COMPOSE_PROJECT_NAME SNAPSHOT_VOLUME REPOSITORY_VOLUME UPLOAD_VOLUME RESTIC_REPOSITORY RESTIC_PASSWORD_FILE BACKUP_STATE_DIR; do
     [[ -n "${!name:-}" ]] || { printf 'missing required backup setting: %s\n' "$name" >&2; return 64; }
   done
+  [[ "$COMPOSE_DIR" == /* ]] || { printf 'COMPOSE_DIR must be an absolute path\n' >&2; return 64; }
   [[ -r "$RESTIC_PASSWORD_FILE" ]] || return 64
 }
 write_checksums() { (cd "$1" && sha256sum database.pgdump snapshots.tgz repositories.tgz uploads.tgz > checksums.sha256); }

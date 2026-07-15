@@ -64,4 +64,6 @@ Restic 密码、OSS/RAM 凭据、数据库 URL、`DEVKH_MASTER_KEY`、源文件�
 GitHub `container-smoke` 使用临时本地 Restic 仓库执行同一套演练，并将该 JSON 作为
 `recovery-evidence` artifact 留存。CI 会先写入一组不含真实凭据的代表 workspace、成员、项目、
 快照、release channel 和 artifact，并要求所有数据库计数及四卷文件计数大于 `0`；空库不能通过。
-CI 临时仓库及恢复容器在任务结束时删除。
+CI 在成功时删除临时仓库、恢复容器和外层 Compose 项目；失败时会保留临时仓库、恢复现场和 Compose 状态供取证，
+并继续上传已生成的 `recovery-evidence` artifact。CI runner 回收前，值班人员应从日志和 artifact 记录
+失败原因；不得把失败现场误标为一次成功演练。

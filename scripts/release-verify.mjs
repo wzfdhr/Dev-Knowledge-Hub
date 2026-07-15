@@ -128,19 +128,28 @@ export async function runReleaseSteps(steps, options = {}) {
   }
 }
 
-async function runContainerVerification() {
-  assertContainerIsolation(process.env);
+export async function runContainerVerification(options = {}) {
+  const env = options.env ?? process.env;
+  const execute = options.execute ?? executeStep;
+  const logger = options.logger ?? console;
+
+  assertContainerIsolation(env);
   let failure;
   try {
-    await runReleaseSteps(CONTAINER_STEPS);
+    await runReleaseSteps(CONTAINER_STEPS, { execute, logger });
   } catch (error) {
     failure = error;
   }
+
+  if (failure) {
+    logger.error("[release] container verification failed; retaining the isolated Compose state for diagnosis");
+    throw failure;
+  }
+
   try {
-    await runReleaseSteps([cleanupStep]);
+    await runReleaseSteps([cleanupStep], { execute, logger });
   } catch (cleanupError) {
-    if (!failure) failure = cleanupError;
-    else console.error(cleanupError.message);
+    failure = cleanupError;
   }
   if (failure) throw failure;
 }

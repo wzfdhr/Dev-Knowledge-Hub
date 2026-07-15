@@ -137,6 +137,14 @@ describe("delivery database isolation", () => {
     expect(gitignore).toMatch(/^docker-compose\.override\.yml$/m);
   });
 
+  test("documents retained recovery fixtures when cleanup or verification fails", async () => {
+    const recoveryEvidence = await readFile("docs/operations/recovery-evidence.md", "utf8");
+    const offsiteBackups = await readFile("docs/operations/encrypted-offsite-backups.md", "utf8");
+
+    expect(recoveryEvidence).toContain("失败时会保留临时仓库、恢复现场和 Compose 状态供取证");
+    expect(offsiteBackups).toContain("失败时保留恢复目录和临时资源供取证");
+  });
+
   test("merges only from a trusted workflow after fresh checks of the approved base and head", async () => {
     const workflow = parse(await readFile(".github/workflows/phase-merge.yml", "utf8"));
     const mergeJob = workflow.jobs.merge;

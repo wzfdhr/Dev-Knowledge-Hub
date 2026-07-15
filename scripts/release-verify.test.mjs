@@ -10,6 +10,7 @@ import {
   VERIFY_STEPS,
   assertContainerIsolation,
   parseReleaseScope,
+  runContainerVerification,
   runReleaseSteps
 } from "./release-verify.mjs";
 
@@ -71,6 +72,23 @@ describe("release verification orchestrator", () => {
       DEVKH_CONTAINER_SMOKE: "true",
       COMPOSE_PROJECT_NAME: "devkh-ci"
     })).not.toThrow();
+  });
+
+  test("retains the outer Compose state when the recovery drill fails", async () => {
+    const execute = vi.fn(async (step) => {
+      if (step.name === "recovery-drill") {
+        throw Object.assign(new Error("recovery fixture failed"), { exitCode: 65 });
+      }
+    });
+
+    await expect(runContainerVerification({
+      env: { DEVKH_CONTAINER_SMOKE: "true", COMPOSE_PROJECT_NAME: "devkh-ci" },
+      execute,
+      logger: { error: vi.fn(), log: vi.fn() }
+    })).rejects.toThrow("recovery-drill failed with exit code 65");
+
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ name: "recovery-drill" }));
+    expect(execute).not.toHaveBeenCalledWith(expect.objectContaining({ name: "compose-cleanup" }));
   });
 
   test("stops at the first failed step and reports its command and exit code", async () => {

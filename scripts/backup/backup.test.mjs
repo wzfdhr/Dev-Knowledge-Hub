@@ -15,6 +15,7 @@ function createFixture({
   resticBackupExit = "0",
   resticBackupDelay = "0",
   resticRestoreDelay = "0",
+  integrityResult = '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":0}',
   artifactContent = '{"fixture":true}'
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "devkh-backup-"));
@@ -31,7 +32,7 @@ case " $* " in
   *" compose "*" images -q app "*) printf 'devkh-recovery-image\n' ;;
   *" pg_restore "*) printf 'pg_restore %s\n' "$*" >> "$CALL_LOG" ;;
   *" psql "*"workspaceCount"*) printf '{"workspaceCount":1,"userCount":1,"projectCount":1,"projectMemberCount":1,"snapshotCount":1,"releaseCount":1,"releaseChannelCount":1,"artifactCount":1}\n' ;;
-  *" psql "*"orphanedReleases"*) printf '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":0}\n' ;;
+  *" psql "*"orphanedReleases"*) printf '%s\n' "$FAKE_INTEGRITY_RESULT" ;;
   *" psql "*"artifact_manifests"*) printf '[{"storageKey":"33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json","contentDigest":"218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9"}]\n' ;;
   *" pg_isready "*) exit 0 ;;
   *" exec "*" node -e "*) exit 0 ;;
@@ -85,6 +86,7 @@ esac
       RESTIC_BACKUP_EXIT: resticBackupExit,
       RESTIC_BACKUP_DELAY: resticBackupDelay,
       RESTIC_RESTORE_DELAY: resticRestoreDelay,
+      FAKE_INTEGRITY_RESULT: integrityResult,
       FAKE_ARTIFACT_CONTENT: artifactContent,
       COMPOSE_DIR: root,
       COMPOSE_PROJECT_NAME: "dev-knowledge-hub",
@@ -258,6 +260,24 @@ test("restore drill rejects artifact content that does not match its manifest di
   }
 });
 
+test("restore drill rejects invalid cross-record relationships", () => {
+  const fixture = createFixture({
+    integrityResult: '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":1}'
+  });
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], {
+      env: fixture.environment,
+      encoding: "utf8"
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /restored database integrity check failed/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("systemd backup timer keeps credentials outside its unit file", () => {
   const timer = readFileSync(join(projectRoot, "deployment/backup/devkh-backup.timer"), "utf8");
   const service = readFileSync(join(projectRoot, "deployment/backup/devkh-backup.service"), "utf8");
@@ -290,5 +310,6 @@ test("backs up durable sources and content-addressed artifacts separately from u
   assert.match(restore, /s\.repository_id<>r\.repository_id/);
   assert.match(restore, /r\.repository_id<>c\.repository_id/);
   assert.match(restore, /repo\.project_id<>a\.project_id/);
+  assert.match(restore, /s\.repository_id<>b\.repository_id/);
   assert.match(restore, /artifact content digest mismatch/);
 });

@@ -25,8 +25,8 @@ case " $* " in
   *" compose "*" exec "*) printf 'fake-pgdump\n' ;;
   *" compose "*" images -q app "*) printf 'devkh-recovery-image\n' ;;
   *" pg_restore "*) printf 'pg_restore %s\n' "$*" >> "$CALL_LOG" ;;
-  *" psql "*"workspaceCount"*) printf '{"workspaceCount":1,"projectCount":1,"releaseCount":1,"artifactCount":1}\n' ;;
-  *" psql "*"orphanedReleases"*) printf '{"orphanedReleases":0,"crossWorkspaceProjectMembers":0,"orphanedArtifacts":0}\n' ;;
+  *" psql "*"workspaceCount"*) printf '{"workspaceCount":1,"userCount":1,"projectCount":1,"projectMemberCount":1,"snapshotCount":1,"releaseCount":1,"releaseChannelCount":1,"artifactCount":1}\n' ;;
+  *" psql "*"orphanedReleases"*) printf '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":0}\n' ;;
   *" pg_isready "*) exit 0 ;;
   *" exec "*" node -e "*) exit 0 ;;
   *" run "*" alpine:3.20 tar "*)
@@ -113,7 +113,7 @@ test("uploads one encrypted set before applying retention", () => {
       encoding: "utf8"
     });
 
-    assert.equal(result.status, 0);
+    assert.equal(result.status, 0, result.stderr);
     const calls = readFileSync(fixture.log, "utf8");
     assert.match(calls, /restic backup .*--tag daily/);
     assert.match(calls, /restic forget --keep-daily 30 --keep-monthly 12 --prune/);
@@ -136,7 +136,7 @@ test("restore drill never writes production Docker volumes", () => {
       encoding: "utf8"
     });
 
-    assert.equal(result.status, 0);
+    assert.equal(result.status, 0, result.stderr);
     const calls = readFileSync(fixture.log, "utf8");
     assert.match(calls, /restic restore latest --target/);
     assert.match(calls, /docker run .*postgres:16-bookworm pg_restore --list \/backup\/database\.pgdump/);
@@ -162,6 +162,7 @@ test("restore drill never writes production Docker volumes", () => {
         healthCheckPassed: evidence.healthCheckPassed,
         volumeArchives: evidence.volumeArchives,
         databaseStats: evidence.databaseStats,
+        volumeFileCounts: evidence.volumeFileCounts,
         integrity: evidence.integrity
       },
       {
@@ -172,10 +173,14 @@ test("restore drill never writes production Docker volumes", () => {
         ephemeralDatabaseRestored: true,
         healthCheckPassed: true,
         volumeArchives: ["snapshots.tgz", "repositories.tgz", "sources.tgz", "artifacts.tgz"],
-        databaseStats: { workspaceCount: 1, projectCount: 1, releaseCount: 1, artifactCount: 1 },
-        integrity: { orphanedReleases: 0, crossWorkspaceProjectMembers: 0, orphanedArtifacts: 0 }
+        databaseStats: { workspaceCount: 1, userCount: 1, projectCount: 1, projectMemberCount: 1, snapshotCount: 1, releaseCount: 1, releaseChannelCount: 1, artifactCount: 1 },
+        volumeFileCounts: { snapshots: 0, repositories: 0, sources: 0, artifacts: 0 },
+        integrity: { orphanedReleases: 0, orphanedReleaseChannels: 0, crossWorkspaceProjectMembers: 0, projectMembersWithoutWorkspaceMembership: 0, orphanedArtifacts: 0 }
       }
     );
+    for (const archive of ["snapshots", "repositories", "sources", "artifacts"]) {
+      assert.match(evidence.volumeArchiveSha256[archive], /^[a-f0-9]{64}$/);
+    }
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

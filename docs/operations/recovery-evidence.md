@@ -14,6 +14,18 @@
   "resticSnapshotId": "abc123",
   "databaseArchiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "volumeArchives": ["snapshots.tgz", "repositories.tgz", "sources.tgz", "artifacts.tgz"],
+  "volumeArchiveSha256": {
+    "snapshots": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repositories": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "sources": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "artifacts": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "volumeFileCounts": {
+    "snapshots": 1,
+    "repositories": 1,
+    "sources": 1,
+    "artifacts": 1
+  },
   "productionVolumeTouched": false,
   "restoredSnapshotCount": 1,
   "pgRestoreListValidated": true,
@@ -21,13 +33,19 @@
   "healthCheckPassed": true,
   "databaseStats": {
     "workspaceCount": 1,
+    "userCount": 1,
     "projectCount": 2,
+    "projectMemberCount": 1,
+    "snapshotCount": 1,
     "releaseCount": 3,
+    "releaseChannelCount": 1,
     "artifactCount": 8
   },
   "integrity": {
     "orphanedReleases": 0,
+    "orphanedReleaseChannels": 0,
     "crossWorkspaceProjectMembers": 0,
+    "projectMembersWithoutWorkspaceMembership": 0,
     "orphanedArtifacts": 0
   }
 }
@@ -40,4 +58,6 @@
 Restic 密码、OSS/RAM 凭据、数据库 URL、`DEVKH_MASTER_KEY`、源文件内容或数据库转储。
 
 GitHub `container-smoke` 使用临时本地 Restic 仓库执行同一套演练，并将该 JSON 作为
-`recovery-evidence` artifact 留存。CI 临时仓库及恢复容器在任务结束时删除。
+`recovery-evidence` artifact 留存。CI 会先写入一组不含真实凭据的代表 workspace、成员、项目、
+快照、release channel 和 artifact，并要求所有数据库计数及四卷文件计数大于 `0`；空库不能通过。
+CI 临时仓库及恢复容器在任务结束时删除。

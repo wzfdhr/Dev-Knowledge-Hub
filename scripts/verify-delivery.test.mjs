@@ -87,6 +87,19 @@ describe("delivery database isolation", () => {
     expect(packageJson.scripts["phase:merge"]).toBe("node scripts/merge-verified-pr.mjs");
   });
 
+  test("seeds representative durable state before the CI recovery rehearsal", async () => {
+    const recovery = await readFile("scripts/backup/ci-recovery-drill.sh", "utf8");
+    const seed = await readFile("scripts/backup/seed-ci-recovery-fixture.sh", "utf8");
+
+    expect(recovery.indexOf("seed-ci-recovery-fixture.sh"))
+      .toBeLessThan(recovery.indexOf("devkh-backup.sh"));
+    expect(seed).toContain("INSERT INTO project_members");
+    expect(seed).toContain("INSERT INTO knowledge_artifacts");
+    expect(seed).toContain("INSERT INTO releases");
+    expect(seed).toContain("INSERT INTO release_channels");
+    expect(seed.match(/write_volume_file /g)).toHaveLength(4);
+  });
+
   test("does not retain a legacy resumable upload staging volume", async () => {
     const dockerfile = await readFile("Dockerfile", "utf8");
     const compose = parse(await readFile("docker-compose.yml", "utf8"));

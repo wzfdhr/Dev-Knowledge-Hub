@@ -28,6 +28,7 @@ export BACKUP_STATE_DIR="$evidence_directory"
 export RECOVERY_APP_IMAGE="${RECOVERY_APP_IMAGE:-devkh:ci}"
 
 restic init >/dev/null
+"$project_root/scripts/backup/seed-ci-recovery-fixture.sh"
 "$project_root/scripts/backup/devkh-backup.sh"
 "$project_root/scripts/backup/devkh-restore-drill.sh"
 
@@ -41,10 +42,18 @@ node -e '
   const fs = require("node:fs");
   const evidence = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
   const integrityPassed = Object.values(evidence.integrity ?? {}).every((value) => value === 0);
+  const representativeDatabaseRestored = ["workspaceCount", "userCount", "projectCount", "projectMemberCount", "snapshotCount", "releaseCount", "releaseChannelCount", "artifactCount"]
+    .every((name) => Number.isInteger(evidence.databaseStats?.[name]) && evidence.databaseStats[name] > 0);
+  const durableFilesRestored = ["snapshots", "repositories", "sources", "artifacts"]
+    .every((name) => Number.isInteger(evidence.volumeFileCounts?.[name])
+      && evidence.volumeFileCounts[name] > 0
+      && /^[a-f0-9]{64}$/.test(evidence.volumeArchiveSha256?.[name] ?? ""));
   if (evidence.result !== "success"
     || evidence.productionVolumeTouched !== false
     || evidence.ephemeralDatabaseRestored !== true
     || evidence.healthCheckPassed !== true
+    || !representativeDatabaseRestored
+    || !durableFilesRestored
     || !integrityPassed) process.exit(1);
   process.stdout.write(JSON.stringify(evidence) + "\n");
 ' "$evidence_path"

@@ -784,6 +784,7 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore {
     commitSha: string
   ): Promise<SourceSnapshotRecord | null>;
   findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null>;
+  listSnapshotFiles(workspaceId: string, snapshotId: string): Promise<SourceFileRecord[]>;
   latestSnapshot(workspaceId: string, repositoryId: string): Promise<SourceSnapshotRecord | null>;
   snapshotChangeSummary(workspaceId: string, repositoryId: string, snapshotId: string): Promise<SnapshotChangeSummary | null>;
   findSourceFile(
@@ -805,6 +806,7 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore {
   countBuilds(workspaceId: string, repositoryId: string): Promise<number>;
   countReleases(workspaceId: string, repositoryId: string): Promise<number>;
   countKnowledgePages(workspaceId: string, releaseId?: string): Promise<number>;
+  countKnowledgePagesForBuild(workspaceId: string, buildId: string): Promise<number>;
 }
 
 export type { BuildPurpose, BuildRecord };

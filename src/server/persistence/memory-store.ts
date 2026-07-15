@@ -57,7 +57,12 @@ import type {
 } from "./store.js";
 import type { PipelineStageRunRecord } from "./store.js";
 import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
-import type { StageStatus } from "../knowledge/pipeline/contracts.js";
+import {
+  artifactManifestSchema,
+  type ArtifactManifest,
+  type BuildStage,
+  type StageStatus
+} from "../knowledge/pipeline/contracts.js";
 import type {
   BuildInput,
   BuildEvent,
@@ -93,6 +98,7 @@ export class MemoryAppStore implements AppStore {
   private nextBuildEventSequence = 1;
   readonly pipelineStageRuns: PipelineStageRunRecord[] = [];
   readonly pipelineStageEvents: PipelineStageEvent[] = [];
+  readonly knowledgeArtifacts: ArtifactManifest[] = [];
   private nextPipelineStageEventSequence = 1;
   readonly knowledgePages: KnowledgePageRecord[] = [];
   readonly releases: ReleaseRecord[] = [];
@@ -1391,6 +1397,12 @@ export class MemoryAppStore implements AppStore {
     ) ?? null;
   }
 
+  async listSnapshotFiles(workspaceId: string, snapshotId: string): Promise<SourceFileRecord[]> {
+    return this.sourceFiles.filter((file) => file.workspaceId === workspaceId && file.snapshotId === snapshotId)
+      .sort((left, right) => left.path.localeCompare(right.path) || left.id.localeCompare(right.id))
+      .map((file) => ({ ...file }));
+  }
+
   async latestSnapshot(workspaceId: string, repositoryId: string): Promise<SourceSnapshotRecord | null> {
     return this.sourceSnapshots.filter((snapshot) =>
       snapshot.workspaceId === workspaceId && snapshot.repositoryId === repositoryId
@@ -1632,6 +1644,25 @@ export class MemoryAppStore implements AppStore {
     return run;
   }
 
+  async claimNextStageRun(
+    workspaceId: string,
+    projectId: string,
+    scope: { buildId?: string; stage?: BuildStage } = {}
+  ): Promise<PipelineStageRunRecord | null> {
+    const run = this.pipelineStageRuns.find((candidate) =>
+      candidate.workspaceId === workspaceId
+      && candidate.projectId === projectId
+      && candidate.status === "queued"
+      && (!scope.buildId || candidate.buildId === scope.buildId)
+      && (!scope.stage || candidate.stage === scope.stage)
+    );
+    if (!run) return null;
+    run.status = "running";
+    run.startedAt = new Date().toISOString();
+    this.recordPipelineStageEvent(run);
+    return run;
+  }
+
   async transitionStageRun(
     workspaceId: string,
     projectId: string,
@@ -1654,6 +1685,62 @@ export class MemoryAppStore implements AppStore {
     run.errorDetail = status === "failed" ? details.errorDetail ?? null : null;
     this.recordPipelineStageEvent(run);
     return run;
+  }
+
+  async createArtifactWithAudit(manifestInput: ArtifactManifest, actorId?: string): Promise<ArtifactManifest> {
+    const manifest = artifactManifestSchema.parse(manifestInput);
+    const build = this.builds.find((candidate) => candidate.id === manifest.buildId
+      && candidate.workspaceId === manifest.workspaceId && candidate.snapshotId === manifest.snapshotId);
+    const repository = build && this.repositories.find((candidate) => candidate.id === build.repositoryId
+      && candidate.workspaceId === manifest.workspaceId && candidate.projectId === manifest.projectId);
+    const snapshot = this.sourceSnapshots.find((candidate) => candidate.id === manifest.snapshotId
+      && candidate.workspaceId === manifest.workspaceId && candidate.repositoryId === build?.repositoryId);
+    if (!build || !repository || !snapshot) {
+      throw new Error("Artifact does not match the project build and snapshot");
+    }
+    const existing = this.knowledgeArtifacts.find((candidate) =>
+      candidate.workspaceId === manifest.workspaceId
+      && candidate.projectId === manifest.projectId
+      && candidate.snapshotId === manifest.snapshotId
+      && candidate.stage === manifest.stage
+      && candidate.kind === manifest.kind
+      && candidate.inputDigest === manifest.inputDigest
+    );
+    if (existing) {
+      if (existing.contentDigest !== manifest.contentDigest || existing.storageKey !== manifest.storageKey) {
+        throw new Error("Artifact cache collision");
+      }
+      return structuredClone(existing);
+    }
+    this.knowledgeArtifacts.push(structuredClone(manifest));
+    await this.recordAudit({
+      workspaceId: manifest.workspaceId,
+      actorId,
+      action: "knowledge_artifact.created",
+      resourceType: "knowledge_artifact",
+      resourceId: manifest.id,
+      metadata: { stage: manifest.stage, kind: manifest.kind, contentDigest: manifest.contentDigest }
+    });
+    return structuredClone(manifest);
+  }
+
+  async findReusableArtifact(
+    workspaceId: string,
+    projectId: string,
+    snapshotId: string,
+    stage: BuildStage,
+    kind: string,
+    inputDigest: string
+  ): Promise<ArtifactManifest | null> {
+    const artifact = this.knowledgeArtifacts.find((candidate) =>
+      candidate.workspaceId === workspaceId
+      && candidate.projectId === projectId
+      && candidate.snapshotId === snapshotId
+      && candidate.stage === stage
+      && candidate.kind === kind
+      && candidate.inputDigest === inputDigest
+    );
+    return artifact ? structuredClone(artifact) : null;
   }
 
   async listPipelineStageRuns(
@@ -1846,6 +1933,10 @@ export class MemoryAppStore implements AppStore {
     return release ? this.knowledgePages.filter((page) =>
       page.workspaceId === workspaceId && page.buildId === release.buildId
     ).length : 0;
+  }
+
+  async countKnowledgePagesForBuild(workspaceId: string, buildId: string): Promise<number> {
+    return this.knowledgePages.filter((page) => page.workspaceId === workspaceId && page.buildId === buildId).length;
   }
 
   async getKnowledgePage(workspaceId: string, pageId: string): Promise<KnowledgePageRecord | null> {

@@ -50,6 +50,7 @@ import type {
   WorkspaceKnowledgeSearchRecord,
   WorkspaceProjectOverviewRecord,
   SetupResult,
+  SourceFileRecord,
   SourceSnapshotRecord,
   TeamMemberRecord,
   TeamRole,
@@ -2715,6 +2716,22 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return rows[0] ? snapshotRecord(rows[0]) : null;
   }
 
+  async listSnapshotFiles(workspaceId: string, snapshotId: string): Promise<SourceFileRecord[]> {
+    const { rows } = await this.pool.query<{
+      id: string; workspace_id: string; snapshot_id: string; path: string;
+      byte_size: number; content_hash: string; language: string | null;
+    }>(
+      `SELECT id, workspace_id, snapshot_id, path, byte_size, content_hash, language
+       FROM source_files WHERE workspace_id = $1 AND snapshot_id = $2
+       ORDER BY path, id`,
+      [workspaceId, snapshotId]
+    );
+    return rows.map((row) => ({
+      id: row.id, workspaceId: row.workspace_id, snapshotId: row.snapshot_id,
+      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language
+    }));
+  }
+
   async latestSnapshot(workspaceId: string, repositoryId: string): Promise<SourceSnapshotRecord | null> {
     const { rows } = await this.pool.query<SnapshotRow>(
       `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
@@ -3408,6 +3425,15 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          AND (($2::uuid IS NOT NULL AND r.id = $2)
            OR ($2::uuid IS NULL AND rc.id IS NOT NULL))`,
       [workspaceId, releaseId ?? null]
+    );
+    return Number(rows[0]?.total ?? 0);
+  }
+
+  async countKnowledgePagesForBuild(workspaceId: string, buildId: string): Promise<number> {
+    const { rows } = await this.pool.query<{ total: string }>(
+      `SELECT count(*)::text AS total FROM knowledge_pages
+       WHERE workspace_id = $1 AND build_job_id = $2`,
+      [workspaceId, buildId]
     );
     return Number(rows[0]?.total ?? 0);
   }

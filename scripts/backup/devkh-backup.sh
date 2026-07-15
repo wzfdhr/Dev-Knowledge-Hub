@@ -19,7 +19,7 @@ finish() {
   if (( app_stopped )); then
     (
       cd "$COMPOSE_DIR"
-      docker compose -f docker-compose.yml -p "$COMPOSE_PROJECT_NAME" start app
+      docker compose -f "$COMPOSE_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" start app
     ) || exit_code=1
   fi
 
@@ -47,12 +47,12 @@ stage="$(mktemp -d "$BACKUP_STATE_DIR/staging.XXXXXX")"
 app_stopped=1
 (
   cd "$COMPOSE_DIR"
-  docker compose -f docker-compose.yml -p "$COMPOSE_PROJECT_NAME" stop app
+  docker compose -f "$COMPOSE_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" stop app
 )
 
 (
   cd "$COMPOSE_DIR"
-  docker compose -f docker-compose.yml -p "$COMPOSE_PROJECT_NAME" exec -T postgres pg_dump -U devkh -d dev_knowledge_hub -Fc
+  docker compose -f "$COMPOSE_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" exec -T postgres pg_dump -U devkh -d dev_knowledge_hub -Fc
 ) > "$stage/database.pgdump"
 
 for pair in "snapshots:$SNAPSHOT_VOLUME" "repositories:$REPOSITORY_VOLUME" "sources:$UPLOADED_SOURCES_VOLUME" "artifacts:$ARTIFACT_VOLUME"; do
@@ -71,7 +71,7 @@ node -e 'const fs=require("node:fs"); const [directory,createdAt,gitRevision]=pr
 
 (
   cd "$COMPOSE_DIR"
-  docker compose -f docker-compose.yml -p "$COMPOSE_PROJECT_NAME" start app
+  docker compose -f "$COMPOSE_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" start app
 )
 app_stopped=0
 

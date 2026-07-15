@@ -140,7 +140,7 @@ artifact_content_verified_count="$(node -e '
 if [[ -n "${RECOVERY_APP_IMAGE:-}" ]]; then
   application_image="$RECOVERY_APP_IMAGE"
 else
-  application_image="$(cd "$COMPOSE_DIR" && docker compose -f docker-compose.yml -p "$COMPOSE_PROJECT_NAME" images -q app | head -n 1)"
+  application_image="$(cd "$COMPOSE_DIR" && docker compose -f "$COMPOSE_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" images -q app | head -n 1)"
 fi
 [[ -n "$application_image" ]] || {
   printf 'unable to identify application image for recovery health check\n' >&2

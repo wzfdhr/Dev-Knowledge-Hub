@@ -96,11 +96,17 @@ describe("delivery database isolation", () => {
   test("pins every active operational Compose command to the repository file", async () => {
     const readme = await readFile("README.md", "utf8");
     const monitor = await readFile("scripts/monitoring/devkh-monitor.sh", "utf8");
+    const backup = await readFile("scripts/backup/devkh-backup.sh", "utf8");
+    const restoreDrill = await readFile("scripts/backup/devkh-restore-drill.sh", "utf8");
     const publicAccess = await readFile("docs/operations/private-tailnet-access.md", "utf8");
     const releaseGates = await readFile("docs/operations/private-repository-release-gates.md", "utf8");
 
     expect(readme).not.toMatch(/docker compose(?! -f docker-compose\.yml)/);
     expect(monitor).toContain('docker compose -f "$COMPOSE_DIR/docker-compose.yml"');
+    for (const operationalScript of [monitor, backup, restoreDrill]) {
+      expect(operationalScript).not.toContain("docker compose -f docker-compose.yml");
+      expect(operationalScript).toContain('docker-compose.yml"');
+    }
     expect(publicAccess).not.toMatch(/docker compose(?! -f docker-compose\.yml)/);
     expect(releaseGates).not.toMatch(/docker compose(?! -f docker-compose\.yml)/);
   });

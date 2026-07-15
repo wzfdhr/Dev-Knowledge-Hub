@@ -966,6 +966,12 @@ export class MemoryAppStore implements AppStore {
       && build.repositoryId === input.repositoryId
     );
     if (!sourceBuild) throw new Error("Remediation source does not match project");
+    const existing = this.remediations.find((candidate) =>
+      candidate.workspaceId === input.workspaceId
+      && candidate.sourceBuildId === input.sourceBuildId
+      && candidate.issue.id === input.issue.id
+    );
+    if (existing) return existing;
     const now = new Date();
     const remediation: RemediationRecord = {
       id: randomUUID(),

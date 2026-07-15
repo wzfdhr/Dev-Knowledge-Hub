@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import type { LintIssue } from "../../../shared/api-contracts.js";
 import type { ArtifactManifest } from "./contracts.js";
 import { canonicalJson, type ArtifactStore } from "./artifact-store.js";
 import type { PipelineStageExecutor, PipelineStageJob } from "./worker.js";
@@ -10,6 +11,7 @@ import type {
   GraphStore,
   PipelineArtifactStore,
   PipelineStageRunRecord,
+  RemediationRecord,
   RepositoryRecord,
   SourceFileRecord,
   SourceSnapshotRecord
@@ -21,6 +23,13 @@ export interface KnowledgeQualityStageStore extends PipelineArtifactStore, Graph
   findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null>;
   listSnapshotFiles(workspaceId: string, snapshotId: string): Promise<SourceFileRecord[]>;
   countKnowledgePagesForBuild(workspaceId: string, buildId: string): Promise<number>;
+  createRemediation(input: {
+    workspaceId: string;
+    projectId: string;
+    repositoryId: string;
+    sourceBuildId: string;
+    issue: LintIssue;
+  }): Promise<RemediationRecord>;
 }
 
 function digest(value: unknown): string {
@@ -137,6 +146,16 @@ export function createKnowledgeQualityStageExecutor(input: {
         buildId: job.buildId,
         graph: quality.graph,
         actorId: input.actorId
+      });
+    }
+    for (const issue of quality.issues) {
+      if (issue.remediationState !== "open") continue;
+      await input.store.createRemediation({
+        workspaceId: job.workspaceId,
+        projectId: job.projectId,
+        repositoryId: build.repositoryId,
+        sourceBuildId: build.id,
+        issue
       });
     }
     return { outputManifestIds: [artifact.manifest.id], reused: artifact.reused };

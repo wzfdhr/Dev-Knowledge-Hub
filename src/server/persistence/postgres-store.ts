@@ -2226,27 +2226,44 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   }
 
   async createRemediation(input: CreateRemediationInput): Promise<RemediationRecord> {
-    const { rows } = await this.pool.query<RemediationRow>(
-      `INSERT INTO remediation_cases
-       (workspace_id, project_id, repository_id, source_build_id, issue, state)
-       SELECT $1, $2, $3, $4, $5::jsonb, 'open'
-       FROM build_jobs build
-       JOIN repositories repository
-         ON repository.id = build.repository_id AND repository.workspace_id = build.workspace_id
-       WHERE build.workspace_id = $1 AND build.id = $4
-         AND repository.id = $3 AND repository.project_id = $2
-       RETURNING id, workspace_id, project_id, repository_id, source_build_id, issue, state,
-                 rebuild_build_id, created_at, updated_at`,
-      [
-        input.workspaceId,
-        input.projectId,
-        input.repositoryId,
-        input.sourceBuildId,
-        JSON.stringify(input.issue)
-      ]
-    );
-    if (!rows[0]) throw new Error("Remediation source does not match project");
-    return remediationRecord(rows[0]);
+    return this.transaction(async (client) => {
+      const owner = await client.query(
+        `SELECT 1 FROM build_jobs build
+         JOIN repositories repository
+           ON repository.id = build.repository_id AND repository.workspace_id = build.workspace_id
+         WHERE build.workspace_id = $1 AND build.id = $4
+           AND repository.id = $3 AND repository.project_id = $2`,
+        [input.workspaceId, input.projectId, input.repositoryId, input.sourceBuildId]
+      );
+      if (owner.rowCount !== 1) throw new Error("Remediation source does not match project");
+      const { rows } = await client.query<RemediationRow>(
+        `INSERT INTO remediation_cases
+         (workspace_id, project_id, repository_id, source_build_id, issue_id, issue, state)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'open')
+         ON CONFLICT (workspace_id, source_build_id, issue_id) DO NOTHING
+         RETURNING id, workspace_id, project_id, repository_id, source_build_id, issue, state,
+                   rebuild_build_id, created_at, updated_at`,
+        [
+          input.workspaceId,
+          input.projectId,
+          input.repositoryId,
+          input.sourceBuildId,
+          input.issue.id,
+          JSON.stringify(input.issue)
+        ]
+      );
+      if (rows[0]) return remediationRecord(rows[0]);
+      const existing = await client.query<RemediationRow>(
+        `SELECT id, workspace_id, project_id, repository_id, source_build_id, issue, state,
+                rebuild_build_id, created_at, updated_at
+         FROM remediation_cases
+         WHERE workspace_id = $1 AND project_id = $2 AND repository_id = $3
+           AND source_build_id = $4 AND issue_id = $5`,
+        [input.workspaceId, input.projectId, input.repositoryId, input.sourceBuildId, input.issue.id]
+      );
+      if (!existing.rows[0]) throw new Error("Remediation case was not persisted");
+      return remediationRecord(existing.rows[0]);
+    });
   }
 
   async getRemediation(workspaceId: string, remediationId: string): Promise<RemediationRecord | null> {

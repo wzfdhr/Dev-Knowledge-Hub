@@ -652,6 +652,16 @@ integration("PostgreSQL cited knowledge integration", () => {
         message: "Knowledge coverage is low", sourceRefs: [], remediationState: "open"
       }
     });
+    const replay = await store.createRemediation({
+      workspaceId: setup!.workspace.id, projectId: project.id, repositoryId: repository!.id,
+      sourceBuildId: sourceBuild.build.id,
+      issue: {
+        id: "lint-coverage", buildId: sourceBuild.build.id, rule: "KNOWLEDGE_LOW_COVERAGE",
+        severity: "warning", targetKind: "knowledge", targetId: "overview",
+        message: "Knowledge coverage is low", sourceRefs: [], remediationState: "open"
+      }
+    });
+    expect(replay.id).toBe(remediation.id);
     await store.transitionRemediationWithAudit(
       setup!.workspace.id, remediation.id, "accepted", setup!.admin.id
     );

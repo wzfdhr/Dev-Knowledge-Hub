@@ -22,9 +22,22 @@ const integrityNames = [
 ];
 const sha256 = /^[a-f0-9]{64}$/;
 const utcIsoTimestamp = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?Z$/;
+const evidenceFields = [
+  "schemaVersion", "operation", "result", "startedAt", "finishedAt", "resticSnapshotId",
+  "databaseArchiveSha256", "volumeArchives", "volumeArchiveSha256", "volumeFileCounts",
+  "productionVolumeTouched", "restoredSnapshotCount", "pgRestoreListValidated",
+  "ephemeralDatabaseRestored", "healthCheckPassed", "artifactContentVerifiedCount", "databaseStats",
+  "integrity"
+];
 
 function requireEvidence(condition, message) {
   if (!condition) throw new Error(`recovery evidence validation failed: ${message}`);
+}
+
+function requireExactFields(value, fields, name) {
+  requireEvidence(value && typeof value === "object" && !Array.isArray(value), `${name} must be an object`);
+  const actual = Object.keys(value);
+  requireEvidence(actual.length === fields.length && fields.every((field) => Object.hasOwn(value, field)), `${name} has unexpected or missing fields`);
 }
 
 function parseUtcTimestamp(value, name) {
@@ -37,6 +50,7 @@ function parseUtcTimestamp(value, name) {
 
 export function validateRecoveryEvidence(evidence) {
   requireEvidence(evidence && typeof evidence === "object" && !Array.isArray(evidence), "document must be an object");
+  requireExactFields(evidence, evidenceFields, "document");
   requireEvidence(evidence.schemaVersion === 2, "schemaVersion must be 2");
   requireEvidence(evidence.operation === "restore-drill", "operation must be restore-drill");
   requireEvidence(evidence.result === "success", "result must be success");
@@ -49,6 +63,8 @@ export function validateRecoveryEvidence(evidence) {
     JSON.stringify(evidence.volumeArchives) === JSON.stringify(volumeArchives),
     "volumeArchives must list every durable archive"
   );
+  requireExactFields(evidence.volumeArchiveSha256, volumeNames, "volumeArchiveSha256");
+  requireExactFields(evidence.volumeFileCounts, volumeNames, "volumeFileCounts");
   for (const name of volumeNames) {
     requireEvidence(
       Number.isInteger(evidence.volumeFileCounts?.[name]) && evidence.volumeFileCounts[name] > 0,
@@ -59,12 +75,14 @@ export function validateRecoveryEvidence(evidence) {
       `${name} archive digest is invalid`
     );
   }
+  requireExactFields(evidence.databaseStats, databaseStatNames, "databaseStats");
   for (const name of databaseStatNames) {
     requireEvidence(
       Number.isInteger(evidence.databaseStats?.[name]) && evidence.databaseStats[name] > 0,
       `${name} must be a positive integer`
     );
   }
+  requireExactFields(evidence.integrity, integrityNames, "integrity");
   for (const name of integrityNames) {
     requireEvidence(evidence.integrity?.[name] === 0, `${name} must be zero`);
   }

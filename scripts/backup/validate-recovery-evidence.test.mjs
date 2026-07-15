@@ -80,7 +80,9 @@ test("rejects incomplete or inconsistent recovery evidence", () => {
     (value) => { value.resticSnapshotId = "abc123ef"; },
     (value) => { value.startedAt = 0; },
     (value) => { value.startedAt = "July 15, 2026"; },
-    (value) => { value.finishedAt = "2026-07-14T23:59:59.000Z"; }
+    (value) => { value.finishedAt = "2026-07-14T23:59:59.000Z"; },
+    (value) => { value.DEVKH_MASTER_KEY = "must-not-be-retained"; },
+    (value) => { value.integrity.DEVKH_MASTER_KEY = "must-not-be-retained"; }
   ];
 
   for (const mutate of mutations) {

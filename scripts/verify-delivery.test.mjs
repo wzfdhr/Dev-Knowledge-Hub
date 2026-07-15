@@ -23,10 +23,12 @@ describe("delivery database isolation", () => {
   test("documents the public HTTPS base URL required by the Compose application", async () => {
     const environment = await readFile(".env.example", "utf8");
     const readme = await readFile("README.md", "utf8");
+    const compose = await readFile("docker-compose.yml", "utf8");
 
     expect(environment).toContain("PUBLIC_BASE_URL=https://hub.example.com");
     expect(readme).toContain("PUBLIC_BASE_URL");
     expect(readme).toContain("https://<your-public-domain>");
+    expect(compose).toContain("${PUBLIC_BASE_URL:-https://${DEVKH_DOMAIN:?set DEVKH_DOMAIN}}");
   });
 
   test("boots both development surfaces, forces production start, and loads dotenv explicitly", async () => {
@@ -69,7 +71,8 @@ describe("delivery database isolation", () => {
     expect(ci.jobs["container-smoke"].env.DEVKH_DOMAIN).toBe("hub.example.test");
     expect(ci.jobs["container-smoke"].env.ACME_EMAIL).toBe("ci@example.test");
     expect(ci.jobs["container-smoke"].env.PUBLIC_BASE_URL).toBe("https://hub.example.test");
-    expect(compose.services.app.environment.PUBLIC_BASE_URL).toContain("set PUBLIC_BASE_URL");
+    expect(compose.services.app.environment.PUBLIC_BASE_URL)
+      .toBe("${PUBLIC_BASE_URL:-https://${DEVKH_DOMAIN:?set DEVKH_DOMAIN}}");
     expect(ci.jobs["container-smoke"].env.COMPOSE_PROJECT_NAME).toBe("devkh-ci");
     expect(ci.jobs["container-smoke"].env.DEVKH_CONTAINER_SMOKE).toBe("true");
     expect(ci.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DIR).toBe("/tmp/devkh-recovery-evidence");

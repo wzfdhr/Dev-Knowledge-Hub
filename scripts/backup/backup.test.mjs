@@ -11,6 +11,7 @@ const projectRoot = join(scriptDirectory, "../..");
 const backupScript = join(scriptDirectory, "devkh-backup.sh");
 const restoreDrillScript = join(scriptDirectory, "devkh-restore-drill.sh");
 const ciRecoveryDrillScript = join(scriptDirectory, "ci-recovery-drill.sh");
+const seedRecoveryFixtureScript = join(scriptDirectory, "seed-ci-recovery-fixture.sh");
 const backupSnapshotId = "a".repeat(64);
 const latestSnapshotId = "b".repeat(64);
 
@@ -195,6 +196,27 @@ test("refuses to seed recovery fixtures outside an isolated CI compose project",
 
   try {
     const result = spawnSync(ciRecoveryDrillScript, [], {
+      env: {
+        ...fixture.environment,
+        DEVKH_CONTAINER_SMOKE: "true",
+        COMPOSE_PROJECT_NAME: "dev-knowledge-hub"
+      },
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 64);
+    assert.match(result.stderr, /isolated CI Compose project/);
+    assert.equal(readFileSync(fixture.log, "utf8"), "");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("the recovery fixture seeder refuses direct execution outside an isolated CI compose project", () => {
+  const fixture = createFixture();
+
+  try {
+    const result = spawnSync(seedRecoveryFixtureScript, [], {
       env: {
         ...fixture.environment,
         DEVKH_CONTAINER_SMOKE: "true",

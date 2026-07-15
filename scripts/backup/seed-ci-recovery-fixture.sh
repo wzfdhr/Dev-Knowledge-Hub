@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+[[ "${DEVKH_CONTAINER_SMOKE:-}" == "true" ]] || {
+  printf 'CI recovery fixture seeding requires DEVKH_CONTAINER_SMOKE=true\n' >&2
+  exit 64
+}
+[[ "${COMPOSE_PROJECT_NAME:-}" =~ ^devkh-ci(-[a-z0-9]+)*$ ]] || {
+  printf 'CI recovery fixture seeding requires an isolated CI Compose project named devkh-ci or devkh-ci-<suffix>\n' >&2
+  exit 64
+}
+
 project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-compose=(docker compose -f "$project_root/docker-compose.yml" -p "${COMPOSE_PROJECT_NAME:-devkh-ci}")
+compose=(docker compose -f "$project_root/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME")
 
 "${compose[@]}" exec -T postgres psql -U devkh -d dev_knowledge_hub -v ON_ERROR_STOP=1 <<'SQL'
 BEGIN;

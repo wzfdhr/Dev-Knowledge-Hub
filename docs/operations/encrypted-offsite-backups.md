@@ -77,7 +77,8 @@ Run an initial backup, repository check, and isolated restore drill. The drill r
 temporary directory below `/var/lib/devkh-backup`, validates checksums and archive paths, restores
 the dump into an ephemeral PostgreSQL container, verifies record counts and permission/release/artifact
 integrity, and starts an ephemeral application container for `/api/health`. 成功时才会移除临时容器、网络和目录；
-失败时保留恢复目录和临时资源供取证，并在 systemd journal 中记录保留路径，待值班人员确认后手动清理。它绝不停止生产应用、写入生产
+失败时保留恢复目录和临时资源供取证，并在 systemd journal 中记录保留路径，待值班人员确认后手动清理。清理过程中出现错误时，可能已有部分资源被删除；
+日志中的恢复目录和剩余资源路径是后续检查的权威位置。它绝不停止生产应用、写入生产
 Docker volume, or restores into the live database. It reads the current application image identifier
 from Compose unless `RECOVERY_APP_IMAGE` explicitly identifies the recovery image.
 

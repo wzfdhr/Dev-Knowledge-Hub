@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 
 import { describe, expect, test } from "vitest";
@@ -135,6 +136,7 @@ describe("delivery database isolation", () => {
     const gitignore = await readFile(".gitignore", "utf8");
 
     expect(gitignore).toMatch(/^docker-compose\.override\.yml$/m);
+    expect(execFileSync("git", ["ls-files", "docker-compose.override.yml"], { encoding: "utf8" }).trim()).toBe("");
   });
 
   test("documents retained recovery fixtures when cleanup or verification fails", async () => {
@@ -143,6 +145,7 @@ describe("delivery database isolation", () => {
 
     expect(recoveryEvidence).toContain("失败时会保留临时仓库、恢复现场和 Compose 状态供取证");
     expect(offsiteBackups).toContain("失败时保留恢复目录和临时资源供取证");
+    expect(offsiteBackups).toContain("清理过程中出现错误时，可能已有部分资源被删除");
   });
 
   test("merges only from a trusted workflow after fresh checks of the approved base and head", async () => {

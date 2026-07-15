@@ -27,6 +27,7 @@ test("documents all four durable backup volumes", () => {
 function createFixture({
   dockerStopExit = "0",
   dockerCleanupExit = "0",
+  restoreCleanupExit = "0",
   resticBackupExit = "0",
   resticBackupDelay = "0",
   resticRestoreDelay = "0",
@@ -102,8 +103,13 @@ case "$1" in
     ;;
 esac
 `);
+  writeFileSync(join(bin, "rm"), String.raw`#!/usr/bin/env sh
+if [ "$RESTORE_CLEANUP_EXIT" != "0" ]; then exit "$RESTORE_CLEANUP_EXIT"; fi
+exec /bin/rm "$@"
+`);
   chmodSync(join(bin, "docker"), 0o755);
   chmodSync(join(bin, "restic"), 0o755);
+  chmodSync(join(bin, "rm"), 0o755);
 
   return {
     root,
@@ -114,6 +120,7 @@ esac
       CALL_LOG: log,
       DOCKER_STOP_EXIT: dockerStopExit,
       DOCKER_CLEANUP_EXIT: dockerCleanupExit,
+      RESTORE_CLEANUP_EXIT: restoreCleanupExit,
       RESTIC_BACKUP_EXIT: resticBackupExit,
       RESTIC_BACKUP_DELAY: resticBackupDelay,
       RESTIC_RESTORE_DELAY: resticRestoreDelay,
@@ -417,6 +424,22 @@ test("preserves the restored fixture when cleanup cannot remove recovery resourc
     assert.equal(result.status, 1);
     assert.match(result.stderr, /recovery cleanup failed/);
     assert.match(execFileSync("find", [fixture.environment.BACKUP_STATE_DIR, "-type", "d", "-name", "restore-check.*"], { encoding: "utf8" }), /restore-check/);
+    const status = JSON.parse(readFileSync(join(fixture.environment.BACKUP_STATE_DIR, "status.json"), "utf8"));
+    assert.equal(status.result, "failed");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("records a failed cleanup when the restored directory cannot be removed", () => {
+  const fixture = createFixture({ restoreCleanupExit: "19" });
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /recovery cleanup failed/);
+    assert.match(result.stderr, /inspect recovery resources/);
     const status = JSON.parse(readFileSync(join(fixture.environment.BACKUP_STATE_DIR, "status.json"), "utf8"));
     assert.equal(status.result, "failed");
   } finally {

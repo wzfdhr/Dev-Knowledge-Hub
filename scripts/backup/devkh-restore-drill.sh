@@ -37,11 +37,14 @@ finish() {
       cleanup_failed=1
     fi
 
+    if (( ! cleanup_failed )) && [[ -n "$target" ]] && ! rm -rf "$target"; then
+      printf 'recovery cleanup failed for restored directory: %s\n' "$target" >&2
+      cleanup_failed=1
+    fi
+
     if (( cleanup_failed )); then
-      printf 'recovery cleanup failed; retained fixture: %s\n' "$target" >&2
+      printf 'recovery cleanup failed; inspect recovery resources under: %s\n' "$target" >&2
       exit_code=1
-    elif [[ -n "$target" ]]; then
-      rm -rf "$target"
     fi
   fi
 

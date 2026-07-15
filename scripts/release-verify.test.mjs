@@ -91,6 +91,22 @@ describe("release verification orchestrator", () => {
     expect(execute).not.toHaveBeenCalledWith(expect.objectContaining({ name: "compose-cleanup" }));
   });
 
+  test("retains the outer Compose state when an earlier container step fails", async () => {
+    const execute = vi.fn(async (step) => {
+      if (step.name === "application-health") throw Object.assign(new Error("health failed"), { exitCode: 1 });
+    });
+    await expect(runContainerVerification({ env: { DEVKH_CONTAINER_SMOKE: "true", COMPOSE_PROJECT_NAME: "devkh-ci" }, execute, logger: { error: vi.fn(), log: vi.fn() } }))
+      .rejects.toThrow("application-health failed with exit code 1");
+    expect(execute).not.toHaveBeenCalledWith(expect.objectContaining({ name: "compose-cleanup" }));
+  });
+
+  test("cleans up the isolated Compose state after successful container verification", async () => {
+    const execute = vi.fn(async () => undefined);
+    await expect(runContainerVerification({ env: { DEVKH_CONTAINER_SMOKE: "true", COMPOSE_PROJECT_NAME: "devkh-ci" }, execute, logger: { error: vi.fn(), log: vi.fn() } }))
+      .resolves.toBeUndefined();
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ name: "compose-cleanup" }));
+  });
+
   test("stops at the first failed step and reports its command and exit code", async () => {
     const execute = vi.fn()
       .mockResolvedValueOnce(undefined)

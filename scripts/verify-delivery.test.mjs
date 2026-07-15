@@ -91,7 +91,7 @@ describe("delivery database isolation", () => {
     expect(deliveryMatrix).not.toMatch(/\| Verified head \|/);
   });
 
-  test("merges only from a trusted workflow after fresh checks of the approved head", async () => {
+  test("merges only from a trusted workflow after fresh checks of the approved base and head", async () => {
     const workflow = parse(await readFile(".github/workflows/phase-merge.yml", "utf8"));
     const mergeJob = workflow.jobs.merge;
 
@@ -101,7 +101,7 @@ describe("delivery database isolation", () => {
     expect(workflow.jobs.verify.permissions.contents).toBe("read");
     expect(workflow.jobs["container-smoke"].permissions.contents).toBe("read");
     expect(mergeJob.permissions.contents).toBe("write");
-    expect(mergeJob.permissions["pull-requests"]).toBe("write");
+    expect(mergeJob.permissions["pull-requests"]).toBe("read");
     expect(mergeJob.needs).toEqual(["verify", "container-smoke"]);
     expect(mergeJob.if).toContain("success()");
     expect(mergeJob.if).toContain("inputs.user_approved");
@@ -124,9 +124,17 @@ describe("delivery database isolation", () => {
     expect(verifyCommands).toContain("git merge-base --is-ancestor");
     expect(containerCommands).toContain("git merge-base --is-ancestor");
     const mergeCommands = mergeJob.steps.map((step) => step.run).filter(Boolean).join("\n");
-    expect(mergeCommands).toContain("--match-head-commit");
+    expect(mergeJob.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uses: "actions/checkout@v4",
+        with: expect.objectContaining({ ref: "${{ inputs.approved_base }}", "fetch-depth": 0 })
+      })
+    ]));
+    expect(mergeCommands).toContain("git merge --no-ff");
+    expect(mergeCommands).toContain("--force-with-lease=refs/heads/main:$APPROVED_BASE");
     expect(mergeCommands).toContain("$APPROVED_HEAD");
     expect(mergeCommands).toContain("$APPROVED_BASE");
+    expect(mergeCommands).not.toContain("--match-head-commit");
   });
 
   test("seeds representative durable state before the CI recovery rehearsal", async () => {

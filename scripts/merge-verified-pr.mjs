@@ -25,16 +25,32 @@ export function parseMergeArguments(args) {
   if (!/^[a-f0-9]{40}$/i.test(approvedHead)) {
     throw new Error("The approved head must be a 40-character Git commit SHA");
   }
-  return { pullRequest, userApproved, approvedHead: approvedHead.toLowerCase() };
+  const approvedBaseIndex = args.indexOf("--approved-base");
+  const approvedBase = approvedBaseIndex >= 0 ? args[approvedBaseIndex + 1] : undefined;
+  if (!approvedBase) {
+    throw new Error("The --approved-base value is required to bind confirmation to the reviewed main commit");
+  }
+  if (!/^[a-f0-9]{40}$/i.test(approvedBase)) {
+    throw new Error("The approved base must be a 40-character Git commit SHA");
+  }
+  return {
+    pullRequest,
+    userApproved,
+    approvedHead: approvedHead.toLowerCase(),
+    approvedBase: approvedBase.toLowerCase()
+  };
 }
 
-export function assertMergeReady(pullRequest, approvedHead) {
+export function assertMergeReady(pullRequest, approvedHead, approvedBase) {
   if (pullRequest.isDraft) throw new Error(`PR #${pullRequest.number} is still a Draft`);
   if (pullRequest.baseRefName !== "main") {
     throw new Error(`PR #${pullRequest.number} must target main`);
   }
   if (!/^[a-f0-9]{40}$/i.test(pullRequest.baseRefOid ?? "")) {
     throw new Error(`PR #${pullRequest.number} has an invalid base commit`);
+  }
+  if (pullRequest.baseRefOid.toLowerCase() !== approvedBase) {
+    throw new Error(`PR #${pullRequest.number} base changed after user approval`);
   }
   if (pullRequest.headRefOid !== approvedHead) {
     throw new Error(`PR #${pullRequest.number} changed after user approval`);
@@ -46,16 +62,19 @@ export async function mergeVerifiedPullRequest(input, options = {}) {
   if (!/^[a-f0-9]{40}$/i.test(input.approvedHead ?? "")) {
     throw new Error("A valid approved head commit is required");
   }
+  if (!/^[a-f0-9]{40}$/i.test(input.approvedBase ?? "")) {
+    throw new Error("A valid approved base commit is required");
+  }
   const execute = options.execute ?? executeGh;
   const fields = "number,isDraft,baseRefName,baseRefOid,headRefName,headRefOid";
   const raw = await execute(["pr", "view", String(input.pullRequest), "--json", fields]);
   const pullRequest = JSON.parse(raw);
-  assertMergeReady(pullRequest, input.approvedHead.toLowerCase());
+  assertMergeReady(pullRequest, input.approvedHead.toLowerCase(), input.approvedBase.toLowerCase());
   await execute([
     "workflow", "run", "phase-merge.yml", "--ref", "main",
     "--field", `pr_number=${input.pullRequest}`,
     "--field", `approved_head=${input.approvedHead.toLowerCase()}`,
-    "--field", `approved_base=${pullRequest.baseRefOid.toLowerCase()}`,
+    "--field", `approved_base=${input.approvedBase.toLowerCase()}`,
     "--field", "user_approved=true"
   ]);
 }

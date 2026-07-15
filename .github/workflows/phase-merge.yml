@@ -121,7 +121,7 @@ jobs:
     if: ${{ success() && inputs.user_approved && github.actor == github.repository_owner }}
     permissions:
       contents: write
-      pull-requests: write
+      pull-requests: read
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -129,6 +129,10 @@ jobs:
       APPROVED_HEAD: ${{ inputs.approved_head }}
       APPROVED_BASE: ${{ inputs.approved_base }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.approved_base }}
+          fetch-depth: 0
       - name: Validate approved pull request
         run: |
           set -euo pipefail
@@ -140,7 +144,12 @@ jobs:
           test "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)" = "main"
           test "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json baseRefOid --jq .baseRefOid)" = "$APPROVED_BASE"
           test "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)" = "$APPROVED_HEAD"
-      - name: Merge approved head
-        run: >-
-          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --merge --delete-branch
-          --match-head-commit "$APPROVED_HEAD"
+          git merge-base --is-ancestor "$APPROVED_BASE" "$APPROVED_HEAD"
+          test "$(git rev-parse HEAD)" = "$APPROVED_BASE"
+      - name: Create and atomically push approved merge commit
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-ff --no-edit "$APPROVED_HEAD" -m "Merge pull request #$PR_NUMBER"
+          git push origin "HEAD:refs/heads/main" "--force-with-lease=refs/heads/main:$APPROVED_BASE"

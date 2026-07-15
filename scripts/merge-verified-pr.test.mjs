@@ -16,23 +16,28 @@ const greenPullRequest = {
 };
 
 describe("private-repository merge gate", () => {
-  test("requires an explicit user approval flag and a positive PR number", () => {
-    expect(parseMergeArguments(["3", "--user-approved", "--approved-head", "a".repeat(40)])).toEqual({
+  test("requires an explicit user approval flag and both reviewed commit SHAs", () => {
+    expect(parseMergeArguments([
+      "3", "--user-approved", "--approved-head", "a".repeat(40), "--approved-base", "c".repeat(40)
+    ])).toEqual({
       pullRequest: 3,
       userApproved: true,
-      approvedHead: "a".repeat(40)
+      approvedHead: "a".repeat(40),
+      approvedBase: "c".repeat(40)
     });
-    expect(() => parseMergeArguments(["3", "--approved-head", "a".repeat(40)])).toThrow("--user-approved");
+    expect(() => parseMergeArguments(["3", "--approved-head", "a".repeat(40), "--approved-base", "c".repeat(40)])).toThrow("--user-approved");
     expect(() => parseMergeArguments(["3", "--user-approved"])).toThrow("--approved-head");
-    expect(() => parseMergeArguments(["3", "--user-approved", "--approved-head", "short"])).toThrow("40-character");
-    expect(() => parseMergeArguments(["not-a-number", "--user-approved", "--approved-head", "a".repeat(40)])).toThrow("pull request number");
+    expect(() => parseMergeArguments(["3", "--user-approved", "--approved-head", "a".repeat(40)])).toThrow("--approved-base");
+    expect(() => parseMergeArguments(["3", "--user-approved", "--approved-head", "short", "--approved-base", "c".repeat(40)])).toThrow("40-character");
+    expect(() => parseMergeArguments(["not-a-number", "--user-approved", "--approved-head", "a".repeat(40), "--approved-base", "c".repeat(40)])).toThrow("pull request number");
   });
 
   test("rejects drafts, non-main targets, and changed heads", () => {
     expect(() => assertMergeReady({ ...greenPullRequest, isDraft: true })).toThrow("Draft");
     expect(() => assertMergeReady({ ...greenPullRequest, baseRefName: "develop" })).toThrow("main");
-    expect(() => assertMergeReady({ ...greenPullRequest, baseRefOid: "invalid" }, "a".repeat(40))).toThrow("base");
-    expect(() => assertMergeReady(greenPullRequest, "b".repeat(40))).toThrow("changed after user approval");
+    expect(() => assertMergeReady({ ...greenPullRequest, baseRefOid: "invalid" }, "a".repeat(40), "c".repeat(40))).toThrow("base");
+    expect(() => assertMergeReady({ ...greenPullRequest, baseRefOid: "b".repeat(40) }, "a".repeat(40), "c".repeat(40))).toThrow("base changed after user approval");
+    expect(() => assertMergeReady(greenPullRequest, "b".repeat(40), "c".repeat(40))).toThrow("changed after user approval");
   });
 
   test("dispatches the trusted merge workflow instead of merging from the client", async () => {
@@ -43,7 +48,8 @@ describe("private-repository merge gate", () => {
     await mergeVerifiedPullRequest({
       pullRequest: 3,
       userApproved: true,
-      approvedHead: "a".repeat(40)
+      approvedHead: "a".repeat(40),
+      approvedBase: "c".repeat(40)
     }, { execute });
 
     expect(execute).toHaveBeenNthCalledWith(1, [

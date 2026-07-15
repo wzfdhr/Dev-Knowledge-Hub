@@ -277,6 +277,7 @@ describe("team projects and members", () => {
       latestSnapshot: null,
       currentRelease: null,
       knowledge: { pageCount: 0, chunkCount: 0, citationCount: 0 },
+      qualityPipeline: null,
       remediation: { open: 0, accepted: 0, rebuilding: 0, resolved: 0, dismissed: 0 },
       diagnostics: [expect.objectContaining({ code: "SOURCE_MISSING" })]
     });
@@ -297,6 +298,10 @@ describe("team projects and members", () => {
     const sourceBuild = await store.createBuild({
       workspaceId: workspace.id, repositoryId: repository.id, snapshotId: "quality-snapshot",
       snapshotPath: "/tmp/quality-snapshot", commitSha: "a".repeat(40)
+    });
+    await store.createStageRun({
+      workspaceId: workspace.id, projectId: project.id, snapshotId: "quality-snapshot",
+      buildId: sourceBuild.build.id, stage: "lint", attempt: 1, inputDigest: "a".repeat(64)
     });
     const remediation = await store.createRemediation({
       workspaceId: workspace.id, projectId: project.id, repositoryId: repository.id,
@@ -327,6 +332,11 @@ describe("team projects and members", () => {
     });
     expect(visible.statusCode).toBe(200);
     expect(visible.json()).toMatchObject({ remediations: [expect.objectContaining({ id: remediation.id, state: "open" })] });
+    const quality = await app.inject({
+      method: "GET", url: `/api/projects/${project.id}/knowledge-quality`, headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) }
+    });
+    expect(quality.statusCode).toBe(200);
+    expect(quality.json()).toMatchObject({ qualityPipeline: { status: "queued", artifactReady: false, errorCode: null } });
     expect((await app.inject({
       method: "PATCH", url: `/api/projects/${project.id}/remediations/${remediation.id}`,
       headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) }, payload: { state: "accepted" }

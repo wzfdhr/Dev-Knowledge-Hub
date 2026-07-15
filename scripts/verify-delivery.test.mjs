@@ -82,9 +82,12 @@ describe("delivery database isolation", () => {
 
   test("exposes one release verification entrypoint", async () => {
     const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+    const deliveryMatrix = await readFile("docs/operations/knowledge-kernel-delivery-matrix.md", "utf8");
 
     expect(packageJson.scripts["release:verify"]).toBe("node scripts/release-verify.mjs");
     expect(packageJson.scripts["phase:merge"]).toBe("node scripts/merge-verified-pr.mjs");
+    expect(deliveryMatrix).toContain("--match-head-commit");
+    expect(deliveryMatrix).not.toMatch(/\| Verified head \|/);
   });
 
   test("seeds representative durable state before the CI recovery rehearsal", async () => {

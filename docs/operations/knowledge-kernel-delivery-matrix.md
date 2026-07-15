@@ -21,14 +21,15 @@ The supplemental commits remain separate commits in Phase A. They are existing w
 
 | Item | Result |
 | --- | --- |
-| Verified head | `2df20c0` |
-| GitHub run | [`29384372103`](https://github.com/wzfdhr/Dev-Knowledge-Hub/actions/runs/29384372103) |
+| Authoritative review target | [Phase A PR #3](https://github.com/wzfdhr/Dev-Knowledge-Hub/pull/3) current head at user approval |
+| Head binding | `phase:merge` requires the approved 40-character head SHA and GitHub `--match-head-commit` |
+| GitHub checks | The current PR head must report successful `verify` and `container-smoke`; older runs are not release evidence |
 | `verify` | Passed, including real PostgreSQL integration, build, acceptance, and E2E |
 | `container-smoke` | Passed, including container health and isolated recovery rehearsal |
-| Recovery artifact | `recovery-evidence`, schema version 2 |
+| Recovery artifact | The current head's `container-smoke` artifact named `recovery-evidence`, schema version 2 |
 | Representative database restore | workspace, user, project, project member, snapshot, release, release channel, and artifact counts are each `1` |
 | Durable file restore | snapshot, repository, uploaded source, and artifact file counts are each `1`; all four archive SHA-256 values recorded |
-| Integrity | orphaned release/channel/artifact and invalid project-membership counts are all `0` |
+| Integrity | orphaned release/channel/artifact and invalid project-membership counts are all `0`; every artifact content digest is verified |
 | Production state | No production deployment or production volume access occurred |
 
 ## Original seven-stage status

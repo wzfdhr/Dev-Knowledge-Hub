@@ -14,7 +14,9 @@ database_container=""
 application_container=""
 
 finish() {
-  local exit_code="$?"
+  local exit_code="$1"
+
+  trap - EXIT INT TERM
 
   if [[ -n "$application_container" ]]; then
     docker rm -f "$application_container" >/dev/null 2>&1 || true
@@ -41,7 +43,9 @@ finish() {
   exit "$exit_code"
 }
 
-trap finish EXIT INT TERM
+trap 'finish $?' EXIT
+trap 'finish 130' INT
+trap 'finish 143' TERM
 
 mkdir -p "$BACKUP_STATE_DIR"
 chmod 700 "$BACKUP_STATE_DIR"

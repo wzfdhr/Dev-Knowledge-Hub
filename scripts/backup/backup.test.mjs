@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,12 @@ const projectRoot = join(scriptDirectory, "../..");
 const backupScript = join(scriptDirectory, "devkh-backup.sh");
 const restoreDrillScript = join(scriptDirectory, "devkh-restore-drill.sh");
 
-function createFixture({ resticBackupExit = "0", artifactContent = '{"fixture":true}' } = {}) {
+function createFixture({
+  resticBackupExit = "0",
+  resticBackupDelay = "0",
+  resticRestoreDelay = "0",
+  artifactContent = '{"fixture":true}'
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), "devkh-backup-"));
   const bin = join(root, "bin");
   const log = join(root, "calls.log");
@@ -41,9 +46,10 @@ esac
   writeFileSync(join(bin, "restic"), String.raw`#!/usr/bin/env sh
 printf 'restic %s\n' "$*" >> "$CALL_LOG"
 case "$1" in
-  backup) exit "$RESTIC_BACKUP_EXIT" ;;
+  backup) sleep "$RESTIC_BACKUP_DELAY"; exit "$RESTIC_BACKUP_EXIT" ;;
   snapshots) printf '[{"short_id":"abc123"}]' ;;
   restore)
+    sleep "$RESTIC_RESTORE_DELAY"
     target=""
     while [ "$#" -gt 0 ]; do
       if [ "$1" = "--target" ]; then target="$2"; shift 2; else shift; fi
@@ -77,6 +83,8 @@ esac
       PATH: `${bin}:${process.env.PATH}`,
       CALL_LOG: log,
       RESTIC_BACKUP_EXIT: resticBackupExit,
+      RESTIC_BACKUP_DELAY: resticBackupDelay,
+      RESTIC_RESTORE_DELAY: resticRestoreDelay,
       FAKE_ARTIFACT_CONTENT: artifactContent,
       COMPOSE_DIR: root,
       COMPOSE_PROJECT_NAME: "dev-knowledge-hub",
@@ -89,6 +97,18 @@ esac
       BACKUP_STATE_DIR: stateDirectory
     }
   };
+}
+
+async function waitForLog(path, pattern) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      if (pattern.test(readFileSync(path, "utf8"))) return;
+    } catch {
+      // The command has not written its first log entry yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`Timed out waiting for ${pattern}`);
 }
 
 test("restarts app and skips retention when the encrypted upload fails", () => {
@@ -131,6 +151,34 @@ test("uploads one encrypted set before applying retention", () => {
     );
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("interrupted backup and restore operations are recorded as failures", async () => {
+  for (const operation of ["backup", "restore-drill"]) {
+    const fixture = createFixture(operation === "backup"
+      ? { resticBackupDelay: "1" }
+      : { resticRestoreDelay: "1" });
+    const script = operation === "backup" ? backupScript : restoreDrillScript;
+    const marker = operation === "backup" ? /restic backup/ : /restic restore/;
+
+    try {
+      const child = spawn(script, [], {
+        env: fixture.environment,
+        stdio: "ignore"
+      });
+      const exited = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+      await waitForLog(fixture.log, marker);
+      child.kill("SIGTERM");
+      const result = await exited;
+
+      assert.notEqual(result.code, 0);
+      const status = JSON.parse(readFileSync(join(fixture.environment.BACKUP_STATE_DIR, "status.json"), "utf8"));
+      assert.equal(status.operation, operation);
+      assert.equal(status.result, "failed");
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
   }
 });
 

@@ -16,4 +16,14 @@ describe("pipeline history backfill", () => {
     expect(script).toContain("legacy-provenance-only");
     expect(script).not.toContain("UPDATE releases");
   });
+
+  test("limits reports to a protected root and validates repository provenance", async () => {
+    const script = await readFile(path.join(root, "scripts/backfill-pipeline-history.mjs"), "utf8");
+
+    expect(script).toContain("PIPELINE_HISTORY_REPORT_ROOT");
+    expect(script).toContain("flag: \"wx\"");
+    expect(script).toContain("rename(");
+    expect(script).toContain("b.repository_id = r.repository_id");
+    expect(script).toContain("s.repository_id = r.repository_id");
+  });
 });

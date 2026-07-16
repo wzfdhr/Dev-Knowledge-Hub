@@ -1,7 +1,7 @@
 import { authenticatedCookie, csrfHeaders } from "../test-support/csrf";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -486,7 +486,8 @@ integration("PostgreSQL cited knowledge integration", () => {
     await runMigrations(pool);
     await pool.query("TRUNCATE workspaces CASCADE");
     const reportDirectory = await mkdtemp(path.join(os.tmpdir(), "devkh-pipeline-backfill-"));
-    const reportPath = path.join(reportDirectory, "report.json");
+    const reportName = "report.json";
+    const reportPath = path.join(reportDirectory, reportName);
     try {
       const store = new PostgresAppStore(pool);
       const setup = await store.createInitialSetup("backfill@example.com", "hash");
@@ -518,6 +519,19 @@ integration("PostgreSQL cited knowledge integration", () => {
       const release = await store.createReleaseDraft(setup!.workspace.id, repository!.id, build.id, "1.0.0");
       await store.publishRelease(setup!.workspace.id, release.id);
       await pool.query("UPDATE build_jobs SET snapshot_id = NULL WHERE id = $1", [build.id]);
+      await pool.query(
+        `WITH generated_builds AS (
+           INSERT INTO build_jobs
+             (workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha, status)
+           SELECT $1, $2, $3, '/tmp/backfill-snapshot', repeat('c', 40), 'queued'
+           FROM generate_series(1, 501)
+           RETURNING id, snapshot_id
+         )
+         INSERT INTO releases (workspace_id, repository_id, build_job_id, snapshot_id, version)
+         SELECT $1, $2, id, snapshot_id, 'legacy-batch-' || row_number() OVER ()
+         FROM generated_builds`,
+        [setup!.workspace.id, repository!.id, snapshotId]
+      );
       await pool.query(`
         CREATE FUNCTION reject_pipeline_history_release_updates()
         RETURNS trigger LANGUAGE plpgsql AS $$
@@ -526,16 +540,23 @@ integration("PostgreSQL cited knowledge integration", () => {
         END;
         $$;
         CREATE TRIGGER reject_pipeline_history_release_updates
-          BEFORE UPDATE ON releases
+          BEFORE INSERT OR UPDATE OR DELETE ON releases
           FOR EACH ROW EXECUTE FUNCTION reject_pipeline_history_release_updates();
       `);
 
       await execute(process.execPath, [path.resolve("scripts/backfill-pipeline-history.mjs")], {
-        env: { ...process.env, DATABASE_URL: databaseUrl, PIPELINE_HISTORY_REPORT: reportPath }
+        env: {
+          ...process.env, DATABASE_URL: databaseUrl,
+          PIPELINE_HISTORY_REPORT_ROOT: reportDirectory, PIPELINE_HISTORY_REPORT: reportName
+        }
       });
       const firstReport = await readFile(reportPath, "utf8");
+      expect((await stat(reportPath)).mode & 0o777).toBe(0o600);
       await execute(process.execPath, [path.resolve("scripts/backfill-pipeline-history.mjs")], {
-        env: { ...process.env, DATABASE_URL: databaseUrl, PIPELINE_HISTORY_REPORT: reportPath }
+        env: {
+          ...process.env, DATABASE_URL: databaseUrl,
+          PIPELINE_HISTORY_REPORT_ROOT: reportDirectory, PIPELINE_HISTORY_REPORT: reportName
+        }
       });
 
       expect(await readFile(reportPath, "utf8")).toBe(firstReport);
@@ -543,7 +564,7 @@ integration("PostgreSQL cited knowledge integration", () => {
         schemaVersion: 2,
         policy: "legacy-provenance-only",
         batchSize: 500,
-        legacyReleasesRetained: 1,
+        legacyReleasesRetained: 502,
         missingSnapshots: [{
           releaseId: release.id,
           workspaceId: setup!.workspace.id,

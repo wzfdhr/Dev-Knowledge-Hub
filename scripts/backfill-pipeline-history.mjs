@@ -1,14 +1,34 @@
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { chmod, lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { Pool } from "pg";
 
 const BATCH_SIZE = 500;
 
+async function writePrivateReport(payload) {
+  const reportRoot = path.resolve(process.env.PIPELINE_HISTORY_REPORT_ROOT ?? "var/reports");
+  const reportName = process.env.PIPELINE_HISTORY_REPORT ?? "pipeline-history-backfill.json";
+  if (path.isAbsolute(reportName) || path.basename(reportName) !== reportName) {
+    throw new Error("PIPELINE_HISTORY_REPORT must be a filename inside PIPELINE_HISTORY_REPORT_ROOT");
+  }
+  await mkdir(reportRoot, { recursive: true, mode: 0o700 });
+  const root = await lstat(reportRoot);
+  if (!root.isDirectory() || root.isSymbolicLink()) throw new Error("PIPELINE_HISTORY_REPORT_ROOT must be a real directory");
+  await chmod(reportRoot, 0o700);
+  const reportPath = path.join(reportRoot, reportName);
+  const temporaryPath = path.join(reportRoot, `.${reportName}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(payload)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    await rename(temporaryPath, reportPath);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
+}
+
 async function main() {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) throw new Error("DATABASE_URL is required");
-  const reportPath = path.resolve(process.env.PIPELINE_HISTORY_REPORT ?? "var/pipeline-history-backfill.json");
   const pool = new Pool({ connectionString });
   const missingSnapshots = [];
   let cursor = "";
@@ -17,7 +37,13 @@ async function main() {
     for (;;) {
       const { rows } = await pool.query(
         `SELECT r.id, r.workspace_id, r.build_job_id, b.snapshot_id,
-                EXISTS (SELECT 1 FROM source_snapshots s WHERE s.id = b.snapshot_id AND s.workspace_id = r.workspace_id) AS snapshot_exists
+                EXISTS (
+                  SELECT 1 FROM source_snapshots s
+                  WHERE s.id = b.snapshot_id
+                    AND s.workspace_id = r.workspace_id
+                    AND b.repository_id = r.repository_id
+                    AND s.repository_id = r.repository_id
+                ) AS snapshot_exists
          FROM releases r JOIN build_jobs b ON b.id = r.build_job_id AND b.workspace_id = r.workspace_id
          WHERE r.id::text > $1 AND r.kernel_mode = 'legacy'
          ORDER BY r.id::text LIMIT $2`,
@@ -33,15 +59,13 @@ async function main() {
   } finally {
     await pool.end();
   }
-  await mkdir(path.dirname(reportPath), { recursive: true, mode: 0o700 });
-  await writeFile(reportPath, `${JSON.stringify({
+  await writePrivateReport({
     schemaVersion: 2,
     policy: "legacy-provenance-only",
     batchSize: BATCH_SIZE,
     legacyReleasesRetained,
     missingSnapshots
-  })}\n`, { mode: 0o600 });
-  await chmod(reportPath, 0o600);
+  });
   console.log(`Retained ${legacyReleasesRetained} legacy releases; identified ${missingSnapshots.length} releases with absent build snapshots.`);
 }
 

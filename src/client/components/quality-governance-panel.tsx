@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, FileCode2, ShieldCheck, XCircle } from "lucide-react";
+import { Check, FileCode2, Hammer, ShieldCheck, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { errorMessage, type ApiClient, type RemediationListParams } from "../api/client";
@@ -65,6 +65,14 @@ export function QualityGovernancePanel({
       ]);
     }
   });
+  const rebuild = useMutation({
+    mutationFn: (remediationId: string) => api.requestProjectRemediationRebuild(projectId, remediationId),
+    onSuccess: () => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["project-remediations", projectId] }),
+      queryClient.invalidateQueries({ queryKey: ["project-knowledge-quality", projectId] }),
+      queryClient.invalidateQueries({ queryKey: ["projects", projectId, "builds"] })
+    ])
+  });
   const items = query.data?.remediations ?? [];
   const selected = items.find((item) => item.id === selectedId) ?? null;
   const ownMembership = members.data?.members.find((member) => member.id === session.data?.admin.id);
@@ -118,7 +126,7 @@ export function QualityGovernancePanel({
           </dl>{canManage && selected.state === "open" && <div className="quality-actions" role="group" aria-label="质量问题操作">
             <button className="button primary" disabled={transition.isPending} onClick={() => transition.mutate({ remediationId: selected.id, state: "accepted" })}><Check aria-hidden="true" />接受处理</button>
             {!dismissing ? <button className="button" disabled={transition.isPending} onClick={() => setDismissing(true)}><XCircle aria-hidden="true" />忽略</button> : <form className="quality-dismiss-form" onSubmit={(event) => { event.preventDefault(); transition.mutate({ remediationId: selected.id, state: "dismissed", reason: dismissalReason.trim() }); }}><label>忽略理由<input aria-label="忽略理由" value={dismissalReason} onChange={(event) => setDismissalReason(event.target.value)} maxLength={500} /></label><button className="button danger" type="submit" disabled={!dismissalReason.trim() || transition.isPending}>确认忽略</button><button className="button" type="button" disabled={transition.isPending} onClick={() => { setDismissing(false); setDismissalReason(""); }}>取消</button></form>}
-          </div>}{transition.error && <ErrorState message={errorMessage(transition.error)} />}
+          </div>}{canManage && selected.state === "accepted" && <div className="quality-actions" role="group" aria-label="质量问题操作"><button className="button primary" disabled={rebuild.isPending} onClick={() => rebuild.mutate(selected.id)}><Hammer aria-hidden="true" />请求范围重建</button></div>}{transition.error || rebuild.error ? <ErrorState message={errorMessage(transition.error ?? rebuild.error)} /> : null}{rebuild.isSuccess && <p className="success-message">已创建范围重建候选，当前已发布版本未改变。</p>}
         </> : <div className="document-empty"><ShieldCheck aria-hidden="true" /><h3>选择一个质量问题</h3><p>查看来源引用、关联构建和可信质量依据。</p></div>}
       </aside>
     </div>}

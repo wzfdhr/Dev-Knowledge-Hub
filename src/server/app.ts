@@ -54,6 +54,7 @@ import { MemorySessionStore, type SessionStore } from "./security/session-store.
 import { createCodexConnectionPack } from "./codex/connection-pack.js";
 import type { BuildEvent, BuildService } from "./knowledge/build-service.js";
 import { deriveChangeImpact } from "./knowledge/change-impact.js";
+import { deriveRemediationScope } from "./knowledge/remediation-scope.js";
 import { loadPublishedKnowledgeGraph } from "./knowledge/pipeline/graph-query.js";
 import { exportKnowledgeGraph } from "./knowledge/pipeline/viz.js";
 import { legacyBuildStatus } from "./knowledge/pipeline/contracts.js";
@@ -1216,7 +1217,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!remediation || remediation.projectId !== params.data.projectId) {
       return sendError(reply, 404, "REMEDIATION_NOT_FOUND", "Remediation was not found");
     }
-    if (remediation.state !== "accepted") {
+    if (remediation.state !== "accepted" && remediation.state !== "rebuilding") {
       return sendError(reply, 409, "REMEDIATION_NOT_ACCEPTED", "Remediation must be accepted first");
     }
     const sourceBuild = await options.store.getBuild(admin.workspaceId, remediation.sourceBuildId);
@@ -1226,11 +1227,16 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!sourceBuild || sourceBuild.repositoryId !== remediation.repositoryId || !snapshot) {
       return sendError(reply, 409, "REMEDIATION_SOURCE_UNAVAILABLE", "Remediation source snapshot is unavailable");
     }
+    const affectedPaths = deriveRemediationScope({
+      sourceRefs: remediation.issue.sourceRefs,
+      graph: await options.store.getKnowledgeGraph(admin.workspaceId, params.data.projectId, sourceBuild.id)
+    });
     try {
       const result = await options.store.requestRemediationBuildWithAudit({
         workspaceId: admin.workspaceId,
         remediationId: remediation.id,
         actorId: admin.id,
+        affectedPaths,
         build: {
           workspaceId: admin.workspaceId,
           repositoryId: remediation.repositoryId,

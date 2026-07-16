@@ -1097,13 +1097,20 @@ export class MemoryAppStore implements AppStore {
     input: RemediationBuildInput
   ): Promise<{ build: BuildRecord; created: boolean }> {
     const remediation = await this.getRemediation(input.workspaceId, input.remediationId);
-    if (!remediation || remediation.state !== "accepted") throw new Error("Remediation must be accepted first");
+    if (!remediation) throw new Error("Remediation must be accepted first");
+    if (remediation.state === "rebuilding" && remediation.rebuildBuildId) {
+      const build = await this.getBuild(input.workspaceId, remediation.rebuildBuildId);
+      if (build) return { build, created: false };
+      throw new Error("Remediation rebuild is unavailable");
+    }
+    if (remediation.state !== "accepted") throw new Error("Remediation must be accepted first");
     const buildLength = this.builds.length;
     const buildEventLength = this.buildEvents.length;
     const remediationEventLength = this.remediationEvents.length;
     const auditLength = this.auditEvents.length;
     const previousSequence = this.nextBuildEventSequence;
     const previous = { state: remediation.state, rebuildBuildId: remediation.rebuildBuildId, updatedAt: remediation.updatedAt };
+    const affectedPaths = [...new Set(input.affectedPaths ?? remediation.issue.sourceRefs.map((reference) => reference.path))].sort();
     try {
       const purpose = {
         kind: "remediation" as const,
@@ -1112,7 +1119,8 @@ export class MemoryAppStore implements AppStore {
         remediationContext: [{
           remediationId: remediation.id,
           issueId: remediation.issue.id,
-          sourceRefs: remediation.issue.sourceRefs
+          sourceRefs: remediation.issue.sourceRefs,
+          affectedPaths
         }]
       };
       const result = await this.createBuild({ ...input.build, purpose });
@@ -1121,7 +1129,7 @@ export class MemoryAppStore implements AppStore {
       await this.recordAudit({
         workspaceId: input.workspaceId, actorId: input.actorId,
         action: "remediation.rebuild_requested", resourceType: "remediation",
-        resourceId: remediation.id, metadata: { buildId: result.build.id, issueId: remediation.issue.id }
+        resourceId: remediation.id, metadata: { buildId: result.build.id, issueId: remediation.issue.id, affectedPaths }
       });
       return result;
     } catch (error) {

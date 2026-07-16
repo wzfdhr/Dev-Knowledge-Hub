@@ -98,6 +98,7 @@ describe("remediation persistence", () => {
       workspaceId: setup!.workspace.id,
       remediationId: remediation.id,
       actorId: setup!.admin.id,
+      affectedPaths: ["src/payments.ts", "src/core.ts"],
       build: {
         workspaceId: setup!.workspace.id,
         repositoryId: repository!.id,
@@ -114,9 +115,24 @@ describe("remediation persistence", () => {
       remediationContext: [expect.objectContaining({
         remediationId: remediation.id,
         issueId: "lint-coverage",
-        sourceRefs: []
+        sourceRefs: [],
+        affectedPaths: ["src/core.ts", "src/payments.ts"]
       })]
     });
+    const repeated = await store.requestRemediationBuildWithAudit({
+      workspaceId: setup!.workspace.id,
+      remediationId: remediation.id,
+      actorId: setup!.admin.id,
+      affectedPaths: ["src/payments.ts", "src/core.ts"],
+      build: {
+        workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id,
+        snapshotId: "snapshot-1",
+        snapshotPath: "/tmp/snapshot-1",
+        commitSha: "a".repeat(40)
+      }
+    });
+    expect(repeated).toEqual({ build: result.build, created: false });
     await expect(store.getRemediation(setup!.workspace.id, remediation.id)).resolves.toMatchObject({
       state: "rebuilding",
       rebuildBuildId: result.build.id
@@ -128,7 +144,10 @@ describe("remediation persistence", () => {
     expect(store.releases).toEqual([]);
     expect(store.auditEvents).toEqual(expect.arrayContaining([
       expect.objectContaining({ action: "remediation.transitioned", resourceId: remediation.id }),
-      expect.objectContaining({ action: "remediation.rebuild_requested", resourceId: remediation.id })
+      expect.objectContaining({
+        action: "remediation.rebuild_requested", resourceId: remediation.id,
+        metadata: expect.objectContaining({ affectedPaths: ["src/core.ts", "src/payments.ts"] })
+      })
     ]));
   });
 });

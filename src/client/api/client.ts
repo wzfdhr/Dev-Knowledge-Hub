@@ -105,6 +105,7 @@ export interface ApiClient {
   listProjectRemediations(projectId: string, params: RemediationListParams): Promise<{ remediations: Remediation[] }>;
   listProjectRemediationEvents(projectId: string, remediationId: string): Promise<{ events: RemediationEvent[] }>;
   transitionProjectRemediation(projectId: string, remediationId: string, input: { state: "accepted" | "dismissed" | "resolved"; reason?: string }): Promise<{ remediation: Remediation }>;
+  requestProjectRemediationRebuild(projectId: string, remediationId: string): Promise<{ build: Build; created: boolean }>;
   listBuilds(pagination: PaginationParams): Promise<{ builds: Build[] } & PaginatedResponse>;
   getBuildStages(id: string): Promise<{
     buildId: string;
@@ -228,6 +229,10 @@ export const api: ApiClient = {
   transitionProjectRemediation: (projectId, remediationId, input) => request(
     `/api/projects/${encodeURIComponent(projectId)}/remediations/${encodeURIComponent(remediationId)}`,
     { method: "PATCH", body: json(input) }
+  ),
+  requestProjectRemediationRebuild: (projectId, remediationId) => request(
+    `/api/projects/${encodeURIComponent(projectId)}/remediations/${encodeURIComponent(remediationId)}/rebuild`,
+    { method: "POST" }
   ),
   listBuilds: (pagination) => request(listPath("/api/builds", pagination)),
   getBuildStages: (id) => request(`/api/builds/${encodeURIComponent(id)}/stages`),

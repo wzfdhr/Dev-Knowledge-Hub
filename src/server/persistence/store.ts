@@ -386,6 +386,7 @@ export interface RemediationBuildInput {
   workspaceId: string;
   remediationId: string;
   actorId: string;
+  affectedPaths?: string[];
   build: BuildInput;
 }
 

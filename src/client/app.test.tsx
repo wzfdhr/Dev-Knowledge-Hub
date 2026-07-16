@@ -779,7 +779,7 @@ describe("knowledge citations", () => {
 
   test("filters quality governance issues and shows the selected source context", async () => {
     const user = userEvent.setup();
-    const listProjectRemediations = vi.fn().mockResolvedValue({ remediations: [{
+    const remediation = {
       id: "remediation-1", projectId: "project-1", repositoryId: "repo", sourceBuildId: "build-1",
       issue: {
         id: "issue-1", buildId: "build-1", rule: "KNOWLEDGE_LOW_COVERAGE", severity: "warning",
@@ -789,7 +789,14 @@ describe("knowledge citations", () => {
       },
       state: "open", rebuildBuildId: null,
       createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z"
-    }] });
+    };
+    const acceptedRemediation = { ...remediation, state: "accepted" as const };
+    const listProjectRemediations = vi.fn().mockResolvedValue({ remediations: [remediation] });
+    const transitionProjectRemediation = vi.fn().mockImplementation(async (_projectId: string, _remediationId: string, input: { state: string }) => {
+      if (input.state === "accepted") listProjectRemediations.mockResolvedValue({ remediations: [acceptedRemediation] });
+      return { remediation: { id: "remediation-1", state: input.state } };
+    });
+    const requestProjectRemediationRebuild = vi.fn().mockResolvedValue({ build: { id: "remediation-build" }, created: true });
     const api = {
       getRepositoryStatus: vi.fn().mockResolvedValue({
         repository: { id: "repo" },
@@ -813,7 +820,8 @@ describe("knowledge citations", () => {
         change: null, diagnostics: [{ code: "PUBLISHED" }]
       }),
       listProjectRemediations,
-      transitionProjectRemediation: vi.fn().mockResolvedValue({ remediation: { id: "remediation-1", state: "accepted" } })
+      transitionProjectRemediation,
+      requestProjectRemediationRebuild
     } as unknown as ApiClient;
     localStorage.setItem("devkh:active-project-id", "project-1");
 
@@ -834,18 +842,20 @@ describe("knowledge citations", () => {
     expect(within(governance).getByText("build-1")).toBeVisible();
     expect(within(governance).getByText("引用完整")).toBeVisible();
     const actions = await within(governance).findByRole("group", { name: "质量问题操作" });
-    await user.click(within(actions).getByRole("button", { name: "接受处理" }));
-    await waitFor(() => expect(api.transitionProjectRemediation).toHaveBeenCalledWith(
-      "project-1", "remediation-1", { state: "accepted" }
-    ));
     await user.click(within(actions).getByRole("button", { name: "忽略" }));
     const dismissalReason = within(actions).getByLabelText("忽略理由");
     expect(within(actions).getByRole("button", { name: "确认忽略" })).toBeDisabled();
     await user.type(dismissalReason, "该规则不适用于当前项目");
     await user.click(within(actions).getByRole("button", { name: "确认忽略" }));
-    await waitFor(() => expect(api.transitionProjectRemediation).toHaveBeenLastCalledWith(
+    await waitFor(() => expect(api.transitionProjectRemediation).toHaveBeenCalledWith(
       "project-1", "remediation-1", { state: "dismissed", reason: "该规则不适用于当前项目" }
     ));
+    await user.click(within(actions).getByRole("button", { name: "接受处理" }));
+    await waitFor(() => expect(api.transitionProjectRemediation).toHaveBeenLastCalledWith(
+      "project-1", "remediation-1", { state: "accepted" }
+    ));
+    await user.click(await within(governance).findByRole("button", { name: "请求范围重建" }));
+    await waitFor(() => expect(api.requestProjectRemediationRebuild).toHaveBeenCalledWith("project-1", "remediation-1"));
   });
 });
 

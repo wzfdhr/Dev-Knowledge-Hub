@@ -2714,11 +2714,24 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         [input.workspaceId, input.remediationId]
       );
       const selectedRow = selected.rows[0];
-      if (!selectedRow || selectedRow.state !== "accepted") throw new Error("Remediation must be accepted first");
+      if (!selectedRow) throw new Error("Remediation must be accepted first");
+      if (selectedRow.state === "rebuilding" && selectedRow.rebuild_build_id) {
+        const existingBuild = await client.query<BuildRow>(
+          `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
+                  status, warnings, cancel_requested, error_message,
+                  purpose, feedback_ids, feedback_context, remediation_context, allow_llm
+           FROM build_jobs WHERE workspace_id = $1 AND id = $2`,
+          [input.workspaceId, selectedRow.rebuild_build_id]
+        );
+        if (existingBuild.rows[0]) return { build: buildRecord(existingBuild.rows[0]), created: false };
+        throw new Error("Remediation rebuild is unavailable");
+      }
+      if (selectedRow.state !== "accepted") throw new Error("Remediation must be accepted first");
       const remediation = remediationRecord(selectedRow);
       if (input.build.workspaceId !== remediation.workspaceId || input.build.repositoryId !== remediation.repositoryId) {
         throw new Error("Remediation build does not match source project");
       }
+      const affectedPaths = [...new Set(input.affectedPaths ?? remediation.issue.sourceRefs.map((reference) => reference.path))].sort();
       const purpose = {
         kind: "remediation" as const,
         feedbackIds: [] as [],
@@ -2726,7 +2739,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         remediationContext: [{
           remediationId: remediation.id,
           issueId: remediation.issue.id,
-          sourceRefs: remediation.issue.sourceRefs
+          sourceRefs: remediation.issue.sourceRefs,
+          affectedPaths
         }]
       };
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [input.build.repositoryId]);
@@ -2785,7 +2799,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       await this.insertAudit(client, {
         workspaceId: input.workspaceId, actorId: input.actorId,
         action: "remediation.rebuild_requested", resourceType: "remediation",
-        resourceId: remediation.id, metadata: { buildId: build.id, issueId: remediation.issue.id }
+        resourceId: remediation.id, metadata: { buildId: build.id, issueId: remediation.issue.id, affectedPaths }
       });
       return { build, created };
     });

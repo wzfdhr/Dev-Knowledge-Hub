@@ -754,6 +754,15 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     });
   }
 
+  async listQueuedStageRuns(): Promise<PipelineStageRunRecord[]> {
+    const { rows } = await this.pool.query<StageRunRow>(
+      `SELECT id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+              input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail
+       FROM build_stage_runs WHERE status = 'queued' ORDER BY created_at, id`
+    );
+    return rows.map(stageRunRecord);
+  }
+
   async transitionStageRun(
     workspaceId: string,
     projectId: string,

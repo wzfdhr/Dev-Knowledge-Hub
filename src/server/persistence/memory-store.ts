@@ -1687,6 +1687,10 @@ export class MemoryAppStore implements AppStore {
     return run;
   }
 
+  async listQueuedStageRuns(): Promise<PipelineStageRunRecord[]> {
+    return this.pipelineStageRuns.filter((run) => run.status === "queued").map((run) => structuredClone(run));
+  }
+
   async transitionStageRun(
     workspaceId: string,
     projectId: string,

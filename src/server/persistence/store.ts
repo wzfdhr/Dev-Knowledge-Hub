@@ -68,6 +68,7 @@ export interface PipelineArtifactStore {
     buildId: string,
     projectId: string
   ): Promise<PipelineStageRunRecord | null>;
+  listQueuedStageRuns(): Promise<PipelineStageRunRecord[]>;
   transitionStageRun(
     workspaceId: string,
     projectId: string,

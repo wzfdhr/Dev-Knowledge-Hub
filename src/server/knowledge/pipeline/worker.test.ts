@@ -60,6 +60,8 @@ class FakePipelineStore implements PipelineArtifactStore {
     return this.claimNextStageRun("workspace-1", projectId, { buildId, stage: this.runs.find((run) => run.id === stageRunId)?.stage });
   }
 
+  async listQueuedStageRuns() { return this.runs.filter((run) => run.status === "queued"); }
+
   async transitionStageRun(_workspaceId: string, _projectId: string, stageRunId: string, expectedStatus: PipelineStageRunRecord["status"], status: PipelineStageRunRecord["status"], details = {}) {
     const run = this.runs.find((candidate) => candidate.id === stageRunId);
     if (!run || run.status !== expectedStatus) return null;
@@ -98,6 +100,17 @@ describe("PipelineStageWorker", () => {
     expect(queue.sent).toEqual([
       { stageRunId: "run-1", buildId: "build-1", projectId: "project-1" }
     ]);
+  });
+
+  test("re-dispatches durable queued runs when the worker starts", async () => {
+    const store = new FakePipelineStore();
+    await store.createStageRun({ ...job, stage: "convert", attempt: 1 });
+    const queue = new FakeQueue();
+    const worker = new PipelineStageWorker(store, queue, async () => ({ outputManifestIds: [] }), stages);
+
+    await worker.start();
+
+    expect(queue.sent).toEqual([{ stageRunId: "run-1", buildId: "build-1", projectId: "project-1" }]);
   });
 
   test("succeeds one stage, then persists and queues only the next stage", async () => {

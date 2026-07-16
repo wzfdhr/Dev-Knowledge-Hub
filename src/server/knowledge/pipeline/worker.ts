@@ -43,6 +43,17 @@ export class PipelineStageWorker {
 
   async start(): Promise<void> {
     await this.queue.start((job) => this.process(job));
+    await this.reconcileQueuedRuns();
+  }
+
+  private async reconcileQueuedRuns(): Promise<void> {
+    for (const run of await this.store.listQueuedStageRuns()) {
+      try {
+        await this.queue.send({ stageRunId: run.id, buildId: run.buildId, projectId: run.projectId });
+      } catch {
+        // The durable queued row remains available for the next reconciliation pass.
+      }
+    }
   }
 
   stop(): Promise<void> {

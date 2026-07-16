@@ -45,7 +45,7 @@ expect(result.rows).toEqual([{ role: "admin" }]);
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: docker compose -p dev-knowledge-hub --profile test run --rm --build integration
+Run: docker compose -f /absolute/path/to/dev-knowledge-hub/docker-compose.yml -p dev-knowledge-hub --profile test run --rm --build integration
 
 Expected: FAIL，project_members 尚不存在。
 
@@ -85,7 +85,7 @@ export interface ProjectAccess {
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: docker compose -p dev-knowledge-hub --profile test run --rm --build integration
+Run: docker compose -f /absolute/path/to/dev-knowledge-hub/docker-compose.yml -p dev-knowledge-hub --profile test run --rm --build integration
 
 Expected: migration test PASS。
 
@@ -169,7 +169,7 @@ RETURNING project_id, user_id, role, created_at;
 Run:
 ~~~bash
 npm test -- src/server/persistence/memory-store.test.ts src/server/persistence/postgres-store.test.ts
-docker compose -p dev-knowledge-hub --profile test run --rm --build integration
+docker compose -f /absolute/path/to/dev-knowledge-hub/docker-compose.yml -p dev-knowledge-hub --profile test run --rm --build integration
 ~~~
 
 Expected: 所有测试 PASS，集成测试验证跨项目访问记录隔离。
@@ -326,9 +326,9 @@ Expected: 全部退出码为 0。
 同步迁移、服务端源文件、测试和 Docker 交付文件到 /opt/dev-knowledge-hub，再执行：
 
 ~~~bash
-docker compose -p dev-knowledge-hub --profile test run --rm --build integration
-docker compose -p dev-knowledge-hub up -d --build app
-docker compose -p dev-knowledge-hub ps
+docker compose -f /absolute/path/to/dev-knowledge-hub/docker-compose.yml -p dev-knowledge-hub --profile test run --rm --build integration
+docker compose -f /absolute/path/to/dev-knowledge-hub/docker-compose.yml -p dev-knowledge-hub up -d --build app
+docker compose -f /absolute/path/to/dev-knowledge-hub/docker-compose.yml -p dev-knowledge-hub ps
 curl -fsS http://127.0.0.1:3000/api/health
 ~~~
 

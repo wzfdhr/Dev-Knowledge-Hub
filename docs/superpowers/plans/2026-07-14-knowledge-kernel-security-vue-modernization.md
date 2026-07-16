@@ -573,7 +573,7 @@ expect(await runShadowBuild(snapshotId)).toMatchObject({ releaseCreated: false, 
 
 **TDD：** 用本地 Compose 压测 10 并发 build、取消、worker restart、SSE reconnect；测试脚本在错误率/队列延迟超过阈值时失败。先失败后实现指标读取和报告。
 
-**命令：** red 阶段执行 `node scripts/load/pipeline-load.mjs --concurrency 10 --expect-failure`，预期缺少指标/阈值检查而失败；green 阶段执行 `docker compose --profile integration up -d && node scripts/load/pipeline-load.mjs --concurrency 10 && node scripts/release/verify-production.mjs --base-url https://hub.starking.icu`，预期三条命令退出码 `0` 并产出 rollout report。
+**命令：** red 阶段执行 `node scripts/load/pipeline-load.mjs --concurrency 10 --expect-failure`，预期缺少指标/阈值检查而失败；green 阶段执行 `docker compose -f /absolute/path/to/dev-knowledge-hub/docker-compose.yml --profile integration up -d && node scripts/load/pipeline-load.mjs --concurrency 10 && node scripts/release/verify-production.mjs --base-url https://hub.starking.icu`，预期三条命令退出码 `0` 并产出 rollout report。
 
 ```ts
 expect(summary).toMatchObject({ concurrentBuilds: 10, errorRate: 0, p95QueueDelayMs: expect.any(Number) });

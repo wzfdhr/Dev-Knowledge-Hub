@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 
 import { describe, expect, test } from "vitest";
@@ -20,6 +21,17 @@ describe("delivery database isolation", () => {
     expect(ci.jobs.verify.env.TEST_DATABASE_URL).toContain("/devkh_test");
   });
 
+  test("documents the public HTTPS base URL required by the Compose application", async () => {
+    const environment = await readFile(".env.example", "utf8");
+    const readme = await readFile("README.md", "utf8");
+    const compose = await readFile("docker-compose.yml", "utf8");
+
+    expect(environment).toContain("PUBLIC_BASE_URL=https://hub.example.com");
+    expect(readme).toContain("PUBLIC_BASE_URL");
+    expect(readme).toContain("https://<your-public-domain>");
+    expect(compose).toContain("${PUBLIC_BASE_URL:-https://${DEVKH_DOMAIN:?set DEVKH_DOMAIN}}");
+  });
+
   test("boots both development surfaces, forces production start, and loads dotenv explicitly", async () => {
     const packageJson = JSON.parse(await readFile("package.json", "utf8"));
     const packageLock = JSON.parse(await readFile("package-lock.json", "utf8"));
@@ -40,7 +52,13 @@ describe("delivery database isolation", () => {
   test("builds the static askpass helper and runs a Compose image smoke job on both branches", async () => {
     const dockerfile = await readFile("Dockerfile", "utf8");
     const deliveryCheck = await readFile("scripts/verify-delivery.mjs", "utf8");
+    const compose = parse(await readFile("docker-compose.yml", "utf8"));
     const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
+    const phaseMerge = parse(await readFile(".github/workflows/phase-merge.yml", "utf8"));
+    const verifySteps = ci.jobs.verify.steps
+      .map((step) => step.run)
+      .filter(Boolean)
+      .join("\n");
     const smokeSteps = ci.jobs["container-smoke"].steps
       .map((step) => step.run)
       .filter(Boolean)
@@ -52,9 +70,144 @@ describe("delivery database isolation", () => {
     expect(String(ci.jobs.verify.steps.find((step) => step.uses === "actions/setup-node@v4")
       ?.with?.["node-version"])).toBe("22.13.0");
     expect(ci.on.push.branches).toEqual(expect.arrayContaining(["main", "codex/mvp"]));
-    expect(smokeSteps).toContain("docker build --target runtime");
-    expect(smokeSteps).toContain("docker compose config --quiet");
-    expect(smokeSteps).toContain("docker compose up -d");
+    expect(ci.jobs["container-smoke"].env.DEVKH_DOMAIN).toBe("hub.example.test");
+    expect(ci.jobs["container-smoke"].env.ACME_EMAIL).toBe("ci@example.test");
+    expect(ci.jobs["container-smoke"].env.PUBLIC_BASE_URL).toBe("https://hub.example.test");
+    expect(compose.services.app.environment.PUBLIC_BASE_URL)
+      .toBe("${PUBLIC_BASE_URL:-https://${DEVKH_DOMAIN:?set DEVKH_DOMAIN}}");
+    expect(ci.jobs["container-smoke"].env.COMPOSE_PROJECT_NAME).toBe("devkh-ci");
+    expect(ci.jobs["container-smoke"].env.DEVKH_CONTAINER_SMOKE).toBe("true");
+    expect(ci.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DIR).toBe("/tmp/devkh-recovery-evidence");
+    expect(ci.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DEFER_FINALIZATION).toBe("true");
+    expect(phaseMerge.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DEFER_FINALIZATION).toBe("true");
+    expect(verifySteps).toContain("npx playwright install --with-deps chromium");
+    expect(verifySteps).toContain("npm run release:verify -- --scope verify");
+    expect(smokeSteps).toContain("apt-get install -y restic");
+    expect(smokeSteps).toContain("npm run release:verify -- --scope container");
+    expect(ci.jobs["container-smoke"].steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uses: "actions/upload-artifact@v4", if: "always()" })
+    ]));
+  });
+
+  test("requires a real PostgreSQL URL before running the integration release gate", async () => {
+    const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+
+    expect(packageJson.scripts["test:integration"]).toContain(
+      "node scripts/require-env.mjs TEST_DATABASE_URL"
+    );
+  });
+
+  test("runs monitoring operational checks through the release backup gate", async () => {
+    const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+    const releaseVerifier = await readFile("scripts/release-verify.mjs", "utf8");
+
+    expect(packageJson.scripts["test:backup"]).toContain("scripts/monitoring/monitor.test.mjs");
+    expect(releaseVerifier).toContain('name: "backup-tests"');
+    expect(releaseVerifier).toContain('args: ["run", "test:backup"]');
+  });
+
+  test("pins every active operational Compose command to the repository file", async () => {
+    const readme = await readFile("README.md", "utf8");
+    const monitor = await readFile("scripts/monitoring/devkh-monitor.sh", "utf8");
+    const backup = await readFile("scripts/backup/devkh-backup.sh", "utf8");
+    const restoreDrill = await readFile("scripts/backup/devkh-restore-drill.sh", "utf8");
+    const publicAccess = await readFile("docs/operations/private-tailnet-access.md", "utf8");
+    const releaseGates = await readFile("docs/operations/private-repository-release-gates.md", "utf8");
+
+    expect(readme).toContain('cd /absolute/path/to/dev-knowledge-hub\nDEVKH_COMPOSE_FILE="$PWD/docker-compose.yml"');
+    expect(readme).not.toMatch(/docker compose(?! -f "\$DEVKH_COMPOSE_FILE")/);
+    expect(monitor).toContain('docker compose -f "$COMPOSE_DIR/docker-compose.yml"');
+    for (const operationalScript of [monitor, backup, restoreDrill]) {
+      expect(operationalScript).not.toContain("docker compose -f docker-compose.yml");
+      expect(operationalScript).toContain('docker-compose.yml"');
+    }
+    expect(publicAccess).not.toMatch(/docker compose(?! -f \/opt\/dev-knowledge-hub\/docker-compose\.yml)/);
+    expect(releaseGates).not.toMatch(/docker compose(?! -f "\$GITHUB_WORKSPACE\/docker-compose\.yml")/);
+  });
+
+  test("exposes one release verification entrypoint", async () => {
+    const packageJson = JSON.parse(await readFile("package.json", "utf8"));
+    const deliveryMatrix = await readFile("docs/operations/knowledge-kernel-delivery-matrix.md", "utf8");
+
+    expect(packageJson.scripts["release:verify"]).toBe("node scripts/release-verify.mjs");
+    expect(packageJson.scripts["phase:merge"]).toBe("node scripts/merge-verified-pr.mjs");
+    expect(deliveryMatrix).toContain("phase-merge.yml");
+    expect(deliveryMatrix).not.toMatch(/\| Verified head \|/);
+  });
+
+  test("keeps the local Compose override out of Git", async () => {
+    const gitignore = await readFile(".gitignore", "utf8");
+
+    expect(gitignore).toMatch(/^docker-compose\.override\.yml$/m);
+    expect(execFileSync("git", ["ls-files", "docker-compose.override.yml"], { encoding: "utf8" }).trim()).toBe("");
+  });
+
+  test("documents retained recovery fixtures when cleanup or verification fails", async () => {
+    const recoveryEvidence = await readFile("docs/operations/recovery-evidence.md", "utf8");
+    const offsiteBackups = await readFile("docs/operations/encrypted-offsite-backups.md", "utf8");
+
+    expect(recoveryEvidence).toContain("失败时会保留临时仓库、恢复现场和 Compose 状态供取证");
+    expect(offsiteBackups).toContain("失败时保留恢复目录和临时资源供取证");
+    expect(offsiteBackups).toContain("清理过程中出现错误时，可能已有部分资源被删除");
+  });
+
+  test("merges only from a trusted workflow after fresh checks of the approved base and head", async () => {
+    const workflow = parse(await readFile(".github/workflows/phase-merge.yml", "utf8"));
+    const mergeJob = workflow.jobs.merge;
+
+    expect(workflow.on).toHaveProperty("workflow_dispatch");
+    expect(workflow.on.workflow_dispatch.inputs).toHaveProperty("approved_base");
+    expect(workflow.permissions.contents).toBe("read");
+    expect(workflow.jobs.verify.permissions.contents).toBe("read");
+    expect(workflow.jobs["container-smoke"].permissions.contents).toBe("read");
+    expect(mergeJob.permissions.contents).toBe("write");
+    expect(mergeJob.permissions["pull-requests"]).toBe("read");
+    expect(mergeJob.needs).toEqual(["verify", "container-smoke"]);
+    expect(mergeJob.if).toContain("success()");
+    expect(mergeJob.if).toContain("inputs.user_approved");
+    expect(mergeJob.if).toContain("github.actor == github.repository_owner");
+    expect(workflow.jobs.verify.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uses: "actions/checkout@v4",
+        with: expect.objectContaining({ ref: "${{ inputs.approved_head }}" })
+      })
+    ]));
+    expect(workflow.jobs["container-smoke"].steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uses: "actions/checkout@v4",
+        with: expect.objectContaining({ ref: "${{ inputs.approved_head }}" })
+      })
+    ]));
+    const verifyCommands = workflow.jobs.verify.steps.map((step) => step.run).filter(Boolean).join("\n");
+    const containerCommands = workflow.jobs["container-smoke"].steps
+      .map((step) => step.run).filter(Boolean).join("\n");
+    expect(verifyCommands).toContain("git merge-base --is-ancestor");
+    expect(containerCommands).toContain("git merge-base --is-ancestor");
+    const mergeCommands = mergeJob.steps.map((step) => step.run).filter(Boolean).join("\n");
+    expect(mergeJob.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uses: "actions/checkout@v4",
+        with: expect.objectContaining({ ref: "${{ inputs.approved_base }}", "fetch-depth": 0 })
+      })
+    ]));
+    expect(mergeCommands).toContain("git merge --no-ff");
+    expect(mergeCommands).toContain("--force-with-lease=refs/heads/main:$APPROVED_BASE");
+    expect(mergeCommands).toContain("$APPROVED_HEAD");
+    expect(mergeCommands).toContain("$APPROVED_BASE");
+    expect(mergeCommands).not.toContain("--match-head-commit");
+  });
+
+  test("seeds representative durable state before the CI recovery rehearsal", async () => {
+    const recovery = await readFile("scripts/backup/ci-recovery-drill.sh", "utf8");
+    const seed = await readFile("scripts/backup/seed-ci-recovery-fixture.sh", "utf8");
+
+    expect(recovery.indexOf("seed-ci-recovery-fixture.sh"))
+      .toBeLessThan(recovery.indexOf("devkh-backup.sh"));
+    expect(seed).toContain("INSERT INTO project_members");
+    expect(seed).toContain("INSERT INTO knowledge_artifacts");
+    expect(seed).toContain("INSERT INTO releases");
+    expect(seed).toContain("INSERT INTO release_channels");
+    expect(seed.match(/write_volume_file /g)).toHaveLength(4);
   });
 
   test("does not retain a legacy resumable upload staging volume", async () => {

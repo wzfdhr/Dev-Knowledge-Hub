@@ -80,6 +80,10 @@ describe("knowledge quality pipeline stage", () => {
 
     expect(first).toEqual({ outputManifestIds: [expect.any(String)], reused: false });
     expect(second).toEqual({ outputManifestIds: first.outputManifestIds, reused: true });
+    await expect(store.listRemediations(workspaceId, project.id)).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceBuildId: build.id, issue: expect.objectContaining({ rule: "TABLE_SENSITIVE_FIELD" }) })
+    ]));
+    await expect(store.listRemediations(workspaceId, project.id)).resolves.toHaveLength(2);
     await expect(store.getKnowledgeGraph(workspaceId, project.id, build.id)).resolves.toEqual(expect.objectContaining({
       nodes: expect.arrayContaining([expect.objectContaining({ kind: "table", name: "contacts" })])
     }));

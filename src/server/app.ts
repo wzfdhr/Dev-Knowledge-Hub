@@ -1059,6 +1059,11 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       await options.store.countRemediations(admin.workspaceId, params.data.projectId, state)
     ] as const));
     const remediation = Object.fromEntries(remediationCounts) as Record<(typeof remediationStates)[number], number>;
+    const qualityRun = overview.latestBuild
+      ? (await options.store.listPipelineStageRuns(
+        admin.workspaceId, params.data.projectId, overview.latestBuild.id
+      )).filter((run) => run.stage === "lint").at(-1)
+      : undefined;
     const diagnostics: Array<{ code: string }> = [];
     if (!repository) diagnostics.push({ code: "SOURCE_MISSING" });
     else if (!snapshot) diagnostics.push({ code: "SNAPSHOT_MISSING" });
@@ -1075,6 +1080,11 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       indexedTextBytes: overview.indexedTextBytes,
       knowledge,
       remediation,
+      qualityPipeline: qualityRun ? {
+        status: qualityRun.status,
+        artifactReady: qualityRun.outputManifestIds.length > 0,
+        errorCode: qualityRun.errorCode
+      } : null,
       change: enrichedChange,
       diagnostics
     };

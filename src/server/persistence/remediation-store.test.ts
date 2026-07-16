@@ -45,6 +45,16 @@ describe("remediation persistence", () => {
       state: "open",
       projectId: project.id
     });
+
+    const replay = await store.createRemediation({
+      workspaceId: setup!.workspace.id,
+      projectId: project.id,
+      repositoryId: repository!.id,
+      sourceBuildId: sourceBuild.build.id,
+      issue: issue(sourceBuild.build.id)
+    });
+    expect(replay.id).toBe(remediation.id);
+    await expect(store.listRemediations(setup!.workspace.id, project.id)).resolves.toHaveLength(1);
   });
 
   test("starts an accepted case as an auditable remediation build without publishing", async () => {

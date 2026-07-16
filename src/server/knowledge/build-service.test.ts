@@ -229,6 +229,21 @@ describe("BuildService", () => {
     expect(events).toEqual(["queued", "syncing", "parsing", "synthesizing", "validating", "ready"]);
   });
 
+  test("schedules deterministic post-build work only after knowledge is durable", async () => {
+    const persistence = new FakeBuildPersistence();
+    const schedulePostBuild = vi.fn(async (build: BuildRecord) => {
+      expect(build.status).toBe("ready");
+      expect(persistence.knowledge).toHaveLength(1);
+    });
+    const service = new BuildService(persistence, new FakeQueue(), { schedulePostBuild });
+    const { build } = await service.startBuild(input());
+
+    await service.process(build.id);
+
+    expect(schedulePostBuild).toHaveBeenCalledWith(expect.objectContaining({ id: build.id, status: "ready" }));
+    expect(persistence.transitions.at(-1)).toBe("ready");
+  });
+
   test("reuses only a build with the same snapshot and purpose identity", async () => {
     const persistence = new FakeBuildPersistence();
     const queue = new FakeQueue();

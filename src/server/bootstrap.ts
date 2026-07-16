@@ -7,7 +7,7 @@ import { buildServer } from "./app.js";
 import { loadEnv, type EnvironmentMode } from "./env.js";
 import { PostgresAppStore } from "./persistence/postgres-store.js";
 import type { AppStore } from "./persistence/store.js";
-import { BuildService, type BuildJobQueue } from "./knowledge/build-service.js";
+import { BuildService, type BuildJobQueue, type BuildRecord } from "./knowledge/build-service.js";
 import { PgBossBuildJobQueue } from "./knowledge/job-queue.js";
 import { anthropicEnhancer, openAiCompatibleEnhancer, type KnowledgeEnhancer } from "./knowledge/enhancer.js";
 import { decryptSecret } from "./security/crypto.js";
@@ -15,11 +15,20 @@ import { syncRepository } from "./git/snapshot.js";
 import { PostgresSessionStore } from "./security/session-store.js";
 import { ArtifactStore } from "./knowledge/pipeline/artifact-store.js";
 import type { PipelineArtifactStore } from "./persistence/store.js";
+import { PipelineStageWorker, type PipelineStageJob } from "./knowledge/pipeline/worker.js";
+import { createKnowledgeQualityStageExecutor, knowledgeQualityInputDigest } from "./knowledge/pipeline/quality-stage.js";
+import { PgBossPipelineStageJobQueue } from "./knowledge/job-queue.js";
 
 const IMPORT_REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 
 interface ArtifactStoreInitializer {
   initialize(): Promise<void>;
+}
+
+interface QualityPipelineWorker {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  schedule(job: PipelineStageJob): Promise<void>;
 }
 
 export interface BootstrapDependencies {
@@ -30,9 +39,15 @@ export interface BootstrapDependencies {
   createBuildService: (
     store: AppStore,
     queue: BuildJobQueue,
-    enhancerForWorkspace: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>
+    enhancerForWorkspace: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>,
+    schedulePostBuild: (build: BuildRecord) => Promise<void>
   ) => BuildService;
   createArtifactStore: (directory: string, persistence: PipelineArtifactStore) => ArtifactStoreInitializer;
+  createQualityPipelineWorker: (
+    connectionString: string,
+    store: AppStore,
+    artifactStore: ArtifactStoreInitializer
+  ) => QualityPipelineWorker;
   buildServer: typeof buildServer;
   setInterval?: (callback: () => void, delay: number) => unknown;
   clearInterval?: (timer: unknown) => void;
@@ -44,9 +59,17 @@ const defaultDependencies: BootstrapDependencies = {
   runMigrations,
   createStore: (pool) => new PostgresAppStore(pool),
   createBuildQueue: (connectionString) => new PgBossBuildJobQueue(connectionString),
-  createBuildService: (store, queue, enhancerForWorkspace) =>
-    new BuildService(store, queue, { enhancerForWorkspace }),
+  createBuildService: (store, queue, enhancerForWorkspace, schedulePostBuild) =>
+    new BuildService(store, queue, { enhancerForWorkspace, schedulePostBuild }),
   createArtifactStore: (directory, persistence) => new ArtifactStore(directory, persistence),
+  createQualityPipelineWorker: (connectionString, store, artifactStore) => new PipelineStageWorker(
+    store as AppStore & PipelineArtifactStore,
+    new PgBossPipelineStageJobQueue(connectionString),
+    createKnowledgeQualityStageExecutor({
+      store: store as AppStore & PipelineArtifactStore,
+      artifactStore: artifactStore as ArtifactStore
+    })
+  ),
   buildServer
 };
 
@@ -79,8 +102,34 @@ export async function bootstrapServer(
       ? anthropicEnhancer({ apiKey, model: config.model })
       : openAiCompatibleEnhancer({ apiKey, model: config.model });
   };
-  const buildService = dependencies.createBuildService(store, queue, enhancerForWorkspace);
-  await buildService.start();
+  const qualityWorker = env.knowledgePipelineV2
+    ? dependencies.createQualityPipelineWorker(env.databaseUrl, store, artifactStore)
+    : undefined;
+  const schedulePostBuild = async (build: BuildRecord) => {
+    if (!qualityWorker) return;
+    const repository = await store.getRepository(build.workspaceId, build.repositoryId);
+    const snapshot = await store.findSnapshotById(build.workspaceId, build.snapshotId);
+    if (!repository || !snapshot) throw new Error("Quality stage source is unavailable");
+    const files = await store.listSnapshotFiles(build.workspaceId, build.snapshotId);
+    const knowledgePageCount = await store.countKnowledgePagesForBuild(build.workspaceId, build.id);
+    await qualityWorker.schedule({
+      workspaceId: build.workspaceId,
+      projectId: repository.projectId,
+      snapshotId: snapshot.id,
+      buildId: build.id,
+      stages: ["lint"],
+      stageIndex: 0,
+      inputDigest: knowledgeQualityInputDigest(snapshot, files, knowledgePageCount)
+    });
+  };
+  const buildService = dependencies.createBuildService(store, queue, enhancerForWorkspace, schedulePostBuild);
+  await qualityWorker?.start();
+  try {
+    await buildService.start();
+  } catch (error) {
+    await qualityWorker?.stop();
+    throw error;
+  }
   const server = dependencies.buildServer({
     store,
     buildService,
@@ -173,6 +222,7 @@ export async function bootstrapServer(
   server.addHook("onClose", async () => {
     clearCleanup(cleanupInterval);
     await buildService.stop();
+    await qualityWorker?.stop();
     await database.pool.end();
   });
   return server;

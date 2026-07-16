@@ -444,12 +444,14 @@ export const remediationCases = pgTable("remediation_cases", {
   projectId: uuid("project_id").notNull(),
   repositoryId: uuid("repository_id").notNull(),
   sourceBuildId: uuid("source_build_id").notNull(),
+  issueId: text("issue_id").notNull(),
   issue: jsonb("issue").$type<LintIssue>().notNull(),
   state: text("state").$type<RemediationState>().notNull().default("open"),
   rebuildBuildId: uuid("rebuild_build_id"),
   ...timestamps
 }, (table) => [
   uniqueIndex("remediation_cases_id_workspace_idx").on(table.id, table.workspaceId),
+  uniqueIndex("remediation_cases_source_issue_unique").on(table.workspaceId, table.sourceBuildId, table.issueId),
   index("remediation_cases_project_state_idx").on(table.workspaceId, table.projectId, table.state, table.createdAt),
   foreignKey({
     columns: [table.projectId, table.workspaceId],

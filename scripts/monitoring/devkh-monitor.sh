@@ -11,6 +11,11 @@ set -uo pipefail
 : "${MAX_BACKUP_AGE_SECONDS:?missing MAX_BACKUP_AGE_SECONDS}"
 : "${MAX_IMPORT_FAILURE_RATE_PERCENT:?missing MAX_IMPORT_FAILURE_RATE_PERCENT}"
 
+[[ "$COMPOSE_DIR" == /* ]] || {
+  printf 'COMPOSE_DIR must be an absolute path\n' >&2
+  exit 64
+}
+
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 failures=()
 
@@ -37,7 +42,7 @@ check_application() {
 
 check_containers() {
   local output
-  output="$(cd "$COMPOSE_DIR" && docker compose -p "$COMPOSE_PROJECT_NAME" ps --format '{{.Service}} {{.Health}}')" \
+  output="$(docker compose -f "$COMPOSE_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" ps --format '{{.Service}} {{.Health}}')" \
     || { failures+=("compose_status"); return; }
   grep -Fx 'app healthy' <<< "$output" >/dev/null || failures+=("app_container")
   grep -Fx 'postgres healthy' <<< "$output" >/dev/null || failures+=("postgres_container")
@@ -64,7 +69,7 @@ check_backup() {
 
 check_import_failure_rate() {
   local counts failed total
-  counts="$(cd "$COMPOSE_DIR" && docker compose -p "$COMPOSE_PROJECT_NAME" exec -T postgres psql -U devkh -d dev_knowledge_hub -Atqc "SELECT count(*) FILTER (WHERE status = 'failed') || '|' || count(*) FROM import_reports WHERE started_at >= now() - interval '24 hours'")" || { failures+=("import_report_query"); return; }
+  counts="$(docker compose -f "$COMPOSE_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" exec -T postgres psql -U devkh -d dev_knowledge_hub -Atqc "SELECT count(*) FILTER (WHERE status = 'failed') || '|' || count(*) FROM import_reports WHERE started_at >= now() - interval '24 hours'")" || { failures+=("import_report_query"); return; }
   IFS='|' read -r failed total <<< "$counts"
   [[ "$failed" =~ ^[0-9]+$ && "$total" =~ ^[0-9]+$ ]] || { failures+=("import_report_query"); return; }
   (( total < 4 || failed * 100 <= total * MAX_IMPORT_FAILURE_RATE_PERCENT )) || failures+=("import_failure_rate")

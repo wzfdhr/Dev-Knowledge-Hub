@@ -1,0 +1,156 @@
+name: phase-merge
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number approved for merge
+        required: true
+        type: string
+      approved_head:
+        description: Reviewed 40-character pull request head SHA
+        required: true
+        type: string
+      approved_base:
+        description: Reviewed 40-character main branch base SHA
+        required: true
+        type: string
+      user_approved:
+        description: User explicitly approved this exact head
+        required: true
+        type: boolean
+
+concurrency:
+  group: phase-merge-pr-${{ inputs.pr_number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_DB: devkh_test
+          POSTGRES_USER: devkh
+          POSTGRES_PASSWORD: devkh-ci-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U devkh -d devkh_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TEST_DATABASE_URL: postgres://devkh:devkh-ci-password@127.0.0.1:5432/devkh_test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.approved_head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate approved base ancestry
+        env:
+          APPROVED_BASE: ${{ inputs.approved_base }}
+          APPROVED_HEAD: ${{ inputs.approved_head }}
+        run: git merge-base --is-ancestor "$APPROVED_BASE" "$APPROVED_HEAD"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run release:verify -- --scope verify
+      - name: Upload Playwright artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-merge-playwright-${{ github.run_id }}
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+
+  container-smoke:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_PASSWORD: devkh-container-password
+      DEVKH_MASTER_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      DEVKH_SESSION_SECRET: container-smoke-session-secret-at-least-32-chars
+      PUBLIC_BASE_URL: https://hub.example.test
+      DEVKH_PORT: 3000
+      DEVKH_DOMAIN: hub.example.test
+      ACME_EMAIL: ci@example.test
+      COMPOSE_PROJECT_NAME: devkh-ci-merge-${{ github.run_id }}
+      DEVKH_CONTAINER_SMOKE: "true"
+      RECOVERY_EVIDENCE_DIR: /tmp/devkh-recovery-evidence
+      RECOVERY_EVIDENCE_DEFER_FINALIZATION: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.approved_head }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate approved base ancestry
+        env:
+          APPROVED_BASE: ${{ inputs.approved_base }}
+          APPROVED_HEAD: ${{ inputs.approved_head }}
+        run: git merge-base --is-ancestor "$APPROVED_BASE" "$APPROVED_HEAD"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+      - name: Install recovery tooling
+        run: sudo apt-get update && sudo apt-get install -y restic
+      - run: npm run release:verify -- --scope container
+      - name: Upload recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-merge-recovery-${{ github.run_id }}
+          path: /tmp/devkh-recovery-evidence/
+          if-no-files-found: error
+
+  merge:
+    needs: [verify, container-smoke]
+    if: ${{ success() && inputs.user_approved && github.actor == github.repository_owner }}
+    permissions:
+      contents: write
+      pull-requests: read
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ inputs.pr_number }}
+      APPROVED_HEAD: ${{ inputs.approved_head }}
+      APPROVED_BASE: ${{ inputs.approved_base }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.approved_base }}
+          fetch-depth: 0
+      - name: Validate approved pull request
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || { echo "invalid pull request number" >&2; exit 64; }
+          [[ "$APPROVED_HEAD" =~ ^[a-fA-F0-9]{40}$ ]] || { echo "invalid approved head" >&2; exit 64; }
+          [[ "$APPROVED_BASE" =~ ^[a-fA-F0-9]{40}$ ]] || { echo "invalid approved base" >&2; exit 64; }
+          test "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "false"
+          test "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state --jq .state)" = "OPEN"
+          test "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)" = "main"
+          test "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json baseRefOid --jq .baseRefOid)" = "$APPROVED_BASE"
+          test "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)" = "$APPROVED_HEAD"
+          git merge-base --is-ancestor "$APPROVED_BASE" "$APPROVED_HEAD"
+          test "$(git rev-parse HEAD)" = "$APPROVED_BASE"
+      - name: Create and atomically push approved merge commit
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-ff --no-edit "$APPROVED_HEAD" -m "Merge pull request #$PR_NUMBER"
+          git push origin "HEAD:refs/heads/main" "--force-with-lease=refs/heads/main:$APPROVED_BASE"

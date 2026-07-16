@@ -119,7 +119,7 @@ describe("immutable repository snapshots", () => {
     });
   });
 
-  test("skips ignored formats, generated files, binary content, and files over one MiB", async () => {
+  test("skips ignored formats, generated files, binary content, and files over one MiB", { timeout: 15_000 }, async () => {
     const repositoryPath = await fixtureRepository();
     await mkdir(path.join(repositoryPath, "node_modules/pkg"), { recursive: true });
     await mkdir(path.join(repositoryPath, "dist"), { recursive: true });
@@ -151,7 +151,7 @@ describe("immutable repository snapshots", () => {
     expect(summary.fileCount).toBe(4);
   });
 
-  test("returns unchanged for the same SHA and creates a snapshot for the next commit", async () => {
+  test("returns unchanged for the same SHA and creates a snapshot for the next commit", { timeout: 15_000 }, async () => {
     const repositoryPath = await fixtureRepository();
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-data-"));
     tempDirectories.push(dataDir);

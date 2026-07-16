@@ -143,6 +143,8 @@ export class BuildService {
   private readonly enhancerForWorkspace?: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>;
   private readonly reconcileIntervalMs: number;
   private readonly onReconciliationError: (error: unknown) => void;
+  private readonly schedulePostBuild?: (build: BuildRecord) => Promise<void>;
+  private readonly onPostBuildSchedulingError: (error: unknown) => void;
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
   private reconciliationPromise: Promise<void> | null = null;
   private startPromise: Promise<void> | null = null;
@@ -158,6 +160,8 @@ export class BuildService {
       enhancerForWorkspace?: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>;
       reconcileIntervalMs?: number;
       onReconciliationError?: (error: unknown) => void;
+      schedulePostBuild?: (build: BuildRecord) => Promise<void>;
+      onPostBuildSchedulingError?: (error: unknown) => void;
     } = {}
   ) {
     this.analyze = dependencies.analyze ?? analyzeSnapshot;
@@ -168,6 +172,9 @@ export class BuildService {
     this.reconcileIntervalMs = dependencies.reconcileIntervalMs ?? 5_000;
     this.onReconciliationError = dependencies.onReconciliationError
       ?? ((error) => console.error("Build reconciliation failed", error));
+    this.schedulePostBuild = dependencies.schedulePostBuild;
+    this.onPostBuildSchedulingError = dependencies.onPostBuildSchedulingError
+      ?? ((error) => console.error("Post-build scheduling failed", error));
   }
 
   subscribe(buildId: string, listener: (event: BuildEvent) => void): () => void {
@@ -330,6 +337,13 @@ export class BuildService {
         throw new StaleBuildWorkerError();
       }
       await this.emitLatest(ready);
+      if (this.schedulePostBuild) {
+        try {
+          await this.schedulePostBuild(ready);
+        } catch (error) {
+          this.onPostBuildSchedulingError(error);
+        }
+      }
     } catch (error) {
       if (error instanceof StaleBuildWorkerError) return;
       const failed = await this.persistence.transitionBuild(buildId, status, "failed", {

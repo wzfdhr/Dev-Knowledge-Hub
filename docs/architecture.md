@@ -46,4 +46,4 @@ Signals call Fastify close once. Fastify stops accepting connections and closes 
 
 ## Deployment state
 
-PostgreSQL, snapshots, and repository mirrors are one consistency set. Compose persists them separately for operational clarity, but backup and restore must capture all three at the same application quiescence point.
+PostgreSQL, snapshots, repository mirrors, durable uploaded sources, and content-addressed artifacts are one consistency set. Compose persists them separately for operational clarity, but backup and restore must capture the database and all four durable file volumes at the same application quiescence point. Retired upload staging is not durable product data and is not backed up.

@@ -34,7 +34,7 @@ services:
       DATABASE_URL: postgres://devkh:${POSTGRES_PASSWORD}@postgres:5432/dev_knowledge_hub
       DEVKH_MASTER_KEY: ${DEVKH_MASTER_KEY:?set DEVKH_MASTER_KEY}
       DEVKH_SESSION_SECRET: ${DEVKH_SESSION_SECRET:?set DEVKH_SESSION_SECRET}
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://${DEVKH_DOMAIN:?set DEVKH_DOMAIN}}
     volumes:
       - snapshot_data:/var/lib/devkh/snapshots
       - repository_mirrors:/var/lib/devkh/repos

@@ -47,8 +47,11 @@ The development server listens on `HOST`/`PORT`. Production requires `DATABASE_U
 ### Secrets and deployment
 
 ```bash
+cd /absolute/path/to/dev-knowledge-hub
+DEVKH_COMPOSE_FILE="$PWD/docker-compose.yml"
 cp .env.example .env
-# Set DEVKH_DOMAIN and ACME_EMAIL to the public hostname and an operator address.
+# Set DEVKH_DOMAIN and PUBLIC_BASE_URL=https://<your-public-domain> to the same public hostname.
+# Set ACME_EMAIL to an operator address.
 # Generate each secret locally; do not paste output into chat, tickets, or commits.
 openssl rand -hex 24      # POSTGRES_PASSWORD
 openssl rand -base64 32   # DEVKH_MASTER_KEY
@@ -57,34 +60,34 @@ openssl rand -hex 32      # DEVKH_SESSION_SECRET
 chmod 600 .env
 
 # This validates Compose without needing a real domain or contacting ACME.
-DEVKH_DOMAIN=example.test ACME_EMAIL=operator@example.test docker compose config --quiet
-docker compose build --pull
-docker compose up -d
-docker compose ps
+DEVKH_DOMAIN=example.test ACME_EMAIL=operator@example.test docker compose -f "$DEVKH_COMPOSE_FILE" config --quiet
+docker compose -f "$DEVKH_COMPOSE_FILE" build --pull
+docker compose -f "$DEVKH_COMPOSE_FILE" up -d
+docker compose -f "$DEVKH_COMPOSE_FILE" ps
 curl --fail --resolve "$DEVKH_DOMAIN:443:127.0.0.1" "https://$DEVKH_DOMAIN/api/health"
 ```
 
-Compose exposes only Caddy on host ports `80` and `443`; Caddy forwards traffic to the app on the private Compose network and obtains HTTPS certificates for `DEVKH_DOMAIN`. PostgreSQL and the app have no host port mappings. The app waits for database health, uses a read-only root filesystem and a no-exec temporary `/tmp`, and persists PostgreSQL data, immutable snapshots, Git mirrors, uploads, and artifacts in separate named volumes. The image installs its Git askpass helper as a static executable under `/app/scripts`; PATs are passed only in the Git child environment. Stop gracefully with `docker compose down`; do not add `--volumes` unless deleting all retained state is intentional.
+Compose exposes only Caddy on host ports `80` and `443`; Caddy forwards traffic to the app on the private Compose network and obtains HTTPS certificates for `DEVKH_DOMAIN`. PostgreSQL and the app have no host port mappings. The app waits for database health, uses a read-only root filesystem and a no-exec temporary `/tmp`, and persists PostgreSQL data, immutable snapshots, Git mirrors, uploads, and artifacts in separate named volumes. The image installs its Git askpass helper as a static executable under `/app/scripts`; PATs are passed only in the Git child environment. Stop gracefully with `docker compose -f "$DEVKH_COMPOSE_FILE" down`; do not add `--volumes` unless deleting all retained state is intentional.
 
 For a deployed server, confirm the public health endpoint and Caddy certificate path after DNS has propagated:
 
 ```bash
 curl --fail "https://$DEVKH_DOMAIN/api/health"
-docker compose logs --tail=100 caddy
-docker compose ps
+docker compose -f "$DEVKH_COMPOSE_FILE" logs --tail=100 caddy
+docker compose -f "$DEVKH_COMPOSE_FILE" ps
 ```
 
 Compose integration and browser tests are optional deployment checks and can run without a public domain:
 
 ```bash
-docker compose --profile test run --rm integration
-docker compose --profile test run --rm e2e
+docker compose -f "$DEVKH_COMPOSE_FILE" --profile test run --rm integration
+docker compose -f "$DEVKH_COMPOSE_FILE" --profile test run --rm e2e
 ```
 
 PostgreSQL initialization creates `dev_knowledge_hub` for the app and a separate `devkh_test` used only by the Compose integration profile. Existing PostgreSQL volumes created before this isolation was added need the test database once before running integration tests:
 
 ```bash
-docker compose exec postgres createdb -U devkh devkh_test
+docker compose -f "$DEVKH_COMPOSE_FILE" exec postgres createdb -U devkh devkh_test
 ```
 
 Integration cleanup must target only `TEST_DATABASE_URL`; never point it at `dev_knowledge_hub`.
@@ -150,7 +153,8 @@ Build before stdio use with `npm run build`. Both transports expose the same eig
 
 Use the automated encrypted OSS backup and restore procedure in
 [encrypted offsite backups](docs/operations/encrypted-offsite-backups.md). Back up the
-database and all three app volumes as one set, test restores regularly, and keep
+database and four durable application volumes (snapshots, repository mirrors, uploaded sources,
+and artifacts) as one set, test restores regularly, and keep
 `DEVKH_MASTER_KEY` separately from the restic repository: it is required to decrypt restored
 provider and repository credentials. Never put `.env`, database dumps, master keys, session
 secrets, tokens, or generated passwords in chat, tickets, or source control.
@@ -177,7 +181,7 @@ CI runs these gates with PostgreSQL 16 and uploads Playwright artifacts on failu
 ## Troubleshooting
 
 - **Startup rejects environment:** ensure the master key is exactly 32 random bytes in canonical base64 and all production variables are present.
-- **PostgreSQL remains unhealthy:** inspect `docker compose logs postgres`; verify the password and volume ownership before changing state.
+- **PostgreSQL remains unhealthy:** inspect `docker compose -f "$DEVKH_COMPOSE_FILE" logs postgres`; verify the password and volume ownership before changing state.
 - **Local sync reports a dirty worktree:** commit, stash, or remove every changed/untracked file. Snapshots intentionally reject dirty local repositories.
 - **Remote sync fails:** use a credential-free HTTPS URL. Supply the PAT separately; never embed credentials in the URL.
 - **MCP returns `UNAUTHORIZED`:** rotate/recreate the token under the project's Codex Integration page and update the client environment. Revoked tokens stop working immediately.

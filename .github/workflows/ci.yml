@@ -34,21 +34,8 @@ jobs:
           node-version: 22.13.0
           cache: npm
       - run: npm ci
-      - run: npm run secrets:scan
-      - run: npm run licenses:check
-      - run: npm run runtime:verify
-      - run: npm run test:runtime
-      - run: npm run test:backup
-      - name: Verify isolated delivery configuration
-        run: npm run delivery:verify
-      - run: npm run typecheck
-      - run: npm run lint
-      - run: npm test
-      - run: npm run test:integration
-      - run: npm run build
-      - run: npm run acceptance
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e
+      - run: npm run release:verify -- --scope verify
       - name: Upload Playwright artifacts
         if: failure()
         uses: actions/upload-artifact@v4
@@ -65,25 +52,26 @@ jobs:
       POSTGRES_PASSWORD: devkh-container-password
       DEVKH_MASTER_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
       DEVKH_SESSION_SECRET: container-smoke-session-secret-at-least-32-chars
+      PUBLIC_BASE_URL: https://hub.example.test
       DEVKH_PORT: 3000
+      DEVKH_DOMAIN: hub.example.test
+      ACME_EMAIL: ci@example.test
+      COMPOSE_PROJECT_NAME: devkh-ci
+      DEVKH_CONTAINER_SMOKE: "true"
+      RECOVERY_EVIDENCE_DIR: /tmp/devkh-recovery-evidence
+      RECOVERY_EVIDENCE_DEFER_FINALIZATION: "true"
     steps:
       - uses: actions/checkout@v4
-      - name: Build production image
-        run: docker build --target runtime -t devkh:ci .
-      - name: Validate Compose
-        run: docker compose config --quiet
-      - name: Start production Compose services
-        run: docker compose up -d --build postgres app
-      - name: Probe application health
-        run: |
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:3000/api/health; then
-              exit 0
-            fi
-            sleep 2
-          done
-          docker compose logs app
-          exit 1
-      - name: Stop Compose services
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+      - name: Install recovery tooling
+        run: sudo apt-get update && sudo apt-get install -y restic
+      - run: npm run release:verify -- --scope container
+      - name: Upload recovery evidence
         if: always()
-        run: docker compose down --volumes
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-evidence
+          path: /tmp/devkh-recovery-evidence/
+          if-no-files-found: error

@@ -145,6 +145,23 @@ describe("knowledge API contracts", () => {
     await app.close();
   });
 
+  test("returns the stable rollback failure contract when the release lookup is unavailable", async () => {
+    const { app, store, cookie } = await authenticatedApp();
+    vi.spyOn(store, "getRelease").mockRejectedValue(new Error("database connection interrupted"));
+
+    const response = await app.inject({
+      method: "POST", url: "/api/releases/11111111-1111-4111-8111-111111111111/rollback",
+      headers: { cookie, ...csrfHeaders(cookie) }
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toMatchObject({
+      error: { code: "ROLLBACK_FAILED", message: "Rollback could not be completed" }
+    });
+    expect(response.body).not.toContain("database connection interrupted");
+    await app.close();
+  });
+
   test("starts, lists, reads, cancels, and streams build state", async () => {
     const { app, cookie } = await authenticatedApp();
     const started = await app.inject({

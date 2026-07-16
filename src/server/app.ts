@@ -2153,9 +2153,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const parsed = z.object({ id: z.uuid() }).safeParse(request.params);
     if (!parsed.success) return sendError(reply, 400, "INVALID_INPUT", "Invalid release ID");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const existing = await options.store.getRelease(admin.workspaceId, parsed.data.id);
-    if (!existing) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
     try {
+      const existing = await options.store.getRelease(admin.workspaceId, parsed.data.id);
+      if (!existing) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
       const result = await options.store.rollbackReleaseToLegacy(
         admin.workspaceId, existing.id, admin.id
       );

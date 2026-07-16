@@ -1,7 +1,7 @@
 import { authenticatedCookie, csrfHeaders } from "../test-support/csrf";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { cp, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -15,7 +15,7 @@ import { runMigrations } from "../../db/migrate";
 import { requireIsolatedTestDatabase } from "../../test/integration-database";
 import { buildServer } from "../app";
 import { syncRepository } from "../git/snapshot";
-import { BuildService, type BuildJobQueue } from "../knowledge/build-service";
+import { BuildService } from "../knowledge/build-service";
 import { analyzeSnapshot, type CodeIndex } from "../knowledge/intelligence";
 import { generateKnowledge } from "../knowledge/generator";
 import {
@@ -64,18 +64,24 @@ class RecordedPipelineQueue implements PipelineStageJobQueue {
   async stop(): Promise<void> {}
 }
 
-class NoopBuildQueue implements BuildJobQueue {
-  async start(): Promise<void> {}
-  async send(): Promise<void> {}
-  async stop(): Promise<void> {}
-}
-
-async function* phaseFSourceFiles(project: string): AsyncGenerator<FolderUploadFile> {
+async function* phaseFSourceFiles(project: string, revision = "baseline"): AsyncGenerator<FolderUploadFile> {
   yield {
     path: `src/${project}.ts`,
-    content: Buffer.from(`export const ${project.replace(/-/g, "_")} = "${project}";\n`)
+    content: Buffer.from(`export const ${project.replace(/-/g, "_")} = "${project}-${revision}";\n`)
   };
-  yield { path: "README.md", content: Buffer.from(`# ${project}\n`) };
+  yield { path: "README.md", content: Buffer.from(`# ${project} ${revision}\n`) };
+}
+
+async function removeReadonlyDirectory(directory: string): Promise<void> {
+  async function makeWritable(candidate: string): Promise<void> {
+    await chmod(candidate, 0o700).catch(() => undefined);
+    const entries = await readdir(candidate, { withFileTypes: true }).catch(() => []);
+    await Promise.all(entries.filter((entry) => entry.isDirectory()).map((entry) =>
+      makeWritable(path.join(candidate, entry.name))
+    ));
+  }
+  await makeWritable(directory);
+  await rm(directory, { recursive: true, force: true });
 }
 
 async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean): Promise<T> {
@@ -158,7 +164,7 @@ integration("PostgreSQL cited knowledge integration", () => {
   }, 90_000);
 
   test(databaseUrl
-    ? "keeps three persisted imports, two builds, and ten searches project-isolated under the Phase F budget"
+    ? "keeps overlapping PostgreSQL imports, queued builds, and searches project-isolated under the Phase F budget"
     : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
     if (!databaseUrl) return;
     pool ??= new Pool({ connectionString: databaseUrl });
@@ -166,7 +172,10 @@ integration("PostgreSQL cited knowledge integration", () => {
     await pool.query("TRUNCATE workspaces CASCADE");
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-phase-f-postgres-"));
     const store = new PostgresAppStore(pool);
+    const queue = new PgBossBuildJobQueue(databaseUrl);
+    const buildService = new BuildService(store, queue, { reconcileIntervalMs: 25 });
     try {
+      await buildService.start();
       const setup = await store.createInitialSetup("phase-f-load@example.com", "hash");
       const workspaceId = setup!.workspace.id;
       const firstProject = (await store.listProjects(workspaceId))[0]!;
@@ -178,31 +187,44 @@ integration("PostgreSQL cited knowledge integration", () => {
       const repositories = await Promise.all(projects.map((project) => store.createRepository(
         workspaceId, { kind: "upload", name: project.slug }, project.id
       )));
-      const imports = await Promise.all(repositories.map((repository, index) => importFolderFiles({
-        files: phaseFSourceFiles(projects[index]!.slug), dataDir, workspaceId, repositoryId: repository!.id,
-        actorId: setup!.admin.id, store
-      })));
-      expect(imports.map((item) => item.fileCount)).toEqual([2, 2, 2]);
-      expect(new Set(imports.map((item) => item.snapshotId)).size).toBe(3);
-
-      const buildService = new BuildService(store, new NoopBuildQueue());
-      const started = await Promise.all(imports.slice(0, 2).map((snapshot, index) => buildService.startBuild({
-        workspaceId, repositoryId: repositories[index]!.id, snapshotId: snapshot.snapshotId,
-        snapshotPath: snapshot.storagePath, commitSha: snapshot.sourceVersion
-      })));
-      await Promise.all(started.map(({ build }) => buildService.process(build.id)));
-      const builds = await Promise.all(started.map(({ build }) => store.getBuild(workspaceId, build.id)));
-      expect(builds).toEqual(expect.arrayContaining([
-        expect.objectContaining({ status: "ready", repositoryId: repositories[0]!.id }),
-        expect.objectContaining({ status: "ready", repositoryId: repositories[1]!.id })
-      ]));
-      await Promise.all(builds.map(async (build, index) => {
-        const release = await store.createReleaseDraft(workspaceId, repositories[index]!.id, build!.id, `1.0.${index}`);
+      const importAndQueueBuild = async (repositoryIndex: number, revision: string) => {
+        const snapshot = await importFolderFiles({
+          files: phaseFSourceFiles(projects[repositoryIndex]!.slug, revision), dataDir, workspaceId,
+          repositoryId: repositories[repositoryIndex]!.id, actorId: setup!.admin.id, store
+        });
+        const started = await buildService.startBuild({
+          workspaceId, repositoryId: repositories[repositoryIndex]!.id, snapshotId: snapshot.snapshotId,
+          snapshotPath: snapshot.storagePath, commitSha: snapshot.sourceVersion
+        });
+        const build = await waitFor(
+          () => store.getBuild(workspaceId, started.build.id),
+          (candidate) => candidate?.status === "ready"
+        );
+        return { snapshot, build: build! };
+      };
+      const baseline = await Promise.all([importAndQueueBuild(0, "baseline"), importAndQueueBuild(1, "baseline")]);
+      await Promise.all(baseline.map(async ({ build }, index) => {
+        const release = await store.createReleaseDraft(workspaceId, repositories[index]!.id, build.id, `1.0.${index}`);
         await store.publishRelease(workspaceId, release.id);
       }));
 
-      const startedAt = performance.now();
-      const searches = await Promise.all(Array.from({ length: 10 }, async (_, index) => {
+      const operationStartedAt = performance.now();
+      const imports = repositories.map((repository, index) => importFolderFiles({
+        files: phaseFSourceFiles(projects[index]!.slug, "updated"), dataDir, workspaceId, repositoryId: repository!.id,
+        actorId: setup!.admin.id, store
+      }));
+      const queuedBuilds = imports.slice(0, 2).map(async (snapshotPromise, index) => {
+        const snapshot = await snapshotPromise;
+        const started = await buildService.startBuild({
+          workspaceId, repositoryId: repositories[index]!.id, snapshotId: snapshot.snapshotId,
+          snapshotPath: snapshot.storagePath, commitSha: snapshot.sourceVersion
+        });
+        return waitFor(
+          () => store.getBuild(workspaceId, started.build.id),
+          (candidate) => candidate?.status === "ready"
+        );
+      });
+      const searches = Promise.all(Array.from({ length: 10 }, async (_, index) => {
         const repositoryIndex = index % 2;
         const searchStartedAt = performance.now();
         const results = await store.searchKnowledge(
@@ -210,22 +232,33 @@ integration("PostgreSQL cited knowledge integration", () => {
         );
         return { repositoryIndex, results, durationMs: performance.now() - searchStartedAt };
       }));
-      const elapsedMs = performance.now() - startedAt;
-      const durations = searches.map((search) => search.durationMs).sort((left, right) => left - right);
+      const [completedImports, completedBuilds, completedSearches] = await Promise.all([
+        Promise.all(imports), Promise.all(queuedBuilds), searches
+      ]);
+      const elapsedMs = performance.now() - operationStartedAt;
+      expect(completedImports.map((item) => item.fileCount)).toEqual([2, 2, 2]);
+      expect(new Set(completedImports.map((item) => item.snapshotId)).size).toBe(3);
+      expect(completedBuilds).toEqual(expect.arrayContaining([
+        expect.objectContaining({ status: "ready", repositoryId: repositories[0]!.id }),
+        expect.objectContaining({ status: "ready", repositoryId: repositories[1]!.id })
+      ]));
+      const searchResults = await completedSearches;
+      const durations = searchResults.map((search) => search.durationMs).sort((left, right) => left - right);
       const p95Ms = durations[Math.ceil(durations.length * 0.95) - 1]!;
-      expect(searches).toHaveLength(10);
-      expect(searches.every(({ results }) => results.length > 0)).toBe(true);
-      expect(searches.filter(({ repositoryIndex }) => repositoryIndex === 0).every(({ results }) =>
+      expect(searchResults).toHaveLength(10);
+      expect(searchResults.every(({ results }) => results.length > 0)).toBe(true);
+      expect(searchResults.filter(({ repositoryIndex }) => repositoryIndex === 0).every(({ results }) =>
         results.every((result) => result.citations.every((citation) => citation.path.includes("default-project")))
       )).toBe(true);
-      expect(searches.filter(({ repositoryIndex }) => repositoryIndex === 1).every(({ results }) =>
+      expect(searchResults.filter(({ repositoryIndex }) => repositoryIndex === 1).every(({ results }) =>
         results.every((result) => result.citations.every((citation) => citation.path.includes("second-project")))
       )).toBe(true);
       expect(p95Ms).toBeLessThanOrEqual(1_000);
-      expect(elapsedMs).toBeLessThanOrEqual(1_000);
+      expect(elapsedMs).toBeLessThanOrEqual(15_000);
       expect(process.memoryUsage().rss).toBeLessThanOrEqual(1.5 * 1024 * 1024 * 1024);
     } finally {
-      await rm(dataDir, { recursive: true, force: true });
+      await buildService.stop();
+      await removeReadonlyDirectory(dataDir);
     }
   }, 30_000);
 
@@ -627,15 +660,17 @@ integration("PostgreSQL cited knowledge integration", () => {
       };
       const output = await generateKnowledge(index);
       await store.saveKnowledge({ build: build.build, index, output });
+      const moduleNodeId = randomUUID();
+      const symbolNodeId = randomUUID();
       await store.saveKnowledgeGraph({
         workspaceId: workspace!.id, projectId: repository!.projectId, snapshotId, buildId: build.build.id,
         actorId: administrator!.id,
         graph: {
           nodes: [
-            { id: "module", projectId: repository!.projectId, snapshotId, kind: "module", name: "math.ts", qualifiedName: citation.path, candidate: false, sourceRefs: [{ ...citation, snapshotId }], attributes: {} },
-            { id: "symbol", projectId: repository!.projectId, snapshotId, kind: "symbol", name: "math", qualifiedName: "math", candidate: false, sourceRefs: [{ ...citation, snapshotId }], attributes: {} }
+            { id: moduleNodeId, projectId: repository!.projectId, snapshotId, kind: "module", name: "math.ts", qualifiedName: citation.path, candidate: false, sourceRefs: [{ ...citation, snapshotId }], attributes: {} },
+            { id: symbolNodeId, projectId: repository!.projectId, snapshotId, kind: "symbol", name: "math", qualifiedName: "math", candidate: false, sourceRefs: [{ ...citation, snapshotId }], attributes: {} }
           ],
-          edges: [{ id: "contains", fromNodeId: "module", toNodeId: "symbol", kind: "contains", candidate: false, confidence: 1, sourceRefs: [{ ...citation, snapshotId }] }]
+          edges: [{ id: randomUUID(), fromNodeId: moduleNodeId, toNodeId: symbolNodeId, kind: "contains", candidate: false, confidence: 1, sourceRefs: [{ ...citation, snapshotId }] }]
         }
       });
       const createArtifact = async (stage: "synthesize" | "lint", kind: "knowledge-pages" | "knowledge-quality", digest: string) => store.createArtifactWithAudit({

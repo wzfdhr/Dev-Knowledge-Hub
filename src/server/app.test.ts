@@ -87,11 +87,9 @@ describe("buildServer", () => {
     await app.close();
   });
 
-  test("serves the Vue console entrypoint for its isolated SPA route", async () => {
+  test("serves React and retires the isolated Vue console route", async () => {
     const clientDir = await mkdtemp(path.join(os.tmpdir(), "devkh-client-"));
-    await mkdir(path.join(clientDir, "console-vue"));
     await writeFile(path.join(clientDir, "index.html"), "<head><!-- devkh:csp-nonce --></head><main>react console</main>");
-    await writeFile(path.join(clientDir, "console-vue", "index.html"), "<head><!-- devkh:csp-nonce --></head><main>vue console</main>");
     const app = buildServer({
       store: new MemoryAppStore(),
       masterKey: Buffer.alloc(32, 1).toString("base64"),
@@ -104,9 +102,8 @@ describe("buildServer", () => {
     const vueResponse = await app.inject({ method: "GET", url: "/console-vue/health" });
     const reactResponse = await app.inject({ method: "GET", url: "/projects" });
 
-    expect(vueResponse.statusCode).toBe(200);
-    expect(vueResponse.body).toContain("vue console");
-    expect(vueResponse.body).toContain('name="devkh-csp-nonce"');
+    expect(vueResponse.statusCode).toBe(404);
+    expect(vueResponse.body).not.toContain("react console");
     expect(reactResponse.statusCode).toBe(200);
     expect(reactResponse.body).toContain("react console");
     await app.close();

@@ -66,7 +66,7 @@ async function upstreamManifests(store: KnowledgePackageStageStore, run: Pipelin
     }
     const manifest = await store.findArtifactById(stageRun.outputManifestIds[0]!);
     if (!manifest || manifest.workspaceId !== run.workspaceId || manifest.projectId !== run.projectId
-      || manifest.snapshotId !== run.snapshotId || manifest.buildId !== run.buildId
+      || manifest.snapshotId !== run.snapshotId
       || manifest.stage !== stage || manifest.kind !== kind
     ) throw new Error(`Knowledge package ${stage} artifact does not match the project build and snapshot`);
     return [stage, manifest] as const;

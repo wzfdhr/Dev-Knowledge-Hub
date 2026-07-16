@@ -98,7 +98,6 @@ async function upstreamManifests(
       || manifest.workspaceId !== run.workspaceId
       || manifest.projectId !== run.projectId
       || manifest.snapshotId !== run.snapshotId
-      || manifest.buildId !== run.buildId
       || manifest.stage !== stage
       || manifest.kind !== kind
     ) throw new Error(`Knowledge validation ${stage} artifact does not match the project build and snapshot`);

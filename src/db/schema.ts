@@ -317,7 +317,9 @@ export const pipelineSearchDocuments = pgTable("pipeline_search_documents", {
   metadata: jsonb("metadata").$type<Record<string, string | number | boolean>>().notNull().default({}),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
 }, (table) => [
-  uniqueIndex("pipeline_search_documents_artifact_key_idx").on(table.sourceArtifactId, table.documentKey),
+  uniqueIndex("pipeline_search_documents_build_artifact_key_idx").on(
+    table.buildJobId, table.sourceArtifactId, table.documentKey
+  ),
   index("pipeline_search_documents_scope_idx").on(
     table.workspaceId, table.projectId, table.buildJobId, table.kind, table.documentKey
   ),

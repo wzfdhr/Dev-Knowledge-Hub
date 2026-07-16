@@ -98,7 +98,6 @@ function assertOwnedUpstreamManifest(run: PipelineStageRunRecord, manifest: Arti
     manifest.workspaceId !== run.workspaceId
     || manifest.projectId !== run.projectId
     || manifest.snapshotId !== run.snapshotId
-    || manifest.buildId !== run.buildId
     || manifest.stage !== "convert"
     || manifest.kind !== "normalized-sources"
   ) {

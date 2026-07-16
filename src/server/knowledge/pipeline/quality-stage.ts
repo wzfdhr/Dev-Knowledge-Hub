@@ -93,7 +93,6 @@ function ownedManifest(
   if (manifest.workspaceId !== run.workspaceId
     || manifest.projectId !== run.projectId
     || manifest.snapshotId !== run.snapshotId
-    || manifest.buildId !== run.buildId
     || manifest.stage !== stage
     || manifest.kind !== kind
   ) {

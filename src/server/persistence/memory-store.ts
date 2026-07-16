@@ -1856,14 +1856,15 @@ export class MemoryAppStore implements AppStore {
       || artifact.workspaceId !== input.workspaceId
       || artifact.projectId !== input.projectId
       || artifact.snapshotId !== input.snapshotId
-      || artifact.buildId !== input.buildId
     ) {
       throw new Error("Pipeline search document does not match the source artifact scope");
     }
     const saved: PipelineSearchDocumentRecord[] = [];
     for (const document of input.documents) {
       const existing = this.pipelineSearchDocuments.find((candidate) =>
-        candidate.sourceArtifactId === input.sourceArtifactId && candidate.documentKey === document.documentKey
+        candidate.buildId === input.buildId
+        && candidate.sourceArtifactId === input.sourceArtifactId
+        && candidate.documentKey === document.documentKey
       );
       if (existing) {
         saved.push(structuredClone(existing));

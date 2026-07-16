@@ -78,7 +78,6 @@ async function graphManifestForRun(store: KnowledgeVisualizationStageStore, run:
     || manifest.workspaceId !== run.workspaceId
     || manifest.projectId !== run.projectId
     || manifest.snapshotId !== run.snapshotId
-    || manifest.buildId !== run.buildId
     || manifest.stage !== "graph"
     || manifest.kind !== "knowledge-graph"
   ) throw new Error("Knowledge visualization graph artifact does not match the project build and snapshot");

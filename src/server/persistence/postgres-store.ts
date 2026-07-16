@@ -1118,8 +1118,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         `SELECT 1
          FROM knowledge_artifacts
          WHERE id = $1 AND workspace_id = $2 AND project_id = $3
-           AND snapshot_id = $4 AND build_job_id = $5`,
-        [input.sourceArtifactId, input.workspaceId, input.projectId, input.snapshotId, input.buildId]
+           AND snapshot_id = $4`,
+        [input.sourceArtifactId, input.workspaceId, input.projectId, input.snapshotId]
       );
       if (source.rowCount !== 1) {
         throw new Error("Pipeline search document does not match the source artifact scope");
@@ -1130,7 +1130,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            (workspace_id, project_id, snapshot_id, build_job_id, source_artifact_id,
             document_key, kind, title, content, citations, metadata)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb)
-           ON CONFLICT (source_artifact_id, document_key) DO NOTHING`,
+           ON CONFLICT (build_job_id, source_artifact_id, document_key) DO NOTHING`,
           [
             input.workspaceId, input.projectId, input.snapshotId, input.buildId, input.sourceArtifactId,
             document.documentKey, document.kind, document.title, document.content,

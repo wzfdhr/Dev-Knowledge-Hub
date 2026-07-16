@@ -118,5 +118,28 @@ describe("B02 shadow pipeline", () => {
         kind: "module", name: "app.ts", qualifiedName: sourcePath
       })])
     });
+
+    await store.transitionBuild(build.id, "queued", "ready");
+    const { build: reusedBuild, created } = await store.createBuild({
+      workspaceId, repositoryId: repository!.id, snapshotId: snapshot.id,
+      snapshotPath: snapshot.storagePath, commitSha: snapshot.commitSha
+    });
+    expect(created).toBe(true);
+    const queuedBeforeReuse = queue.sent.length;
+    await worker.schedule({
+      workspaceId, projectId: project.id, snapshotId: snapshot.id, buildId: reusedBuild.id,
+      inputDigest: normalizedSourcesPipelineInputDigest(snapshot, files, reusedBuild.purpose)
+    });
+    for (let index = queuedBeforeReuse; index < queue.sent.length; index += 1) {
+      await worker.process(queue.sent[index]!);
+    }
+
+    expect((await store.listPipelineStageRuns(workspaceId, project.id, reusedBuild.id))
+      .map((run) => [run.stage, run.status]))
+      .toEqual([
+        ["convert", "reused"], ["extract", "reused"], ["tables", "reused"], ["graph", "reused"],
+        ["synthesize", "reused"], ["index", "reused"], ["lint", "reused"], ["viz", "reused"],
+        ["validate", "reused"], ["package", "reused"]
+      ]);
   });
 });

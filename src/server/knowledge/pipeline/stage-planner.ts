@@ -4,6 +4,7 @@ import { knowledgeGraphPipelineInputDigest } from "./graph-stage.js";
 import { pipelineSearchIndexInputDigest } from "./index-stage.js";
 import { pipelineKnowledgeQualityInputDigest } from "./quality-stage.js";
 import { knowledgeVisualizationPipelineInputDigest } from "./viz-stage.js";
+import { knowledgeValidationPipelineInputDigest } from "./validate-stage.js";
 import { knowledgeSynthesisPipelineInputDigest } from "./synthesize-stage.js";
 import { tableSchemasPipelineInputDigest } from "./tables-stage.js";
 import type { PipelineStageInputPlanner } from "./worker.js";
@@ -127,6 +128,28 @@ function nextB02InputDigest(input: {
       );
       assertSingleManifest("viz", graphManifestIds);
       return knowledgeVisualizationPipelineInputDigest(input.snapshot, input.build.purpose, graphManifestIds);
+    }
+    case "validate": {
+      const synthesisManifestIds = latestOutputManifestIds(
+        input.runs, "synthesize", input.currentRun, input.outputManifestIds
+      );
+      const indexManifestIds = latestOutputManifestIds(
+        input.runs, "index", input.currentRun, input.outputManifestIds
+      );
+      const lintManifestIds = latestOutputManifestIds(
+        input.runs, "lint", input.currentRun, input.outputManifestIds
+      );
+      const visualizationManifestIds = latestOutputManifestIds(
+        input.runs, "viz", input.currentRun, input.outputManifestIds
+      );
+      for (const manifestIds of [synthesisManifestIds, indexManifestIds, lintManifestIds, visualizationManifestIds]) {
+        assertSingleManifest("validate", manifestIds);
+      }
+      return knowledgeValidationPipelineInputDigest(
+        input.snapshot,
+        input.build.purpose,
+        [...synthesisManifestIds, ...indexManifestIds, ...lintManifestIds, ...visualizationManifestIds]
+      );
     }
     default:
       throw new Error(`No B02 input digest planner exists for ${input.nextStage}`);

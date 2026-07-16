@@ -447,6 +447,32 @@ describe("team projects and members", () => {
     });
     expect(accepted.statusCode).toBe(200);
     expect(accepted.json()).toMatchObject({ remediation: { id: remediation.id, state: "accepted" } });
+    const candidate = await store.requestRemediationBuildWithAudit({
+      workspaceId: workspace.id,
+      remediationId: remediation.id,
+      actorId: admin.id,
+      affectedPaths: [],
+      build: {
+        workspaceId: workspace.id,
+        repositoryId: repository.id,
+        snapshotId: "quality-snapshot",
+        snapshotPath: "/tmp/quality-snapshot",
+        commitSha: "a".repeat(40)
+      }
+    });
+    const prematureResolution = await app.inject({
+      method: "PATCH", url: `/api/projects/${project.id}/remediations/${remediation.id}`,
+      headers: { cookie, ...csrfHeaders(cookie) }, payload: { state: "resolved" }
+    });
+    expect(prematureResolution.statusCode).toBe(409);
+    expect(prematureResolution.json()).toMatchObject({ error: { code: "REMEDIATION_REBUILD_NOT_READY" } });
+    await store.transitionBuild(candidate.build.id, "queued", "ready");
+    const resolved = await app.inject({
+      method: "PATCH", url: `/api/projects/${project.id}/remediations/${remediation.id}`,
+      headers: { cookie, ...csrfHeaders(cookie) }, payload: { state: "resolved" }
+    });
+    expect(resolved.statusCode).toBe(200);
+    expect(resolved.json()).toMatchObject({ remediation: { id: remediation.id, state: "resolved" } });
     const missingDismissalReason = await app.inject({
       method: "PATCH", url: `/api/projects/${project.id}/remediations/${errorRemediation.id}`,
       headers: { cookie, ...csrfHeaders(cookie) }, payload: { state: "dismissed" }
@@ -479,7 +505,11 @@ describe("team projects and members", () => {
     expect(dismissalEvents.json()).toMatchObject({
       events: [expect.objectContaining({ fromState: "open", toState: "dismissed", reason: "误报，边已由来源文件证明" })]
     });
-    expect(events.json()).toMatchObject({ events: [expect.objectContaining({ fromState: "open", toState: "accepted", actorId: admin.id })] });
+    expect(events.json<{ events: Array<{ fromState: string | null; toState: string; actorId: string }> }>().events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ fromState: "open", toState: "accepted", actorId: admin.id }),
+      expect.objectContaining({ fromState: "accepted", toState: "rebuilding", actorId: admin.id }),
+      expect.objectContaining({ fromState: "rebuilding", toState: "resolved", actorId: admin.id })
+    ]));
   });
 
   test("uses the requested project when resolving the current repository", async () => {

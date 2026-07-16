@@ -1191,6 +1191,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!existing || existing.projectId !== params.data.projectId) {
       return sendError(reply, 404, "REMEDIATION_NOT_FOUND", "Remediation was not found");
     }
+    if (body.data.state === "resolved") {
+      const rebuild = existing.rebuildBuildId
+        ? await options.store.getBuild(admin.workspaceId, existing.rebuildBuildId)
+        : null;
+      if (!rebuild || !["ready", "published"].includes(rebuild.status)) {
+        return sendError(reply, 409, "REMEDIATION_REBUILD_NOT_READY", "Remediation rebuild must be ready before resolution");
+      }
+    }
     try {
       const remediation = await options.store.transitionRemediationWithAudit(
         admin.workspaceId, existing.id, body.data.state, admin.id, body.data.reason

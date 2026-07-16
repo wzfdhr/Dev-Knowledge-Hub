@@ -822,12 +822,16 @@ describe("knowledge citations", () => {
       createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z"
     };
     const acceptedRemediation = { ...remediation, state: "accepted" as const };
+    const rebuildingRemediation = { ...remediation, state: "rebuilding" as const, rebuildBuildId: "remediation-build" };
     const listProjectRemediations = vi.fn().mockResolvedValue({ remediations: [remediation] });
     const transitionProjectRemediation = vi.fn().mockImplementation(async (_projectId: string, _remediationId: string, input: { state: string }) => {
       if (input.state === "accepted") listProjectRemediations.mockResolvedValue({ remediations: [acceptedRemediation] });
       return { remediation: { id: "remediation-1", state: input.state } };
     });
-    const requestProjectRemediationRebuild = vi.fn().mockResolvedValue({ build: { id: "remediation-build" }, created: true });
+    const requestProjectRemediationRebuild = vi.fn().mockImplementation(async () => {
+      listProjectRemediations.mockResolvedValue({ remediations: [rebuildingRemediation] });
+      return { build: { id: "remediation-build" }, created: true };
+    });
     const api = {
       getRepositoryStatus: vi.fn().mockResolvedValue({
         repository: { id: "repo" },
@@ -887,6 +891,10 @@ describe("knowledge citations", () => {
     ));
     await user.click(await within(governance).findByRole("button", { name: "请求范围重建" }));
     await waitFor(() => expect(api.requestProjectRemediationRebuild).toHaveBeenCalledWith("project-1", "remediation-1"));
+    await user.click(await within(governance).findByRole("button", { name: "标记已解决" }));
+    await waitFor(() => expect(api.transitionProjectRemediation).toHaveBeenLastCalledWith(
+      "project-1", "remediation-1", { state: "resolved" }
+    ));
   });
 });
 

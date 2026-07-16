@@ -31,3 +31,4 @@
 .quality-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}.quality-dismiss-form{min-width:0;flex:1 1 260px;display:flex;align-items:flex-end;flex-wrap:wrap;gap:8px}.quality-dismiss-form label{min-width:160px;flex:1 1 220px;display:flex;flex-direction:column;gap:5px}
 @media(max-width:760px){.quality-issue-detail{padding:16px;border-top:1px solid var(--border);border-left:0}.quality-issue-list{flex-basis:100%}}
 .empty-state-note{display:block;margin-top:6px;color:#647084;font-size:12px}.auth-session-notice{margin-top:14px;padding:10px 12px;border-left:3px solid #b88218;background:#fff8e8;color:#6d4d10;font-size:12px;line-height:1.5}.state.ant-alert .ant-alert-description{margin-top:5px;font-size:12px;line-height:1.5}
+.quality-action-note{flex:1 1 100%;color:#647084;font-size:12px}

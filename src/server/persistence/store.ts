@@ -40,6 +40,7 @@ export interface CreateStageRunInput {
   stage: BuildStage;
   attempt: number;
   inputDigest: string;
+  availableAt?: Date;
 }
 
 export interface CompleteStageRunInput {
@@ -62,7 +63,7 @@ export interface FailStageRunAndCreateRetryInput {
   stageRunId: string;
   errorCode: string;
   errorDetail: string;
-  retry?: { inputDigest: string };
+  retry?: { inputDigest: string; availableAt: Date };
 }
 
 export interface FailStageRunAndCreateRetryResult {
@@ -83,6 +84,7 @@ export interface PipelineArtifactStore {
     projectId: string
   ): Promise<PipelineStageRunRecord | null>;
   listQueuedStageRuns(): Promise<PipelineStageRunRecord[]>;
+  listStaleRunningStageRuns(staleBefore: Date): Promise<PipelineStageRunRecord[]>;
   transitionStageRun(
     workspaceId: string,
     projectId: string,

@@ -743,7 +743,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       const { rows } = await client.query<StageRunRow>(
         `WITH candidate AS (
            SELECT id FROM build_stage_runs
-           WHERE workspace_id = $1 AND project_id = $2 AND status = 'queued'
+           WHERE workspace_id = $1 AND project_id = $2 AND status = 'queued' AND available_at <= now()
              AND ($3::uuid IS NULL OR build_job_id = $3)
              AND ($4::text IS NULL OR stage = $4)
            ORDER BY created_at, id
@@ -780,7 +780,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         `WITH updated AS (
            UPDATE build_stage_runs
            SET status = 'running', started_at = now(), updated_at = now()
-           WHERE id = $1 AND build_job_id = $2 AND project_id = $3 AND status = 'queued'
+           WHERE id = $1 AND build_job_id = $2 AND project_id = $3 AND status = 'queued' AND available_at <= now()
            RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
                      input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail
          ), event AS (
@@ -800,7 +800,19 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     const { rows } = await this.pool.query<StageRunRow>(
       `SELECT id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
               input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail
-       FROM build_stage_runs WHERE status = 'queued' ORDER BY created_at, id`
+       FROM build_stage_runs WHERE status = 'queued' AND available_at <= now() ORDER BY available_at, created_at, id`
+    );
+    return rows.map(stageRunRecord);
+  }
+
+  async listStaleRunningStageRuns(staleBefore: Date): Promise<PipelineStageRunRecord[]> {
+    const { rows } = await this.pool.query<StageRunRow>(
+      `SELECT id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+              input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail
+       FROM build_stage_runs
+       WHERE status = 'running' AND started_at < $1
+       ORDER BY started_at, id`,
+      [staleBefore]
     );
     return rows.map(stageRunRecord);
   }
@@ -875,8 +887,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       if (!input.retry) return { failed, retry: null };
       const { rows: retryRows } = await client.query<StageRunRow>(
         `INSERT INTO build_stage_runs
-         (workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status, input_digest)
-         SELECT $1, $2, $3, $4, $5, $6, 'queued', $7
+         (workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status, input_digest, available_at)
+         SELECT $1, $2, $3, $4, $5, $6, 'queued', $7, $8
          FROM build_jobs build
          JOIN repositories repository ON repository.id = build.repository_id AND repository.workspace_id = build.workspace_id
          JOIN source_snapshots snapshot ON snapshot.id = build.snapshot_id AND snapshot.workspace_id = build.workspace_id
@@ -888,7 +900,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
                    input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
         [
           failed.workspaceId, failed.projectId, failed.snapshotId, failed.buildId,
-          failed.stage, failed.attempt + 1, input.retry.inputDigest
+          failed.stage, failed.attempt + 1, input.retry.inputDigest, input.retry.availableAt
         ]
       );
       if (!retryRows[0]) throw new Error("Retry stage run does not match the project build and snapshot");

@@ -64,11 +64,13 @@ export class PipelineStageWorker {
     private readonly execute: PipelineStageExecutor,
     private readonly stages: readonly BuildStage[],
     private readonly reconcileIntervalMs = 5_000,
-    private readonly inputPlanner?: PipelineStageInputPlanner
+    private readonly inputPlanner?: PipelineStageInputPlanner,
+    private readonly staleRunAfterMs = 5 * 60_000
   ) {}
 
   async start(): Promise<void> {
     await this.queue.start((job) => this.process(job));
+    await this.recoverStaleRuns();
     await this.reconcileQueuedRuns();
     this.reconcileTimer = setInterval(() => {
       void this.reconcileQueuedRuns();
@@ -82,6 +84,30 @@ export class PipelineStageWorker {
         await this.queue.send({ stageRunId: run.id, buildId: run.buildId, projectId: run.projectId });
       } catch {
         // The durable queued row remains available for the next reconciliation pass.
+      }
+    }
+  }
+
+  private async recoverStaleRuns(): Promise<void> {
+    const staleBefore = new Date(Date.now() - this.staleRunAfterMs);
+    for (const run of await this.store.listStaleRunningStageRuns(staleBefore)) {
+      const recovered = await this.store.failStageRunAndCreateRetry({
+        workspaceId: run.workspaceId,
+        projectId: run.projectId,
+        stageRunId: run.id,
+        errorCode: "STAGE_INTERRUPTED",
+        errorDetail: "Pipeline worker stopped before this stage completed",
+        ...(shouldRetry(run) ? { retry: {
+          inputDigest: run.inputDigest,
+          availableAt: new Date(Date.now() + retryDelayMs(run))
+        } } : {})
+      });
+      if (recovered.retry) {
+        await this.queue.send({
+          stageRunId: recovered.retry.id,
+          buildId: recovered.retry.buildId,
+          projectId: recovered.retry.projectId
+        }, { delayMs: retryDelayMs(run) });
       }
     }
   }
@@ -157,7 +183,10 @@ export class PipelineStageWorker {
           stageRunId: run.id,
           errorCode: "PIPELINE_STAGE_FAILED",
           errorDetail: error instanceof Error ? error.message.slice(0, 4_000) : "Pipeline stage failed",
-          ...(shouldRetry(run) ? { retry: { inputDigest: run.inputDigest } } : {})
+          ...(shouldRetry(run) ? { retry: {
+            inputDigest: run.inputDigest,
+            availableAt: new Date(Date.now() + retryDelayMs(run))
+          } } : {})
         });
         if (failed.retry) {
           await this.queue.send({

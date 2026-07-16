@@ -103,6 +103,7 @@ export class MemoryAppStore implements AppStore {
   readonly buildEvents: BuildEvent[] = [];
   private nextBuildEventSequence = 1;
   readonly pipelineStageRuns: PipelineStageRunRecord[] = [];
+  private readonly pipelineStageAvailableAt = new Map<string, Date>();
   readonly pipelineStageEvents: PipelineStageEvent[] = [];
   readonly knowledgeArtifacts: ArtifactManifest[] = [];
   readonly pipelineSearchDocuments: PipelineSearchDocumentRecord[] = [];
@@ -1653,6 +1654,7 @@ export class MemoryAppStore implements AppStore {
       errorDetail: null
     };
     this.pipelineStageRuns.push(run);
+    this.pipelineStageAvailableAt.set(run.id, input.availableAt ?? new Date());
     this.recordPipelineStageEvent(run);
     return run;
   }
@@ -1693,7 +1695,16 @@ export class MemoryAppStore implements AppStore {
   }
 
   async listQueuedStageRuns(): Promise<PipelineStageRunRecord[]> {
-    return this.pipelineStageRuns.filter((run) => run.status === "queued").map((run) => structuredClone(run));
+    const now = new Date();
+    return this.pipelineStageRuns.filter((run) => run.status === "queued"
+      && (this.pipelineStageAvailableAt.get(run.id) ?? now) <= now
+    ).map((run) => structuredClone(run));
+  }
+
+  async listStaleRunningStageRuns(staleBefore: Date): Promise<PipelineStageRunRecord[]> {
+    return this.pipelineStageRuns.filter((run) => run.status === "running"
+      && run.startedAt !== null && new Date(run.startedAt) < staleBefore
+    ).map((run) => structuredClone(run));
   }
 
   async transitionStageRun(
@@ -1737,7 +1748,8 @@ export class MemoryAppStore implements AppStore {
       buildId: failed.buildId,
       stage: failed.stage,
       attempt: failed.attempt + 1,
-      inputDigest: input.retry.inputDigest
+      inputDigest: input.retry.inputDigest,
+      availableAt: input.retry.availableAt
     });
     return { failed, retry };
   }

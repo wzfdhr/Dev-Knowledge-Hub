@@ -77,6 +77,7 @@ class FakePipelineStore implements PipelineArtifactStore {
   }
 
   async listQueuedStageRuns() { return this.runs.filter((run) => run.status === "queued"); }
+  async listStaleRunningStageRuns() { return this.runs.filter((run) => run.status === "running"); }
 
   async transitionStageRun(_workspaceId: string, _projectId: string, stageRunId: string, expectedStatus: PipelineStageRunRecord["status"], status: PipelineStageRunRecord["status"], details = {}) {
     const run = this.runs.find((candidate) => candidate.id === stageRunId);
@@ -197,7 +198,7 @@ describe("PipelineStageWorker", () => {
     await worker.process(queue.sent[0]!);
 
     expect(store.failStageRunAndCreateRetry).toHaveBeenCalledWith(expect.objectContaining({
-      stageRunId: "run-1", errorCode: "PIPELINE_STAGE_FAILED", retry: { inputDigest: digest }
+      stageRunId: "run-1", errorCode: "PIPELINE_STAGE_FAILED", retry: expect.objectContaining({ inputDigest: digest })
     }));
     expect(store.runs).toEqual(expect.arrayContaining([
       expect.objectContaining({ stage: "convert", attempt: 1, status: "failed" }),
@@ -207,6 +208,29 @@ describe("PipelineStageWorker", () => {
       { stageRunId: "run-1", buildId: "build-1", projectId: "project-1" },
       { stageRunId: "run-2", buildId: "build-1", projectId: "project-1" }
     ]);
+  });
+
+  test("records an interrupted stale attempt before recovering its retry", async () => {
+    const store = new FakePipelineStore();
+    await store.createStageRun({ ...job, stage: "convert", attempt: 1 });
+    const stale = store.runs[0]!;
+    stale.status = "running";
+    stale.startedAt = "2026-07-14T00:00:00.000Z";
+    const queue = new FakeQueue();
+    const worker = new PipelineStageWorker(store, queue, async () => ({ outputManifestIds: [] }), stages);
+
+    await worker.start();
+    await worker.stop();
+
+    expect(store.failStageRunAndCreateRetry).toHaveBeenCalledWith(expect.objectContaining({
+      stageRunId: stale.id,
+      errorCode: "STAGE_INTERRUPTED",
+      retry: expect.objectContaining({ inputDigest: digest })
+    }));
+    expect(store.runs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: stale.id, status: "failed", errorCode: "STAGE_INTERRUPTED" }),
+      expect.objectContaining({ stage: "convert", attempt: 2, status: "queued" })
+    ]));
   });
 
   test("records a cache hit as reused before scheduling the next stage", async () => {

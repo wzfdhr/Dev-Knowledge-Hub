@@ -405,6 +405,74 @@ integration("PostgreSQL cited knowledge integration", () => {
   }, 30_000);
 
   test(databaseUrl
+    ? "atomically persists the ready transition with its initial shadow stage"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("pipeline-finalize@example.com", "hash");
+    const repository = await store.createRepository(
+      setup!.workspace.id,
+      { kind: "upload", name: "Finalized pipeline" }
+    );
+    const snapshotId = randomUUID();
+    await store.createSnapshot({
+      snapshot: {
+        id: snapshotId,
+        workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id,
+        commitSha: "a".repeat(40),
+        ref: "upload",
+        remoteUrl: null,
+        commitTimestamp: new Date("2026-07-16T00:00:00.000Z"),
+        storagePath: "/tmp/pipeline-finalize-snapshot"
+      },
+      files: []
+    });
+    const { build } = await store.createBuild({
+      workspaceId: setup!.workspace.id,
+      repositoryId: repository!.id,
+      snapshotId,
+      snapshotPath: "/tmp/pipeline-finalize-snapshot",
+      commitSha: "a".repeat(40)
+    });
+    for (const [from, to] of [["queued", "syncing"], ["syncing", "parsing"], ["parsing", "synthesizing"], ["synthesizing", "validating"]] as const) {
+      await expect(store.transitionBuild(build.id, from, to)).resolves.toMatchObject({ status: to });
+    }
+
+    await expect(store.transitionBuildAndCreateInitialStage(
+      build.id,
+      "validating",
+      "ready",
+      { requireNotCancelled: true },
+      { projectId: randomUUID(), inputDigest: "b".repeat(64) }
+    )).rejects.toThrow("Initial stage run does not match");
+    await expect(store.getBuild(setup!.workspace.id, build.id)).resolves.toMatchObject({ status: "validating" });
+    await expect(store.listPipelineStageRuns(
+      setup!.workspace.id,
+      repository!.projectId,
+      build.id
+    )).resolves.toEqual([]);
+
+    await expect(store.transitionBuildAndCreateInitialStage(
+      build.id,
+      "validating",
+      "ready",
+      { requireNotCancelled: true },
+      { projectId: repository!.projectId, inputDigest: "b".repeat(64) }
+    )).resolves.toMatchObject({ status: "ready" });
+    await expect(store.listPipelineStageRuns(
+      setup!.workspace.id,
+      repository!.projectId,
+      build.id
+    )).resolves.toEqual([
+      expect.objectContaining({ stage: "convert", attempt: 1, status: "queued", inputDigest: "b".repeat(64) })
+    ]);
+  }, 30_000);
+
+  test(databaseUrl
     ? "runs and reuses all ten shadow stages with PostgreSQL persistence"
     : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
     if (!databaseUrl) return;

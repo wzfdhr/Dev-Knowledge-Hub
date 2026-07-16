@@ -70,7 +70,9 @@ describe("production bootstrap", () => {
       "postgres://localhost/devkh", store, artifactStore, expect.any(Function)
     );
     expect(qualityWorker.start).toHaveBeenCalledOnce();
-    expect(deps.createBuildService).toHaveBeenCalledWith(store, queue, expect.any(Function), expect.any(Function));
+    expect(deps.createBuildService).toHaveBeenCalledWith(
+      store, queue, expect.any(Function), expect.any(Function), expect.any(Function)
+    );
     expect(deps.createArtifactStore).toHaveBeenCalledWith("/var/lib/devkh/artifacts", store);
     expect(artifactStore.initialize).toHaveBeenCalledOnce();
     expect(buildService.start).toHaveBeenCalledOnce();
@@ -97,7 +99,7 @@ describe("production bootstrap", () => {
     }, deps);
 
     expect(deps.createQualityPipelineWorker).not.toHaveBeenCalled();
-    const schedulePostBuild = vi.mocked(deps.createBuildService).mock.calls[0]![3]!;
+    const schedulePostBuild = vi.mocked(deps.createBuildService).mock.calls[0]![4]!;
     await expect(schedulePostBuild({ id: "build-1" } as BuildRecord)).resolves.toBeUndefined();
   });
 
@@ -132,14 +134,16 @@ describe("production bootstrap", () => {
     persistedStore.getRepository = vi.fn(async () => ({ id: "repo-1", projectId: "project-1" }));
     persistedStore.findSnapshotById = vi.fn(async () => ({ id: "snapshot-1", commitSha: "a".repeat(40) }));
     persistedStore.listSnapshotFiles = vi.fn(async () => []);
-    const schedulePostBuild = vi.mocked(deps.createBuildService).mock.calls[0]![3]!;
+    const preparePostBuild = vi.mocked(deps.createBuildService).mock.calls[0]![3]!;
+    const schedulePostBuild = vi.mocked(deps.createBuildService).mock.calls[0]![4]!;
     const build: BuildRecord = {
       id: "build-1", workspaceId: "workspace-1", repositoryId: "repo-1", snapshotId: "snapshot-1",
       snapshotPath: "/tmp/snapshot", commitSha: "a".repeat(40), status: "ready", warnings: [], cancelRequested: false,
       purpose: { kind: "standard", feedbackIds: [], feedbackContext: [], remediationContext: [] }
     };
 
-    await schedulePostBuild(build);
+    const initialStage = await preparePostBuild(build);
+    await schedulePostBuild(build, initialStage);
 
     const qualityWorker = vi.mocked(deps.createQualityPipelineWorker).mock.results[0].value;
     expect(qualityWorker.schedule).toHaveBeenCalledWith(expect.objectContaining({

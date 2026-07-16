@@ -67,6 +67,7 @@ import type {
   BuildEvent,
   BuildRecord,
   BuildStatus,
+  InitialPipelineStage,
   PersistedKnowledge
 } from "../knowledge/build-service.js";
 import { standardBuildPurpose } from "../knowledge/build-service.js";
@@ -3493,6 +3494,98 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       ]
     );
     return rows[0] ? buildRecord(rows[0]) : null;
+  }
+
+  async transitionBuildAndCreateInitialStage(
+    buildId: string,
+    expectedStatus: BuildStatus,
+    status: BuildStatus,
+    details: {
+      errorMessage?: string;
+      warnings?: BuildRecord["warnings"];
+      requireNotCancelled?: boolean;
+    },
+    stage: InitialPipelineStage
+  ): Promise<BuildRecord | null> {
+    const queued = stageRunSchema.parse({
+      id: "pending",
+      buildId,
+      stage: "convert",
+      attempt: 1,
+      status: "queued",
+      inputDigest: stage.inputDigest,
+      outputManifestIds: [],
+      startedAt: null,
+      finishedAt: null,
+      errorCode: null,
+      errorDetail: null
+    });
+    return this.transaction(async (client) => {
+      const payload = JSON.stringify({
+        ...(details.errorMessage ? { errorMessage: details.errorMessage } : {}),
+        ...(details.warnings ? { warnings: details.warnings } : {})
+      });
+      const { rows } = await client.query<BuildRow>(
+        `UPDATE build_jobs
+         SET status = $3, error_message = COALESCE($4, error_message),
+             warnings = COALESCE($5::jsonb, warnings), updated_at = now()
+         WHERE id = $1 AND status = $2 AND ($7::boolean = false OR cancel_requested = false)
+         RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
+                   status, warnings, cancel_requested, error_message,
+                   purpose, feedback_ids, feedback_context, remediation_context, allow_llm`,
+        [
+          buildId,
+          expectedStatus,
+          status,
+          details.errorMessage ?? null,
+          details.warnings ? JSON.stringify(details.warnings) : null,
+          payload,
+          details.requireNotCancelled ?? false
+        ]
+      );
+      if (!rows[0]) return null;
+      const build = buildRecord(rows[0]);
+      await client.query(
+        `INSERT INTO build_events (workspace_id, build_job_id, status, payload)
+         VALUES ($1, $2, $3, $4::jsonb)`,
+        [build.workspaceId, build.id, build.status, payload]
+      );
+      const { rows: stageRows } = await client.query<StageRunRow>(
+        `WITH run AS (
+           INSERT INTO build_stage_runs
+             (workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status, input_digest)
+           SELECT $1, $2, build.snapshot_id, build.id, $3, $4, $5, $6
+           FROM build_jobs build
+           JOIN repositories repository
+             ON repository.id = build.repository_id AND repository.workspace_id = build.workspace_id
+           JOIN source_snapshots snapshot
+             ON snapshot.id = build.snapshot_id AND snapshot.workspace_id = build.workspace_id
+           WHERE build.workspace_id = $1 AND build.id = $7
+             AND repository.project_id = $2 AND snapshot.repository_id = build.repository_id
+           ON CONFLICT (build_job_id, stage, attempt) DO UPDATE
+             SET updated_at = build_stage_runs.updated_at
+           RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+                     input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail
+         ), event AS (
+           INSERT INTO build_stage_events
+             (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+           SELECT workspace_id, project_id, build_job_id, id, stage, status FROM run
+           ON CONFLICT (stage_run_id, status) DO NOTHING
+         )
+         SELECT * FROM run`,
+        [
+          build.workspaceId,
+          stage.projectId,
+          queued.stage,
+          queued.attempt,
+          queued.status,
+          queued.inputDigest,
+          build.id
+        ]
+      );
+      if (!stageRows[0]) throw new Error("Initial stage run does not match the project build and snapshot");
+      return build;
+    });
   }
 
   async requestBuildCancellation(workspaceId: string, buildId: string): Promise<BuildRecord | null> {

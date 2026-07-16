@@ -73,6 +73,7 @@ import type {
   BuildInput,
   BuildEvent,
   BuildRecord,
+  InitialPipelineStage,
   PersistedKnowledge
 } from "../knowledge/build-service.js";
 import { standardBuildPurpose } from "../knowledge/build-service.js";
@@ -1602,6 +1603,31 @@ export class MemoryAppStore implements AppStore {
       status,
       occurredAt: new Date().toISOString(),
       ...(details?.errorMessage ? { errorMessage: details.errorMessage } : {})
+    });
+    return build;
+  }
+
+  async transitionBuildAndCreateInitialStage(
+    buildId: string,
+    expectedStatus: BuildRecord["status"],
+    status: BuildRecord["status"],
+    details: {
+      errorMessage?: string;
+      warnings?: BuildRecord["warnings"];
+      requireNotCancelled?: boolean;
+    },
+    stage: InitialPipelineStage
+  ): Promise<BuildRecord | null> {
+    const build = await this.transitionBuild(buildId, expectedStatus, status, details);
+    if (!build) return null;
+    await this.createStageRun({
+      workspaceId: build.workspaceId,
+      projectId: stage.projectId,
+      snapshotId: build.snapshotId,
+      buildId: build.id,
+      stage: "convert",
+      attempt: 1,
+      inputDigest: stage.inputDigest
     });
     return build;
   }

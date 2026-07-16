@@ -94,6 +94,21 @@ class FakeBuildPersistence implements BuildPersistence {
     return build;
   }
 
+  readonly transitionBuildAndCreateInitialStage = vi.fn(async (
+    buildId: string,
+    expectedStatus: BuildRecord["status"],
+    status: BuildRecord["status"],
+    details: {
+      errorMessage?: string;
+      warnings?: BuildRecord["warnings"];
+      requireNotCancelled?: boolean;
+    },
+    stage: { projectId: string; inputDigest: string }
+  ) => {
+    void stage;
+    return this.transitionBuild(buildId, expectedStatus, status, details);
+  });
+
   async requestBuildCancellation(workspaceId: string, buildId: string) {
     const build = await this.getBuild(workspaceId, buildId);
     if (!build) return null;
@@ -255,6 +270,31 @@ describe("BuildService", () => {
 
     expect(schedulePostBuild).toHaveBeenCalledWith(expect.objectContaining({ id: build.id, status: "ready" }));
     expect(persistence.transitions.at(-1)).toBe("ready");
+  });
+
+  test("persists the shadow convert stage with the ready transition before queue delivery", async () => {
+    const persistence = new FakeBuildPersistence();
+    const preparePostBuild = vi.fn(async () => ({ projectId: "project-1", inputDigest: "a".repeat(64) }));
+    const schedulePostBuild = vi.fn(async () => {});
+    const service = new BuildService(persistence, new FakeQueue(), {
+      preparePostBuild,
+      schedulePostBuild
+    } as never);
+    const { build } = await service.startBuild(input());
+
+    await service.process(build.id);
+
+    expect(persistence.transitionBuildAndCreateInitialStage).toHaveBeenCalledWith(
+      build.id,
+      "validating",
+      "ready",
+      expect.objectContaining({ requireNotCancelled: true }),
+      { projectId: "project-1", inputDigest: "a".repeat(64) }
+    );
+    expect(schedulePostBuild).toHaveBeenCalledWith(
+      expect.objectContaining({ id: build.id, status: "ready" }),
+      { projectId: "project-1", inputDigest: "a".repeat(64) }
+    );
   });
 
   test("reuses only a build with the same snapshot and purpose identity", async () => {

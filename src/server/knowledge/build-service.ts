@@ -57,6 +57,11 @@ export interface BuildInput {
   llmAudit?: { actorId: string; projectId: string };
 }
 
+export interface InitialPipelineStage {
+  projectId: string;
+  inputDigest: string;
+}
+
 export interface BuildPagination {
   limit?: number;
   offset?: number;
@@ -98,6 +103,17 @@ export interface BuildPersistence {
       warnings?: KnowledgeOutput["warnings"];
       requireNotCancelled?: boolean;
     }
+  ): Promise<BuildRecord | null>;
+  transitionBuildAndCreateInitialStage(
+    buildId: string,
+    expectedStatus: BuildStatus,
+    status: BuildStatus,
+    details: {
+      errorMessage?: string;
+      warnings?: KnowledgeOutput["warnings"];
+      requireNotCancelled?: boolean;
+    },
+    stage: InitialPipelineStage
   ): Promise<BuildRecord | null>;
   requestBuildCancellation(workspaceId: string, buildId: string): Promise<BuildRecord | null>;
   saveKnowledge(value: PersistedKnowledge): Promise<void>;
@@ -146,7 +162,8 @@ export class BuildService {
   private readonly enhancerForWorkspace?: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>;
   private readonly reconcileIntervalMs: number;
   private readonly onReconciliationError: (error: unknown) => void;
-  private readonly schedulePostBuild?: (build: BuildRecord) => Promise<void>;
+  private readonly preparePostBuild?: (build: BuildRecord) => Promise<InitialPipelineStage | undefined>;
+  private readonly schedulePostBuild?: (build: BuildRecord, stage?: InitialPipelineStage) => Promise<void>;
   private readonly onPostBuildSchedulingError: (error: unknown) => void;
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
   private reconciliationPromise: Promise<void> | null = null;
@@ -163,7 +180,8 @@ export class BuildService {
       enhancerForWorkspace?: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>;
       reconcileIntervalMs?: number;
       onReconciliationError?: (error: unknown) => void;
-      schedulePostBuild?: (build: BuildRecord) => Promise<void>;
+      preparePostBuild?: (build: BuildRecord) => Promise<InitialPipelineStage | undefined>;
+      schedulePostBuild?: (build: BuildRecord, stage?: InitialPipelineStage) => Promise<void>;
       onPostBuildSchedulingError?: (error: unknown) => void;
     } = {}
   ) {
@@ -175,6 +193,7 @@ export class BuildService {
     this.reconcileIntervalMs = dependencies.reconcileIntervalMs ?? 5_000;
     this.onReconciliationError = dependencies.onReconciliationError
       ?? ((error) => console.error("Build reconciliation failed", error));
+    this.preparePostBuild = dependencies.preparePostBuild;
     this.schedulePostBuild = dependencies.schedulePostBuild;
     this.onPostBuildSchedulingError = dependencies.onPostBuildSchedulingError
       ?? ((error) => console.error("Post-build scheduling failed", error));
@@ -332,10 +351,18 @@ export class BuildService {
       await this.checkCancellation(original);
       await this.persistence.saveKnowledge({ build: original, index, output });
       await this.checkCancellation(original);
-      const ready = await this.persistence.transitionBuild(buildId, status, "ready", {
-        warnings: output.warnings,
-        requireNotCancelled: true
-      });
+      const initialPipelineStage = this.preparePostBuild
+        ? await this.preparePostBuild(original)
+        : undefined;
+      const ready = initialPipelineStage
+        ? await this.persistence.transitionBuildAndCreateInitialStage(buildId, status, "ready", {
+          warnings: output.warnings,
+          requireNotCancelled: true
+        }, initialPipelineStage)
+        : await this.persistence.transitionBuild(buildId, status, "ready", {
+          warnings: output.warnings,
+          requireNotCancelled: true
+        });
       if (!ready) {
         const latest = await this.persistence.getBuild(original.workspaceId, buildId);
         if (latest?.status === status && latest.cancelRequested) throw new BuildCancelledError();
@@ -344,7 +371,8 @@ export class BuildService {
       await this.emitLatest(ready);
       if (this.schedulePostBuild) {
         try {
-          await this.schedulePostBuild(ready);
+          if (initialPipelineStage) await this.schedulePostBuild(ready, initialPipelineStage);
+          else await this.schedulePostBuild(ready);
         } catch (error) {
           this.onPostBuildSchedulingError(error);
         }

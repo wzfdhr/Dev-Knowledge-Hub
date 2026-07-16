@@ -143,7 +143,7 @@ describe("PipelineStageWorker", () => {
       store, failedQueue, async () => ({ outputManifestIds: [] }), stages
     );
 
-    await expect(failedWorker.schedule(job)).rejects.toThrow("queue unavailable");
+    await expect(failedWorker.schedule(job)).resolves.toBeUndefined();
     expect(store.runs).toEqual([expect.objectContaining({ stage: "convert", status: "queued" })]);
 
     const recoveredQueue = new FakeQueue();
@@ -190,6 +190,25 @@ describe("PipelineStageWorker", () => {
 
     expect(execute).toHaveBeenCalledOnce();
     expect(store.runs.filter((run) => run.stage === "extract")).toHaveLength(1);
+  });
+
+  test("keeps the next durable stage queued when its delivery fails", async () => {
+    const store = new FakePipelineStore();
+    const queue: PipelineStageJobQueue = {
+      send: async () => { throw new Error("queue unavailable"); },
+      start: async () => {},
+      stop: async () => {}
+    };
+    const worker = new PipelineStageWorker(store, queue, async () => ({ outputManifestIds: ["artifact-1"] }), stages);
+    await store.createStageRun({ ...job, stage: "convert", attempt: 1 });
+
+    await expect(worker.process({ stageRunId: "run-1", buildId: "build-1", projectId: "project-1" })).resolves.toBeUndefined();
+
+    expect(store.failStageRunAndCreateRetry).not.toHaveBeenCalled();
+    expect(store.runs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stage: "convert", status: "succeeded" }),
+      expect.objectContaining({ stage: "extract", status: "queued" })
+    ]));
   });
 
   test("uses the stage input planner for the next durable run", async () => {
@@ -270,6 +289,26 @@ describe("PipelineStageWorker", () => {
     }));
     expect(store.runs).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: stale.id, status: "failed", errorCode: "STAGE_INTERRUPTED" }),
+      expect.objectContaining({ stage: "convert", attempt: 2, status: "queued" })
+    ]));
+  });
+
+  test("keeps a recovered stale retry queued when delayed delivery fails", async () => {
+    const store = new FakePipelineStore();
+    await store.createStageRun({ ...job, stage: "convert", attempt: 1 });
+    store.runs[0]!.status = "running";
+    const queue: PipelineStageJobQueue = {
+      send: async () => { throw new Error("queue unavailable"); },
+      start: async () => {},
+      stop: async () => {}
+    };
+    const worker = new PipelineStageWorker(store, queue, async () => ({ outputManifestIds: [] }), stages);
+
+    await expect(worker.start()).resolves.toBeUndefined();
+    await worker.stop();
+
+    expect(store.runs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stage: "convert", attempt: 1, status: "failed", errorCode: "STAGE_INTERRUPTED" }),
       expect.objectContaining({ stage: "convert", attempt: 2, status: "queued" })
     ]));
   });

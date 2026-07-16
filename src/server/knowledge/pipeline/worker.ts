@@ -68,6 +68,14 @@ export class PipelineStageWorker {
     private readonly staleRunAfterMs = 5 * 60_000
   ) {}
 
+  private async enqueue(job: PipelineStageJob, options?: { delayMs?: number }): Promise<void> {
+    try {
+      await this.queue.send(job, options);
+    } catch {
+      // The stage run is already durable. Reconciliation will retry delivery.
+    }
+  }
+
   async start(): Promise<void> {
     await this.queue.start((job) => this.process(job));
     await this.recoverStaleRuns();
@@ -80,11 +88,7 @@ export class PipelineStageWorker {
 
   private async reconcileQueuedRuns(): Promise<void> {
     for (const run of await this.store.listQueuedStageRuns()) {
-      try {
-        await this.queue.send({ stageRunId: run.id, buildId: run.buildId, projectId: run.projectId });
-      } catch {
-        // The durable queued row remains available for the next reconciliation pass.
-      }
+      await this.enqueue({ stageRunId: run.id, buildId: run.buildId, projectId: run.projectId });
     }
   }
 
@@ -103,7 +107,7 @@ export class PipelineStageWorker {
         } } : {})
       });
       if (recovered.retry) {
-        await this.queue.send({
+        await this.enqueue({
           stageRunId: recovered.retry.id,
           buildId: recovered.retry.buildId,
           projectId: recovered.retry.projectId
@@ -122,7 +126,7 @@ export class PipelineStageWorker {
     const stage = this.stages[0];
     if (!stage) return;
     const run = await this.store.createStageRun({ ...job, stage, attempt: 1 });
-    await this.queue.send({ stageRunId: run.id, buildId: run.buildId, projectId: run.projectId });
+    await this.enqueue({ stageRunId: run.id, buildId: run.buildId, projectId: run.projectId });
   }
 
   async process(job: PipelineStageJob): Promise<void> {
@@ -170,7 +174,7 @@ export class PipelineStageWorker {
           } } : {})
         });
         if (advanced?.next) {
-          await this.queue.send({
+          await this.enqueue({
             stageRunId: advanced.next.id,
             buildId: advanced.next.buildId,
             projectId: advanced.next.projectId
@@ -189,7 +193,7 @@ export class PipelineStageWorker {
           } } : {})
         });
         if (failed.retry) {
-          await this.queue.send({
+          await this.enqueue({
             stageRunId: failed.retry.id,
             buildId: failed.retry.buildId,
             projectId: failed.retry.projectId

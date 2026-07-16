@@ -343,6 +343,26 @@ describe("PipelineStageWorker", () => {
     expect(queue.sent).toHaveLength(1);
   });
 
+  test("cancels a stage when cancellation is requested during execution", async () => {
+    const store = new FakePipelineStore();
+    const queue = new FakeQueue();
+    const worker = new PipelineStageWorker(
+      store,
+      queue,
+      async () => {
+        store.build!.cancelRequested = true;
+        return { outputManifestIds: ["artifact-1"] };
+      },
+      stages
+    );
+    await worker.schedule(job);
+
+    await worker.process(queue.sent[0]!);
+
+    expect(store.runs).toEqual([expect.objectContaining({ stage: "convert", status: "cancelled" })]);
+    expect(queue.sent).toHaveLength(1);
+  });
+
   test("cancels an orphaned queued stage without executing it", async () => {
     const store = new FakePipelineStore(null);
     const queue = new FakeQueue();

@@ -136,6 +136,11 @@ export class PipelineStageWorker {
     if (build && !build.cancelRequested) {
       try {
         const result = await this.execute(run);
+        const currentBuild = await this.store.getBuild(run.workspaceId, run.buildId);
+        if (!currentBuild || currentBuild.cancelRequested) {
+          await this.store.transitionStageRun(run.workspaceId, run.projectId, run.id, "running", "cancelled");
+          return;
+        }
         const nextStage = this.stages[this.stages.indexOf(run.stage) + 1];
         const outputManifestIds = result.outputManifestIds ?? [];
         const defaultNextInputDigest = nextStage ? pipelineInputDigest({

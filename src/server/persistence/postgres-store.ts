@@ -928,6 +928,12 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
              output_manifest_ids = COALESCE($6::uuid[], output_manifest_ids),
              finished_at = now(), updated_at = now()
          WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND status = 'running'
+           AND NOT EXISTS (
+             SELECT 1 FROM build_jobs build
+             WHERE build.id = build_stage_runs.build_job_id
+               AND build.workspace_id = build_stage_runs.workspace_id
+               AND build.cancel_requested
+           )
          RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
                    input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
         [input.workspaceId, input.projectId, input.stageRunId, "running", input.status, input.outputManifestIds ?? null]

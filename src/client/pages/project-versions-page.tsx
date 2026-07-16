@@ -13,6 +13,19 @@ import "../progress.css";
 type PrimaryKind = "connect" | "sync" | "start-build" | "retry-build" | "review" | "publish" | "none";
 interface OverviewState { repository: Repository | null; builds: Build[]; releases: Release[]; snapshotId?: string }
 
+export function shadowPipelineMessage(status: Build["status"] | null): { title: string; detail: string } {
+  if (status === "failed") return {
+    title: "影子验证发现问题",
+    detail: "正式版本保持不变；请检查失败阶段后重试影子验证。"
+  };
+  if (status === "ready" || status === "published") return {
+    title: "影子验证已完成",
+    detail: "结果仅用于新内核验证，当前正式版本仍使用 legacy 内核。"
+  };
+  if (status === null) return { title: "尚未运行影子验证", detail: "当前正式构建不受影响。" };
+  return { title: "影子验证进行中", detail: "当前正式版本继续使用 legacy 内核。" };
+}
+
 export function derivePrimaryAction(state: OverviewState): { kind: PrimaryKind; label: string } {
   if (!state.repository) return { kind: "connect", label: "连接仓库" };
   const latestBuild = state.builds[0];
@@ -80,6 +93,13 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
     unchanged: sessionSnapshot?.snapshotId === serverSnapshot.id ? sessionSnapshot.unchanged : true
   } : sessionSnapshot;
   const effectiveSnapshotId = snapshot?.snapshotId ?? failedBuild?.snapshotId;
+  const shadowPipelineQuery = useQuery({
+    queryKey: ["build-stages", projectId, latestBuild?.id],
+    queryFn: () => api.getBuildStages(latestBuild!.id),
+    enabled: Boolean(latestBuild),
+    retry: false,
+    refetchInterval: latestBuild && !terminal.has(latestBuild.status) ? 3000 : false
+  });
   const requiredLoading = Boolean(repository) && (buildsQuery.isLoading || releasesQuery.isLoading || repositoryStatusQuery.isLoading);
   const blockingError = repositoryQuery.error
     ? repositoryQuery.error
@@ -107,6 +127,7 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
   const invalidate = async () => Promise.all([
     queryClient.invalidateQueries({ queryKey: projectKeys.builds(projectId) }),
     queryClient.invalidateQueries({ queryKey: projectKeys.releases(projectId) }),
+    queryClient.invalidateQueries({ queryKey: ["build-stages", projectId] }),
     queryClient.invalidateQueries({ queryKey: ["repository-status"] })
   ]);
   const sync = useMutation({ mutationFn: api.syncRepository, onSuccess: (value) => {
@@ -184,6 +205,8 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
     {!blockingError && !requiredLoading && <>
       <section className="repo-strip" aria-label="仓库状态"><div><span>仓库</span><strong>{repository?.name ?? "未连接"}</strong></div><div><span>{repository?.kind === "upload" ? "来源" : "分支"}</span><strong><GitBranch aria-hidden="true" />{snapshot?.ref ?? repository?.defaultBranch ?? "-"}</strong></div><div><span>{sourceLabel}</span><strong className="mono">{commit?.slice(0, 12) ?? "暂无快照"}</strong></div><div><span>待同步</span><strong>{snapshot ? (snapshot.unchanged ? "没有变更" : `已采集 ${snapshot.fileCount} 个文件`) : repository ? repository.kind === "upload" ? "等待导入项目文件夹" : "需要同步" : "-"}</strong></div></section>
       <section className="metric-grid" aria-label="工作区摘要"><article><span>当前版本</span><strong>{releases.find((release) => release.publishedAt)?.version ?? "未发布"}</strong></article><article><span>人工待处理项</span><strong>{feedbackQuery.data?.pages.flatMap((page) => page.feedback).filter((item) => ["open", "acknowledged"].includes(item.status)).length ?? 0}</strong></article><article><span>构建数</span><strong>{builds.length}</strong></article><article><span>知识状态</span><strong>{latestBuild ? <Status value={latestBuild.status} /> : "尚未构建"}</strong></article></section>
+      {shadowPipelineQuery.data?.stages.length ? <section className="panel shadow-pipeline-panel" aria-label="影子验证状态"><div className="section-heading"><div><p className="eyebrow">新内核影子验证</p><h2>{shadowPipelineMessage(shadowPipelineQuery.data.pipelineStatus).title}</h2><p>{shadowPipelineMessage(shadowPipelineQuery.data.pipelineStatus).detail}</p></div><Status value={shadowPipelineQuery.data.pipelineStatus ?? "queued"} /></div><div className="shadow-stage-grid">{shadowPipelineQuery.data.stages.map((stage) => <div className="shadow-stage" key={stage.id}><span>{stage.stage}</span><Status value={stage.status === "reused" ? "ready" : stage.status === "cancelled" ? "failed" : stage.status} /><small>{stage.errorCode ?? ""}</small></div>)}</div></section> : null}
+      {shadowPipelineQuery.error && <ErrorState message={`无法读取影子验证状态：${errorMessage(shadowPipelineQuery.error)}`} retry={() => void shadowPipelineQuery.refetch()} />}
       {feedbackQuery.error && <ErrorState message={`无法读取反馈数量：${errorMessage(feedbackQuery.error)}`} retry={() => void feedbackQuery.refetch()} />}
       {activeBuild && <section className="panel active-build"><div className="section-heading"><div><p className="eyebrow">正在构建</p><h2>{statusLabel(activeBuild.status)}</h2></div><Status value={activeBuild.status} /></div><progress className="progress" aria-label="构建进度" max={100} value={progress} /><p className="muted">{sourceLabel} <span className="mono">{activeBuild.commitSha.slice(0, 12)}</span>。{eventState === "reconnecting" ? "正在重新连接构建更新" : eventState === "connected" ? "已连接实时更新" : "正在连接实时更新"}</p><button className="button danger" onClick={() => cancel.mutate(activeBuild.id)} disabled={activeBuild.cancelRequested}><Square aria-hidden="true" />{activeBuild.cancelRequested ? "已请求取消" : "取消构建"}</button></section>}
       {failedBuild && <section className="panel failed-build" role="alert"><div className="section-heading"><div><p className="eyebrow">构建失败</p><h2>{failedBuild.errorMessage ?? "知识构建失败"}</h2></div><Status value="failed" /></div><p className="muted">修正报告的问题后，可重试此快照。</p></section>}

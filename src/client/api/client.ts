@@ -96,7 +96,12 @@ export interface ApiClient {
   getProjectGraph(projectId: string): Promise<{ release: { id: string; version: string } | null; format: "tree"; data: { roots: unknown[]; crossLinks: unknown[] } | null }>;
   getProjectKnowledgeQuality(projectId: string): Promise<ProjectKnowledgeQuality>;
   listBuilds(pagination: PaginationParams): Promise<{ builds: Build[] } & PaginatedResponse>;
-  getBuildStages(id: string): Promise<{ buildId: string; legacyStatus: Build["status"]; stages: PipelineStageRun[] }>;
+  getBuildStages(id: string): Promise<{
+    buildId: string;
+    legacyStatus: Build["status"];
+    pipelineStatus: Build["status"] | null;
+    stages: PipelineStageRun[];
+  }>;
   startBuild(snapshotId: string): Promise<{ build: Build; created: boolean }>;
   cancelBuild(id: string): Promise<{ build: Build }>;
   listReleases(pagination: PaginationParams): Promise<{ releases: Release[] } & PaginatedResponse>;

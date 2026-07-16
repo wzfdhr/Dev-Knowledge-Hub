@@ -102,6 +102,42 @@
   border-right: 1px solid var(--border);
 }
 
+.shadow-pipeline-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.shadow-stage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(136px, 1fr));
+  gap: 8px;
+}
+
+.shadow-stage {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+}
+
+.shadow-stage > span {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shadow-stage small {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .project-center-metrics > div:last-child {
   border-right: 0;
 }

@@ -165,6 +165,8 @@ export interface Release {
   createdAt: string;
   publishedAt: string | null;
   commitSha?: string | null;
+  kernelMode?: "legacy" | "pipeline";
+  packageArtifactId?: string | null;
 }
 export interface RepositoryStatus {
   repository: Repository | null;

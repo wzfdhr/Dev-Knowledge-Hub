@@ -421,6 +421,12 @@ export interface FinishGitSynchronizationInput {
   now: Date;
 }
 
+export interface GitSynchronizationLease {
+  repositoryId: string;
+  leaseToken: string;
+  now?: Date;
+}
+
 export interface EncryptedCredentialRecord {
   id: string;
   workspaceId: string;
@@ -914,6 +920,10 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
     path: string
   ): Promise<SourceFileRecord | null>;
   createSnapshot(input: CreateSnapshotInput): Promise<SourceSnapshotRecord>;
+  createSnapshotWithGitSynchronizationLease(
+    input: CreateSnapshotInput,
+    lease: GitSynchronizationLease
+  ): Promise<SourceSnapshotRecord | null>;
   createSnapshotWithAudit(input: CreateSnapshotInput, actorId: string): Promise<SourceSnapshotRecord>;
   countSnapshotFiles(snapshotId: string): Promise<number>;
   snapshotTextBytes(snapshotId: string): Promise<number>;

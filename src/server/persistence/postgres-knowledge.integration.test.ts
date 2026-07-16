@@ -40,11 +40,7 @@ import { createKnowledgeVisualizationStageExecutor } from "../knowledge/pipeline
 import { PipelineStageWorker, type PipelineStageJob, type PipelineStageJobQueue } from "../knowledge/pipeline/worker";
 import { hashMcpToken } from "../mcp/auth";
 import { PostgresSessionStore } from "../security/session-store";
-import {
-  GIT_SYNC_FAILURE_BACKOFF_MS,
-  GIT_SYNC_INTERVAL_MS,
-  LastProjectAdminError
-} from "./store";
+import { LastProjectAdminError } from "./store";
 import { PostgresAppStore } from "./postgres-store";
 
 const databaseUrl = process.env.TEST_DATABASE_URL
@@ -1300,7 +1296,7 @@ integration("PostgreSQL cited knowledge integration", () => {
     const repository = await firstStore.createRepository(setup!.workspace.id, {
       kind: "git", name: "Scheduled Git source", url: "https://github.com/example/scheduled-source.git"
     }, project.id);
-    const now = new Date("2040-01-01T00:00:00.000Z");
+    const now = new Date();
 
     const [firstClaims, secondClaims] = await Promise.all([
       firstStore.claimDueGitSynchronizations(now, 10, 60_000),
@@ -1317,21 +1313,35 @@ integration("PostgreSQL cited knowledge integration", () => {
       failureCode: "GIT_SYNC_TIMEOUT",
       now
     })).resolves.toBe(true);
-    await expect(secondStore.claimDueGitSynchronizations(
-      new Date(now.getTime() + GIT_SYNC_FAILURE_BACKOFF_MS - 1), 10, 60_000
-    )).resolves.toEqual([]);
-
-    const [retry] = await secondStore.claimDueGitSynchronizations(
-      new Date(now.getTime() + GIT_SYNC_FAILURE_BACKOFF_MS), 10, 60_000
+    const afterFailure = await pool.query<{ failure_count: number; next_attempt_at: Date }>(
+      `SELECT failure_count, next_attempt_at
+       FROM repository_sync_schedules WHERE repository_id = $1`,
+      [repository!.id]
     );
+    expect(afterFailure.rows[0]).toMatchObject({ failure_count: 1 });
+    expect(afterFailure.rows[0]!.next_attempt_at.getTime()).toBeGreaterThan(Date.now());
+    await expect(secondStore.claimDueGitSynchronizations(new Date(), 10, 60_000)).resolves.toEqual([]);
+    await pool.query(
+      "UPDATE repository_sync_schedules SET next_attempt_at = clock_timestamp() WHERE repository_id = $1",
+      [repository!.id]
+    );
+
+    const [retry] = await secondStore.claimDueGitSynchronizations(new Date(), 10, 60_000);
     await expect(secondStore.finishGitSynchronization({
       repositoryId: repository!.id,
       leaseToken: retry!.leaseToken,
       status: "succeeded",
-      now: new Date(now.getTime() + GIT_SYNC_FAILURE_BACKOFF_MS)
+      now: new Date()
     })).resolves.toBe(true);
+    const afterSuccess = await pool.query<{ failure_count: number; next_attempt_at: Date }>(
+      `SELECT failure_count, next_attempt_at
+       FROM repository_sync_schedules WHERE repository_id = $1`,
+      [repository!.id]
+    );
+    expect(afterSuccess.rows[0]).toMatchObject({ failure_count: 0 });
+    expect(afterSuccess.rows[0]!.next_attempt_at.getTime()).toBeGreaterThan(Date.now());
     await expect(firstStore.claimDueGitSynchronizations(
-      new Date(now.getTime() + GIT_SYNC_FAILURE_BACKOFF_MS + GIT_SYNC_INTERVAL_MS - 1), 10, 60_000
+      new Date(), 10, 60_000
     )).resolves.toEqual([]);
   }, 30_000);
 });

@@ -199,4 +199,36 @@ describe("production bootstrap", () => {
     expect(deps.reportBackgroundError).not.toHaveBeenCalled();
   });
 
+  test("backs off a claimed synchronization when its import report cannot be created", async () => {
+    const deps = dependencies();
+    const repository = {
+      id: "repo-1", workspaceId: "workspace-1", projectId: "project-1", kind: "git",
+      name: "Source", localPath: null, cloneUrl: "https://github.com/example/source.git",
+      defaultBranch: "main", archivedAt: null, hasCredential: false
+    };
+    const durableStore = {
+      durable: true,
+      deleteExpiredImportReports: vi.fn(async () => 0),
+      claimDueGitSynchronizations: vi.fn(async () => [{ repository, leaseToken: "lease-1" }]),
+      createImportReport: vi.fn(async () => { throw new Error("import report unavailable"); }),
+      finishGitSynchronization: vi.fn(async () => true),
+      recordAudit: vi.fn(async () => undefined)
+    };
+    vi.mocked(deps.createStore).mockImplementation(() => durableStore as never);
+    deps.reportBackgroundError = vi.fn();
+
+    await bootstrapProductionServer({
+      DATABASE_URL: "postgres://localhost/devkh",
+      DEVKH_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
+      DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars"
+    }, deps);
+
+    await vi.waitFor(() => expect(durableStore.finishGitSynchronization).toHaveBeenCalledWith(expect.objectContaining({
+      repositoryId: repository.id,
+      leaseToken: "lease-1",
+      status: "failed",
+      failureCode: "SCHEDULED_SYNC_FAILED"
+    })));
+  });
+
 });

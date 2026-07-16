@@ -6,6 +6,7 @@ import { filterImportFile } from "../../shared/import-filter.js";
 
 import type {
   AppStore,
+  GitSynchronizationLease,
   RepositoryRecord,
   SourceFileRecord,
   SourceSnapshotRecord
@@ -20,6 +21,15 @@ export class DirtyWorktreeError extends Error {
   constructor(readonly changedPaths: string[]) {
     super("Local repository worktree has uncommitted changes");
     this.name = "DirtyWorktreeError";
+  }
+}
+
+export class GitSynchronizationLeaseExpiredError extends Error {
+  readonly code = "SCHEDULED_SYNC_LEASE_EXPIRED";
+
+  constructor() {
+    super("Git synchronization lease expired before the snapshot could be persisted");
+    this.name = "GitSynchronizationLeaseExpiredError";
   }
 }
 
@@ -114,7 +124,8 @@ async function syncRepositoryUnlocked({
   token,
   actorId,
   prepareRemote = prepareRemoteRepository,
-  gitTimeoutMs
+  gitTimeoutMs,
+  gitSynchronizationLease
 }: {
   repository: RepositoryRecord;
   dataDir: string;
@@ -123,6 +134,7 @@ async function syncRepositoryUnlocked({
   actorId?: string;
   prepareRemote?: typeof prepareRemoteRepository;
   gitTimeoutMs?: number;
+  gitSynchronizationLease?: GitSynchronizationLease;
 }): Promise<SnapshotSummary> {
   const repositoryPath = repository.kind === "local"
     ? repository.localPath
@@ -247,9 +259,13 @@ async function syncRepositoryUnlocked({
   };
   let persisted: SourceSnapshotRecord;
   try {
-    persisted = actorId
-      ? await store.createSnapshotWithAudit({ snapshot, files }, actorId)
-      : await store.createSnapshot({ snapshot, files });
+    const written = gitSynchronizationLease
+      ? await store.createSnapshotWithGitSynchronizationLease({ snapshot, files }, gitSynchronizationLease)
+      : actorId
+        ? await store.createSnapshotWithAudit({ snapshot, files }, actorId)
+        : await store.createSnapshot({ snapshot, files });
+    if (!written) throw new GitSynchronizationLeaseExpiredError();
+    persisted = written;
   } catch (error) {
     await rm(snapshotDirectory, { recursive: true, force: true });
     throw error;

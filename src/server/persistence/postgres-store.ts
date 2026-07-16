@@ -26,6 +26,7 @@ import type {
   FeedbackRebuildInput,
   FinishGitSynchronizationInput,
   GitSynchronizationClaim,
+  GitSynchronizationLease,
   ImportReportRecord,
   KnowledgePageRecord,
   KnowledgeMetadata,
@@ -2911,7 +2912,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   }
 
   async claimDueGitSynchronizations(
-    now: Date,
+    _now: Date,
     limit: number,
     leaseDurationMs: number
   ): Promise<GitSynchronizationClaim[]> {
@@ -2920,11 +2921,10 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return this.transaction(async (client) => {
       await client.query(
         `INSERT INTO repository_sync_schedules (repository_id, workspace_id, next_attempt_at)
-         SELECT repository.id, repository.workspace_id, $1
+         SELECT repository.id, repository.workspace_id, clock_timestamp()
          FROM repositories repository
          WHERE repository.kind = 'git' AND repository.archived_at IS NULL
-         ON CONFLICT (repository_id) DO NOTHING`,
-        [now]
+         ON CONFLICT (repository_id) DO NOTHING`
       );
       const { rows } = await client.query<RepositoryRow & { lease_token: string }>(
         `WITH due AS (
@@ -2932,16 +2932,16 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            FROM repository_sync_schedules schedule
            JOIN repositories repository ON repository.id = schedule.repository_id
            WHERE repository.kind = 'git' AND repository.archived_at IS NULL
-             AND schedule.next_attempt_at <= $1
-             AND (schedule.lease_expires_at IS NULL OR schedule.lease_expires_at <= $1)
+             AND schedule.next_attempt_at <= clock_timestamp()
+             AND (schedule.lease_expires_at IS NULL OR schedule.lease_expires_at <= clock_timestamp())
            ORDER BY schedule.next_attempt_at, schedule.repository_id
            FOR UPDATE OF schedule SKIP LOCKED
-           LIMIT $2
+           LIMIT $1
          ), claimed AS (
            UPDATE repository_sync_schedules schedule
            SET lease_token = gen_random_uuid(),
-               lease_expires_at = $1 + ($3 * interval '1 millisecond'),
-               last_started_at = $1,
+               lease_expires_at = clock_timestamp() + ($2 * interval '1 millisecond'),
+               last_started_at = clock_timestamp(),
                updated_at = now()
            FROM due
            WHERE schedule.repository_id = due.repository_id
@@ -2959,7 +2959,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          FROM claimed
          JOIN repositories repository ON repository.id = claimed.repository_id
          ORDER BY repository.workspace_id, repository.project_id, repository.id`,
-        [now, limit, leaseDurationMs]
+        [limit, leaseDurationMs]
       );
       return rows.map((row) => ({ repository: repositoryRecord(row), leaseToken: row.lease_token }));
     });
@@ -2971,27 +2971,26 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       `UPDATE repository_sync_schedules
        SET failure_count = CASE WHEN $3 THEN failure_count + 1 ELSE 0 END,
            next_attempt_at = CASE
-             WHEN $3 THEN $4 + (
+             WHEN $3 THEN clock_timestamp() + (
                CASE
-                 WHEN failure_count = 0 THEN $5
-                 WHEN failure_count = 1 THEN $6
-                 ELSE LEAST($7 * failure_count, $8)
+                 WHEN failure_count = 0 THEN $4
+                 WHEN failure_count = 1 THEN $5
+                 ELSE LEAST($6 * failure_count, $7)
                END * interval '1 millisecond'
              )
-             ELSE $4 + ($9 * interval '1 millisecond')
+             ELSE clock_timestamp() + ($8 * interval '1 millisecond')
            END,
            lease_token = NULL,
            lease_expires_at = NULL,
-           last_finished_at = $4,
-           last_error_code = CASE WHEN $3 THEN $10 ELSE NULL END,
+           last_finished_at = clock_timestamp(),
+           last_error_code = CASE WHEN $3 THEN $9 ELSE NULL END,
            updated_at = now()
-       WHERE repository_id = $1 AND lease_token = $2 AND lease_expires_at > $4
+       WHERE repository_id = $1 AND lease_token = $2 AND lease_expires_at > clock_timestamp()
        RETURNING repository_id`,
       [
         input.repositoryId,
         input.leaseToken,
         failed,
-        input.now,
         5 * 60 * 1000,
         30 * 60 * 1000,
         30 * 60 * 1000,
@@ -3328,6 +3327,24 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
 
   async createSnapshot(input: CreateSnapshotInput): Promise<SourceSnapshotRecord> {
     return this.transaction(async (client) => (await this.insertSnapshot(client, input)).snapshot);
+  }
+
+  async createSnapshotWithGitSynchronizationLease(
+    input: CreateSnapshotInput,
+    lease: GitSynchronizationLease
+  ): Promise<SourceSnapshotRecord | null> {
+    if (input.snapshot.repositoryId !== lease.repositoryId) return null;
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<{ repository_id: string }>(
+        `SELECT repository_id
+         FROM repository_sync_schedules
+         WHERE repository_id = $1 AND lease_token = $2 AND lease_expires_at > clock_timestamp()
+         FOR UPDATE`,
+        [lease.repositoryId, lease.leaseToken]
+      );
+      if (!rows[0]) return null;
+      return (await this.insertSnapshot(client, input)).snapshot;
+    });
   }
 
   async createSnapshotWithAudit(

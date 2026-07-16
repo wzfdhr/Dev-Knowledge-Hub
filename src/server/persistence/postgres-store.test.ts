@@ -421,6 +421,37 @@ describe("PostgresAppStore repository reads", () => {
   });
 });
 
+describe("PostgresAppStore Git synchronization leases", () => {
+  test("uses the PostgreSQL clock instead of the caller clock for lease decisions", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({
+      query,
+      connect: vi.fn(async () => client)
+    } as never);
+    const callerClock = new Date("2040-01-01T00:00:00.000Z");
+
+    await store.claimDueGitSynchronizations(callerClock, 10, 60_000);
+    await store.finishGitSynchronization({
+      repositoryId: "11111111-1111-4111-8111-111111111111",
+      leaseToken: "22222222-2222-4222-8222-222222222222",
+      status: "failed",
+      failureCode: "GIT_SYNC_TIMEOUT",
+      now: callerClock
+    });
+
+    const calls = query.mock.calls as unknown as Array<[string, unknown[]?]>;
+    const schedulingStatements = calls.filter(([sql]) =>
+      sql.includes("repository_sync_schedules")
+    );
+    expect(schedulingStatements).toHaveLength(3);
+    for (const [sql, values] of schedulingStatements) {
+      expect(sql).toContain("clock_timestamp()");
+      expect(values).not.toContain(callerClock);
+    }
+  });
+});
+
 describe("PostgresAppStore MCP token rotation", () => {
   test("rotates an active MCP token in one audited transaction", async () => {
     const oldToken = {

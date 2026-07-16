@@ -91,4 +91,30 @@ describe("durable Git synchronization scheduling", () => {
       now: new Date(now.getTime() + 60_000)
     })).resolves.toBe(true);
   });
+
+  test("refuses a snapshot write after the synchronization lease has expired", async () => {
+    const store = new MemoryAppStore();
+    const repository = await createGitRepository(store);
+    const now = new Date("2040-01-01T00:00:00.000Z");
+    const [claim] = await store.claimDueGitSynchronizations(now, 10, 60_000);
+
+    await expect(store.createSnapshotWithGitSynchronizationLease({
+      snapshot: {
+        id: "44444444-4444-4444-8444-444444444444",
+        workspaceId: repository.workspaceId,
+        repositoryId: repository.id,
+        commitSha: "a".repeat(40),
+        ref: "origin/main",
+        remoteUrl: repository.cloneUrl,
+        commitTimestamp: now,
+        storagePath: "/tmp/stale-snapshot"
+      },
+      files: []
+    }, {
+      repositoryId: repository.id,
+      leaseToken: claim!.leaseToken,
+      now: new Date(now.getTime() + 60_000)
+    })).resolves.toBeNull();
+    await expect(store.latestSnapshot(repository.workspaceId, repository.id)).resolves.toBeNull();
+  });
 });

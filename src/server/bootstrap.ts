@@ -219,20 +219,22 @@ export async function bootstrapServer(
       new Date(), GIT_SYNC_CLAIM_LIMIT, GIT_SYNC_LEASE_DURATION_MS
     ).then(async (claims) => {
       await Promise.all(claims.map(async ({ repository, leaseToken }) => {
-        const report = await store.createImportReport({
-          workspaceId: repository.workspaceId,
-          projectId: repository.projectId,
-          repositoryId: repository.id,
-          actorId: null,
-          sourceKind: "git"
-        });
+        let report: Awaited<ReturnType<typeof store.createImportReport>> | null = null;
         try {
+          report = await store.createImportReport({
+            workspaceId: repository.workspaceId,
+            projectId: repository.projectId,
+            repositoryId: repository.id,
+            actorId: null,
+            sourceKind: "git"
+          });
           const credential = await store.repositoryCredential(repository.workspaceId, repository.id);
           const summary = await syncRepository({
             repository,
             dataDir: env.dataDir,
             store,
             gitTimeoutMs: GIT_SYNC_COMMAND_TIMEOUT_MS,
+            gitSynchronizationLease: { repositoryId: repository.id, leaseToken },
             ...(credential ? { token: decryptSecret(credential, env.masterKey!) } : {})
           });
           const completed = await store.finishGitSynchronization({
@@ -275,14 +277,16 @@ export async function bootstrapServer(
             failureCode: scheduledGitSyncFailureCode(error),
             now: new Date()
           }).catch(() => false);
-          await store.finishImportReport(repository.workspaceId, report.id, {
-            status: "failed",
-            collectedFileCount: 0,
-            collectedTextBytes: 0,
-            ignored: { total: 0, reasons: {} },
-            snapshotId: null,
-            failureCode: completed ? scheduledGitSyncFailureCode(error) : "SCHEDULED_SYNC_LEASE_EXPIRED"
-          }).catch(() => undefined);
+          if (report) {
+            await store.finishImportReport(repository.workspaceId, report.id, {
+              status: "failed",
+              collectedFileCount: 0,
+              collectedTextBytes: 0,
+              ignored: { total: 0, reasons: {} },
+              snapshotId: null,
+              failureCode: completed ? scheduledGitSyncFailureCode(error) : "SCHEDULED_SYNC_LEASE_EXPIRED"
+            }).catch(() => undefined);
+          }
           if (completed) {
             await store.recordAudit({
               workspaceId: repository.workspaceId,

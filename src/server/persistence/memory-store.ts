@@ -33,6 +33,7 @@ import type {
   FeedbackRebuildInput,
   FinishGitSynchronizationInput,
   GitSynchronizationClaim,
+  GitSynchronizationLease,
   ImportReportRecord,
   KnowledgePageRecord,
   KnowledgeMetadata,
@@ -1469,6 +1470,18 @@ export class MemoryAppStore implements AppStore {
     this.sourceSnapshots.push(snapshot);
     this.sourceFiles.push(...files);
     return snapshot;
+  }
+
+  async createSnapshotWithGitSynchronizationLease(
+    input: CreateSnapshotInput,
+    lease: GitSynchronizationLease
+  ): Promise<SourceSnapshotRecord | null> {
+    const schedule = this.gitSynchronizationSchedules.get(lease.repositoryId);
+    const now = lease.now ?? new Date();
+    if (input.snapshot.repositoryId !== lease.repositoryId || !schedule
+      || schedule.leaseToken !== lease.leaseToken || !schedule.leaseExpiresAt
+      || schedule.leaseExpiresAt.getTime() <= now.getTime()) return null;
+    return this.createSnapshot(input);
   }
 
   async createSnapshotWithAudit(

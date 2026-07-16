@@ -80,6 +80,9 @@ export async function bootstrapServer(
   dependencies: BootstrapDependencies = defaultDependencies
 ) {
   const env = loadEnv({ mode, env: sourceEnv });
+  if (env.knowledgeKernelMode === "active") {
+    throw new Error("DEVKH_KNOWLEDGE_KERNEL_MODE=active is unavailable before F05");
+  }
   if (!env.databaseUrl || !env.masterKey || !env.sessionSecret) {
     throw new Error(
       "DATABASE_URL, DEVKH_MASTER_KEY, and DEVKH_SESSION_SECRET are required for server startup"

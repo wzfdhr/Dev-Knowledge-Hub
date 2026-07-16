@@ -98,18 +98,18 @@ describe("production bootstrap", () => {
     await expect(schedulePostBuild({ id: "build-1" } as BuildRecord)).resolves.toBeUndefined();
   });
 
-  test("does not activate the staged pipeline from active mode before F05", async () => {
+  test("rejects active kernel mode before F05", async () => {
     const deps = dependencies();
-    await bootstrapProductionServer({
+    await expect(bootstrapProductionServer({
       DATABASE_URL: "postgres://localhost/devkh",
       DEVKH_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
       DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars",
       DEVKH_KNOWLEDGE_KERNEL_MODE: "active"
-    }, deps);
+    }, deps)).rejects.toThrow(/active.*F05/i);
 
+    expect(deps.createDatabase).not.toHaveBeenCalled();
     expect(deps.createQualityPipelineWorker).not.toHaveBeenCalled();
-    const schedulePostBuild = vi.mocked(deps.createBuildService).mock.calls[0]![3]!;
-    await expect(schedulePostBuild({ id: "build-1" } as BuildRecord)).resolves.toBeUndefined();
+    expect(deps.createBuildService).not.toHaveBeenCalled();
   });
 
   test("queues one deterministic quality stage after a durable build", async () => {

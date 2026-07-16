@@ -31,6 +31,8 @@ import type {
   CreateRemediationInput,
   EncryptedCredentialRecord,
   FeedbackRebuildInput,
+  FinishGitSynchronizationInput,
+  GitSynchronizationClaim,
   ImportReportRecord,
   KnowledgePageRecord,
   KnowledgeMetadata,
@@ -63,6 +65,10 @@ import type {
   WorkspaceKnowledgeSearchRecord,
   WorkspaceProjectOverviewRecord,
   WorkspaceRecord
+} from "./store.js";
+import {
+  GIT_SYNC_FAILURE_BACKOFF_MS,
+  GIT_SYNC_INTERVAL_MS
 } from "./store.js";
 import type { PipelineStageRunRecord } from "./store.js";
 import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
@@ -104,6 +110,13 @@ export class MemoryAppStore implements AppStore {
   private readonly projects: ProjectRecord[] = [];
   private readonly projectMembers: Array<ProjectMemberRecord & { userId: string }> = [];
   private readonly repositories: RepositoryRecord[] = [];
+  private readonly gitSynchronizationSchedules = new Map<string, {
+    nextAttemptAt: Date;
+    failureCount: number;
+    leaseToken: string | null;
+    leaseExpiresAt: Date | null;
+    lastFailureCode: string | null;
+  }>();
   readonly auditEvents: AuditEventRecord[] = [];
   readonly mcpTokens: McpTokenRecord[] = [];
   readonly feedback: AgentFeedbackRecord[] = [];
@@ -1256,6 +1269,56 @@ export class MemoryAppStore implements AppStore {
 
   async listActiveGitRepositories(): Promise<RepositoryRecord[]> {
     return this.repositories.filter((repository) => repository.kind === "git" && repository.archivedAt === null);
+  }
+
+  async claimDueGitSynchronizations(
+    now: Date,
+    limit: number,
+    leaseDurationMs: number
+  ): Promise<GitSynchronizationClaim[]> {
+    if (!Number.isInteger(limit) || limit < 1) return [];
+    if (!Number.isFinite(leaseDurationMs) || leaseDurationMs <= 0) return [];
+    const claims: GitSynchronizationClaim[] = [];
+    const repositories = await this.listActiveGitRepositories();
+    for (const repository of repositories) {
+      if (claims.length >= limit) break;
+      const schedule = this.gitSynchronizationSchedules.get(repository.id) ?? {
+        nextAttemptAt: now,
+        failureCount: 0,
+        leaseToken: null,
+        leaseExpiresAt: null,
+        lastFailureCode: null
+      };
+      this.gitSynchronizationSchedules.set(repository.id, schedule);
+      const leaseExpired = schedule.leaseExpiresAt === null || schedule.leaseExpiresAt.getTime() <= now.getTime();
+      if (schedule.nextAttemptAt.getTime() > now.getTime() || !leaseExpired) continue;
+      const leaseToken = randomUUID();
+      schedule.leaseToken = leaseToken;
+      schedule.leaseExpiresAt = new Date(now.getTime() + leaseDurationMs);
+      claims.push({ repository, leaseToken });
+    }
+    return claims;
+  }
+
+  async finishGitSynchronization(input: FinishGitSynchronizationInput): Promise<boolean> {
+    const schedule = this.gitSynchronizationSchedules.get(input.repositoryId);
+    if (!schedule || schedule.leaseToken !== input.leaseToken || !schedule.leaseExpiresAt
+      || schedule.leaseExpiresAt.getTime() <= input.now.getTime()) return false;
+    schedule.leaseToken = null;
+    schedule.leaseExpiresAt = null;
+    if (input.status === "succeeded") {
+      schedule.failureCount = 0;
+      schedule.lastFailureCode = null;
+      schedule.nextAttemptAt = new Date(input.now.getTime() + GIT_SYNC_INTERVAL_MS);
+      return true;
+    }
+    schedule.failureCount += 1;
+    schedule.lastFailureCode = input.failureCode ?? "SCHEDULED_SYNC_FAILED";
+    const delay = schedule.failureCount === 1
+      ? GIT_SYNC_FAILURE_BACKOFF_MS
+      : Math.min(GIT_SYNC_FAILURE_BACKOFF_MS * 6 * (schedule.failureCount - 1), 2 * GIT_SYNC_INTERVAL_MS);
+    schedule.nextAttemptAt = new Date(input.now.getTime() + delay);
+    return true;
   }
 
   async getRepository(workspaceId: string, repositoryId: string): Promise<RepositoryRecord | null> {

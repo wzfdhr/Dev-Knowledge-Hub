@@ -24,6 +24,8 @@ import type {
   CreateRemediationInput,
   CreateSnapshotInput,
   FeedbackRebuildInput,
+  FinishGitSynchronizationInput,
+  GitSynchronizationClaim,
   ImportReportRecord,
   KnowledgePageRecord,
   KnowledgeMetadata,
@@ -2906,6 +2908,99 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
        ORDER BY r.workspace_id, r.project_id, r.id`
     );
     return rows.map(repositoryRecord);
+  }
+
+  async claimDueGitSynchronizations(
+    now: Date,
+    limit: number,
+    leaseDurationMs: number
+  ): Promise<GitSynchronizationClaim[]> {
+    if (!Number.isInteger(limit) || limit < 1) return [];
+    if (!Number.isFinite(leaseDurationMs) || leaseDurationMs <= 0) return [];
+    return this.transaction(async (client) => {
+      await client.query(
+        `INSERT INTO repository_sync_schedules (repository_id, workspace_id, next_attempt_at)
+         SELECT repository.id, repository.workspace_id, $1
+         FROM repositories repository
+         WHERE repository.kind = 'git' AND repository.archived_at IS NULL
+         ON CONFLICT (repository_id) DO NOTHING`,
+        [now]
+      );
+      const { rows } = await client.query<RepositoryRow & { lease_token: string }>(
+        `WITH due AS (
+           SELECT schedule.repository_id
+           FROM repository_sync_schedules schedule
+           JOIN repositories repository ON repository.id = schedule.repository_id
+           WHERE repository.kind = 'git' AND repository.archived_at IS NULL
+             AND schedule.next_attempt_at <= $1
+             AND (schedule.lease_expires_at IS NULL OR schedule.lease_expires_at <= $1)
+           ORDER BY schedule.next_attempt_at, schedule.repository_id
+           FOR UPDATE OF schedule SKIP LOCKED
+           LIMIT $2
+         ), claimed AS (
+           UPDATE repository_sync_schedules schedule
+           SET lease_token = gen_random_uuid(),
+               lease_expires_at = $1 + ($3 * interval '1 millisecond'),
+               last_started_at = $1,
+               updated_at = now()
+           FROM due
+           WHERE schedule.repository_id = due.repository_id
+           RETURNING schedule.repository_id, schedule.lease_token
+         )
+         SELECT repository.id, repository.workspace_id, repository.project_id, repository.kind,
+                repository.name, repository.local_path, repository.clone_url, repository.default_branch,
+                repository.archived_at,
+                EXISTS (
+                  SELECT 1 FROM encrypted_credentials credential
+                  WHERE credential.workspace_id = repository.workspace_id
+                    AND credential.repository_id = repository.id
+                ) AS has_credential,
+                claimed.lease_token
+         FROM claimed
+         JOIN repositories repository ON repository.id = claimed.repository_id
+         ORDER BY repository.workspace_id, repository.project_id, repository.id`,
+        [now, limit, leaseDurationMs]
+      );
+      return rows.map((row) => ({ repository: repositoryRecord(row), leaseToken: row.lease_token }));
+    });
+  }
+
+  async finishGitSynchronization(input: FinishGitSynchronizationInput): Promise<boolean> {
+    const failed = input.status === "failed";
+    const { rows } = await this.pool.query<{ repository_id: string }>(
+      `UPDATE repository_sync_schedules
+       SET failure_count = CASE WHEN $3 THEN failure_count + 1 ELSE 0 END,
+           next_attempt_at = CASE
+             WHEN $3 THEN $4 + (
+               CASE
+                 WHEN failure_count = 0 THEN $5
+                 WHEN failure_count = 1 THEN $6
+                 ELSE LEAST($7 * failure_count, $8)
+               END * interval '1 millisecond'
+             )
+             ELSE $4 + ($9 * interval '1 millisecond')
+           END,
+           lease_token = NULL,
+           lease_expires_at = NULL,
+           last_finished_at = $4,
+           last_error_code = CASE WHEN $3 THEN $10 ELSE NULL END,
+           updated_at = now()
+       WHERE repository_id = $1 AND lease_token = $2 AND lease_expires_at > $4
+       RETURNING repository_id`,
+      [
+        input.repositoryId,
+        input.leaseToken,
+        failed,
+        input.now,
+        5 * 60 * 1000,
+        30 * 60 * 1000,
+        30 * 60 * 1000,
+        2 * 60 * 60 * 1000,
+        60 * 60 * 1000,
+        input.failureCode ?? "SCHEDULED_SYNC_FAILED"
+      ]
+    );
+    return rows.length === 1;
   }
 
   async getRepository(workspaceId: string, repositoryId: string): Promise<RepositoryRecord | null> {

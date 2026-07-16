@@ -405,6 +405,22 @@ export interface RepositoryRecord {
   hasCredential: boolean;
 }
 
+export const GIT_SYNC_INTERVAL_MS = 60 * 60 * 1000;
+export const GIT_SYNC_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
+
+export interface GitSynchronizationClaim {
+  repository: RepositoryRecord;
+  leaseToken: string;
+}
+
+export interface FinishGitSynchronizationInput {
+  repositoryId: string;
+  leaseToken: string;
+  status: "succeeded" | "failed";
+  failureCode?: string;
+  now: Date;
+}
+
 export interface EncryptedCredentialRecord {
   id: string;
   workspaceId: string;
@@ -859,6 +875,12 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
   ): Promise<RepositoryRecord | null>;
   currentRepository(workspaceId: string, projectId?: string): Promise<RepositoryRecord | null>;
   listActiveGitRepositories(): Promise<RepositoryRecord[]>;
+  claimDueGitSynchronizations(
+    now: Date,
+    limit: number,
+    leaseDurationMs: number
+  ): Promise<GitSynchronizationClaim[]>;
+  finishGitSynchronization(input: FinishGitSynchronizationInput): Promise<boolean>;
   getRepository(workspaceId: string, repositoryId: string): Promise<RepositoryRecord | null>;
   listArchivedRepositories(workspaceId: string): Promise<RepositoryRecord[]>;
   switchRepositoryWithAudit(

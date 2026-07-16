@@ -104,6 +104,26 @@ export const repositories = pgTable("repositories", {
   }).onDelete("cascade")
 ]);
 
+export const repositorySyncSchedules = pgTable("repository_sync_schedules", {
+  repositoryId: uuid("repository_id").primaryKey(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  failureCount: integer("failure_count").notNull().default(0),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+  leaseToken: uuid("lease_token"),
+  leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+  lastStartedAt: timestamp("last_started_at", { withTimezone: true }),
+  lastFinishedAt: timestamp("last_finished_at", { withTimezone: true }),
+  lastErrorCode: text("last_error_code"),
+  ...timestamps
+}, (table) => [
+  index("repository_sync_schedules_due_idx").on(table.nextAttemptAt),
+  foreignKey({
+    columns: [table.repositoryId, table.workspaceId],
+    foreignColumns: [repositories.id, repositories.workspaceId],
+    name: "repository_sync_schedules_repository_workspace_fk"
+  }).onDelete("cascade")
+]);
+
 export const encryptedCredentials = pgTable("encrypted_credentials", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),

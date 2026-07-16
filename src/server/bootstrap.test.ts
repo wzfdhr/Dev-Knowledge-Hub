@@ -10,7 +10,7 @@ function dependencies(): BootstrapDependencies {
   const store = {
     durable: true,
     deleteExpiredImportReports: vi.fn(async () => 0),
-    listActiveGitRepositories: vi.fn(async () => [])
+    claimDueGitSynchronizations: vi.fn(async () => [])
   };
   const queue = { durable: true };
   const qualityWorker = {
@@ -189,7 +189,7 @@ describe("production bootstrap", () => {
     const store = vi.mocked(deps.createStore).mock.results[0].value;
     await vi.waitFor(() => expect(store.deleteExpiredImportReports).toHaveBeenCalledWith(expect.any(Date)));
     expect(store.deleteExpiredImportReports).toHaveBeenCalledWith(expect.any(Date));
-    expect(store.listActiveGitRepositories).toHaveBeenCalledOnce();
+    expect(store.claimDueGitSynchronizations).toHaveBeenCalledWith(expect.any(Date), 10, 15 * 60 * 1000);
     expect(deps.setInterval).toHaveBeenCalledWith(expect.any(Function), 60 * 60 * 1000);
 
     const onClose = vi.mocked(server.addHook).mock.calls.find(([name]) => name === "onClose")?.[1];

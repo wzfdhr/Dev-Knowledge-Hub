@@ -42,6 +42,20 @@ export interface CreateStageRunInput {
   inputDigest: string;
 }
 
+export interface CompleteStageRunInput {
+  workspaceId: string;
+  projectId: string;
+  stageRunId: string;
+  status: "succeeded" | "reused";
+  outputManifestIds?: string[];
+  next?: CreateStageRunInput;
+}
+
+export interface CompleteStageRunResult {
+  completed: PipelineStageRunRecord;
+  next: PipelineStageRunRecord | null;
+}
+
 export interface PipelineArtifactStore {
   createStageRun(input: CreateStageRunInput): Promise<PipelineStageRunRecord>;
   claimNextStageRun(
@@ -62,6 +76,7 @@ export interface PipelineArtifactStore {
     status: StageStatus,
     details?: { outputManifestIds?: string[]; errorCode?: string; errorDetail?: string }
   ): Promise<PipelineStageRunRecord | null>;
+  completeStageRunAndCreateNext(input: CompleteStageRunInput): Promise<CompleteStageRunResult | null>;
   createArtifactWithAudit(manifest: ArtifactManifest, actorId?: string): Promise<ArtifactManifest>;
   findReusableArtifact(
     workspaceId: string,

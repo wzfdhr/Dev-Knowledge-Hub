@@ -36,6 +36,8 @@ import type {
   PipelineArtifactStore,
   PipelineStageRunRecord,
   CreateStageRunInput,
+  CompleteStageRunInput,
+  CompleteStageRunResult,
   SaveKnowledgeGraphInput,
   ReleaseRecord,
   RepositoryConnectionInput,
@@ -794,6 +796,62 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       ]
     );
     return rows[0] ? stageRunRecord(rows[0]) : null;
+  }
+
+  async completeStageRunAndCreateNext(
+    input: CompleteStageRunInput
+  ): Promise<CompleteStageRunResult | null> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<StageRunRow>(
+        `UPDATE build_stage_runs
+         SET status = $5,
+             output_manifest_ids = COALESCE($6::uuid[], output_manifest_ids),
+             finished_at = now(), updated_at = now()
+         WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND status = 'running'
+         RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+                   input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
+        [input.workspaceId, input.projectId, input.stageRunId, "running", input.status, input.outputManifestIds ?? null]
+      );
+      const completedRow = rows[0];
+      if (!completedRow) return null;
+      const completed = stageRunRecord(completedRow);
+      await client.query(
+        `INSERT INTO build_stage_events
+         (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (stage_run_id, status) DO NOTHING`,
+        [completed.workspaceId, completed.projectId, completed.buildId, completed.id, completed.stage, completed.status]
+      );
+      if (!input.next) return { completed, next: null };
+      const { rows: nextRows } = await client.query<StageRunRow>(
+        `INSERT INTO build_stage_runs
+         (workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status, input_digest)
+         SELECT $1, $2, $3, $4, $5, $6, 'queued', $7
+         FROM build_jobs build
+         JOIN repositories repository ON repository.id = build.repository_id AND repository.workspace_id = build.workspace_id
+         JOIN source_snapshots snapshot ON snapshot.id = build.snapshot_id AND snapshot.workspace_id = build.workspace_id
+         WHERE build.workspace_id = $1 AND build.id = $4 AND repository.project_id = $2
+           AND snapshot.id = $3 AND snapshot.repository_id = build.repository_id
+         ON CONFLICT (build_job_id, stage, attempt) DO UPDATE
+           SET updated_at = build_stage_runs.updated_at
+         RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+                   input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
+        [
+          input.next.workspaceId, input.next.projectId, input.next.snapshotId, input.next.buildId,
+          input.next.stage, input.next.attempt, input.next.inputDigest
+        ]
+      );
+      if (!nextRows[0]) throw new Error("Next stage run does not match the project build and snapshot");
+      const next = stageRunRecord(nextRows[0]);
+      await client.query(
+        `INSERT INTO build_stage_events
+         (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+         VALUES ($1, $2, $3, $4, $5, 'queued')
+         ON CONFLICT (stage_run_id, status) DO NOTHING`,
+        [next.workspaceId, next.projectId, next.buildId, next.id, next.stage]
+      );
+      return { completed, next };
+    });
   }
 
   async listPipelineStageRuns(

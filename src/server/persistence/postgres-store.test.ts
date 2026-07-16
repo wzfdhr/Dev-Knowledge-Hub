@@ -111,6 +111,36 @@ describe("PostgresAppStore pipeline persistence", () => {
     expect(query.mock.calls[1][1]).toEqual(["workspace-1", "project-1", "build-1", "convert"]);
     expect(client.release).toHaveBeenCalledOnce();
   });
+
+  test("commits a completed stage and its next queued stage in one transaction", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+      if (sql.startsWith("UPDATE build_stage_runs")) {
+        return { rows: [{ ...stageRow, status: "succeeded", started_at: new Date("2026-07-14T00:00:00.000Z"), finished_at: new Date("2026-07-14T00:00:01.000Z") }] };
+      }
+      if (sql.includes("INSERT INTO build_stage_runs")) return { rows: [{ ...stageRow, id: "stage-run-2", stage: "extract" }] };
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+
+    await expect(store.completeStageRunAndCreateNext({
+      workspaceId: "workspace-1", projectId: "project-1", stageRunId: "stage-run-1",
+      status: "succeeded", outputManifestIds: ["artifact-1"],
+      next: {
+        workspaceId: "workspace-1", projectId: "project-1", snapshotId: "snapshot-1", buildId: "build-1",
+        stage: "extract", attempt: 1, inputDigest: "a".repeat(64)
+      }
+    })).resolves.toMatchObject({
+      completed: { id: "stage-run-1", status: "succeeded" },
+      next: { id: "stage-run-2", stage: "extract", status: "queued" }
+    });
+    expect(query.mock.calls.map(([sql]) => String(sql))).toEqual(expect.arrayContaining([
+      "BEGIN", "COMMIT"
+    ]));
+    expect(query.mock.calls.filter(([sql]) => String(sql).includes("INSERT INTO build_stage_events"))).toHaveLength(2);
+    expect(client.release).toHaveBeenCalledOnce();
+  });
 });
 
 describe("PostgresAppStore repository reads", () => {

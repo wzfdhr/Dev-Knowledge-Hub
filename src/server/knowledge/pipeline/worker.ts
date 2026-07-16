@@ -63,15 +63,14 @@ export class PipelineStageWorker {
     if (build && !build.cancelRequested) {
       try {
         const result = await this.execute(run);
-        const completed = await this.store.transitionStageRun(
-          run.workspaceId, run.projectId, run.id,
-          "running", result.reused ? "reused" : "succeeded",
-          { outputManifestIds: result.outputManifestIds }
-        );
-        if (!completed) return;
         const nextStage = this.stages[this.stages.indexOf(run.stage) + 1];
-        if (nextStage) {
-          const next = await this.store.createStageRun({
+        const advanced = await this.store.completeStageRunAndCreateNext({
+          workspaceId: run.workspaceId,
+          projectId: run.projectId,
+          stageRunId: run.id,
+          status: result.reused ? "reused" : "succeeded",
+          outputManifestIds: result.outputManifestIds,
+          ...(nextStage ? { next: {
             workspaceId: run.workspaceId,
             projectId: run.projectId,
             snapshotId: run.snapshotId,
@@ -79,8 +78,14 @@ export class PipelineStageWorker {
             stage: nextStage,
             attempt: 1,
             inputDigest: run.inputDigest
+          } } : {})
+        });
+        if (advanced?.next) {
+          await this.queue.send({
+            stageRunId: advanced.next.id,
+            buildId: advanced.next.buildId,
+            projectId: advanced.next.projectId
           });
-          await this.queue.send({ stageRunId: next.id, buildId: next.buildId, projectId: next.projectId });
         }
       } catch (error) {
         await this.store.transitionStageRun(

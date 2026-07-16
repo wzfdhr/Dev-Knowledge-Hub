@@ -19,6 +19,8 @@ import type {
   AppStore,
   AuditEventInput,
   AuditEventRecord,
+  CompleteStageRunInput,
+  CompleteStageRunResult,
   CreateSnapshotInput,
   CreateStageRunInput,
   CreateFeedbackInput,
@@ -1707,6 +1709,16 @@ export class MemoryAppStore implements AppStore {
     run.errorDetail = status === "failed" ? details.errorDetail ?? null : null;
     this.recordPipelineStageEvent(run);
     return run;
+  }
+
+  async completeStageRunAndCreateNext(input: CompleteStageRunInput): Promise<CompleteStageRunResult | null> {
+    const completed = await this.transitionStageRun(
+      input.workspaceId, input.projectId, input.stageRunId, "running", input.status,
+      { outputManifestIds: input.outputManifestIds }
+    );
+    if (!completed) return null;
+    const next = input.next ? await this.createStageRun(input.next) : null;
+    return { completed, next };
   }
 
   async createArtifactWithAudit(manifestInput: ArtifactManifest, actorId?: string): Promise<ArtifactManifest> {

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import {
   PipelineStageWorker,
@@ -21,6 +21,18 @@ function createBuild(cancelRequested = false): BuildRecord {
 
 class FakePipelineStore implements PipelineArtifactStore {
   readonly runs: PipelineStageRunRecord[] = [];
+  readonly completeStageRunAndCreateNext = vi.fn(async (input: {
+    workspaceId: string; projectId: string; stageRunId: string; status: "succeeded" | "reused";
+    outputManifestIds?: string[]; next?: Parameters<FakePipelineStore["createStageRun"]>[0];
+  }) => {
+    const completed = await this.transitionStageRun(
+      input.workspaceId, input.projectId, input.stageRunId, "running", input.status,
+      { outputManifestIds: input.outputManifestIds }
+    );
+    if (!completed) return null;
+    const next = input.next ? await this.createStageRun(input.next) : null;
+    return { completed, next };
+  });
   constructor(readonly build: BuildRecord | null = createBuild()) {}
 
   async createStageRun(input: { workspaceId: string; projectId: string; snapshotId: string; buildId: string; stage: PipelineStageRunRecord["stage"]; attempt: number; inputDigest: string }) {
@@ -96,6 +108,7 @@ describe("PipelineStageWorker", () => {
 
     await worker.process(queue.sent[0]!);
 
+    expect(store.completeStageRunAndCreateNext).toHaveBeenCalledOnce();
     expect(store.runs).toEqual(expect.arrayContaining([
       expect.objectContaining({ stage: "convert", status: "succeeded", outputManifestIds: ["artifact-1"] }),
       expect.objectContaining({ stage: "extract", status: "queued" })

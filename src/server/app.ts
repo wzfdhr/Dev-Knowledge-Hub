@@ -1062,7 +1062,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const qualityRun = overview.latestBuild
       ? (await options.store.listPipelineStageRuns(
         admin.workspaceId, params.data.projectId, overview.latestBuild.id
-      )).filter((run) => run.stage === "lint").at(-1)
+      )).at(-1)
       : undefined;
     const diagnostics: Array<{ code: string }> = [];
     if (!repository) diagnostics.push({ code: "SOURCE_MISSING" });
@@ -1081,6 +1081,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       knowledge,
       remediation,
       qualityPipeline: qualityRun ? {
+        stage: qualityRun.stage,
         status: qualityRun.status,
         artifactReady: qualityRun.outputManifestIds.length > 0,
         errorCode: qualityRun.errorCode

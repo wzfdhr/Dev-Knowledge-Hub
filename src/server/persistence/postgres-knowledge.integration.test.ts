@@ -1,7 +1,7 @@
 import { authenticatedCookie, csrfHeaders } from "../test-support/csrf";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -17,6 +17,20 @@ import { buildServer } from "../app";
 import { syncRepository } from "../git/snapshot";
 import { BuildService } from "../knowledge/build-service";
 import { PgBossBuildJobQueue } from "../knowledge/job-queue";
+import { ArtifactStore } from "../knowledge/pipeline/artifact-store";
+import { createNormalizedSourcesStageExecutor, normalizedSourcesPipelineInputDigest } from "../knowledge/pipeline/convert-stage";
+import { createKnowledgeIrStageExecutor } from "../knowledge/pipeline/extract-stage";
+import { createKnowledgeGraphStageExecutor } from "../knowledge/pipeline/graph-stage";
+import { createPipelineSearchIndexStageExecutor } from "../knowledge/pipeline/index-stage";
+import { createKnowledgePackageStageExecutor } from "../knowledge/pipeline/package-stage";
+import { createKnowledgeQualityStageExecutor } from "../knowledge/pipeline/quality-stage";
+import { createPipelineStageExecutor } from "../knowledge/pipeline/stage-executor";
+import { createB02StageInputPlanner } from "../knowledge/pipeline/stage-planner";
+import { createKnowledgeSynthesisStageExecutor } from "../knowledge/pipeline/synthesize-stage";
+import { createTableSchemasStageExecutor } from "../knowledge/pipeline/tables-stage";
+import { createKnowledgeValidationStageExecutor } from "../knowledge/pipeline/validate-stage";
+import { createKnowledgeVisualizationStageExecutor } from "../knowledge/pipeline/viz-stage";
+import { PipelineStageWorker, type PipelineStageJob, type PipelineStageJobQueue } from "../knowledge/pipeline/worker";
 import { hashMcpToken } from "../mcp/auth";
 import { PostgresSessionStore } from "../security/session-store";
 import { LastProjectAdminError } from "./store";
@@ -29,6 +43,17 @@ const integration = databaseUrl ? describe : describe.skip;
 let pool: Pool | null = null;
 let temporaryRoot: string | null = null;
 const execute = promisify(execFile);
+
+class RecordedPipelineQueue implements PipelineStageJobQueue {
+  readonly sent: PipelineStageJob[] = [];
+
+  async send(job: PipelineStageJob): Promise<void> {
+    this.sent.push(job);
+  }
+
+  async start(): Promise<void> {}
+  async stop(): Promise<void> {}
+}
 
 async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean): Promise<T> {
   const deadline = Date.now() + 15_000;
@@ -303,6 +328,122 @@ integration("PostgreSQL cited knowledge integration", () => {
     await expect(pool.query("DELETE FROM knowledge_artifacts WHERE id = $1", [artifact.id]))
       .rejects.toThrow("Cannot delete artifacts from a published build");
   }, 30_000);
+
+  test(databaseUrl
+    ? "runs and reuses all ten shadow stages with PostgreSQL persistence"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const sourceRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-postgres-pipeline-source-"));
+    const artifactRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-postgres-pipeline-artifacts-"));
+    try {
+      const sourcePath = "src/app.ts";
+      const source = "export const answer = 42;\n";
+      await mkdir(path.join(sourceRoot, "src"), { recursive: true });
+      await writeFile(path.join(sourceRoot, sourcePath), source);
+
+      const store = new PostgresAppStore(pool);
+      const setup = await store.createInitialSetup("pipeline-worker@example.com", "hash");
+      const project = (await store.listProjects(setup!.workspace.id))[0]!;
+      const repository = await store.createRepository(
+        setup!.workspace.id, { kind: "upload", name: "Pipeline source" }, project.id
+      );
+      const snapshotId = randomUUID();
+      const snapshot = await store.createSnapshot({
+        snapshot: {
+          id: snapshotId,
+          workspaceId: setup!.workspace.id,
+          repositoryId: repository!.id,
+          commitSha: "a".repeat(40),
+          ref: "upload",
+          remoteUrl: null,
+          commitTimestamp: new Date("2026-07-16T00:00:00.000Z"),
+          storagePath: sourceRoot
+        },
+        files: [{
+          id: randomUUID(),
+          workspaceId: setup!.workspace.id,
+          snapshotId,
+          path: sourcePath,
+          byteSize: Buffer.byteLength(source),
+          contentHash: createHash("sha256").update(source).digest("hex"),
+          language: "typescript"
+        }]
+      });
+      const artifactStore = new ArtifactStore(artifactRoot, store);
+      await artifactStore.initialize();
+      const queue = new RecordedPipelineQueue();
+      const worker = new PipelineStageWorker(
+        store,
+        queue,
+        createPipelineStageExecutor({
+          convert: createNormalizedSourcesStageExecutor({ store, artifactStore }),
+          extract: createKnowledgeIrStageExecutor({ store, artifactStore }),
+          tables: createTableSchemasStageExecutor({ store, artifactStore }),
+          graph: createKnowledgeGraphStageExecutor({ store, artifactStore }),
+          synthesize: createKnowledgeSynthesisStageExecutor({ store, artifactStore }),
+          index: createPipelineSearchIndexStageExecutor({ store, artifactStore }),
+          lint: createKnowledgeQualityStageExecutor({ store, artifactStore }),
+          viz: createKnowledgeVisualizationStageExecutor({ store, artifactStore }),
+          validate: createKnowledgeValidationStageExecutor({ store, artifactStore }),
+          package: createKnowledgePackageStageExecutor({ store, artifactStore })
+        }),
+        ["convert", "extract", "tables", "graph", "synthesize", "index", "lint", "viz", "validate", "package"],
+        5_000,
+        createB02StageInputPlanner(store)
+      );
+      const files = await store.listSnapshotFiles(setup!.workspace.id, snapshot.id);
+      const runBuild = async () => {
+        const { build } = await store.createBuild({
+          workspaceId: setup!.workspace.id,
+          repositoryId: repository!.id,
+          snapshotId: snapshot.id,
+          snapshotPath: snapshot.storagePath,
+          commitSha: snapshot.commitSha
+        });
+        const queueStart = queue.sent.length;
+        await worker.schedule({
+          workspaceId: setup!.workspace.id,
+          projectId: project.id,
+          snapshotId: snapshot.id,
+          buildId: build.id,
+          inputDigest: normalizedSourcesPipelineInputDigest(snapshot, files, build.purpose)
+        });
+        for (let index = queueStart; index < queue.sent.length; index += 1) {
+          await worker.process(queue.sent[index]!);
+        }
+        return build;
+      };
+
+      const firstBuild = await runBuild();
+      expect((await store.listPipelineStageRuns(setup!.workspace.id, project.id, firstBuild.id))
+        .map((run) => [run.stage, run.status]))
+        .toEqual([
+          ["convert", "succeeded"], ["extract", "succeeded"], ["tables", "succeeded"], ["graph", "succeeded"],
+          ["synthesize", "succeeded"], ["index", "succeeded"], ["lint", "succeeded"], ["viz", "succeeded"],
+          ["validate", "succeeded"], ["package", "succeeded"]
+        ]);
+
+      await store.transitionBuild(firstBuild.id, "queued", "ready");
+      const release = await store.createReleaseDraft(setup!.workspace.id, repository!.id, firstBuild.id, "1.0.0");
+      await store.publishRelease(setup!.workspace.id, release.id);
+      const reusedBuild = await runBuild();
+      expect((await store.listPipelineStageRuns(setup!.workspace.id, project.id, reusedBuild.id))
+        .map((run) => [run.stage, run.status]))
+        .toEqual([
+          ["convert", "reused"], ["extract", "reused"], ["tables", "reused"], ["graph", "reused"],
+          ["synthesize", "reused"], ["index", "reused"], ["lint", "reused"], ["viz", "reused"],
+          ["validate", "reused"], ["package", "reused"]
+        ]);
+      await expect(store.currentRelease(setup!.workspace.id, repository!.id))
+        .resolves.toMatchObject({ id: release.id, buildId: firstBuild.id, kernelMode: "legacy" });
+    } finally {
+      await rm(sourceRoot, { recursive: true, force: true });
+      await rm(artifactRoot, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   test(databaseUrl
     ? "persists project memberships, rejects cross-workspace users, and protects the final project administrator"

@@ -192,6 +192,19 @@ describe("PipelineStageWorker", () => {
     expect(store.runs.filter((run) => run.stage === "extract")).toHaveLength(1);
   });
 
+  test("ignores a delivery whose project identifier does not match the durable run", async () => {
+    const store = new FakePipelineStore();
+    const queue = new FakeQueue();
+    const execute = vi.fn(async () => ({ outputManifestIds: ["artifact-1"] }));
+    const worker = new PipelineStageWorker(store, queue, execute, stages);
+    await worker.schedule(job);
+
+    await worker.process({ ...queue.sent[0]!, projectId: "other-project" });
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(store.runs).toEqual([expect.objectContaining({ stage: "convert", status: "queued" })]);
+  });
+
   test("keeps the next durable stage queued when its delivery fails", async () => {
     const store = new FakePipelineStore();
     const queue: PipelineStageJobQueue = {

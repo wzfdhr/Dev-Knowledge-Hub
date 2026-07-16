@@ -171,7 +171,10 @@ test("folder import, project release, Codex, and collaboration workflow", async 
 
   await page.setViewportSize({ width: 320, height: 760 });
   await page.goto(`/projects/${projectId}/overview`);
-  await page.getByRole("button", { name: "打开导航" }).click();
+  const navigationButton = page.getByRole("button", { name: "打开导航" });
+  await navigationButton.focus();
+  await expect(navigationButton).toBeFocused();
+  await navigationButton.press("Enter");
   await expect(page.getByRole("link", { name: "项目中心" }).last()).toBeVisible();
   const overflow320 = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow320).toBeLessThanOrEqual(0);

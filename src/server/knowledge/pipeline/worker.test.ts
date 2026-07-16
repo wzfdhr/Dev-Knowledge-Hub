@@ -21,6 +21,22 @@ function createBuild(cancelRequested = false): BuildRecord {
 
 class FakePipelineStore implements PipelineArtifactStore {
   readonly runs: PipelineStageRunRecord[] = [];
+  readonly failStageRunAndCreateRetry = vi.fn(async (input: {
+    workspaceId: string; projectId: string; stageRunId: string; errorCode: string; errorDetail: string;
+    retry?: { inputDigest: string };
+  }) => {
+    const failed = await this.transitionStageRun(
+      input.workspaceId, input.projectId, input.stageRunId, "running", "failed",
+      { errorCode: input.errorCode, errorDetail: input.errorDetail }
+    );
+    if (!failed || !input.retry) return { failed, retry: null };
+    const retry = await this.createStageRun({
+      workspaceId: failed.workspaceId, projectId: failed.projectId, snapshotId: failed.snapshotId,
+      buildId: failed.buildId, stage: failed.stage, attempt: failed.attempt + 1,
+      inputDigest: input.retry.inputDigest
+    });
+    return { failed, retry };
+  });
   readonly completeStageRunAndCreateNext = vi.fn(async (input: {
     workspaceId: string; projectId: string; stageRunId: string; status: "succeeded" | "reused";
     outputManifestIds?: string[]; next?: Parameters<FakePipelineStore["createStageRun"]>[0];
@@ -160,16 +176,37 @@ describe("PipelineStageWorker", () => {
     ]));
   });
 
-  test("does not schedule a downstream stage after a worker failure", async () => {
+  test("does not retry a deterministic stage after a worker failure", async () => {
     const store = new FakePipelineStore();
     const queue = new FakeQueue();
-    const worker = new PipelineStageWorker(store, queue, async () => { throw new Error("parser failed"); }, stages);
+    const worker = new PipelineStageWorker(store, queue, async () => { throw new Error("parser failed"); }, ["extract", "graph"]);
     await worker.schedule(job);
 
     await worker.process(queue.sent[0]!);
 
-    expect(store.runs).toEqual([expect.objectContaining({ stage: "convert", status: "failed", errorCode: "PIPELINE_STAGE_FAILED" })]);
+    expect(store.runs).toEqual([expect.objectContaining({ stage: "extract", status: "failed", errorCode: "PIPELINE_STAGE_FAILED" })]);
     expect(queue.sent).toHaveLength(1);
+  });
+
+  test("preserves a failed retryable attempt before queueing its next attempt", async () => {
+    const store = new FakePipelineStore();
+    const queue = new FakeQueue();
+    const worker = new PipelineStageWorker(store, queue, async () => { throw new Error("database unavailable"); }, stages);
+    await worker.schedule(job);
+
+    await worker.process(queue.sent[0]!);
+
+    expect(store.failStageRunAndCreateRetry).toHaveBeenCalledWith(expect.objectContaining({
+      stageRunId: "run-1", errorCode: "PIPELINE_STAGE_FAILED", retry: { inputDigest: digest }
+    }));
+    expect(store.runs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stage: "convert", attempt: 1, status: "failed" }),
+      expect.objectContaining({ stage: "convert", attempt: 2, status: "queued", inputDigest: digest })
+    ]));
+    expect(queue.sent).toEqual([
+      { stageRunId: "run-1", buildId: "build-1", projectId: "project-1" },
+      { stageRunId: "run-2", buildId: "build-1", projectId: "project-1" }
+    ]);
   });
 
   test("records a cache hit as reused before scheduling the next stage", async () => {

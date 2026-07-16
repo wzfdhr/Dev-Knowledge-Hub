@@ -37,6 +37,21 @@ describe("PgBossPipelineStageJobQueue", () => {
     );
   });
 
+  test("schedules a retry after its requested durable backoff", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-16T04:00:00.000Z"));
+    const queue = new PgBossPipelineStageJobQueue("postgres://localhost/devkh");
+
+    await queue.send(job, { delayMs: 5_000 });
+
+    expect(mocks.boss.upsert).toHaveBeenCalledWith(
+      "knowledge-pipeline-stage",
+      job,
+      { singletonKey: "stage-run-1", startAfter: new Date("2026-07-16T04:00:05.000Z") }
+    );
+    vi.useRealTimers();
+  });
+
   test("starts a stage consumer and hands each queued job to the worker", async () => {
     const queue = new PgBossPipelineStageJobQueue("postgres://localhost/devkh");
     const handler = vi.fn(async () => undefined);

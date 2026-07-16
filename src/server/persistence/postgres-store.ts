@@ -40,6 +40,8 @@ import type {
   CreateStageRunInput,
   CompleteStageRunInput,
   CompleteStageRunResult,
+  FailStageRunAndCreateRetryInput,
+  FailStageRunAndCreateRetryResult,
   SaveKnowledgeGraphInput,
   ReleaseRecord,
   RepositoryConnectionInput,
@@ -845,6 +847,61 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       ]
     );
     return rows[0] ? stageRunRecord(rows[0]) : null;
+  }
+
+  async failStageRunAndCreateRetry(
+    input: FailStageRunAndCreateRetryInput
+  ): Promise<FailStageRunAndCreateRetryResult> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<StageRunRow>(
+        `UPDATE build_stage_runs
+         SET status = 'failed', started_at = COALESCE(started_at, now()), finished_at = now(),
+             error_code = $4, error_detail = $5, updated_at = now()
+         WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND status = 'running'
+         RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+                   input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
+        [input.workspaceId, input.projectId, input.stageRunId, input.errorCode, input.errorDetail]
+      );
+      const failedRow = rows[0];
+      if (!failedRow) return { failed: null, retry: null };
+      const failed = stageRunRecord(failedRow);
+      await client.query(
+        `INSERT INTO build_stage_events
+         (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+         VALUES ($1, $2, $3, $4, $5, 'failed')
+         ON CONFLICT (stage_run_id, status) DO NOTHING`,
+        [failed.workspaceId, failed.projectId, failed.buildId, failed.id, failed.stage]
+      );
+      if (!input.retry) return { failed, retry: null };
+      const { rows: retryRows } = await client.query<StageRunRow>(
+        `INSERT INTO build_stage_runs
+         (workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status, input_digest)
+         SELECT $1, $2, $3, $4, $5, $6, 'queued', $7
+         FROM build_jobs build
+         JOIN repositories repository ON repository.id = build.repository_id AND repository.workspace_id = build.workspace_id
+         JOIN source_snapshots snapshot ON snapshot.id = build.snapshot_id AND snapshot.workspace_id = build.workspace_id
+         WHERE build.workspace_id = $1 AND build.id = $4 AND repository.project_id = $2
+           AND snapshot.id = $3 AND snapshot.repository_id = build.repository_id
+         ON CONFLICT (build_job_id, stage, attempt) DO UPDATE
+           SET updated_at = build_stage_runs.updated_at
+         RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+                   input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
+        [
+          failed.workspaceId, failed.projectId, failed.snapshotId, failed.buildId,
+          failed.stage, failed.attempt + 1, input.retry.inputDigest
+        ]
+      );
+      if (!retryRows[0]) throw new Error("Retry stage run does not match the project build and snapshot");
+      const retry = stageRunRecord(retryRows[0]);
+      await client.query(
+        `INSERT INTO build_stage_events
+         (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+         VALUES ($1, $2, $3, $4, $5, 'queued')
+         ON CONFLICT (stage_run_id, status) DO NOTHING`,
+        [retry.workspaceId, retry.projectId, retry.buildId, retry.id, retry.stage]
+      );
+      return { failed, retry };
+    });
   }
 
   async completeStageRunAndCreateNext(

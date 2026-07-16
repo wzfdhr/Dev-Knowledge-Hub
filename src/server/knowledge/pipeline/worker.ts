@@ -18,7 +18,7 @@ export interface PipelineStageJob {
 }
 
 export interface PipelineStageJobQueue {
-  send(job: PipelineStageJob): Promise<void>;
+  send(job: PipelineStageJob, options?: { delayMs?: number }): Promise<void>;
   start(handler: (job: PipelineStageJob) => Promise<void>): Promise<void>;
   stop(): Promise<void>;
 }
@@ -42,6 +42,18 @@ export interface PipelineStageInputPlanner {
 type PipelineWorkerStore = PipelineArtifactStore & {
   getBuild(workspaceId: string, buildId: string): Promise<BuildRecord | null>;
 };
+
+const RETRYABLE_STAGES = new Set<BuildStage>(["convert", "graph", "index", "package"]);
+const MAX_STAGE_ATTEMPTS = 3;
+const RETRY_DELAYS_MS = [5_000, 30_000] as const;
+
+function shouldRetry(run: PipelineStageRunRecord): boolean {
+  return RETRYABLE_STAGES.has(run.stage) && run.attempt < MAX_STAGE_ATTEMPTS;
+}
+
+function retryDelayMs(run: PipelineStageRunRecord): number {
+  return RETRY_DELAYS_MS[run.attempt - 1] ?? RETRY_DELAYS_MS.at(-1)!;
+}
 
 export class PipelineStageWorker {
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
@@ -139,12 +151,21 @@ export class PipelineStageWorker {
           });
         }
       } catch (error) {
-        await this.store.transitionStageRun(
-          run.workspaceId, run.projectId, run.id, "running", "failed", {
-            errorCode: "PIPELINE_STAGE_FAILED",
-            errorDetail: error instanceof Error ? error.message.slice(0, 4_000) : "Pipeline stage failed"
-          }
-        );
+        const failed = await this.store.failStageRunAndCreateRetry({
+          workspaceId: run.workspaceId,
+          projectId: run.projectId,
+          stageRunId: run.id,
+          errorCode: "PIPELINE_STAGE_FAILED",
+          errorDetail: error instanceof Error ? error.message.slice(0, 4_000) : "Pipeline stage failed",
+          ...(shouldRetry(run) ? { retry: { inputDigest: run.inputDigest } } : {})
+        });
+        if (failed.retry) {
+          await this.queue.send({
+            stageRunId: failed.retry.id,
+            buildId: failed.retry.buildId,
+            projectId: failed.retry.projectId
+          }, { delayMs: retryDelayMs(run) });
+        }
       }
       return;
     }

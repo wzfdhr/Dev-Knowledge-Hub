@@ -56,6 +56,20 @@ export interface CompleteStageRunResult {
   next: PipelineStageRunRecord | null;
 }
 
+export interface FailStageRunAndCreateRetryInput {
+  workspaceId: string;
+  projectId: string;
+  stageRunId: string;
+  errorCode: string;
+  errorDetail: string;
+  retry?: { inputDigest: string };
+}
+
+export interface FailStageRunAndCreateRetryResult {
+  failed: PipelineStageRunRecord | null;
+  retry: PipelineStageRunRecord | null;
+}
+
 export interface PipelineArtifactStore {
   createStageRun(input: CreateStageRunInput): Promise<PipelineStageRunRecord>;
   claimNextStageRun(
@@ -77,6 +91,9 @@ export interface PipelineArtifactStore {
     status: StageStatus,
     details?: { outputManifestIds?: string[]; errorCode?: string; errorDetail?: string }
   ): Promise<PipelineStageRunRecord | null>;
+  failStageRunAndCreateRetry(
+    input: FailStageRunAndCreateRetryInput
+  ): Promise<FailStageRunAndCreateRetryResult>;
   completeStageRunAndCreateNext(input: CompleteStageRunInput): Promise<CompleteStageRunResult | null>;
   createArtifactWithAudit(manifest: ArtifactManifest, actorId?: string): Promise<ArtifactManifest>;
   findArtifactById(artifactId: string): Promise<ArtifactManifest | null>;

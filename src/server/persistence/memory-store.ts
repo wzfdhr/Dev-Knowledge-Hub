@@ -21,6 +21,8 @@ import type {
   AuditEventRecord,
   CompleteStageRunInput,
   CompleteStageRunResult,
+  FailStageRunAndCreateRetryInput,
+  FailStageRunAndCreateRetryResult,
   CreateSnapshotInput,
   CreateStageRunInput,
   CreateFeedbackInput,
@@ -1716,6 +1718,28 @@ export class MemoryAppStore implements AppStore {
     run.errorDetail = status === "failed" ? details.errorDetail ?? null : null;
     this.recordPipelineStageEvent(run);
     return run;
+  }
+
+  async failStageRunAndCreateRetry(
+    input: FailStageRunAndCreateRetryInput
+  ): Promise<FailStageRunAndCreateRetryResult> {
+    const failed = await this.transitionStageRun(
+      input.workspaceId, input.projectId, input.stageRunId, "running", "failed", {
+        errorCode: input.errorCode,
+        errorDetail: input.errorDetail
+      }
+    );
+    if (!failed || !input.retry) return { failed, retry: null };
+    const retry = await this.createStageRun({
+      workspaceId: failed.workspaceId,
+      projectId: failed.projectId,
+      snapshotId: failed.snapshotId,
+      buildId: failed.buildId,
+      stage: failed.stage,
+      attempt: failed.attempt + 1,
+      inputDigest: input.retry.inputDigest
+    });
+    return { failed, retry };
   }
 
   async completeStageRunAndCreateNext(input: CompleteStageRunInput): Promise<CompleteStageRunResult | null> {

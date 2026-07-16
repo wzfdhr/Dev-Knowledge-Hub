@@ -107,6 +107,10 @@ export interface PipelineArtifactStore {
     kind: string,
     inputDigest: string
   ): Promise<ArtifactManifest | null>;
+  recordArtifactCacheMiss(
+    manifest: ArtifactManifest,
+    reason: "content_missing"
+  ): Promise<void>;
 }
 
 export interface KnowledgeGraphRecord {

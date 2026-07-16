@@ -1075,6 +1075,23 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return rows[0] ? artifactManifest(rows[0]) : null;
   }
 
+  async recordArtifactCacheMiss(manifest: ArtifactManifest, reason: "content_missing"): Promise<void> {
+    await this.insertAudit(this.pool, {
+      workspaceId: manifest.workspaceId,
+      action: "pipeline.artifact.cache_miss",
+      resourceType: "knowledge_artifact",
+      resourceId: manifest.id,
+      metadata: {
+        reason,
+        projectId: manifest.projectId,
+        snapshotId: manifest.snapshotId,
+        buildId: manifest.buildId,
+        stage: manifest.stage,
+        kind: manifest.kind
+      }
+    });
+  }
+
   async findArtifactById(artifactId: string): Promise<ArtifactManifest | null> {
     const { rows } = await this.pool.query<ArtifactRow>(
       `SELECT id, workspace_id, project_id, snapshot_id, build_job_id, stage, kind, schema_version,

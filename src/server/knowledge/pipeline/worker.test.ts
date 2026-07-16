@@ -90,6 +90,7 @@ class FakePipelineStore implements PipelineArtifactStore {
 
   async findReusableArtifact() { return null; }
   async findArtifactById() { return null; }
+  async recordArtifactCacheMiss() {}
   async createArtifactWithAudit(): Promise<never> { throw new Error("not used"); }
   async getBuild() { return this.build; }
 }

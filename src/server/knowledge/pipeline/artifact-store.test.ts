@@ -23,7 +23,7 @@ function manifest(input: Partial<ArtifactManifest> = {}): ArtifactManifest {
   };
 }
 
-function persistence(): PipelineArtifactStore {
+function persistence(): PipelineArtifactStore & { recordArtifactCacheMiss: ReturnType<typeof vi.fn> } {
   const artifacts: ArtifactManifest[] = [];
   return {
     createStageRun: vi.fn(), claimNextStageRun: vi.fn(), transitionStageRun: vi.fn(),
@@ -36,8 +36,9 @@ function persistence(): PipelineArtifactStore {
       if (existing) return existing;
       artifacts.push(value);
       return value;
-    })
-  } as unknown as PipelineArtifactStore;
+    }),
+    recordArtifactCacheMiss: vi.fn(async () => undefined)
+  } as unknown as PipelineArtifactStore & { recordArtifactCacheMiss: ReturnType<typeof vi.fn> };
 }
 
 async function root() {
@@ -95,5 +96,18 @@ describe("ArtifactStore", () => {
     await expect(store.getJson(saved.manifest)).rejects.toBeInstanceOf(ArtifactStoreIntegrityError);
     await expect(store.getJson({ ...saved.manifest, storageKey: "../outside.json" }))
       .rejects.toBeInstanceOf(ArtifactStoreIntegrityError);
+  });
+
+  test("regenerates a missing physical artifact as an audited cache miss", async () => {
+    const database = persistence();
+    const store = new ArtifactStore(await root(), database);
+    const saved = await store.putJson({ manifest: manifest(), value: { answer: 42 } });
+    await rm(path.join(store.root, saved.manifest.storageKey));
+
+    const regenerated = await store.putJson({ manifest: manifest(), value: { answer: 42 } });
+
+    expect(regenerated.reused).toBe(false);
+    await expect(store.getJson(regenerated.manifest)).resolves.toEqual({ answer: 42 });
+    expect(database.recordArtifactCacheMiss).toHaveBeenCalledWith(saved.manifest, "content_missing");
   });
 });

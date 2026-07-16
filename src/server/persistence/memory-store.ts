@@ -1820,6 +1820,23 @@ export class MemoryAppStore implements AppStore {
     return artifact ? structuredClone(artifact) : null;
   }
 
+  async recordArtifactCacheMiss(manifest: ArtifactManifest, reason: "content_missing"): Promise<void> {
+    await this.recordAudit({
+      workspaceId: manifest.workspaceId,
+      action: "pipeline.artifact.cache_miss",
+      resourceType: "knowledge_artifact",
+      resourceId: manifest.id,
+      metadata: {
+        reason,
+        projectId: manifest.projectId,
+        snapshotId: manifest.snapshotId,
+        buildId: manifest.buildId,
+        stage: manifest.stage,
+        kind: manifest.kind
+      }
+    });
+  }
+
   async findArtifactById(artifactId: string): Promise<ArtifactManifest | null> {
     const artifact = this.knowledgeArtifacts.find((candidate) => candidate.id === artifactId);
     return artifact ? structuredClone(artifact) : null;

@@ -132,6 +132,32 @@ describe("PipelineStageWorker", () => {
     expect(queue.sent).toEqual([{ stageRunId: "run-1", buildId: "build-1", projectId: "project-1" }]);
   });
 
+  test("reconciles a stage that was committed before queue delivery failed", async () => {
+    const store = new FakePipelineStore();
+    const failedQueue: PipelineStageJobQueue = {
+      send: async () => { throw new Error("queue unavailable"); },
+      start: async () => {},
+      stop: async () => {}
+    };
+    const failedWorker = new PipelineStageWorker(
+      store, failedQueue, async () => ({ outputManifestIds: [] }), stages
+    );
+
+    await expect(failedWorker.schedule(job)).rejects.toThrow("queue unavailable");
+    expect(store.runs).toEqual([expect.objectContaining({ stage: "convert", status: "queued" })]);
+
+    const recoveredQueue = new FakeQueue();
+    const recoveredWorker = new PipelineStageWorker(
+      store, recoveredQueue, async () => ({ outputManifestIds: [] }), stages
+    );
+    await recoveredWorker.start();
+    await recoveredWorker.stop();
+
+    expect(recoveredQueue.sent).toEqual([
+      { stageRunId: "run-1", buildId: "build-1", projectId: "project-1" }
+    ]);
+  });
+
   test("succeeds one stage, then persists and queues only the next stage", async () => {
     const store = new FakePipelineStore();
     const queue = new FakeQueue();
@@ -150,6 +176,20 @@ describe("PipelineStageWorker", () => {
       { stageRunId: "run-1", buildId: "build-1", projectId: "project-1" },
       { stageRunId: "run-2", buildId: "build-1", projectId: "project-1" }
     ]);
+  });
+
+  test("ignores a duplicate delivery after the stage has already completed", async () => {
+    const store = new FakePipelineStore();
+    const queue = new FakeQueue();
+    const execute = vi.fn(async () => ({ outputManifestIds: ["artifact-1"] }));
+    const worker = new PipelineStageWorker(store, queue, execute, stages);
+    await worker.schedule(job);
+
+    await worker.process(queue.sent[0]!);
+    await worker.process(queue.sent[0]!);
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(store.runs.filter((run) => run.stage === "extract")).toHaveLength(1);
   });
 
   test("uses the stage input planner for the next durable run", async () => {

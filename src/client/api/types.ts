@@ -49,6 +49,26 @@ export interface ProjectKnowledgeQuality {
   change: SnapshotChangeSummary | null;
   diagnostics: Array<{ code: "SOURCE_MISSING" | "SNAPSHOT_MISSING" | "BUILD_FAILED" | "RELEASE_MISSING" | "REBUILD_RECOMMENDED" | "PUBLISHED" }>;
 }
+export type RemediationState = "open" | "accepted" | "rebuilding" | "resolved" | "dismissed";
+export interface Remediation {
+  id: string;
+  projectId: string;
+  repositoryId: string;
+  sourceBuildId: string;
+  issue: LintIssue;
+  state: RemediationState;
+  rebuildBuildId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface RemediationEvent {
+  id: string;
+  remediationId: string;
+  fromState: RemediationState;
+  toState: RemediationState;
+  actorId: string | null;
+  createdAt: string;
+}
 export interface WorkspaceOverview {
   projects: ProjectSummary[];
   totals: { projects: number; connected: number; published: number; members: number };

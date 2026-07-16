@@ -2,6 +2,7 @@ import type {
   ApiErrorShape, Build, PipelineStageRun, Feedback, McpConnection, McpToken, KnowledgePageRecord,
   ArchivedRepository, KnowledgeMetadata, ProjectKnowledgeQuality, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotChangeSummary, SnapshotSummary, SourceExcerpt,
   UploadSnapshotSummary, ImportReport, TeamMember, ProjectMember, Project, ProjectSummary, ProjectActivity, CodexConnectionPack,
+  Remediation, RemediationEvent, RemediationState,
   WorkspaceOverview, WorkspaceSearchResult, MfaStatus
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
@@ -18,6 +19,12 @@ export class ApiError extends Error {
 export interface PaginationParams {
   limit: number;
   offset: number;
+}
+
+export interface RemediationListParams extends PaginationParams {
+  state?: RemediationState;
+  severity?: "error" | "warning" | "info";
+  rule?: string;
 }
 
 export interface PaginatedResponse {
@@ -95,6 +102,8 @@ export interface ApiClient {
   getProjectChanges(projectId: string): Promise<{ change: SnapshotChangeSummary | null }>;
   getProjectGraph(projectId: string): Promise<{ release: { id: string; version: string } | null; format: "tree"; data: { roots: unknown[]; crossLinks: unknown[] } | null }>;
   getProjectKnowledgeQuality(projectId: string): Promise<ProjectKnowledgeQuality>;
+  listProjectRemediations(projectId: string, params: RemediationListParams): Promise<{ remediations: Remediation[] }>;
+  listProjectRemediationEvents(projectId: string, remediationId: string): Promise<{ events: RemediationEvent[] }>;
   listBuilds(pagination: PaginationParams): Promise<{ builds: Build[] } & PaginatedResponse>;
   getBuildStages(id: string): Promise<{
     buildId: string;
@@ -205,6 +214,16 @@ export const api: ApiClient = {
   getProjectChanges: (projectId) => request(`/api/projects/${projectId}/changes`),
   getProjectGraph: (projectId) => request(`/api/projects/${encodeURIComponent(projectId)}/graph?format=tree`),
   getProjectKnowledgeQuality: (projectId) => request(`/api/projects/${projectId}/knowledge-quality`),
+  listProjectRemediations: (projectId, params) => request(listPath(
+    `/api/projects/${encodeURIComponent(projectId)}/remediations`, params, {
+      state: params.state,
+      severity: params.severity,
+      rule: params.rule
+    }
+  )),
+  listProjectRemediationEvents: (projectId, remediationId) => request(
+    `/api/projects/${encodeURIComponent(projectId)}/remediations/${encodeURIComponent(remediationId)}/events`
+  ),
   listBuilds: (pagination) => request(listPath("/api/builds", pagination)),
   getBuildStages: (id) => request(`/api/builds/${encodeURIComponent(id)}/stages`),
   startBuild: (snapshotId, options) => request("/api/builds", {

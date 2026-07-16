@@ -19,7 +19,7 @@ import { App } from "./app";
 import { ErrorState } from "./components/ui";
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
-beforeEach(() => sessionStorage.clear());
+beforeEach(() => { sessionStorage.clear(); localStorage.clear(); });
 
 function renderPage(node: React.ReactNode) {
   const queryClient = new QueryClient({
@@ -775,6 +775,61 @@ describe("knowledge citations", () => {
     expect(screen.getByText("imports · src/math.ts:1")).toBeVisible();
     expect(consoleError.mock.calls.flat().join(" ")).not.toContain("same key");
     consoleError.mockRestore();
+  });
+
+  test("filters quality governance issues and shows the selected source context", async () => {
+    const user = userEvent.setup();
+    const listProjectRemediations = vi.fn().mockResolvedValue({ remediations: [{
+      id: "remediation-1", projectId: "project-1", repositoryId: "repo", sourceBuildId: "build-1",
+      issue: {
+        id: "issue-1", buildId: "build-1", rule: "KNOWLEDGE_LOW_COVERAGE", severity: "warning",
+        targetKind: "knowledge", targetId: "module:payments", message: "模块文档覆盖不足",
+        sourceRefs: [{ snapshotId: "snapshot-1", path: "src/payments.ts", startLine: 12, endLine: 24, blobHash: "b".repeat(64) }],
+        remediationState: "open"
+      },
+      state: "open", rebuildBuildId: null,
+      createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z"
+    }] });
+    const api = {
+      getRepositoryStatus: vi.fn().mockResolvedValue({
+        repository: { id: "repo" },
+        latestSnapshot: { id: "snapshot-1", commitSha: "a".repeat(40), ref: "main", commitTimestamp: "2026-07-16" }
+      }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [{
+        id: "release-1", buildId: "build-1", snapshotId: "snapshot-1", version: "1.0.0",
+        createdAt: "2026-07-16", publishedAt: "2026-07-16"
+      }] }),
+      getKnowledgeMetadata: vi.fn().mockResolvedValue({ symbols: [], dependencies: [] }),
+      listKnowledgePages: vi.fn().mockResolvedValue({ pages: [] }),
+      getProjectKnowledgeQuality: vi.fn().mockResolvedValue({
+        repository: { id: "repo" }, latestSnapshot: null, currentRelease: null, latestBuild: null,
+        pendingFeedbackCount: 0, indexedTextBytes: 0,
+        knowledge: { pageCount: 0, chunkCount: 0, citationCount: 0 },
+        remediation: { open: 1, accepted: 0, rebuilding: 0, resolved: 0, dismissed: 0 },
+        qualityPipeline: null,
+        assessment: { trust: { targetKind: "knowledge", targetId: "module:payments", score: 0.8, citationScore: 1, parserScore: 1, freshnessScore: 1, lintPenalty: 0, reasons: ["引用完整"] }, issueTotal: 1, issues: [] },
+        change: null, diagnostics: [{ code: "PUBLISHED" }]
+      }),
+      listProjectRemediations
+    } as unknown as ApiClient;
+    localStorage.setItem("devkh:active-project-id", "project-1");
+
+    renderPage(<KnowledgePage api={api} />);
+
+    const governance = await screen.findByRole("region", { name: "质量治理" });
+    expect(within(governance).getByText("模块文档覆盖不足")).toBeVisible();
+    await user.selectOptions(within(governance).getByLabelText("严重度"), "warning");
+    await waitFor(() => expect(listProjectRemediations).toHaveBeenLastCalledWith("project-1", {
+      limit: 50, offset: 0, severity: "warning"
+    }));
+    await user.type(within(governance).getByLabelText("规则"), "KNOWLEDGE_LOW_COVERAGE");
+    await waitFor(() => expect(listProjectRemediations).toHaveBeenLastCalledWith("project-1", {
+      limit: 50, offset: 0, severity: "warning", rule: "KNOWLEDGE_LOW_COVERAGE"
+    }));
+    await user.click(within(governance).getByRole("button", { name: /模块文档覆盖不足/ }));
+    expect(within(governance).getByText("src/payments.ts:12-24")).toBeVisible();
+    expect(within(governance).getByText("build-1")).toBeVisible();
+    expect(within(governance).getByText("引用完整")).toBeVisible();
   });
 });
 

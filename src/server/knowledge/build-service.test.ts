@@ -195,7 +195,7 @@ function input(repositoryId = "repo-1") {
 }
 
 describe("BuildService", () => {
-  test("resolves an optional enhancer for the build workspace at synthesis time", async () => {
+  test("resolves an optional enhancer only for an explicitly opted-in build", async () => {
     const persistence = new FakeBuildPersistence();
     const enhancer = { enhance: vi.fn() };
     const enhancerForWorkspace = vi.fn(async () => enhancer);
@@ -206,12 +206,25 @@ describe("BuildService", () => {
       enhancerForWorkspace,
       synthesize
     });
-    const { build } = await service.startBuild(input());
+    const { build } = await service.startBuild({ ...input(), allowLlm: true });
 
     await service.process(build.id);
 
     expect(enhancerForWorkspace).toHaveBeenCalledWith("workspace-1");
     expect(synthesize.mock.calls[0][1]).toBe(enhancer);
+  });
+
+  test("does not resolve an enhancer for a deterministic build", async () => {
+    const persistence = new FakeBuildPersistence();
+    const enhancerForWorkspace = vi.fn(async () => ({ enhance: vi.fn() }));
+    const synthesize = vi.fn(async (...args: Parameters<typeof generateKnowledge>) => generateKnowledge(args[0]));
+    const service = new BuildService(persistence, new FakeQueue(), { enhancerForWorkspace, synthesize });
+    const { build } = await service.startBuild(input());
+
+    await service.process(build.id);
+
+    expect(enhancerForWorkspace).not.toHaveBeenCalled();
+    expect(synthesize.mock.calls[0][1]).toBeUndefined();
   });
   test("runs the durable state machine and persists validated knowledge", async () => {
     const persistence = new FakeBuildPersistence();

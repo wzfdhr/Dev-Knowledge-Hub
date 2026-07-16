@@ -318,9 +318,11 @@ export class BuildService {
       await this.checkCancellation(original);
       await this.transition(buildId, status, "synthesizing");
       status = "synthesizing";
-      const enhancer = this.enhancerForWorkspace
-        ? await this.enhancerForWorkspace(original.workspaceId)
-        : this.enhancer;
+      const enhancer = original.allowLlm === true
+        ? this.enhancerForWorkspace
+          ? await this.enhancerForWorkspace(original.workspaceId)
+          : this.enhancer
+        : undefined;
       const output = await this.synthesize(index, enhancer, { purpose: original.purpose });
       await this.checkCancellation(original);
       await this.transition(buildId, status, "validating", { warnings: output.warnings });

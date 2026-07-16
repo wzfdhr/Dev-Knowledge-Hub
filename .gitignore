@@ -3,6 +3,7 @@ dist
 coverage
 playwright-report
 test-results
+artifacts
 .env
 docker-compose.override.yml
 *.log

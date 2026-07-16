@@ -97,6 +97,15 @@ describe("delivery database isolation", () => {
     );
   });
 
+  test("preserves the retrieval evaluation report outside Playwright's disposable result directory", async () => {
+    const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
+    const upload = ci.jobs.verify.steps.find((step) =>
+      step.name === "Upload knowledge retrieval evaluation"
+    );
+
+    expect(upload.with.path).toBe("artifacts/knowledge-retrieval-evaluation.json");
+  });
+
   test("runs monitoring operational checks through the release backup gate", async () => {
     const packageJson = JSON.parse(await readFile("package.json", "utf8"));
     const releaseVerifier = await readFile("scripts/release-verify.mjs", "utf8");

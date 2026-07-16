@@ -13,7 +13,7 @@ import { MemoryAppStore } from "../src/server/persistence/memory-store.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const casesPath = path.join(root, "evaluation/knowledge-v2/cases.jsonl");
-const reportPath = path.join(root, "test-results/knowledge-retrieval-evaluation.json");
+const reportPath = path.join(root, "artifacts/knowledge-retrieval-evaluation.json");
 const commitSha = "e".repeat(40);
 
 const cases = parseRetrievalCases(await readFile(casesPath, "utf8"));

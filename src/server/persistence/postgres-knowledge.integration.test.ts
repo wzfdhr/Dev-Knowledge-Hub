@@ -69,6 +69,70 @@ async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean):
 
 integration("PostgreSQL cited knowledge integration", () => {
   test(databaseUrl
+    ? "rolls back LLM builds when their audit event cannot be persisted and preserves allowLlm projections"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("llm-atomic@example.com", "hash");
+    const repository = await store.createRepository(
+      setup!.workspace.id, { kind: "upload", name: "LLM atomic source" }
+    );
+    const snapshotId = randomUUID();
+    await store.createSnapshot({
+      snapshot: {
+        id: snapshotId,
+        workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id,
+        commitSha: "d".repeat(40),
+        ref: "upload",
+        remoteUrl: null,
+        commitTimestamp: new Date("2026-07-16T00:00:00.000Z"),
+        storagePath: "/tmp/llm-atomic-snapshot"
+      },
+      files: []
+    });
+    await pool.query(`
+      CREATE FUNCTION reject_llm_build_audit()
+      RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.action = 'build.llm_opted_in' THEN RAISE EXCEPTION 'audit unavailable'; END IF;
+        RETURN NEW;
+      END;
+      $$;
+      CREATE TRIGGER reject_llm_build_audit
+        BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION reject_llm_build_audit();
+    `);
+    const input = {
+      workspaceId: setup!.workspace.id,
+      repositoryId: repository!.id,
+      snapshotId,
+      snapshotPath: "/tmp/llm-atomic-snapshot",
+      commitSha: "d".repeat(40),
+      allowLlm: true,
+      llmAudit: { actorId: setup!.admin.id, projectId: repository!.projectId }
+    };
+    try {
+      await expect(store.createBuild(input)).rejects.toThrow("audit unavailable");
+      await expect(store.listBuilds(setup!.workspace.id, repository!.id)).resolves.toEqual([]);
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS reject_llm_build_audit ON audit_events");
+      await pool.query("DROP FUNCTION IF EXISTS reject_llm_build_audit()");
+    }
+
+    const { build } = await store.createBuild(input);
+    expect((await store.listBuilds(setup!.workspace.id, repository!.id))[0]).toMatchObject({ id: build.id, allowLlm: true });
+    expect(await store.listUnfinishedBuilds()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: build.id, allowLlm: true })
+    ]));
+    expect((await store.workspaceOverview(setup!.workspace.id, setup!.admin.id))[0]?.latestBuild)
+      .toMatchObject({ id: build.id, allowLlm: true });
+  }, 30_000);
+
+  test(databaseUrl
     ? "migrates durable build, citation, search, and release structures"
     : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
     if (!databaseUrl) return;

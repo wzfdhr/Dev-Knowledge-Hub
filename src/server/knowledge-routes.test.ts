@@ -147,6 +147,28 @@ describe("knowledge API contracts", () => {
     await app.close();
   });
 
+  test("does not create an opted-in LLM build when its audit record cannot be written", async () => {
+    const { app, store, cookie, repositoryId, workspaceId } = await authenticatedApp();
+    const repository = await store.getRepository(workspaceId, repositoryId);
+    expect(repository).not.toBeNull();
+    const originalRecordAudit = store.recordAudit.bind(store);
+    store.recordAudit = vi.fn(async (event) => {
+      if (event.action === "build.llm_opted_in") throw new Error("audit unavailable");
+      await originalRecordAudit(event);
+    });
+
+    const response = await app.inject({
+      method: "POST", url: "/api/builds", headers: {
+        cookie, ...csrfHeaders(cookie), "x-devkh-project": repository!.projectId
+      },
+      payload: { snapshotId: "11111111-1111-4111-8111-111111111111", allowLlm: true }
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(await store.listBuilds(workspaceId, repositoryId)).toEqual([]);
+    await app.close();
+  });
+
   test("subscribes before replay and merges a racing live event exactly once", async () => {
     const { app, store, buildService, cookie } = await authenticatedApp();
     const started = await app.inject({

@@ -1767,7 +1767,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            'snapshot_id', b.snapshot_id, 'snapshot_path', b.snapshot_path, 'commit_sha', b.commit_sha,
            'status', b.status, 'warnings', b.warnings, 'cancel_requested', b.cancel_requested,
            'error_message', b.error_message, 'purpose', b.purpose, 'feedback_ids', b.feedback_ids,
-           'feedback_context', b.feedback_context, 'remediation_context', b.remediation_context
+           'feedback_context', b.feedback_context, 'remediation_context', b.remediation_context,
+           'allow_llm', b.allow_llm
          ) AS value
          FROM build_jobs b WHERE b.workspace_id = p.workspace_id AND b.repository_id = repo.id
          ORDER BY b.created_at DESC, b.id DESC LIMIT 1
@@ -1831,6 +1832,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
             kind: "remediation", feedbackIds: [], feedbackContext: [],
             remediationContext: (build.remediation_context ?? []) as Extract<BuildRecord["purpose"], { kind: "remediation" }>["remediationContext"]
           } : standardBuildPurpose(),
+          allowLlm: Boolean(build.allow_llm),
           ...(build.error_message ? { errorMessage: String(build.error_message) } : {})
         } : null,
         memberCount: Number(row.member_count),
@@ -2524,7 +2526,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            VALUES ($1, $2, $3, $4, $5, 'queued', 'feedback', $6::uuid[], $7::jsonb)
            RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                      status, warnings, cancel_requested, error_message,
-                     purpose, feedback_ids, feedback_context, remediation_context`,
+                     purpose, feedback_ids, feedback_context, remediation_context, allow_llm`,
           [
             input.build.workspaceId,
             input.build.repositoryId,
@@ -2739,7 +2741,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            VALUES ($1, $2, $3, $4, $5, 'queued', 'remediation', '{}'::uuid[], '[]'::jsonb, $6::jsonb)
            RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                      status, warnings, cancel_requested, error_message,
-                     purpose, feedback_ids, feedback_context, remediation_context`,
+                     purpose, feedback_ids, feedback_context, remediation_context, allow_llm`,
           [
             input.build.workspaceId,
             input.build.repositoryId,
@@ -3379,6 +3381,16 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          VALUES ($1, $2, 'queued')`,
         [build.workspaceId, build.id]
       );
+      if (input.llmAudit) {
+        await this.insertAudit(client, {
+          workspaceId: build.workspaceId,
+          actorId: input.llmAudit.actorId,
+          action: "build.llm_opted_in",
+          resourceType: "build",
+          resourceId: build.id,
+          metadata: { projectId: input.llmAudit.projectId, snapshotId: build.snapshotId }
+        });
+      }
       await client.query("COMMIT");
       return { build, created: true };
     } catch (error) {
@@ -3490,7 +3502,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          AND status NOT IN ('ready', 'published', 'failed')
        RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                  status, warnings, cancel_requested, error_message,
-                 purpose, feedback_ids, feedback_context, remediation_context`,
+                 purpose, feedback_ids, feedback_context, remediation_context, allow_llm`,
       [workspaceId, buildId]
     );
     return rows[0] ? buildRecord(rows[0]) : this.getBuild(workspaceId, buildId);
@@ -3500,7 +3512,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     const { rows } = await this.pool.query<BuildRow>(
       `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
               status, warnings, cancel_requested, error_message,
-              purpose, feedback_ids, feedback_context, remediation_context
+              purpose, feedback_ids, feedback_context, remediation_context, allow_llm
        FROM build_jobs WHERE status NOT IN ('ready', 'published', 'failed')
        ORDER BY created_at ASC`
     );
@@ -3516,7 +3528,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     const { rows } = await this.pool.query<BuildRow>(
       `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
               status, warnings, cancel_requested, error_message,
-              purpose, feedback_ids, feedback_context, remediation_context
+              purpose, feedback_ids, feedback_context, remediation_context, allow_llm
        FROM build_jobs WHERE workspace_id = $1 AND repository_id = $2
        ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`,
       [workspaceId, repositoryId, limit, offset]

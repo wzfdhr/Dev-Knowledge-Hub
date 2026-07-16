@@ -1518,6 +1518,7 @@ export class MemoryAppStore implements AppStore {
   async createBuild(
     input: BuildInput
   ): Promise<{ build: BuildRecord; created: boolean }> {
+    const { llmAudit, ...buildInput } = input;
     const purpose = input.purpose ?? standardBuildPurpose();
     const active = this.builds.find((build) =>
       build.workspaceId === input.workspaceId
@@ -1531,7 +1532,7 @@ export class MemoryAppStore implements AppStore {
     );
     if (active) return { build: active, created: false };
     const build: BuildRecord = {
-      ...input,
+      ...buildInput,
       purpose,
       allowLlm: input.allowLlm === true,
       id: randomUUID(),
@@ -1539,6 +1540,16 @@ export class MemoryAppStore implements AppStore {
       warnings: [],
       cancelRequested: false
     };
+    if (llmAudit) {
+      await this.recordAudit({
+        workspaceId: build.workspaceId,
+        actorId: llmAudit.actorId,
+        action: "build.llm_opted_in",
+        resourceType: "build",
+        resourceId: build.id,
+        metadata: { projectId: llmAudit.projectId, snapshotId: build.snapshotId }
+      });
+    }
     this.builds.push(build);
     this.buildEvents.push({
       sequence: this.nextBuildEventSequence++,

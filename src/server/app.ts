@@ -1666,18 +1666,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       snapshotId: snapshot.id,
       snapshotPath: snapshot.storagePath,
       commitSha: snapshot.commitSha,
-      allowLlm: parsed.data.allowLlm === true
+      allowLlm: parsed.data.allowLlm === true,
+      ...(parsed.data.allowLlm ? { llmAudit: { actorId: admin.id, projectId: repository.projectId } } : {})
     });
-    if (result.created && parsed.data.allowLlm) {
-      await options.store.recordAudit({
-        workspaceId: admin.workspaceId,
-        actorId: admin.id,
-        action: "build.llm_opted_in",
-        resourceType: "build",
-        resourceId: result.build.id,
-        metadata: { projectId: repository.projectId, snapshotId: snapshot.id }
-      });
-    }
     return reply.code(result.created ? 202 : 200).send(result);
   });
 

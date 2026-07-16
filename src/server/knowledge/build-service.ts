@@ -54,6 +54,7 @@ export interface BuildInput {
   commitSha: string;
   purpose?: BuildPurpose;
   allowLlm?: boolean;
+  llmAudit?: { actorId: string; projectId: string };
 }
 
 export interface BuildPagination {

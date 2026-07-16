@@ -21,7 +21,8 @@ describe("PostgresAppStore pipeline persistence", () => {
       id: "b".repeat(64), projectId: "project-1", snapshotId: "snapshot-1",
       kind: "module" as const, name: "main.ts", qualifiedName: "src/main.ts", candidate: false, sourceRefs: [sourceRef], attributes: { language: "typescript" }
     };
-    const query = vi.fn(async (sql: string) => {
+    const query = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
       if (sql === "BEGIN" || sql === "COMMIT") return { rows: [], rowCount: 0 };
       if (sql.includes("FROM build_jobs build")) return { rows: [], rowCount: 1 };
       if (sql.includes("SELECT 1 FROM knowledge_graph_nodes")) return { rows: [], rowCount: 0 };
@@ -68,10 +69,50 @@ describe("PostgresAppStore pipeline persistence", () => {
     await expect(store.findReusableArtifact(
       "workspace-1", "project-1", "snapshot-1", "convert", "normalized-source", "a".repeat(64)
     )).resolves.toMatchObject({ id: "artifact-1" });
+    await expect(store.findArtifactById("artifact-1")).resolves.toMatchObject({ id: "artifact-1" });
 
     expect(query.mock.calls.some(([sql]) => String(sql).includes("workspace_id, project_id, snapshot_id, build_job_id"))).toBe(true);
     expect(query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO knowledge_artifacts"))).toBe(true);
     expect(query.mock.calls.some(([sql]) => String(sql).includes("workspace_id = $1 AND project_id = $2"))).toBe(true);
+    expect(query.mock.calls.some(([sql, values]) =>
+      String(sql).includes("WHERE id = $1") && values?.[0] === "artifact-1"
+    )).toBe(true);
+  });
+
+  test("persists pipeline search documents only after validating the source artifact scope", async () => {
+    const documentRow = {
+      id: "document-1", workspace_id: "workspace-1", project_id: "project-1", snapshot_id: "snapshot-1",
+      build_job_id: "build-1", source_artifact_id: "artifact-1", document_key: "architecture-overview:0",
+      kind: "page", title: "Architecture", content: "Overview", citations: [], metadata: { pageSlug: "architecture-overview" },
+      created_at: new Date("2026-07-16T00:00:00.000Z")
+    };
+    const query = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
+      if (sql === "BEGIN" || sql === "COMMIT") return { rows: [], rowCount: 0 };
+      if (sql.includes("FROM knowledge_artifacts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("INSERT INTO pipeline_search_documents")) return { rows: [], rowCount: 1 };
+      if (sql.includes("FROM pipeline_search_documents")) return { rows: [documentRow], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ query, connect: vi.fn(async () => client) } as never);
+    const input = {
+      workspaceId: "workspace-1", projectId: "project-1", snapshotId: "snapshot-1", buildId: "build-1",
+      sourceArtifactId: "artifact-1",
+      documents: [{
+        documentKey: "architecture-overview:0", kind: "page" as const, title: "Architecture", content: "Overview",
+        citations: [], metadata: { pageSlug: "architecture-overview" }
+      }]
+    };
+
+    await expect(store.savePipelineSearchDocuments(input)).resolves.toEqual([
+      expect.objectContaining({ sourceArtifactId: "artifact-1", documentKey: "architecture-overview:0" })
+    ]);
+    await expect(store.listPipelineSearchDocuments("workspace-1", "project-1", "build-1")).resolves.toHaveLength(1);
+    expect(query.mock.calls.some(([sql, values]) =>
+      String(sql).includes("FROM knowledge_artifacts")
+      && values?.slice(0, 4).join(":") === "artifact-1:workspace-1:project-1:snapshot-1"
+    )).toBe(true);
   });
 
   test("creates a stage run idempotently when the queue replays its schedule request", async () => {
@@ -110,6 +151,64 @@ describe("PostgresAppStore pipeline persistence", () => {
     expect(String(query.mock.calls[1][0])).toContain("FOR UPDATE SKIP LOCKED");
     expect(query.mock.calls[1][1]).toEqual(["workspace-1", "project-1", "build-1", "convert"]);
     expect(client.release).toHaveBeenCalledOnce();
+  });
+
+  test("commits a completed stage and its next queued stage in one transaction", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+      if (sql.startsWith("UPDATE build_stage_runs")) {
+        return { rows: [{ ...stageRow, status: "succeeded", started_at: new Date("2026-07-14T00:00:00.000Z"), finished_at: new Date("2026-07-14T00:00:01.000Z") }] };
+      }
+      if (sql.includes("INSERT INTO build_stage_runs")) return { rows: [{ ...stageRow, id: "stage-run-2", stage: "extract" }] };
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+
+    await expect(store.completeStageRunAndCreateNext({
+      workspaceId: "workspace-1", projectId: "project-1", stageRunId: "stage-run-1",
+      status: "succeeded", outputManifestIds: ["artifact-1"],
+      next: {
+        workspaceId: "workspace-1", projectId: "project-1", snapshotId: "snapshot-1", buildId: "build-1",
+        stage: "extract", attempt: 1, inputDigest: "a".repeat(64)
+      }
+    })).resolves.toMatchObject({
+      completed: { id: "stage-run-1", status: "succeeded" },
+      next: { id: "stage-run-2", stage: "extract", status: "queued" }
+    });
+    expect(query.mock.calls.map(([sql]) => String(sql))).toEqual(expect.arrayContaining([
+      "BEGIN", "COMMIT"
+    ]));
+    expect(query.mock.calls.filter(([sql]) => String(sql).includes("INSERT INTO build_stage_events"))).toHaveLength(2);
+    expect(client.release).toHaveBeenCalledOnce();
+  });
+
+  test("preserves a failed attempt before atomically scheduling its delayed retry", async () => {
+    const retryAt = new Date("2026-07-16T04:00:05.000Z");
+    const query = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
+      if (sql === "BEGIN" || sql === "COMMIT") return { rows: [] };
+      if (sql.startsWith("UPDATE build_stage_runs")) {
+        return { rows: [{ ...stageRow, status: "failed", started_at: new Date("2026-07-16T04:00:00.000Z"), finished_at: new Date("2026-07-16T04:00:01.000Z"), error_code: "PIPELINE_STAGE_FAILED", error_detail: "database unavailable" }] };
+      }
+      if (sql.includes("INSERT INTO build_stage_runs")) return { rows: [{ ...stageRow, id: "stage-run-2", attempt: 2 }] };
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+
+    await expect(store.failStageRunAndCreateRetry({
+      workspaceId: "workspace-1", projectId: "project-1", stageRunId: "stage-run-1",
+      errorCode: "PIPELINE_STAGE_FAILED", errorDetail: "database unavailable",
+      retry: { inputDigest: "a".repeat(64), availableAt: retryAt }
+    })).resolves.toMatchObject({
+      failed: { id: "stage-run-1", status: "failed", attempt: 1 },
+      retry: { id: "stage-run-2", status: "queued", attempt: 2 }
+    });
+    const retryInsert = query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO build_stage_runs"));
+    expect(String(retryInsert?.[0])).toContain("available_at");
+    expect(retryInsert?.[1]).toContain(retryAt);
+    expect(query.mock.calls.map(([sql]) => String(sql))).toEqual(expect.arrayContaining(["BEGIN", "COMMIT"]));
   });
 });
 

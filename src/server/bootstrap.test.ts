@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { bootstrapProductionServer, type BootstrapDependencies } from "./bootstrap";
 import type { BuildRecord } from "./knowledge/build-service";
+import { normalizedSourcesPipelineInputDigest } from "./knowledge/pipeline/convert-stage";
 
 function dependencies(): BootstrapDependencies {
   const pool = { durable: true, end: vi.fn(async () => {}) };
@@ -15,7 +16,8 @@ function dependencies(): BootstrapDependencies {
   const qualityWorker = {
     start: vi.fn(async () => {}),
     stop: vi.fn(async () => {}),
-    schedule: vi.fn(async () => {})
+    schedule: vi.fn(async () => {}),
+    dispatch: vi.fn(async () => {})
   };
   const buildService = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
   const server = { durable: true, addHook: vi.fn() };
@@ -43,7 +45,7 @@ describe("production bootstrap", () => {
     expect(deps.buildServer).not.toHaveBeenCalled();
   });
 
-  test("starts the staged quality worker only when the pipeline is explicitly enabled", async () => {
+  test("starts the staged pipeline worker only in explicit shadow mode", async () => {
     const deps = dependencies();
     const artifactStore = { initialize: vi.fn(async () => {}) };
     (deps as BootstrapDependencies & { createArtifactStore: (directory: string) => typeof artifactStore }).createArtifactStore = vi.fn(() => artifactStore);
@@ -53,7 +55,7 @@ describe("production bootstrap", () => {
       DEVKH_MASTER_KEY: masterKey,
       DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars",
       DATA_DIR: "/var/lib/devkh",
-      KNOWLEDGE_PIPELINE_V2: "true"
+      DEVKH_KNOWLEDGE_KERNEL_MODE: "shadow"
     }, deps);
 
     const database = vi.mocked(deps.createDatabase).mock.results[0].value;
@@ -65,9 +67,13 @@ describe("production bootstrap", () => {
     expect(deps.runMigrations).toHaveBeenCalledWith(database.pool);
     expect(deps.createStore).toHaveBeenCalledWith(database.pool);
     expect(deps.createBuildQueue).toHaveBeenCalledWith("postgres://localhost/devkh");
-    expect(deps.createQualityPipelineWorker).toHaveBeenCalledWith("postgres://localhost/devkh", store, artifactStore);
+    expect(deps.createQualityPipelineWorker).toHaveBeenCalledWith(
+      "postgres://localhost/devkh", store, artifactStore, expect.any(Function)
+    );
     expect(qualityWorker.start).toHaveBeenCalledOnce();
-    expect(deps.createBuildService).toHaveBeenCalledWith(store, queue, expect.any(Function), expect.any(Function));
+    expect(deps.createBuildService).toHaveBeenCalledWith(
+      store, queue, expect.any(Function), expect.any(Function), expect.any(Function)
+    );
     expect(deps.createArtifactStore).toHaveBeenCalledWith("/var/lib/devkh/artifacts", store);
     expect(artifactStore.initialize).toHaveBeenCalledOnce();
     expect(buildService.start).toHaveBeenCalledOnce();
@@ -85,7 +91,7 @@ describe("production bootstrap", () => {
     expect(server).toBe(vi.mocked(deps.buildServer).mock.results[0].value);
   });
 
-  test("keeps the staged quality worker inactive in the legacy default", async () => {
+  test("keeps the staged pipeline worker inactive in the legacy default", async () => {
     const deps = dependencies();
     await bootstrapProductionServer({
       DATABASE_URL: "postgres://localhost/devkh",
@@ -94,43 +100,55 @@ describe("production bootstrap", () => {
     }, deps);
 
     expect(deps.createQualityPipelineWorker).not.toHaveBeenCalled();
-    const schedulePostBuild = vi.mocked(deps.createBuildService).mock.calls[0]![3]!;
+    const schedulePostBuild = vi.mocked(deps.createBuildService).mock.calls[0]![4]!;
     await expect(schedulePostBuild({ id: "build-1" } as BuildRecord)).resolves.toBeUndefined();
   });
 
-  test("queues one deterministic quality stage after a durable build", async () => {
+  test("rejects active kernel mode before F05", async () => {
+    const deps = dependencies();
+    await expect(bootstrapProductionServer({
+      DATABASE_URL: "postgres://localhost/devkh",
+      DEVKH_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
+      DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars",
+      DEVKH_KNOWLEDGE_KERNEL_MODE: "active"
+    }, deps)).rejects.toThrow(/active.*F05/i);
+
+    expect(deps.createDatabase).not.toHaveBeenCalled();
+    expect(deps.createQualityPipelineWorker).not.toHaveBeenCalled();
+    expect(deps.createBuildService).not.toHaveBeenCalled();
+  });
+
+  test("queues the deterministic shadow convert stage after a durable build", async () => {
     const deps = dependencies();
     await bootstrapProductionServer({
       DATABASE_URL: "postgres://localhost/devkh",
       DEVKH_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
       DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars",
-      KNOWLEDGE_PIPELINE_V2: "true"
+      DEVKH_KNOWLEDGE_KERNEL_MODE: "shadow"
     }, deps);
 
-    const persistedStore = vi.mocked(deps.createStore).mock.results[0].value as {
-      getRepository: ReturnType<typeof vi.fn>;
-      findSnapshotById: ReturnType<typeof vi.fn>;
-      listSnapshotFiles: ReturnType<typeof vi.fn>;
-      countKnowledgePagesForBuild: ReturnType<typeof vi.fn>;
-    };
-    persistedStore.getRepository = vi.fn(async () => ({ id: "repo-1", projectId: "project-1" }));
-    persistedStore.findSnapshotById = vi.fn(async () => ({ id: "snapshot-1", commitSha: "a".repeat(40) }));
-    persistedStore.listSnapshotFiles = vi.fn(async () => []);
-    persistedStore.countKnowledgePagesForBuild = vi.fn(async () => 1);
-    const schedulePostBuild = vi.mocked(deps.createBuildService).mock.calls[0]![3]!;
+    const initialPipelineStage = vi.mocked(deps.createBuildService).mock.calls[0]![3]!;
+    const schedulePostBuild = vi.mocked(deps.createBuildService).mock.calls[0]![4]!;
     const build: BuildRecord = {
       id: "build-1", workspaceId: "workspace-1", repositoryId: "repo-1", snapshotId: "snapshot-1",
       snapshotPath: "/tmp/snapshot", commitSha: "a".repeat(40), status: "ready", warnings: [], cancelRequested: false,
       purpose: { kind: "standard", feedbackIds: [], feedbackContext: [], remediationContext: [] }
     };
 
-    await schedulePostBuild(build);
+    const initialStage = initialPipelineStage!(build, []);
+    await schedulePostBuild(build, { stageRunId: "stage-1", projectId: "project-1" });
 
     const qualityWorker = vi.mocked(deps.createQualityPipelineWorker).mock.results[0].value;
-    expect(qualityWorker.schedule).toHaveBeenCalledWith(expect.objectContaining({
-      workspaceId: "workspace-1", projectId: "project-1", snapshotId: "snapshot-1", buildId: "build-1",
-      stages: ["lint"], stageIndex: 0, inputDigest: expect.stringMatching(/^[a-f0-9]{64}$/)
-    }));
+    expect(initialStage).toEqual({
+      inputDigest: normalizedSourcesPipelineInputDigest(
+        { id: "snapshot-1", commitSha: "a".repeat(40) },
+        [],
+        build.purpose
+      )
+    });
+    expect(qualityWorker.dispatch).toHaveBeenCalledWith({
+      stageRunId: "stage-1", buildId: "build-1", projectId: "project-1"
+    });
   });
 
   test("stops the build queue before closing the database", async () => {

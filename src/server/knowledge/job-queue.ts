@@ -37,11 +37,14 @@ export class PgBossPipelineStageJobQueue implements PipelineStageJobQueue {
     this.boss = new PgBoss(connectionString);
   }
 
-  async send(job: PipelineStageJob): Promise<void> {
+  async send(job: PipelineStageJob, options: { delayMs?: number } = {}): Promise<void> {
     await this.boss.upsert(
       PIPELINE_STAGE_QUEUE,
       job,
-      { singletonKey: `${job.buildId}:${job.stageIndex}` }
+      {
+        singletonKey: job.stageRunId,
+        ...(options.delayMs ? { startAfter: new Date(Date.now() + options.delayMs) } : {})
+      }
     );
   }
 

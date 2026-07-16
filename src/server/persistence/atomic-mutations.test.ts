@@ -65,6 +65,8 @@ describe("core mutation audit atomicity", () => {
       buildId: "build-original",
       snapshotId: "snapshot-original",
       version: "1.0.0",
+      kernelMode: "legacy",
+      packageArtifactId: null,
       createdAt: new Date("2026-07-11T00:00:00.000Z"),
       publishedAt: new Date("2026-07-11T00:01:00.000Z")
     });

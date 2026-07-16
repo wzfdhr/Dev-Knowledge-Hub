@@ -336,7 +336,9 @@ describe("team projects and members", () => {
       method: "GET", url: `/api/projects/${project.id}/knowledge-quality`, headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) }
     });
     expect(quality.statusCode).toBe(200);
-    expect(quality.json()).toMatchObject({ qualityPipeline: { status: "queued", artifactReady: false, errorCode: null } });
+    expect(quality.json()).toMatchObject({
+      qualityPipeline: { stage: "lint", status: "queued", artifactReady: false, errorCode: null }
+    });
     expect((await app.inject({
       method: "PATCH", url: `/api/projects/${project.id}/remediations/${remediation.id}`,
       headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) }, payload: { state: "accepted" }

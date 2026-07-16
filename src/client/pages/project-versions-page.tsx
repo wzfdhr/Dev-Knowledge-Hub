@@ -13,6 +13,26 @@ import "../progress.css";
 type PrimaryKind = "connect" | "sync" | "start-build" | "retry-build" | "review" | "publish" | "none";
 interface OverviewState { repository: Repository | null; builds: Build[]; releases: Release[]; snapshotId?: string }
 
+export function shadowPipelineMessage(status: Build["status"] | null): { title: string; detail: string } {
+  if (status === "failed") return {
+    title: "影子验证发现问题",
+    detail: "正式版本保持不变；请检查失败阶段后重试影子验证。"
+  };
+  if (status === "ready" || status === "published") return {
+    title: "影子验证已完成",
+    detail: "结果仅用于新内核验证，当前正式版本仍使用 legacy 内核。"
+  };
+  if (status === null) return { title: "尚未运行影子验证", detail: "当前正式构建不受影响。" };
+  return { title: "影子验证进行中", detail: "当前正式版本继续使用 legacy 内核。" };
+}
+
+export function canEnableLlmBuild(
+  workspaceRole: "admin" | "member" | "reader" | undefined,
+  projectRole: "admin" | "member" | "reader" | undefined
+): boolean {
+  return workspaceRole === "admin" || projectRole === "admin";
+}
+
 export function derivePrimaryAction(state: OverviewState): { kind: PrimaryKind; label: string } {
   if (!state.repository) return { kind: "connect", label: "连接仓库" };
   const latestBuild = state.builds[0];
@@ -58,12 +78,25 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
   });
   const releasesQuery = useQuery({ queryKey: projectKeys.releases(projectId), queryFn: () => api.listReleases({ limit: LIST_PAGE_SIZE, offset: 0 }), enabled: Boolean(repository), retry: false });
   const feedbackQuery = useFeedback(api, undefined, Boolean(repository));
+  const sessionQuery = useQuery({
+    queryKey: ["session"],
+    queryFn: api.session,
+    enabled: typeof api.session === "function",
+    retry: false
+  });
+  const projectMembersQuery = useQuery({
+    queryKey: ["project-members", projectId],
+    queryFn: () => api.listProjectMembers(projectId),
+    enabled: Boolean(projectId && sessionQuery.data && typeof api.listProjectMembers === "function"),
+    retry: false
+  });
   const [sessionSnapshot, setSessionSnapshot] = useState<SnapshotSummary | null>(() => {
     const raw = sessionStorage.getItem(snapshotKey);
     return raw ? JSON.parse(raw) as SnapshotSummary : null;
   });
   const [reviewBuild, setReviewBuild] = useState<Build | null>(null);
   const [version, setVersion] = useState("1.0.0");
+  const [allowLlm, setAllowLlm] = useState(false);
   const [eventState, setEventState] = useState<"idle" | "connecting" | "connected" | "reconnecting">("idle");
 
   const builds = buildsQuery.data?.pages.flatMap((page) => page.builds) ?? [];
@@ -80,6 +113,13 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
     unchanged: sessionSnapshot?.snapshotId === serverSnapshot.id ? sessionSnapshot.unchanged : true
   } : sessionSnapshot;
   const effectiveSnapshotId = snapshot?.snapshotId ?? failedBuild?.snapshotId;
+  const shadowPipelineQuery = useQuery({
+    queryKey: ["build-stages", projectId, latestBuild?.id],
+    queryFn: () => api.getBuildStages(latestBuild!.id),
+    enabled: Boolean(latestBuild),
+    retry: false,
+    refetchInterval: latestBuild && !terminal.has(latestBuild.status) ? 3000 : false
+  });
   const requiredLoading = Boolean(repository) && (buildsQuery.isLoading || releasesQuery.isLoading || repositoryStatusQuery.isLoading);
   const blockingError = repositoryQuery.error
     ? repositoryQuery.error
@@ -87,6 +127,8 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
   const action = blockingError || requiredLoading
     ? null
     : derivePrimaryAction({ repository, builds, releases, snapshotId: effectiveSnapshotId });
+  const projectRole = projectMembersQuery.data?.members.find((member) => member.id === sessionQuery.data?.admin.id)?.role;
+  const canUseLlm = canEnableLlmBuild(sessionQuery.data?.admin.role, projectRole);
 
   useEffect(() => {
     if (!activeBuild) {
@@ -107,13 +149,18 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
   const invalidate = async () => Promise.all([
     queryClient.invalidateQueries({ queryKey: projectKeys.builds(projectId) }),
     queryClient.invalidateQueries({ queryKey: projectKeys.releases(projectId) }),
+    queryClient.invalidateQueries({ queryKey: ["build-stages", projectId] }),
     queryClient.invalidateQueries({ queryKey: ["repository-status"] })
   ]);
   const sync = useMutation({ mutationFn: api.syncRepository, onSuccess: (value) => {
     setSessionSnapshot(value);
     sessionStorage.setItem(snapshotKey, JSON.stringify(value));
   } });
-  const start = useMutation({ mutationFn: (id: string) => api.startBuild(id), onSuccess: invalidate });
+  const start = useMutation({
+    mutationFn: ({ snapshotId, allowLlm: useLlm }: { snapshotId: string; allowLlm: boolean }) =>
+      api.startBuild(snapshotId, { allowLlm: useLlm }),
+    onSuccess: invalidate
+  });
   const createRelease = useMutation({
     mutationFn: ({ buildId, value }: {
       buildId: string;
@@ -143,7 +190,9 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
       if (repository?.kind === "upload") navigate("../imports");
       else sync.mutate();
     }
-    if (["start-build", "retry-build"].includes(action.kind) && effectiveSnapshotId) start.mutate(effectiveSnapshotId);
+    if (["start-build", "retry-build"].includes(action.kind) && effectiveSnapshotId) {
+      start.mutate({ snapshotId: effectiveSnapshotId, allowLlm: canUseLlm && allowLlm });
+    }
     if (action.kind === "review") setReviewBuild(latestBuild?.status === "ready" ? latestBuild : null);
     if (action.kind === "publish") {
       const draft = releases.find((release) => release.buildId === latestBuild?.id && !release.publishedAt);
@@ -174,9 +223,12 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
   if (repositoryQuery.isLoading) return <Loading label="正在加载操作台" />;
   return <div className="page versions-page">
     <header className="page-header"><div><p className="eyebrow">构建与发布</p><h1>知识版本</h1><p>构建、审核并发布可供团队和 Codex 使用的不可变知识版本。</p></div>
-      {!blockingError && !requiredLoading && (reviewBuild || (action && action.kind !== "none")) && <button className="button primary command" onClick={handlePrimary} disabled={sync.isPending || start.isPending || publish.isPending || createRelease.isPending}>
+      {!blockingError && !requiredLoading && (reviewBuild || (action && action.kind !== "none")) && <div className="page-header-actions">
+        {!reviewBuild && canUseLlm && ["start-build", "retry-build"].includes(action?.kind ?? "") && <label className="llm-build-option"><input type="checkbox" checked={allowLlm} onChange={(event) => setAllowLlm(event.target.checked)} /><span>本次构建使用 LLM 增强</span></label>}
+        <button className="button primary command" onClick={handlePrimary} disabled={sync.isPending || start.isPending || publish.isPending || createRelease.isPending}>
         {!reviewBuild && action?.kind === "sync" && <RefreshCw aria-hidden="true" />}{!reviewBuild && ["start-build", "retry-build"].includes(action?.kind ?? "") && <Play aria-hidden="true" />}{!reviewBuild && action?.kind === "publish" && <Send aria-hidden="true" />}{(reviewBuild || ["connect", "review"].includes(action?.kind ?? "")) && <ArrowRight aria-hidden="true" />}{reviewBuild ? "创建版本草稿" : action?.label}
-      </button>}
+        </button>
+      </div>}
     </header>
     {blockingError && <div className="state error blocking-error" role="alert"><TriangleAlert aria-hidden="true" /><span>{errorMessage(blockingError)}</span><button className="button" onClick={retryOverview}>重试总览数据</button></div>}
     {requiredLoading && <Loading label="正在加载构建和版本状态" />}
@@ -184,6 +236,8 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
     {!blockingError && !requiredLoading && <>
       <section className="repo-strip" aria-label="仓库状态"><div><span>仓库</span><strong>{repository?.name ?? "未连接"}</strong></div><div><span>{repository?.kind === "upload" ? "来源" : "分支"}</span><strong><GitBranch aria-hidden="true" />{snapshot?.ref ?? repository?.defaultBranch ?? "-"}</strong></div><div><span>{sourceLabel}</span><strong className="mono">{commit?.slice(0, 12) ?? "暂无快照"}</strong></div><div><span>待同步</span><strong>{snapshot ? (snapshot.unchanged ? "没有变更" : `已采集 ${snapshot.fileCount} 个文件`) : repository ? repository.kind === "upload" ? "等待导入项目文件夹" : "需要同步" : "-"}</strong></div></section>
       <section className="metric-grid" aria-label="工作区摘要"><article><span>当前版本</span><strong>{releases.find((release) => release.publishedAt)?.version ?? "未发布"}</strong></article><article><span>人工待处理项</span><strong>{feedbackQuery.data?.pages.flatMap((page) => page.feedback).filter((item) => ["open", "acknowledged"].includes(item.status)).length ?? 0}</strong></article><article><span>构建数</span><strong>{builds.length}</strong></article><article><span>知识状态</span><strong>{latestBuild ? <Status value={latestBuild.status} /> : "尚未构建"}</strong></article></section>
+      {shadowPipelineQuery.data?.stages.length ? <section className="panel shadow-pipeline-panel" aria-label="影子验证状态"><div className="section-heading"><div><p className="eyebrow">新内核影子验证</p><h2>{shadowPipelineMessage(shadowPipelineQuery.data.pipelineStatus).title}</h2><p>{shadowPipelineMessage(shadowPipelineQuery.data.pipelineStatus).detail}</p></div><Status value={shadowPipelineQuery.data.pipelineStatus ?? "queued"} /></div><div className="shadow-stage-grid">{shadowPipelineQuery.data.stages.map((stage) => <div className="shadow-stage" key={stage.id}><span>{stage.stage}</span><Status value={stage.status === "reused" ? "ready" : stage.status === "cancelled" ? "failed" : stage.status} /><small>{stage.errorCode ?? ""}</small></div>)}</div></section> : null}
+      {shadowPipelineQuery.error && <ErrorState message={`无法读取影子验证状态：${errorMessage(shadowPipelineQuery.error)}`} retry={() => void shadowPipelineQuery.refetch()} />}
       {feedbackQuery.error && <ErrorState message={`无法读取反馈数量：${errorMessage(feedbackQuery.error)}`} retry={() => void feedbackQuery.refetch()} />}
       {activeBuild && <section className="panel active-build"><div className="section-heading"><div><p className="eyebrow">正在构建</p><h2>{statusLabel(activeBuild.status)}</h2></div><Status value={activeBuild.status} /></div><progress className="progress" aria-label="构建进度" max={100} value={progress} /><p className="muted">{sourceLabel} <span className="mono">{activeBuild.commitSha.slice(0, 12)}</span>。{eventState === "reconnecting" ? "正在重新连接构建更新" : eventState === "connected" ? "已连接实时更新" : "正在连接实时更新"}</p><button className="button danger" onClick={() => cancel.mutate(activeBuild.id)} disabled={activeBuild.cancelRequested}><Square aria-hidden="true" />{activeBuild.cancelRequested ? "已请求取消" : "取消构建"}</button></section>}
       {failedBuild && <section className="panel failed-build" role="alert"><div className="section-heading"><div><p className="eyebrow">构建失败</p><h2>{failedBuild.errorMessage ?? "知识构建失败"}</h2></div><Status value="failed" /></div><p className="muted">修正报告的问题后，可重试此快照。</p></section>}

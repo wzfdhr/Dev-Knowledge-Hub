@@ -1,7 +1,7 @@
 import { authenticatedCookie, csrfHeaders } from "../test-support/csrf";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -17,6 +17,20 @@ import { buildServer } from "../app";
 import { syncRepository } from "../git/snapshot";
 import { BuildService } from "../knowledge/build-service";
 import { PgBossBuildJobQueue } from "../knowledge/job-queue";
+import { ArtifactStore } from "../knowledge/pipeline/artifact-store";
+import { createNormalizedSourcesStageExecutor, normalizedSourcesPipelineInputDigest } from "../knowledge/pipeline/convert-stage";
+import { createKnowledgeIrStageExecutor } from "../knowledge/pipeline/extract-stage";
+import { createKnowledgeGraphStageExecutor } from "../knowledge/pipeline/graph-stage";
+import { createPipelineSearchIndexStageExecutor } from "../knowledge/pipeline/index-stage";
+import { createKnowledgePackageStageExecutor } from "../knowledge/pipeline/package-stage";
+import { createKnowledgeQualityStageExecutor } from "../knowledge/pipeline/quality-stage";
+import { createPipelineStageExecutor } from "../knowledge/pipeline/stage-executor";
+import { createB02StageInputPlanner } from "../knowledge/pipeline/stage-planner";
+import { createKnowledgeSynthesisStageExecutor } from "../knowledge/pipeline/synthesize-stage";
+import { createTableSchemasStageExecutor } from "../knowledge/pipeline/tables-stage";
+import { createKnowledgeValidationStageExecutor } from "../knowledge/pipeline/validate-stage";
+import { createKnowledgeVisualizationStageExecutor } from "../knowledge/pipeline/viz-stage";
+import { PipelineStageWorker, type PipelineStageJob, type PipelineStageJobQueue } from "../knowledge/pipeline/worker";
 import { hashMcpToken } from "../mcp/auth";
 import { PostgresSessionStore } from "../security/session-store";
 import { LastProjectAdminError } from "./store";
@@ -29,6 +43,17 @@ const integration = databaseUrl ? describe : describe.skip;
 let pool: Pool | null = null;
 let temporaryRoot: string | null = null;
 const execute = promisify(execFile);
+
+class RecordedPipelineQueue implements PipelineStageJobQueue {
+  readonly sent: PipelineStageJob[] = [];
+
+  async send(job: PipelineStageJob): Promise<void> {
+    this.sent.push(job);
+  }
+
+  async start(): Promise<void> {}
+  async stop(): Promise<void> {}
+}
 
 async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean): Promise<T> {
   const deadline = Date.now() + 15_000;
@@ -43,6 +68,70 @@ async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean):
 }
 
 integration("PostgreSQL cited knowledge integration", () => {
+  test(databaseUrl
+    ? "rolls back LLM builds when their audit event cannot be persisted and preserves allowLlm projections"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("llm-atomic@example.com", "hash");
+    const repository = await store.createRepository(
+      setup!.workspace.id, { kind: "upload", name: "LLM atomic source" }
+    );
+    const snapshotId = randomUUID();
+    await store.createSnapshot({
+      snapshot: {
+        id: snapshotId,
+        workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id,
+        commitSha: "d".repeat(40),
+        ref: "upload",
+        remoteUrl: null,
+        commitTimestamp: new Date("2026-07-16T00:00:00.000Z"),
+        storagePath: "/tmp/llm-atomic-snapshot"
+      },
+      files: []
+    });
+    await pool.query(`
+      CREATE FUNCTION reject_llm_build_audit()
+      RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.action = 'build.llm_opted_in' THEN RAISE EXCEPTION 'audit unavailable'; END IF;
+        RETURN NEW;
+      END;
+      $$;
+      CREATE TRIGGER reject_llm_build_audit
+        BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION reject_llm_build_audit();
+    `);
+    const input = {
+      workspaceId: setup!.workspace.id,
+      repositoryId: repository!.id,
+      snapshotId,
+      snapshotPath: "/tmp/llm-atomic-snapshot",
+      commitSha: "d".repeat(40),
+      allowLlm: true,
+      llmAudit: { actorId: setup!.admin.id, projectId: repository!.projectId }
+    };
+    try {
+      await expect(store.createBuild(input)).rejects.toThrow("audit unavailable");
+      await expect(store.listBuilds(setup!.workspace.id, repository!.id)).resolves.toEqual([]);
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS reject_llm_build_audit ON audit_events");
+      await pool.query("DROP FUNCTION IF EXISTS reject_llm_build_audit()");
+    }
+
+    const { build } = await store.createBuild(input);
+    expect((await store.listBuilds(setup!.workspace.id, repository!.id))[0]).toMatchObject({ id: build.id, allowLlm: true });
+    expect(await store.listUnfinishedBuilds()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: build.id, allowLlm: true })
+    ]));
+    expect((await store.workspaceOverview(setup!.workspace.id, setup!.admin.id))[0]?.latestBuild)
+      .toMatchObject({ id: build.id, allowLlm: true });
+  }, 30_000);
+
   test(databaseUrl
     ? "migrates durable build, citation, search, and release structures"
     : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
@@ -237,6 +326,17 @@ integration("PostgreSQL cited knowledge integration", () => {
     expect(stageEvents).toEqual(expect.arrayContaining([
       expect.objectContaining({ stageRunId: convert.id, status: "running" })
     ]));
+    const staleThreshold = new Date(Date.now() - 60_000);
+    expect(await store.listStaleRunningStageRuns(staleThreshold)).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: convert.id })
+    ]));
+    await pool.query(
+      "UPDATE build_stage_runs SET started_at = now() - interval '10 minutes' WHERE id = $1",
+      [convert.id]
+    );
+    await expect(store.listStaleRunningStageRuns(staleThreshold)).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: convert.id, status: "running" })
+    ]));
 
     const artifact = {
       id: randomUUID(), workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId, buildId: build.build.id,
@@ -251,6 +351,15 @@ integration("PostgreSQL cited knowledge integration", () => {
     await expect(store.createArtifactWithAudit({ ...artifact, id: randomUUID() }, setup!.admin.id))
       .resolves.toMatchObject({ id: artifact.id });
 
+    const searchDocument = {
+      documentKey: "overview:0", kind: "page" as const, title: "Overview", content: "Pipeline overview",
+      citations: [], metadata: { source: "integration" }
+    };
+    await expect(store.savePipelineSearchDocuments({
+      workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId,
+      buildId: build.build.id, sourceArtifactId: artifact.id, documents: [searchDocument]
+    })).resolves.toHaveLength(1);
+
     const otherProject = await store.createProject(
       setup!.workspace.id, { name: "Other pipeline", slug: "other-pipeline" }, setup!.admin.id
     );
@@ -260,8 +369,360 @@ integration("PostgreSQL cited knowledge integration", () => {
     await store.transitionBuild(build.build.id, "queued", "ready");
     const release = await store.createReleaseDraft(setup!.workspace.id, repository!.id, build.build.id, "1.0.0");
     await store.publishRelease(setup!.workspace.id, release.id);
+    const { build: reusedBuild, created } = await store.createBuild({
+      workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId,
+      snapshotPath: "/tmp/pipeline-snapshot", commitSha: "a".repeat(40)
+    });
+    expect(created).toBe(true);
+    await expect(store.savePipelineSearchDocuments({
+      workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId,
+      buildId: reusedBuild.id, sourceArtifactId: artifact.id, documents: [searchDocument]
+    })).resolves.toHaveLength(1);
+    const queuedReuse = await store.createStageRun({
+      ...baseStage, buildId: reusedBuild.id, stage: "convert"
+    });
+    await expect(store.cancelPipelineStageRuns(
+      setup!.workspace.id, repository!.projectId, reusedBuild.id
+    )).resolves.toEqual([expect.objectContaining({ id: queuedReuse.id, status: "cancelled" })]);
+    await expect(store.currentRelease(setup!.workspace.id, repository!.id))
+      .resolves.toMatchObject({ id: release.id, kernelMode: "legacy" });
+
+    const packageArtifact = await store.createArtifactWithAudit({
+      ...artifact,
+      id: randomUUID(),
+      stage: "package",
+      kind: "pipeline-package",
+      inputDigest: "e".repeat(64),
+      contentDigest: "f".repeat(64),
+      storageKey: `${repository!.projectId}/${snapshotId}/package/${"f".repeat(64)}.json`
+    }, setup!.admin.id);
+    await expect(pool.query(
+      "UPDATE releases SET kernel_mode = 'pipeline', package_artifact_id = $1 WHERE id = $2",
+      [packageArtifact.id, release.id]
+    )).rejects.toThrow("Release pipeline provenance is immutable");
     await expect(pool.query("DELETE FROM knowledge_artifacts WHERE id = $1", [artifact.id]))
       .rejects.toThrow("Cannot delete artifacts from a published build");
+  }, 30_000);
+
+  test(databaseUrl
+    ? "atomically persists the ready transition with its initial shadow stage"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("pipeline-finalize@example.com", "hash");
+    const repository = await store.createRepository(
+      setup!.workspace.id,
+      { kind: "upload", name: "Finalized pipeline" }
+    );
+    const snapshotId = randomUUID();
+    await store.createSnapshot({
+      snapshot: {
+        id: snapshotId,
+        workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id,
+        commitSha: "a".repeat(40),
+        ref: "upload",
+        remoteUrl: null,
+        commitTimestamp: new Date("2026-07-16T00:00:00.000Z"),
+        storagePath: "/tmp/pipeline-finalize-snapshot"
+      },
+      files: []
+    });
+    const { build } = await store.createBuild({
+      workspaceId: setup!.workspace.id,
+      repositoryId: repository!.id,
+      snapshotId,
+      snapshotPath: "/tmp/pipeline-finalize-snapshot",
+      commitSha: "a".repeat(40)
+    });
+    for (const [from, to] of [["queued", "syncing"], ["syncing", "parsing"], ["parsing", "synthesizing"], ["synthesizing", "validating"]] as const) {
+      await expect(store.transitionBuild(build.id, from, to)).resolves.toMatchObject({ status: to });
+    }
+
+    await pool.query(`
+      CREATE FUNCTION reject_initial_stage() RETURNS trigger AS $$
+      BEGIN
+        RAISE EXCEPTION 'initial stage unavailable';
+      END
+      $$ LANGUAGE plpgsql;
+      CREATE TRIGGER reject_initial_stage_insert
+      BEFORE INSERT ON build_stage_runs
+      FOR EACH ROW EXECUTE FUNCTION reject_initial_stage();
+    `);
+    await expect(store.transitionBuildAndCreateInitialStage(
+      build.id,
+      "validating",
+      "ready",
+      { requireNotCancelled: true },
+      { inputDigest: "b".repeat(64) }
+    )).rejects.toThrow("initial stage unavailable");
+    await pool.query("DROP TRIGGER reject_initial_stage_insert ON build_stage_runs");
+    await pool.query("DROP FUNCTION reject_initial_stage()");
+    await expect(store.getBuild(setup!.workspace.id, build.id)).resolves.toMatchObject({ status: "validating" });
+    await expect(store.listPipelineStageRuns(
+      setup!.workspace.id,
+      repository!.projectId,
+      build.id
+    )).resolves.toEqual([]);
+
+    await expect(store.transitionBuildAndCreateInitialStage(
+      build.id,
+      "validating",
+      "ready",
+      { requireNotCancelled: true },
+      { inputDigest: "b".repeat(64) }
+    )).resolves.toMatchObject({ build: { status: "ready" } });
+    await expect(store.listPipelineStageRuns(
+      setup!.workspace.id,
+      repository!.projectId,
+      build.id
+    )).resolves.toEqual([
+      expect.objectContaining({ stage: "convert", attempt: 1, status: "queued", inputDigest: "b".repeat(64) })
+    ]);
+  }, 30_000);
+
+  test(databaseUrl
+    ? "runs and reuses all ten shadow stages with PostgreSQL persistence"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const sourceRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-postgres-pipeline-source-"));
+    const artifactRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-postgres-pipeline-artifacts-"));
+    try {
+      const sourcePath = "src/app.ts";
+      const source = "export const answer = 42;\n";
+      await mkdir(path.join(sourceRoot, "src"), { recursive: true });
+      await writeFile(path.join(sourceRoot, sourcePath), source);
+
+      const store = new PostgresAppStore(pool);
+      const setup = await store.createInitialSetup("pipeline-worker@example.com", "hash");
+      const project = (await store.listProjects(setup!.workspace.id))[0]!;
+      const repository = await store.createRepository(
+        setup!.workspace.id, { kind: "upload", name: "Pipeline source" }, project.id
+      );
+      const snapshotId = randomUUID();
+      const snapshot = await store.createSnapshot({
+        snapshot: {
+          id: snapshotId,
+          workspaceId: setup!.workspace.id,
+          repositoryId: repository!.id,
+          commitSha: "a".repeat(40),
+          ref: "upload",
+          remoteUrl: null,
+          commitTimestamp: new Date("2026-07-16T00:00:00.000Z"),
+          storagePath: sourceRoot
+        },
+        files: [{
+          id: randomUUID(),
+          workspaceId: setup!.workspace.id,
+          snapshotId,
+          path: sourcePath,
+          byteSize: Buffer.byteLength(source),
+          contentHash: createHash("sha256").update(source).digest("hex"),
+          language: "typescript"
+        }]
+      });
+      const artifactStore = new ArtifactStore(artifactRoot, store);
+      await artifactStore.initialize();
+      const queue = new RecordedPipelineQueue();
+      const worker = new PipelineStageWorker(
+        store,
+        queue,
+        createPipelineStageExecutor({
+          convert: createNormalizedSourcesStageExecutor({ store, artifactStore }),
+          extract: createKnowledgeIrStageExecutor({ store, artifactStore }),
+          tables: createTableSchemasStageExecutor({ store, artifactStore }),
+          graph: createKnowledgeGraphStageExecutor({ store, artifactStore }),
+          synthesize: createKnowledgeSynthesisStageExecutor({ store, artifactStore }),
+          index: createPipelineSearchIndexStageExecutor({ store, artifactStore }),
+          lint: createKnowledgeQualityStageExecutor({ store, artifactStore }),
+          viz: createKnowledgeVisualizationStageExecutor({ store, artifactStore }),
+          validate: createKnowledgeValidationStageExecutor({ store, artifactStore }),
+          package: createKnowledgePackageStageExecutor({ store, artifactStore })
+        }),
+        ["convert", "extract", "tables", "graph", "synthesize", "index", "lint", "viz", "validate", "package"],
+        5_000,
+        createB02StageInputPlanner(store)
+      );
+      const files = await store.listSnapshotFiles(setup!.workspace.id, snapshot.id);
+      const runBuild = async () => {
+        const { build } = await store.createBuild({
+          workspaceId: setup!.workspace.id,
+          repositoryId: repository!.id,
+          snapshotId: snapshot.id,
+          snapshotPath: snapshot.storagePath,
+          commitSha: snapshot.commitSha
+        });
+        const queueStart = queue.sent.length;
+        await worker.schedule({
+          workspaceId: setup!.workspace.id,
+          projectId: project.id,
+          snapshotId: snapshot.id,
+          buildId: build.id,
+          inputDigest: normalizedSourcesPipelineInputDigest(snapshot, files, build.purpose)
+        });
+        for (let index = queueStart; index < queue.sent.length; index += 1) {
+          const delivery = queue.sent[index]!;
+          await Promise.all([worker.process(delivery), worker.process(delivery)]);
+        }
+        return build;
+      };
+
+      const firstBuild = await runBuild();
+      const firstRuns = await store.listPipelineStageRuns(setup!.workspace.id, project.id, firstBuild.id);
+      expect(firstRuns.map((run) => ({ stage: run.stage, status: run.status, errorDetail: run.errorDetail })))
+        .toEqual([
+          { stage: "convert", status: "succeeded", errorDetail: null },
+          { stage: "extract", status: "succeeded", errorDetail: null },
+          { stage: "tables", status: "succeeded", errorDetail: null },
+          { stage: "graph", status: "succeeded", errorDetail: null },
+          { stage: "synthesize", status: "succeeded", errorDetail: null },
+          { stage: "index", status: "succeeded", errorDetail: null },
+          { stage: "lint", status: "succeeded", errorDetail: null },
+          { stage: "viz", status: "succeeded", errorDetail: null },
+          { stage: "validate", status: "succeeded", errorDetail: null },
+          { stage: "package", status: "succeeded", errorDetail: null }
+        ]);
+
+      await store.transitionBuild(firstBuild.id, "queued", "ready");
+      const release = await store.createReleaseDraft(setup!.workspace.id, repository!.id, firstBuild.id, "1.0.0");
+      await store.publishRelease(setup!.workspace.id, release.id);
+      const reusedBuild = await runBuild();
+      expect((await store.listPipelineStageRuns(setup!.workspace.id, project.id, reusedBuild.id))
+        .map((run) => [run.stage, run.status]))
+        .toEqual([
+          ["convert", "reused"], ["extract", "reused"], ["tables", "reused"], ["graph", "reused"],
+          ["synthesize", "reused"], ["index", "reused"], ["lint", "reused"], ["viz", "reused"],
+          ["validate", "reused"], ["package", "reused"]
+        ]);
+      await store.transitionBuild(reusedBuild.id, "queued", "ready");
+      const firstConvert = (await store.listPipelineStageRuns(setup!.workspace.id, project.id, firstBuild.id))
+        .find((run) => run.stage === "convert")!;
+      const firstConvertArtifact = await store.findArtifactById(firstConvert.outputManifestIds[0]!);
+      await rm(path.join(artifactRoot, firstConvertArtifact!.storageKey));
+
+      const regeneratedBuild = await runBuild();
+      expect((await store.listPipelineStageRuns(setup!.workspace.id, project.id, regeneratedBuild.id))
+        .map((run) => [run.stage, run.status]))
+        .toEqual([
+          ["convert", "succeeded"], ["extract", "reused"], ["tables", "reused"], ["graph", "reused"],
+          ["synthesize", "reused"], ["index", "reused"], ["lint", "reused"], ["viz", "reused"],
+          ["validate", "reused"], ["package", "reused"]
+        ]);
+      await expect(store.currentRelease(setup!.workspace.id, repository!.id))
+        .resolves.toMatchObject({ id: release.id, buildId: firstBuild.id, kernelMode: "legacy" });
+    } finally {
+      await rm(sourceRoot, { recursive: true, force: true });
+      await rm(artifactRoot, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test(databaseUrl
+    ? "retains legacy release provenance and reports absent build snapshots without mutations"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const reportDirectory = await mkdtemp(path.join(os.tmpdir(), "devkh-pipeline-backfill-"));
+    const reportName = "report.json";
+    const reportPath = path.join(reportDirectory, "reports", reportName);
+    try {
+      const store = new PostgresAppStore(pool);
+      const setup = await store.createInitialSetup("backfill@example.com", "hash");
+      const repository = await store.createRepository(
+        setup!.workspace.id, { kind: "upload", name: "Backfill source" }
+      );
+      const snapshotId = randomUUID();
+      await store.createSnapshot({
+        snapshot: {
+          id: snapshotId,
+          workspaceId: setup!.workspace.id,
+          repositoryId: repository!.id,
+          commitSha: "b".repeat(40),
+          ref: "upload",
+          remoteUrl: null,
+          commitTimestamp: new Date("2026-07-16T00:00:00.000Z"),
+          storagePath: "/tmp/backfill-snapshot"
+        },
+        files: []
+      });
+      const { build } = await store.createBuild({
+        workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id,
+        snapshotId,
+        snapshotPath: "/tmp/backfill-snapshot",
+        commitSha: "b".repeat(40)
+      });
+      await store.transitionBuild(build.id, "queued", "ready");
+      const release = await store.createReleaseDraft(setup!.workspace.id, repository!.id, build.id, "1.0.0");
+      await store.publishRelease(setup!.workspace.id, release.id);
+      await pool.query("UPDATE build_jobs SET snapshot_id = NULL WHERE id = $1", [build.id]);
+      await pool.query(
+        `WITH generated_builds AS (
+           INSERT INTO build_jobs
+             (workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha, status)
+           SELECT $1, $2, $3, '/tmp/backfill-snapshot', repeat('c', 40), 'queued'
+           FROM generate_series(1, 501)
+           RETURNING id, snapshot_id
+         )
+         INSERT INTO releases (workspace_id, repository_id, build_job_id, snapshot_id, version)
+         SELECT $1, $2, id, snapshot_id, 'legacy-batch-' || row_number() OVER ()
+         FROM generated_builds`,
+        [setup!.workspace.id, repository!.id, snapshotId]
+      );
+      await pool.query(`
+        CREATE FUNCTION reject_pipeline_history_release_updates()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'pipeline history backfill must not update releases';
+        END;
+        $$;
+        CREATE TRIGGER reject_pipeline_history_release_updates
+          BEFORE INSERT OR UPDATE OR DELETE ON releases
+          FOR EACH ROW EXECUTE FUNCTION reject_pipeline_history_release_updates();
+      `);
+
+      await execute(process.execPath, [path.resolve("scripts/backfill-pipeline-history.mjs")], {
+        env: {
+          ...process.env, DATABASE_URL: databaseUrl,
+          DEVKH_DATA_DIR: reportDirectory, PIPELINE_HISTORY_REPORT: reportName
+        }
+      });
+      const firstReport = await readFile(reportPath, "utf8");
+      expect((await stat(reportPath)).mode & 0o777).toBe(0o600);
+      await execute(process.execPath, [path.resolve("scripts/backfill-pipeline-history.mjs")], {
+        env: {
+          ...process.env, DATABASE_URL: databaseUrl,
+          DEVKH_DATA_DIR: reportDirectory, PIPELINE_HISTORY_REPORT: reportName
+        }
+      });
+
+      expect(await readFile(reportPath, "utf8")).toBe(firstReport);
+      expect(JSON.parse(firstReport)).toEqual({
+        schemaVersion: 2,
+        policy: "legacy-provenance-only",
+        batchSize: 500,
+        legacyReleasesRetained: 502,
+        missingSnapshots: [{
+          releaseId: release.id,
+          workspaceId: setup!.workspace.id,
+          buildId: build.id,
+          snapshotId: null
+        }]
+      });
+      await expect(store.currentRelease(setup!.workspace.id, repository!.id))
+        .resolves.toMatchObject({ id: release.id, kernelMode: "legacy", packageArtifactId: null });
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS reject_pipeline_history_release_updates ON releases");
+      await pool.query("DROP FUNCTION IF EXISTS reject_pipeline_history_release_updates()");
+      await rm(reportDirectory, { recursive: true, force: true });
+    }
   }, 30_000);
 
   test(databaseUrl

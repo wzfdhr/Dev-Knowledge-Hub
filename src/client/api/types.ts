@@ -38,7 +38,12 @@ export interface ProjectKnowledgeQuality {
   indexedTextBytes: number;
   knowledge: { pageCount: number; chunkCount: number; citationCount: number };
   remediation: { open: number; accepted: number; rebuilding: number; resolved: number; dismissed: number };
-  qualityPipeline: { status: PipelineStageRun["status"]; artifactReady: boolean; errorCode: string | null } | null;
+  qualityPipeline: {
+    stage: PipelineStageRun["stage"];
+    status: PipelineStageRun["status"];
+    artifactReady: boolean;
+    errorCode: string | null;
+  } | null;
   change: SnapshotChangeSummary | null;
   diagnostics: Array<{ code: "SOURCE_MISSING" | "SNAPSHOT_MISSING" | "BUILD_FAILED" | "RELEASE_MISSING" | "REBUILD_RECOMMENDED" | "PUBLISHED" }>;
 }
@@ -140,6 +145,7 @@ export interface Build {
   status: BuildStatus;
   warnings: Array<{ code?: string; message?: string }>;
   cancelRequested: boolean;
+  allowLlm?: boolean;
   errorMessage?: string;
 }
 export type PipelineBuildStage = "convert" | "extract" | "tables" | "graph" | "synthesize" | "index" | "lint" | "viz" | "validate" | "package";
@@ -165,6 +171,8 @@ export interface Release {
   createdAt: string;
   publishedAt: string | null;
   commitSha?: string | null;
+  kernelMode?: "legacy" | "pipeline";
+  packageArtifactId?: string | null;
 }
 export interface RepositoryStatus {
   repository: Repository | null;

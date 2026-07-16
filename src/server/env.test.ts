@@ -9,13 +9,27 @@ describe("loadEnv", () => {
       host: "127.0.0.1",
       port: 3000,
       dataDir: "./data",
-      knowledgePipelineV2: false
+      knowledgeKernelMode: "legacy"
     });
   });
 
-  test("enables the new knowledge pipeline only for an explicit true flag", () => {
-    expect(loadEnv({ mode: "development", env: { KNOWLEDGE_PIPELINE_V2: "true" } }).knowledgePipelineV2).toBe(true);
-    expect(loadEnv({ mode: "development", env: { KNOWLEDGE_PIPELINE_V2: "false" } }).knowledgePipelineV2).toBe(false);
+  test("defaults to legacy and enables shadow only by explicit kernel mode", () => {
+    expect(loadEnv({ mode: "development", env: {} }).knowledgeKernelMode).toBe("legacy");
+    expect(loadEnv({
+      mode: "development",
+      env: { DEVKH_KNOWLEDGE_KERNEL_MODE: "shadow" }
+    }).knowledgeKernelMode).toBe("shadow");
+  });
+
+  test("accepts only the documented knowledge kernel modes", () => {
+    expect(loadEnv({
+      mode: "development",
+      env: { DEVKH_KNOWLEDGE_KERNEL_MODE: "active" }
+    }).knowledgeKernelMode).toBe("active");
+    expect(() => loadEnv({
+      mode: "development",
+      env: { DEVKH_KNOWLEDGE_KERNEL_MODE: "unexpected" }
+    })).toThrow(/DEVKH_KNOWLEDGE_KERNEL_MODE/);
   });
 
   test("production mode rejects missing required secrets", () => {

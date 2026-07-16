@@ -34,8 +34,14 @@ import type {
   CreateMcpTokenInput,
   Pagination,
   PipelineArtifactStore,
+  PipelineSearchDocumentInput,
+  PipelineSearchDocumentRecord,
   PipelineStageRunRecord,
   CreateStageRunInput,
+  CompleteStageRunInput,
+  CompleteStageRunResult,
+  FailStageRunAndCreateRetryInput,
+  FailStageRunAndCreateRetryResult,
   SaveKnowledgeGraphInput,
   ReleaseRecord,
   RepositoryConnectionInput,
@@ -61,6 +67,7 @@ import type {
   BuildEvent,
   BuildRecord,
   BuildStatus,
+  InitialPipelineStage,
   PersistedKnowledge
 } from "../knowledge/build-service.js";
 import { standardBuildPurpose } from "../knowledge/build-service.js";
@@ -123,6 +130,7 @@ interface BuildRow extends QueryResultRow {
   feedback_ids: string[];
   feedback_context: BuildRecord["purpose"]["feedbackContext"];
   remediation_context: Extract<BuildRecord["purpose"], { kind: "remediation" }>["remediationContext"];
+  allow_llm?: boolean;
 }
 
 interface RemediationRow extends QueryResultRow {
@@ -191,6 +199,22 @@ interface ArtifactRow extends QueryResultRow {
   created_at: Date;
 }
 
+interface PipelineSearchDocumentRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  snapshot_id: string;
+  build_job_id: string;
+  source_artifact_id: string;
+  document_key: string;
+  kind: PipelineSearchDocumentRecord["kind"];
+  title: string;
+  content: string;
+  citations: PipelineSearchDocumentRecord["citations"];
+  metadata: PipelineSearchDocumentRecord["metadata"];
+  created_at: Date;
+}
+
 interface GraphNodeRow extends QueryResultRow {
   node_id: string;
   workspace_id: string;
@@ -233,6 +257,8 @@ interface ReleaseRow extends QueryResultRow {
   build_job_id: string;
   snapshot_id: string;
   version: string;
+  kernel_mode?: "legacy" | "pipeline";
+  package_artifact_id?: string | null;
   created_at: Date;
   published_at: Date | null;
   status?: BuildStatus;
@@ -405,6 +431,7 @@ function buildRecord(row: BuildRow): BuildRecord {
     warnings: row.warnings ?? [],
     cancelRequested: row.cancel_requested,
     purpose,
+    allowLlm: row.allow_llm ?? false,
     ...(row.error_message ? { errorMessage: row.error_message } : {})
   };
 }
@@ -488,6 +515,24 @@ function artifactManifest(row: ArtifactRow): ArtifactManifest {
   });
 }
 
+function pipelineSearchDocument(row: PipelineSearchDocumentRow): PipelineSearchDocumentRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    projectId: row.project_id,
+    snapshotId: row.snapshot_id,
+    buildId: row.build_job_id,
+    sourceArtifactId: row.source_artifact_id,
+    documentKey: row.document_key,
+    kind: row.kind,
+    title: row.title,
+    content: row.content,
+    citations: row.citations,
+    metadata: row.metadata,
+    createdAt: row.created_at
+  };
+}
+
 function knowledgePageRecord(row: KnowledgePageRow): KnowledgePageRecord {
   return boundedKnowledgePage({
     id: row.id,
@@ -509,6 +554,8 @@ function releaseRecord(row: ReleaseRow): ReleaseRecord {
     buildId: row.build_job_id,
     snapshotId: row.snapshot_id,
     version: row.version,
+    kernelMode: row.kernel_mode ?? "legacy",
+    packageArtifactId: row.package_artifact_id ?? null,
     createdAt: row.created_at,
     publishedAt: row.published_at
   };
@@ -699,7 +746,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       const { rows } = await client.query<StageRunRow>(
         `WITH candidate AS (
            SELECT id FROM build_stage_runs
-           WHERE workspace_id = $1 AND project_id = $2 AND status = 'queued'
+           WHERE workspace_id = $1 AND project_id = $2 AND status = 'queued' AND available_at <= now()
              AND ($3::uuid IS NULL OR build_job_id = $3)
              AND ($4::text IS NULL OR stage = $4)
            ORDER BY created_at, id
@@ -724,6 +771,53 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       );
       return rows[0] ? stageRunRecord(rows[0]) : null;
     });
+  }
+
+  async claimStageRun(
+    stageRunId: string,
+    buildId: string,
+    projectId: string
+  ): Promise<PipelineStageRunRecord | null> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<StageRunRow>(
+        `WITH updated AS (
+           UPDATE build_stage_runs
+           SET status = 'running', started_at = now(), updated_at = now()
+           WHERE id = $1 AND build_job_id = $2 AND project_id = $3 AND status = 'queued' AND available_at <= now()
+           RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+                     input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail
+         ), event AS (
+           INSERT INTO build_stage_events
+             (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+           SELECT workspace_id, project_id, build_job_id, id, stage, status FROM updated
+           ON CONFLICT (stage_run_id, status) DO NOTHING
+         )
+         SELECT * FROM updated`,
+        [stageRunId, buildId, projectId]
+      );
+      return rows[0] ? stageRunRecord(rows[0]) : null;
+    });
+  }
+
+  async listQueuedStageRuns(): Promise<PipelineStageRunRecord[]> {
+    const { rows } = await this.pool.query<StageRunRow>(
+      `SELECT id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+              input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail
+       FROM build_stage_runs WHERE status = 'queued' AND available_at <= now() ORDER BY available_at, created_at, id`
+    );
+    return rows.map(stageRunRecord);
+  }
+
+  async listStaleRunningStageRuns(staleBefore: Date): Promise<PipelineStageRunRecord[]> {
+    const { rows } = await this.pool.query<StageRunRow>(
+      `SELECT id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+              input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail
+       FROM build_stage_runs
+       WHERE status = 'running' AND started_at < $1
+       ORDER BY started_at, id`,
+      [staleBefore]
+    );
+    return rows.map(stageRunRecord);
   }
 
   async transitionStageRun(
@@ -770,6 +864,123 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return rows[0] ? stageRunRecord(rows[0]) : null;
   }
 
+  async failStageRunAndCreateRetry(
+    input: FailStageRunAndCreateRetryInput
+  ): Promise<FailStageRunAndCreateRetryResult> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<StageRunRow>(
+        `UPDATE build_stage_runs
+         SET status = 'failed', started_at = COALESCE(started_at, now()), finished_at = now(),
+             error_code = $4, error_detail = $5, updated_at = now()
+         WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND status = 'running'
+         RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+                   input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
+        [input.workspaceId, input.projectId, input.stageRunId, input.errorCode, input.errorDetail]
+      );
+      const failedRow = rows[0];
+      if (!failedRow) return { failed: null, retry: null };
+      const failed = stageRunRecord(failedRow);
+      await client.query(
+        `INSERT INTO build_stage_events
+         (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+         VALUES ($1, $2, $3, $4, $5, 'failed')
+         ON CONFLICT (stage_run_id, status) DO NOTHING`,
+        [failed.workspaceId, failed.projectId, failed.buildId, failed.id, failed.stage]
+      );
+      if (!input.retry) return { failed, retry: null };
+      const { rows: retryRows } = await client.query<StageRunRow>(
+        `INSERT INTO build_stage_runs
+         (workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status, input_digest, available_at)
+         SELECT $1, $2, $3, $4, $5, $6, 'queued', $7, $8
+         FROM build_jobs build
+         JOIN repositories repository ON repository.id = build.repository_id AND repository.workspace_id = build.workspace_id
+         JOIN source_snapshots snapshot ON snapshot.id = build.snapshot_id AND snapshot.workspace_id = build.workspace_id
+         WHERE build.workspace_id = $1 AND build.id = $4 AND repository.project_id = $2
+           AND snapshot.id = $3 AND snapshot.repository_id = build.repository_id
+         ON CONFLICT (build_job_id, stage, attempt) DO UPDATE
+           SET updated_at = build_stage_runs.updated_at
+         RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+                   input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
+        [
+          failed.workspaceId, failed.projectId, failed.snapshotId, failed.buildId,
+          failed.stage, failed.attempt + 1, input.retry.inputDigest, input.retry.availableAt
+        ]
+      );
+      if (!retryRows[0]) throw new Error("Retry stage run does not match the project build and snapshot");
+      const retry = stageRunRecord(retryRows[0]);
+      await client.query(
+        `INSERT INTO build_stage_events
+         (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+         VALUES ($1, $2, $3, $4, $5, 'queued')
+         ON CONFLICT (stage_run_id, status) DO NOTHING`,
+        [retry.workspaceId, retry.projectId, retry.buildId, retry.id, retry.stage]
+      );
+      return { failed, retry };
+    });
+  }
+
+  async completeStageRunAndCreateNext(
+    input: CompleteStageRunInput
+  ): Promise<CompleteStageRunResult | null> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<StageRunRow>(
+        `UPDATE build_stage_runs
+         SET status = $5,
+             output_manifest_ids = COALESCE($6::uuid[], output_manifest_ids),
+             finished_at = now(), updated_at = now()
+         WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND status = $4
+           AND NOT EXISTS (
+             SELECT 1 FROM build_jobs build
+             WHERE build.id = build_stage_runs.build_job_id
+               AND build.workspace_id = build_stage_runs.workspace_id
+               AND build.cancel_requested
+           )
+         RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+                   input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
+        [input.workspaceId, input.projectId, input.stageRunId, "running", input.status, input.outputManifestIds ?? null]
+      );
+      const completedRow = rows[0];
+      if (!completedRow) return null;
+      const completed = stageRunRecord(completedRow);
+      await client.query(
+        `INSERT INTO build_stage_events
+         (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (stage_run_id, status) DO NOTHING`,
+        [completed.workspaceId, completed.projectId, completed.buildId, completed.id, completed.stage, completed.status]
+      );
+      if (!input.next) return { completed, next: null };
+      const { rows: nextRows } = await client.query<StageRunRow>(
+        `INSERT INTO build_stage_runs
+         (workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status, input_digest)
+         SELECT $1, $2, $3, $4, $5, $6, 'queued', $7
+         FROM build_jobs build
+         JOIN repositories repository ON repository.id = build.repository_id AND repository.workspace_id = build.workspace_id
+         JOIN source_snapshots snapshot ON snapshot.id = build.snapshot_id AND snapshot.workspace_id = build.workspace_id
+         WHERE build.workspace_id = $1 AND build.id = $4 AND repository.project_id = $2
+           AND snapshot.id = $3 AND snapshot.repository_id = build.repository_id
+         ON CONFLICT (build_job_id, stage, attempt) DO UPDATE
+           SET updated_at = build_stage_runs.updated_at
+         RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+                   input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
+        [
+          input.next.workspaceId, input.next.projectId, input.next.snapshotId, input.next.buildId,
+          input.next.stage, input.next.attempt, input.next.inputDigest
+        ]
+      );
+      if (!nextRows[0]) throw new Error("Next stage run does not match the project build and snapshot");
+      const next = stageRunRecord(nextRows[0]);
+      await client.query(
+        `INSERT INTO build_stage_events
+         (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+         VALUES ($1, $2, $3, $4, $5, 'queued')
+         ON CONFLICT (stage_run_id, status) DO NOTHING`,
+        [next.workspaceId, next.projectId, next.buildId, next.id, next.stage]
+      );
+      return { completed, next };
+    });
+  }
+
   async listPipelineStageRuns(
     workspaceId: string,
     projectId: string,
@@ -784,6 +995,39 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       [workspaceId, projectId, buildId]
     );
     return rows.map(stageRunRecord);
+  }
+
+  async cancelPipelineStageRuns(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineStageRunRecord[]> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<StageRunRow>(
+        `UPDATE build_stage_runs
+         SET status = 'cancelled',
+             started_at = COALESCE(started_at, now()),
+             finished_at = now(),
+             error_code = NULL,
+             error_detail = NULL,
+             updated_at = now()
+         WHERE workspace_id = $1 AND project_id = $2 AND build_job_id = $3
+           AND status IN ('queued', 'running')
+         RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+                   input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
+        [workspaceId, projectId, buildId]
+      );
+      for (const row of rows) {
+        await client.query(
+          `INSERT INTO build_stage_events
+             (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+           VALUES ($1, $2, $3, $4, $5, 'cancelled')
+           ON CONFLICT (stage_run_id, status) DO NOTHING`,
+          [row.workspace_id, row.project_id, row.build_job_id, row.id, row.stage]
+        );
+      }
+      return rows.map(stageRunRecord);
+    });
   }
 
   async listPipelineStageEvents(
@@ -871,6 +1115,95 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       [workspaceId, projectId, snapshotId, stage, kind, inputDigest]
     );
     return rows[0] ? artifactManifest(rows[0]) : null;
+  }
+
+  async recordArtifactCacheMiss(manifest: ArtifactManifest, reason: "content_missing"): Promise<void> {
+    await this.insertAudit(this.pool, {
+      workspaceId: manifest.workspaceId,
+      action: "pipeline.artifact.cache_miss",
+      resourceType: "knowledge_artifact",
+      resourceId: manifest.id,
+      metadata: {
+        reason,
+        projectId: manifest.projectId,
+        snapshotId: manifest.snapshotId,
+        buildId: manifest.buildId,
+        stage: manifest.stage,
+        kind: manifest.kind
+      }
+    });
+  }
+
+  async findArtifactById(artifactId: string): Promise<ArtifactManifest | null> {
+    const { rows } = await this.pool.query<ArtifactRow>(
+      `SELECT id, workspace_id, project_id, snapshot_id, build_job_id, stage, kind, schema_version,
+              input_digest, content_digest, storage_key, source_refs, producer, created_at
+       FROM knowledge_artifacts
+       WHERE id = $1`,
+      [artifactId]
+    );
+    return rows[0] ? artifactManifest(rows[0]) : null;
+  }
+
+  async savePipelineSearchDocuments(input: {
+    workspaceId: string;
+    projectId: string;
+    snapshotId: string;
+    buildId: string;
+    sourceArtifactId: string;
+    documents: PipelineSearchDocumentInput[];
+  }): Promise<PipelineSearchDocumentRecord[]> {
+    return this.transaction(async (client) => {
+      const source = await client.query(
+        `SELECT 1
+         FROM knowledge_artifacts
+         WHERE id = $1 AND workspace_id = $2 AND project_id = $3
+           AND snapshot_id = $4`,
+        [input.sourceArtifactId, input.workspaceId, input.projectId, input.snapshotId]
+      );
+      if (source.rowCount !== 1) {
+        throw new Error("Pipeline search document does not match the source artifact scope");
+      }
+      for (const document of input.documents) {
+        await client.query(
+          `INSERT INTO pipeline_search_documents
+           (workspace_id, project_id, snapshot_id, build_job_id, source_artifact_id,
+            document_key, kind, title, content, citations, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb)
+           ON CONFLICT (build_job_id, source_artifact_id, document_key) DO NOTHING`,
+          [
+            input.workspaceId, input.projectId, input.snapshotId, input.buildId, input.sourceArtifactId,
+            document.documentKey, document.kind, document.title, document.content,
+            JSON.stringify(document.citations), JSON.stringify(document.metadata)
+          ]
+        );
+      }
+      const { rows } = await client.query<PipelineSearchDocumentRow>(
+        `SELECT id, workspace_id, project_id, snapshot_id, build_job_id, source_artifact_id,
+                document_key, kind, title, content, citations, metadata, created_at
+         FROM pipeline_search_documents
+         WHERE workspace_id = $1 AND project_id = $2 AND build_job_id = $3 AND source_artifact_id = $4
+         ORDER BY document_key, id`,
+        [input.workspaceId, input.projectId, input.buildId, input.sourceArtifactId]
+      );
+      return rows.map(pipelineSearchDocument);
+    });
+  }
+
+  async listPipelineSearchDocuments(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineSearchDocumentRecord[]> {
+    const { rows } = await this.pool.query<PipelineSearchDocumentRow>(
+      `SELECT id, workspace_id, project_id, snapshot_id, build_job_id, source_artifact_id,
+              document_key, kind, title, content, citations, metadata, created_at
+       FROM pipeline_search_documents
+       WHERE workspace_id = $1 AND project_id = $2 AND build_job_id = $3
+       ORDER BY document_key, id`,
+      [workspaceId, projectId, buildId]
+    );
+    return rows.map(pipelineSearchDocument);
   }
 
   async saveKnowledgeGraph(input: SaveKnowledgeGraphInput): Promise<void> {
@@ -1422,6 +1755,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          SELECT jsonb_build_object(
            'id', r.id, 'workspace_id', r.workspace_id, 'repository_id', r.repository_id,
            'build_job_id', r.build_job_id, 'snapshot_id', r.snapshot_id, 'version', r.version,
+           'kernel_mode', r.kernel_mode, 'package_artifact_id', r.package_artifact_id,
            'created_at', r.created_at, 'published_at', r.published_at
          ) AS value
          FROM release_channels channel JOIN releases r ON r.id = channel.release_id
@@ -1434,7 +1768,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            'snapshot_id', b.snapshot_id, 'snapshot_path', b.snapshot_path, 'commit_sha', b.commit_sha,
            'status', b.status, 'warnings', b.warnings, 'cancel_requested', b.cancel_requested,
            'error_message', b.error_message, 'purpose', b.purpose, 'feedback_ids', b.feedback_ids,
-           'feedback_context', b.feedback_context, 'remediation_context', b.remediation_context
+           'feedback_context', b.feedback_context, 'remediation_context', b.remediation_context,
+           'allow_llm', b.allow_llm
          ) AS value
          FROM build_jobs b WHERE b.workspace_id = p.workspace_id AND b.repository_id = repo.id
          ORDER BY b.created_at DESC, b.id DESC LIMIT 1
@@ -1482,6 +1817,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         currentRelease: release ? {
           id: String(release.id), workspaceId: String(release.workspace_id), repositoryId: String(release.repository_id),
           buildId: String(release.build_job_id), snapshotId: String(release.snapshot_id), version: String(release.version),
+          kernelMode: release.kernel_mode === "pipeline" ? "pipeline" : "legacy",
+          packageArtifactId: release.package_artifact_id ? String(release.package_artifact_id) : null,
           createdAt: date(release.created_at), publishedAt: release.published_at ? date(release.published_at) : null
         } : null,
         latestBuild: build ? {
@@ -1496,6 +1833,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
             kind: "remediation", feedbackIds: [], feedbackContext: [],
             remediationContext: (build.remediation_context ?? []) as Extract<BuildRecord["purpose"], { kind: "remediation" }>["remediationContext"]
           } : standardBuildPurpose(),
+          allowLlm: Boolean(build.allow_llm),
           ...(build.error_message ? { errorMessage: String(build.error_message) } : {})
         } : null,
         memberCount: Number(row.member_count),
@@ -2169,7 +2507,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       const active = await client.query<BuildRow>(
         `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                 status, warnings, cancel_requested, error_message,
-                purpose, feedback_ids, feedback_context, remediation_context
+                purpose, feedback_ids, feedback_context, remediation_context, allow_llm
          FROM build_jobs
          WHERE workspace_id = $1 AND repository_id = $2
            AND snapshot_id = $3 AND purpose = 'feedback' AND feedback_ids = $4::uuid[]
@@ -2189,7 +2527,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            VALUES ($1, $2, $3, $4, $5, 'queued', 'feedback', $6::uuid[], $7::jsonb)
            RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                      status, warnings, cancel_requested, error_message,
-                     purpose, feedback_ids, feedback_context, remediation_context`,
+                     purpose, feedback_ids, feedback_context, remediation_context, allow_llm`,
           [
             input.build.workspaceId,
             input.build.repositoryId,
@@ -2384,7 +2722,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       const active = await client.query<BuildRow>(
         `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                 status, warnings, cancel_requested, error_message,
-                purpose, feedback_ids, feedback_context, remediation_context
+                purpose, feedback_ids, feedback_context, remediation_context, allow_llm
          FROM build_jobs
          WHERE workspace_id = $1 AND repository_id = $2 AND snapshot_id = $3
            AND purpose = 'remediation' AND remediation_context = $4::jsonb
@@ -2404,7 +2742,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            VALUES ($1, $2, $3, $4, $5, 'queued', 'remediation', '{}'::uuid[], '[]'::jsonb, $6::jsonb)
            RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                      status, warnings, cancel_requested, error_message,
-                     purpose, feedback_ids, feedback_context, remediation_context`,
+                     purpose, feedback_ids, feedback_context, remediation_context, allow_llm`,
           [
             input.build.workspaceId,
             input.build.repositoryId,
@@ -2917,6 +3255,19 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return new Map(rows.map((row) => [row.path, row.content_hash]));
   }
 
+  async snapshotFileMetadata(workspaceId: string, snapshotId: string) {
+    const { rows } = await this.pool.query<{ path: string; byte_size: string; content_hash: string }>(
+      `SELECT path, byte_size::text AS byte_size, content_hash FROM source_files
+       WHERE workspace_id = $1 AND snapshot_id = $2 ORDER BY path`,
+      [workspaceId, snapshotId]
+    );
+    return rows.map((row) => ({
+      path: row.path,
+      byteSize: Number(row.byte_size),
+      contentHash: row.content_hash
+    }));
+  }
+
   async repositoryCredential(workspaceId: string, repositoryId: string): Promise<string | null> {
     const { rows } = await this.pool.query<{ ciphertext: string }>(
       `SELECT ciphertext FROM encrypted_credentials
@@ -2996,11 +3347,11 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       const active = await client.query<BuildRow>(
         `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                 status, warnings, cancel_requested, error_message,
-                purpose, feedback_ids, feedback_context, remediation_context
+                purpose, feedback_ids, feedback_context, remediation_context, allow_llm
          FROM build_jobs
          WHERE workspace_id = $1 AND repository_id = $2
            AND snapshot_id = $3 AND purpose = $4 AND feedback_ids = $5::uuid[]
-           AND remediation_context = $6::jsonb
+           AND remediation_context = $6::jsonb AND allow_llm = $7
            AND status NOT IN ('ready', 'published', 'failed')
          ORDER BY created_at DESC LIMIT 1`,
         [
@@ -3009,7 +3360,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           input.snapshotId,
           purpose.kind,
           purpose.feedbackIds,
-          JSON.stringify(purpose.remediationContext ?? [])
+          JSON.stringify(purpose.remediationContext ?? []),
+          input.allowLlm === true
         ]
       );
       if (active.rows[0]) {
@@ -3019,11 +3371,11 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       const inserted = await client.query<BuildRow>(
         `INSERT INTO build_jobs
          (workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha, status,
-          purpose, feedback_ids, feedback_context, remediation_context)
-         VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7::uuid[], $8::jsonb, $9::jsonb)
+          purpose, feedback_ids, feedback_context, remediation_context, allow_llm)
+         VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7::uuid[], $8::jsonb, $9::jsonb, $10)
          RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                    status, warnings, cancel_requested, error_message,
-                     purpose, feedback_ids, feedback_context, remediation_context`,
+                     purpose, feedback_ids, feedback_context, remediation_context, allow_llm`,
         [
           input.workspaceId,
           input.repositoryId,
@@ -3033,7 +3385,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           purpose.kind,
           purpose.feedbackIds,
           JSON.stringify(purpose.feedbackContext),
-          JSON.stringify(purpose.remediationContext ?? [])
+          JSON.stringify(purpose.remediationContext ?? []),
+          input.allowLlm === true
         ]
       );
       const build = buildRecord(inserted.rows[0]);
@@ -3042,6 +3395,16 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          VALUES ($1, $2, 'queued')`,
         [build.workspaceId, build.id]
       );
+      if (input.llmAudit) {
+        await this.insertAudit(client, {
+          workspaceId: build.workspaceId,
+          actorId: input.llmAudit.actorId,
+          action: "build.llm_opted_in",
+          resourceType: "build",
+          resourceId: build.id,
+          metadata: { projectId: input.llmAudit.projectId, snapshotId: build.snapshotId }
+        });
+      }
       await client.query("COMMIT");
       return { build, created: true };
     } catch (error) {
@@ -3056,7 +3419,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     const { rows } = await this.pool.query<BuildRow>(
       `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
               status, warnings, cancel_requested, error_message,
-                purpose, feedback_ids, feedback_context, remediation_context
+                purpose, feedback_ids, feedback_context, remediation_context, allow_llm
        FROM build_jobs WHERE workspace_id = $1 AND id = $2`,
       [workspaceId, buildId]
     );
@@ -3093,7 +3456,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
                    candidate.snapshot_id, candidate.snapshot_path, candidate.commit_sha,
                    candidate.status, candidate.warnings, candidate.cancel_requested,
                    candidate.error_message, candidate.purpose, candidate.feedback_ids,
-                   candidate.feedback_context, candidate.remediation_context`,
+                   candidate.feedback_context, candidate.remediation_context, candidate.allow_llm`,
         [buildId]
       );
       if (!rows[0]) return null;
@@ -3124,7 +3487,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          WHERE id = $1 AND status = $2 AND ($7::boolean = false OR cancel_requested = false)
          RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                    status, warnings, cancel_requested, error_message,
-                   purpose, feedback_ids, feedback_context, remediation_context
+                   purpose, feedback_ids, feedback_context, remediation_context, allow_llm
        ), event AS (
          INSERT INTO build_events (workspace_id, build_job_id, status, payload)
          SELECT workspace_id, id, status, $6::jsonb FROM updated RETURNING id
@@ -3134,16 +3497,110 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         buildId,
         expectedStatus,
         status,
-        details?.errorMessage ?? null,
-        details?.warnings ? JSON.stringify(details.warnings) : null,
-        JSON.stringify({
-          ...(details?.errorMessage ? { errorMessage: details.errorMessage } : {}),
-          ...(details?.warnings ? { warnings: details.warnings } : {})
-        }),
-        details?.requireNotCancelled ?? false
+          details?.errorMessage ?? null,
+          details?.warnings ? JSON.stringify(details.warnings) : null,
+          JSON.stringify({
+            ...(details?.errorMessage ? { errorMessage: details.errorMessage } : {}),
+            ...(details?.warnings ? { warnings: details.warnings } : {})
+          }),
+          details?.requireNotCancelled ?? false
       ]
     );
     return rows[0] ? buildRecord(rows[0]) : null;
+  }
+
+  async transitionBuildAndCreateInitialStage(
+    buildId: string,
+    expectedStatus: BuildStatus,
+    status: BuildStatus,
+    details: {
+      errorMessage?: string;
+      warnings?: BuildRecord["warnings"];
+      requireNotCancelled?: boolean;
+    },
+    stage: InitialPipelineStage
+  ): Promise<{ build: BuildRecord; initialStage: { stageRunId: string; projectId: string } } | null> {
+    const queued = stageRunSchema.parse({
+      id: "pending",
+      buildId,
+      stage: "convert",
+      attempt: 1,
+      status: "queued",
+      inputDigest: stage.inputDigest,
+      outputManifestIds: [],
+      startedAt: null,
+      finishedAt: null,
+      errorCode: null,
+      errorDetail: null
+    });
+    return this.transaction(async (client) => {
+      const payload = JSON.stringify({
+        ...(details.errorMessage ? { errorMessage: details.errorMessage } : {}),
+        ...(details.warnings ? { warnings: details.warnings } : {})
+      });
+      const { rows } = await client.query<BuildRow>(
+        `UPDATE build_jobs
+         SET status = $3, error_message = COALESCE($4, error_message),
+             warnings = COALESCE($5::jsonb, warnings), updated_at = now()
+         WHERE id = $1 AND status = $2 AND ($6::boolean = false OR cancel_requested = false)
+         RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
+                   status, warnings, cancel_requested, error_message,
+                   purpose, feedback_ids, feedback_context, remediation_context, allow_llm`,
+        [
+          buildId,
+          expectedStatus,
+          status,
+          details.errorMessage ?? null,
+          details.warnings ? JSON.stringify(details.warnings) : null,
+          details.requireNotCancelled ?? false
+        ]
+      );
+      if (!rows[0]) return null;
+      const build = buildRecord(rows[0]);
+      await client.query(
+        `INSERT INTO build_events (workspace_id, build_job_id, status, payload)
+         VALUES ($1, $2, $3, $4::jsonb)`,
+        [build.workspaceId, build.id, build.status, payload]
+      );
+      const { rows: stageRows } = await client.query<StageRunRow>(
+        `WITH run AS (
+           INSERT INTO build_stage_runs
+             (workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status, input_digest)
+           SELECT $1, repository.project_id, build.snapshot_id, build.id, $2, $3, $4, $5
+           FROM build_jobs build
+           JOIN repositories repository
+             ON repository.id = build.repository_id AND repository.workspace_id = build.workspace_id
+           JOIN source_snapshots snapshot
+             ON snapshot.id = build.snapshot_id AND snapshot.workspace_id = build.workspace_id
+           WHERE build.workspace_id = $1 AND build.id = $6
+             AND snapshot.repository_id = build.repository_id
+           ON CONFLICT (build_job_id, stage, attempt) DO UPDATE
+             SET updated_at = build_stage_runs.updated_at
+           RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+                     input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail
+         ), event AS (
+           INSERT INTO build_stage_events
+             (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+           SELECT workspace_id, project_id, build_job_id, id, stage, status FROM run
+           ON CONFLICT (stage_run_id, status) DO NOTHING
+         )
+         SELECT * FROM run`,
+        [
+          build.workspaceId,
+          queued.stage,
+          queued.attempt,
+          queued.status,
+          queued.inputDigest,
+          build.id
+        ]
+      );
+      if (!stageRows[0]) throw new Error("Initial stage run does not match the project build and snapshot");
+      const persistedStage = stageRunRecord(stageRows[0]);
+      return {
+        build,
+        initialStage: { stageRunId: persistedStage.id, projectId: persistedStage.projectId }
+      };
+    });
   }
 
   async requestBuildCancellation(workspaceId: string, buildId: string): Promise<BuildRecord | null> {
@@ -3153,7 +3610,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          AND status NOT IN ('ready', 'published', 'failed')
        RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                  status, warnings, cancel_requested, error_message,
-                 purpose, feedback_ids, feedback_context, remediation_context`,
+                 purpose, feedback_ids, feedback_context, remediation_context, allow_llm`,
       [workspaceId, buildId]
     );
     return rows[0] ? buildRecord(rows[0]) : this.getBuild(workspaceId, buildId);
@@ -3163,7 +3620,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     const { rows } = await this.pool.query<BuildRow>(
       `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
               status, warnings, cancel_requested, error_message,
-              purpose, feedback_ids, feedback_context, remediation_context
+              purpose, feedback_ids, feedback_context, remediation_context, allow_llm
        FROM build_jobs WHERE status NOT IN ('ready', 'published', 'failed')
        ORDER BY created_at ASC`
     );
@@ -3179,7 +3636,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     const { rows } = await this.pool.query<BuildRow>(
       `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
               status, warnings, cancel_requested, error_message,
-              purpose, feedback_ids, feedback_context, remediation_context
+              purpose, feedback_ids, feedback_context, remediation_context, allow_llm
        FROM build_jobs WHERE workspace_id = $1 AND repository_id = $2
        ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`,
       [workspaceId, repositoryId, limit, offset]
@@ -3293,7 +3750,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
        FROM build_jobs b
        WHERE b.id = $3 AND b.workspace_id = $1 AND b.repository_id = $2 AND b.status = 'ready'
        RETURNING id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-                 created_at, published_at`,
+                 kernel_mode, package_artifact_id, created_at, published_at`,
       [workspaceId, repositoryId, buildId, version]
     );
     if (!rows[0]) throw new Error("Only a ready build can create a release draft");
@@ -3310,7 +3767,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       await client.query("BEGIN");
       const selected = await client.query<ReleaseRow>(
         `SELECT r.id, r.workspace_id, r.repository_id, r.build_job_id, r.snapshot_id,
-                r.version, r.created_at, r.published_at, b.status
+                r.version, r.kernel_mode, r.package_artifact_id, r.created_at, r.published_at, b.status
          FROM releases r JOIN build_jobs b ON b.id = r.build_job_id
          WHERE r.workspace_id = $1 AND r.id = $2 FOR UPDATE`,
         [workspaceId, releaseId]
@@ -3329,7 +3786,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         `UPDATE releases SET published_at = COALESCE(published_at, now()), updated_at = now()
          WHERE id = $1
          RETURNING id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-                   created_at, published_at`,
+                   kernel_mode, package_artifact_id, created_at, published_at`,
         [release.id]
       );
       const publishedBuild = await client.query<{ id: string; workspace_id: string; status: BuildStatus }>(
@@ -3361,7 +3818,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   ): Promise<ReleaseRecord | null> {
     const { rows } = await this.pool.query<ReleaseRow>(
       `SELECT r.id, r.workspace_id, r.repository_id, r.build_job_id, r.snapshot_id,
-              r.version, r.created_at, r.published_at
+              r.version, r.kernel_mode, r.package_artifact_id, r.created_at, r.published_at
        FROM release_channels c JOIN releases r ON r.id = c.release_id
        WHERE c.workspace_id = $1 AND c.repository_id = $2 AND c.name = $3`,
       [workspaceId, repositoryId, channel]
@@ -3372,7 +3829,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   async getRelease(workspaceId: string, releaseId: string): Promise<ReleaseRecord | null> {
     const { rows } = await this.pool.query<ReleaseRow>(
       `SELECT id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-              created_at, published_at
+              kernel_mode, package_artifact_id, created_at, published_at
        FROM releases WHERE workspace_id = $1 AND id = $2 LIMIT 1`,
       [workspaceId, releaseId]
     );
@@ -3387,7 +3844,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     const { limit, offset } = normalizePagination(pagination);
     const { rows } = await this.pool.query<ReleaseRow>(
       `SELECT id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-              created_at, published_at
+              kernel_mode, package_artifact_id, created_at, published_at
        FROM releases WHERE workspace_id = $1 AND repository_id = $2
        ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`,
       [workspaceId, repositoryId, limit, offset]

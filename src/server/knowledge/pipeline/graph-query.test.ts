@@ -2,7 +2,11 @@ import { describe, expect, test } from "vitest";
 
 import { loadPublishedKnowledgeGraph } from "./graph-query";
 
-const release = { id: "release-1", workspaceId: "workspace-1", repositoryId: "repository-1", buildId: "build-1", snapshotId: "snapshot-1", version: "v1", createdAt: new Date(), publishedAt: new Date() };
+const release = {
+  id: "release-1", workspaceId: "workspace-1", repositoryId: "repository-1", buildId: "build-1",
+  snapshotId: "snapshot-1", version: "v1", kernelMode: "legacy" as const, packageArtifactId: null,
+  createdAt: new Date(), publishedAt: new Date()
+};
 const graph = { nodes: [], edges: [] };
 
 describe("loadPublishedKnowledgeGraph", () => {

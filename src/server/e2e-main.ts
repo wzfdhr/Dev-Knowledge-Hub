@@ -63,5 +63,36 @@ app.post("/__test__/feedback", async (_request, reply) => {
   }) });
 });
 
+app.post("/__test__/shadow-failure", async (_request, reply) => {
+  const workspace = await store.defaultWorkspace();
+  const repository = workspace ? await store.currentRepository(workspace.id) : null;
+  const release = workspace && repository ? await store.currentRelease(workspace.id, repository.id) : null;
+  if (!workspace || !repository || !release) return reply.code(409).send({ error: "Publish a release first" });
+  const build = await store.getBuild(workspace.id, release.buildId);
+  if (!build) return reply.code(409).send({ error: "Release build is unavailable" });
+  const run = await store.createStageRun({
+    workspaceId: workspace.id,
+    projectId: repository.projectId,
+    snapshotId: build.snapshotId,
+    buildId: build.id,
+    stage: "convert",
+    attempt: 1,
+    inputDigest: "f".repeat(64)
+  });
+  const running = await store.transitionStageRun(
+    workspace.id, repository.projectId, run.id, "queued", "running"
+  );
+  if (!running) return reply.code(409).send({ error: "Shadow stage could not start" });
+  const failed = await store.transitionStageRun(
+    workspace.id,
+    repository.projectId,
+    run.id,
+    "running",
+    "failed",
+    { errorCode: "PIPELINE_STAGE_FAILED", errorDetail: "shadow conversion failed" }
+  );
+  return { stage: failed };
+});
+
 app.addHook("onClose", async () => buildService.stop());
 await app.listen({ host: "127.0.0.1", port: 3000 });

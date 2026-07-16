@@ -21,8 +21,13 @@ const actionLabels: Record<string, string> = {
   "mcp_token.created": "创建了 Codex Token",
   "mcp_token.revoked": "撤销了 Codex Token",
   "release.published": "发布了知识版本",
-  "member.created": "添加了团队成员"
+  "member.created": "添加了团队成员",
+  "build.llm_opted_in": "已启用 LLM 增强构建"
 };
+
+export function projectActivityLabel(action: string): string {
+  return actionLabels[action] ?? "更新了项目";
+}
 
 function ActivityIcon({ action }: { action: string }) {
   if (action === "repository.sync_succeeded") return <PackageCheck aria-hidden="true" />;
@@ -35,7 +40,7 @@ function ActivityIcon({ action }: { action: string }) {
 }
 
 export function ProjectActivityItem({ event }: { event: ProjectActivityRecord }) {
-  const label = actionLabels[event.action] ?? "更新了项目";
+  const label = projectActivityLabel(event.action);
   const actor = event.actorEmail ?? "系统";
   return <div className="project-activity-item">
     <span className="activity-icon"><ActivityIcon action={event.action} /></span>

@@ -99,6 +99,76 @@ describe("knowledge API contracts", () => {
     await app.close();
   });
 
+  test("allows only project administrators to opt in to LLM builds and records the decision", async () => {
+    const { app, store, cookie, repositoryId, workspaceId } = await authenticatedApp();
+    const repository = await store.getRepository(workspaceId, repositoryId);
+    expect(repository).not.toBeNull();
+    const projectId = repository!.projectId;
+    const member = await app.inject({
+      method: "POST", url: "/api/members", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { email: "member@example.com", password: "correct horse battery staple", role: "member" }
+    });
+    expect(member.statusCode).toBe(201);
+    const memberId = member.json().member.id as string;
+    const added = await app.inject({
+      method: "POST", url: `/api/projects/${projectId}/members`, headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { userId: memberId, role: "member" }
+    });
+    expect(added.statusCode).toBe(201);
+    const memberLogin = await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "member@example.com", password: "correct horse battery staple" }
+    });
+    const memberCookie = authenticatedCookie(memberLogin);
+    const headers = { "x-devkh-project": projectId };
+
+    const denied = await app.inject({
+      method: "POST", url: "/api/builds", headers: { cookie: memberCookie, ...csrfHeaders(memberCookie), ...headers },
+      payload: { snapshotId: "11111111-1111-4111-8111-111111111111", allowLlm: true }
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().error.code).toBe("PROJECT_ACCESS_DENIED");
+
+    const accepted = await app.inject({
+      method: "POST", url: "/api/builds", headers: { cookie, ...csrfHeaders(cookie), ...headers },
+      payload: { snapshotId: "11111111-1111-4111-8111-111111111111", allowLlm: true }
+    });
+    expect(accepted.statusCode).toBe(202);
+    expect(accepted.json().build.allowLlm).toBe(true);
+    const activity = await store.listProjectActivity(workspaceId, projectId);
+    expect(activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "build.llm_opted_in",
+        resourceType: "build",
+        resourceId: accepted.json().build.id,
+        metadata: expect.objectContaining({ projectId, snapshotId: "11111111-1111-4111-8111-111111111111" })
+      })
+    ]));
+    await app.close();
+  });
+
+  test("does not create an opted-in LLM build when its audit record cannot be written", async () => {
+    const { app, store, cookie, repositoryId, workspaceId } = await authenticatedApp();
+    const repository = await store.getRepository(workspaceId, repositoryId);
+    expect(repository).not.toBeNull();
+    const originalRecordAudit = store.recordAudit.bind(store);
+    store.recordAudit = vi.fn(async (event) => {
+      if (event.action === "build.llm_opted_in") throw new Error("audit unavailable");
+      await originalRecordAudit(event);
+    });
+
+    const response = await app.inject({
+      method: "POST", url: "/api/builds", headers: {
+        cookie, ...csrfHeaders(cookie), "x-devkh-project": repository!.projectId
+      },
+      payload: { snapshotId: "11111111-1111-4111-8111-111111111111", allowLlm: true }
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(await store.listBuilds(workspaceId, repositoryId)).toEqual([]);
+    await app.close();
+  });
+
   test("subscribes before replay and merges a racing live event exactly once", async () => {
     const { app, store, buildService, cookie } = await authenticatedApp();
     const started = await app.inject({

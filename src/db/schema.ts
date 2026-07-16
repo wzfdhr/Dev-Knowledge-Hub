@@ -20,7 +20,7 @@ import {
 } from "../shared/contracts.js";
 import type { Citation } from "../server/knowledge/intelligence.js";
 import type { FeedbackGenerationContext, RemediationGenerationContext } from "../server/knowledge/build-service.js";
-import type { LintIssue } from "../shared/api-contracts.js";
+import type { LintIssue, SourceRef } from "../shared/api-contracts.js";
 import type { RemediationState } from "../server/knowledge/remediation.js";
 
 export { AGENT_FEEDBACK_STATUSES, BUILD_JOB_STATUSES } from "../shared/contracts.js";
@@ -241,6 +241,7 @@ export const buildJobs = pgTable("build_jobs", {
     .notNull().default([]),
   remediationContext: jsonb("remediation_context").$type<RemediationGenerationContext[]>()
     .notNull().default([]),
+  allowLlm: boolean("allow_llm").notNull().default(false),
   ...timestamps
 }, (table) => [
   uniqueIndex("build_jobs_id_workspace_idx").on(table.id, table.workspaceId),
@@ -301,6 +302,44 @@ export const knowledgeChunks = pgTable("knowledge_chunks", {
   }).onDelete("cascade")
 ]);
 
+export const pipelineSearchDocuments = pgTable("pipeline_search_documents", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  projectId: uuid("project_id").notNull(),
+  snapshotId: uuid("snapshot_id").notNull(),
+  buildJobId: uuid("build_job_id").notNull(),
+  sourceArtifactId: uuid("source_artifact_id").notNull(),
+  documentKey: text("document_key").notNull(),
+  kind: text("kind").notNull(),
+  title: text("title").notNull(),
+  content: text("content").notNull(),
+  citations: jsonb("citations").$type<SourceRef[]>().notNull().default([]),
+  metadata: jsonb("metadata").$type<Record<string, string | number | boolean>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+}, (table) => [
+  uniqueIndex("pipeline_search_documents_build_artifact_key_idx").on(
+    table.buildJobId, table.sourceArtifactId, table.documentKey
+  ),
+  index("pipeline_search_documents_scope_idx").on(
+    table.workspaceId, table.projectId, table.buildJobId, table.kind, table.documentKey
+  ),
+  foreignKey({
+    columns: [table.projectId, table.workspaceId],
+    foreignColumns: [projects.id, projects.workspaceId],
+    name: "pipeline_search_documents_project_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.snapshotId, table.workspaceId],
+    foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId],
+    name: "pipeline_search_documents_snapshot_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.buildJobId, table.workspaceId],
+    foreignColumns: [buildJobs.id, buildJobs.workspaceId],
+    name: "pipeline_search_documents_build_workspace_fk"
+  }).onDelete("cascade")
+]);
+
 export const releases = pgTable("releases", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
@@ -308,6 +347,8 @@ export const releases = pgTable("releases", {
   buildJobId: uuid("build_job_id").notNull(),
   snapshotId: uuid("snapshot_id").notNull(),
   version: text("version").notNull(),
+  kernelMode: text("kernel_mode").notNull().default("legacy"),
+  packageArtifactId: uuid("package_artifact_id"),
   publishedAt: timestamp("published_at", { withTimezone: true }),
   ...timestamps
 }, (table) => [

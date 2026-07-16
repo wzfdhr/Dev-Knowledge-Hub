@@ -73,6 +73,17 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   await page.getByRole("button", { name: "发布版本" }).click();
   await expect(page.getByText("1.0.0").first()).toBeVisible();
 
+  const shadowFailure = await request.post("/__test__/shadow-failure");
+  expect(shadowFailure.ok()).toBeTruthy();
+  await page.reload();
+  const shadowPanel = page.getByRole("region", { name: "影子验证状态" });
+  await expect(shadowPanel).toContainText("影子验证发现问题");
+  await expect(shadowPanel).toContainText("PIPELINE_STAGE_FAILED");
+  await expect(shadowPanel).toContainText("正式版本保持不变");
+  await expect(page.getByText("1.0.0").first()).toBeVisible();
+  await expect(page.getByText("构建失败", { exact: true })).toHaveCount(0);
+  await page.screenshot({ path: "test-results/shadow-failure-1440x1024.png", fullPage: true });
+
   await page.goto(`/projects/${projectId}/codex`);
   await expect(page.getByRole("heading", { name: "Codex 接入" })).toBeVisible();
   await page.getByLabel("Token 名称").fill("Playwright agent");

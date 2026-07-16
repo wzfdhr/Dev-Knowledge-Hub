@@ -19,6 +19,10 @@ import type {
   AppStore,
   AuditEventInput,
   AuditEventRecord,
+  CompleteStageRunInput,
+  CompleteStageRunResult,
+  FailStageRunAndCreateRetryInput,
+  FailStageRunAndCreateRetryResult,
   CreateSnapshotInput,
   CreateStageRunInput,
   CreateFeedbackInput,
@@ -35,6 +39,8 @@ import type {
   McpTokenRecord,
   CreateMcpTokenInput,
   Pagination,
+  PipelineSearchDocumentInput,
+  PipelineSearchDocumentRecord,
   ReleaseRecord,
   RepositoryConnectionInput,
   RepositoryRecord,
@@ -67,6 +73,7 @@ import type {
   BuildInput,
   BuildEvent,
   BuildRecord,
+  InitialPipelineStage,
   PersistedKnowledge
 } from "../knowledge/build-service.js";
 import { standardBuildPurpose } from "../knowledge/build-service.js";
@@ -97,8 +104,10 @@ export class MemoryAppStore implements AppStore {
   readonly buildEvents: BuildEvent[] = [];
   private nextBuildEventSequence = 1;
   readonly pipelineStageRuns: PipelineStageRunRecord[] = [];
+  private readonly pipelineStageAvailableAt = new Map<string, Date>();
   readonly pipelineStageEvents: PipelineStageEvent[] = [];
   readonly knowledgeArtifacts: ArtifactManifest[] = [];
+  readonly pipelineSearchDocuments: PipelineSearchDocumentRecord[] = [];
   private nextPipelineStageEventSequence = 1;
   readonly knowledgePages: KnowledgePageRecord[] = [];
   readonly releases: ReleaseRecord[] = [];
@@ -1459,6 +1468,12 @@ export class MemoryAppStore implements AppStore {
     ).map((file) => [file.path, file.contentHash]));
   }
 
+  async snapshotFileMetadata(workspaceId: string, snapshotId: string) {
+    return this.sourceFiles
+      .filter((file) => file.workspaceId === workspaceId && file.snapshotId === snapshotId)
+      .map(({ path, byteSize, contentHash }) => ({ path, byteSize, contentHash }));
+  }
+
   async repositoryCredential(workspaceId: string, repositoryId: string): Promise<string | null> {
     return this.encryptedCredentials.find((credential) =>
       credential.workspaceId === workspaceId && credential.repositoryId === repositoryId
@@ -1510,25 +1525,38 @@ export class MemoryAppStore implements AppStore {
   async createBuild(
     input: BuildInput
   ): Promise<{ build: BuildRecord; created: boolean }> {
+    const { llmAudit, ...buildInput } = input;
     const purpose = input.purpose ?? standardBuildPurpose();
     const active = this.builds.find((build) =>
       build.workspaceId === input.workspaceId
       && build.repositoryId === input.repositoryId
       && build.snapshotId === input.snapshotId
       && build.purpose.kind === purpose.kind
+      && build.allowLlm === (input.allowLlm === true)
       && JSON.stringify(build.purpose.feedbackIds) === JSON.stringify(purpose.feedbackIds)
       && JSON.stringify(build.purpose.remediationContext ?? []) === JSON.stringify(purpose.remediationContext ?? [])
       && !["ready", "published", "failed"].includes(build.status)
     );
     if (active) return { build: active, created: false };
     const build: BuildRecord = {
-      ...input,
+      ...buildInput,
       purpose,
+      allowLlm: input.allowLlm === true,
       id: randomUUID(),
       status: "queued",
       warnings: [],
       cancelRequested: false
     };
+    if (llmAudit) {
+      await this.recordAudit({
+        workspaceId: build.workspaceId,
+        actorId: llmAudit.actorId,
+        action: "build.llm_opted_in",
+        resourceType: "build",
+        resourceId: build.id,
+        metadata: { projectId: llmAudit.projectId, snapshotId: build.snapshotId }
+      });
+    }
     this.builds.push(build);
     this.buildEvents.push({
       sequence: this.nextBuildEventSequence++,
@@ -1583,6 +1611,33 @@ export class MemoryAppStore implements AppStore {
       ...(details?.errorMessage ? { errorMessage: details.errorMessage } : {})
     });
     return build;
+  }
+
+  async transitionBuildAndCreateInitialStage(
+    buildId: string,
+    expectedStatus: BuildRecord["status"],
+    status: BuildRecord["status"],
+    details: {
+      errorMessage?: string;
+      warnings?: BuildRecord["warnings"];
+      requireNotCancelled?: boolean;
+    },
+    stage: InitialPipelineStage
+  ): Promise<{ build: BuildRecord; initialStage: { stageRunId: string; projectId: string } } | null> {
+    const repository = this.repositories.find((candidate) => candidate.id === this.builds.find((build) => build.id === buildId)?.repositoryId);
+    if (!repository) throw new Error("Initial stage run does not match the project build and snapshot");
+    const build = await this.transitionBuild(buildId, expectedStatus, status, details);
+    if (!build) return null;
+    const run = await this.createStageRun({
+      workspaceId: build.workspaceId,
+      projectId: repository.projectId,
+      snapshotId: build.snapshotId,
+      buildId: build.id,
+      stage: "convert",
+      attempt: 1,
+      inputDigest: stage.inputDigest
+    });
+    return { build, initialStage: { stageRunId: run.id, projectId: run.projectId } };
   }
 
   async requestBuildCancellation(workspaceId: string, buildId: string): Promise<BuildRecord | null> {
@@ -1646,6 +1701,7 @@ export class MemoryAppStore implements AppStore {
       errorDetail: null
     };
     this.pipelineStageRuns.push(run);
+    this.pipelineStageAvailableAt.set(run.id, input.availableAt ?? new Date());
     this.recordPipelineStageEvent(run);
     return run;
   }
@@ -1667,6 +1723,35 @@ export class MemoryAppStore implements AppStore {
     run.startedAt = new Date().toISOString();
     this.recordPipelineStageEvent(run);
     return run;
+  }
+
+  async claimStageRun(
+    stageRunId: string,
+    buildId: string,
+    projectId: string
+  ): Promise<PipelineStageRunRecord | null> {
+    const run = this.pipelineStageRuns.find((candidate) =>
+      candidate.id === stageRunId && candidate.buildId === buildId
+      && candidate.projectId === projectId && candidate.status === "queued"
+    );
+    if (!run) return null;
+    run.status = "running";
+    run.startedAt = new Date().toISOString();
+    this.recordPipelineStageEvent(run);
+    return run;
+  }
+
+  async listQueuedStageRuns(): Promise<PipelineStageRunRecord[]> {
+    const now = new Date();
+    return this.pipelineStageRuns.filter((run) => run.status === "queued"
+      && (this.pipelineStageAvailableAt.get(run.id) ?? now) <= now
+    ).map((run) => structuredClone(run));
+  }
+
+  async listStaleRunningStageRuns(staleBefore: Date): Promise<PipelineStageRunRecord[]> {
+    return this.pipelineStageRuns.filter((run) => run.status === "running"
+      && run.startedAt !== null && new Date(run.startedAt) < staleBefore
+    ).map((run) => structuredClone(run));
   }
 
   async transitionStageRun(
@@ -1691,6 +1776,39 @@ export class MemoryAppStore implements AppStore {
     run.errorDetail = status === "failed" ? details.errorDetail ?? null : null;
     this.recordPipelineStageEvent(run);
     return run;
+  }
+
+  async failStageRunAndCreateRetry(
+    input: FailStageRunAndCreateRetryInput
+  ): Promise<FailStageRunAndCreateRetryResult> {
+    const failed = await this.transitionStageRun(
+      input.workspaceId, input.projectId, input.stageRunId, "running", "failed", {
+        errorCode: input.errorCode,
+        errorDetail: input.errorDetail
+      }
+    );
+    if (!failed || !input.retry) return { failed, retry: null };
+    const retry = await this.createStageRun({
+      workspaceId: failed.workspaceId,
+      projectId: failed.projectId,
+      snapshotId: failed.snapshotId,
+      buildId: failed.buildId,
+      stage: failed.stage,
+      attempt: failed.attempt + 1,
+      inputDigest: input.retry.inputDigest,
+      availableAt: input.retry.availableAt
+    });
+    return { failed, retry };
+  }
+
+  async completeStageRunAndCreateNext(input: CompleteStageRunInput): Promise<CompleteStageRunResult | null> {
+    const completed = await this.transitionStageRun(
+      input.workspaceId, input.projectId, input.stageRunId, "running", input.status,
+      { outputManifestIds: input.outputManifestIds }
+    );
+    if (!completed) return null;
+    const next = input.next ? await this.createStageRun(input.next) : null;
+    return { completed, next };
   }
 
   async createArtifactWithAudit(manifestInput: ArtifactManifest, actorId?: string): Promise<ArtifactManifest> {
@@ -1749,6 +1867,83 @@ export class MemoryAppStore implements AppStore {
     return artifact ? structuredClone(artifact) : null;
   }
 
+  async recordArtifactCacheMiss(manifest: ArtifactManifest, reason: "content_missing"): Promise<void> {
+    await this.recordAudit({
+      workspaceId: manifest.workspaceId,
+      action: "pipeline.artifact.cache_miss",
+      resourceType: "knowledge_artifact",
+      resourceId: manifest.id,
+      metadata: {
+        reason,
+        projectId: manifest.projectId,
+        snapshotId: manifest.snapshotId,
+        buildId: manifest.buildId,
+        stage: manifest.stage,
+        kind: manifest.kind
+      }
+    });
+  }
+
+  async findArtifactById(artifactId: string): Promise<ArtifactManifest | null> {
+    const artifact = this.knowledgeArtifacts.find((candidate) => candidate.id === artifactId);
+    return artifact ? structuredClone(artifact) : null;
+  }
+
+  async savePipelineSearchDocuments(input: {
+    workspaceId: string;
+    projectId: string;
+    snapshotId: string;
+    buildId: string;
+    sourceArtifactId: string;
+    documents: PipelineSearchDocumentInput[];
+  }): Promise<PipelineSearchDocumentRecord[]> {
+    const artifact = this.knowledgeArtifacts.find((candidate) => candidate.id === input.sourceArtifactId);
+    if (!artifact
+      || artifact.workspaceId !== input.workspaceId
+      || artifact.projectId !== input.projectId
+      || artifact.snapshotId !== input.snapshotId
+    ) {
+      throw new Error("Pipeline search document does not match the source artifact scope");
+    }
+    const saved: PipelineSearchDocumentRecord[] = [];
+    for (const document of input.documents) {
+      const existing = this.pipelineSearchDocuments.find((candidate) =>
+        candidate.buildId === input.buildId
+        && candidate.sourceArtifactId === input.sourceArtifactId
+        && candidate.documentKey === document.documentKey
+      );
+      if (existing) {
+        saved.push(structuredClone(existing));
+        continue;
+      }
+      const record: PipelineSearchDocumentRecord = {
+        ...structuredClone(document),
+        id: randomUUID(),
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        snapshotId: input.snapshotId,
+        buildId: input.buildId,
+        sourceArtifactId: input.sourceArtifactId,
+        createdAt: new Date()
+      };
+      this.pipelineSearchDocuments.push(record);
+      saved.push(structuredClone(record));
+    }
+    return saved;
+  }
+
+  async listPipelineSearchDocuments(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineSearchDocumentRecord[]> {
+    return this.pipelineSearchDocuments.filter((document) =>
+      document.workspaceId === workspaceId
+      && document.projectId === projectId
+      && document.buildId === buildId
+    ).map((document) => structuredClone(document));
+  }
+
   async listPipelineStageRuns(
     workspaceId: string,
     projectId: string,
@@ -1757,6 +1952,21 @@ export class MemoryAppStore implements AppStore {
     return this.pipelineStageRuns.filter((run) =>
       run.workspaceId === workspaceId && run.projectId === projectId && run.buildId === buildId
     );
+  }
+
+  async cancelPipelineStageRuns(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineStageRunRecord[]> {
+    const cancelled: PipelineStageRunRecord[] = [];
+    for (const run of this.pipelineStageRuns) {
+      if (run.workspaceId !== workspaceId || run.projectId !== projectId || run.buildId !== buildId) continue;
+      if (run.status !== "queued" && run.status !== "running") continue;
+      const transitioned = await this.transitionStageRun(workspaceId, projectId, run.id, run.status, "cancelled");
+      if (transitioned) cancelled.push(transitioned);
+    }
+    return cancelled;
   }
 
   async listPipelineStageEvents(
@@ -1850,6 +2060,8 @@ export class MemoryAppStore implements AppStore {
       buildId,
       snapshotId: build.snapshotId,
       version,
+      kernelMode: "legacy",
+      packageArtifactId: null,
       createdAt: new Date(),
       publishedAt: null
     };

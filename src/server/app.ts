@@ -1062,7 +1062,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const qualityRun = overview.latestBuild
       ? (await options.store.listPipelineStageRuns(
         admin.workspaceId, params.data.projectId, overview.latestBuild.id
-      )).filter((run) => run.stage === "lint").at(-1)
+      )).at(-1)
       : undefined;
     const diagnostics: Array<{ code: string }> = [];
     if (!repository) diagnostics.push({ code: "SOURCE_MISSING" });
@@ -1081,6 +1081,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       knowledge,
       remediation,
       qualityPipeline: qualityRun ? {
+        stage: qualityRun.stage,
         status: qualityRun.status,
         artifactReady: qualityRun.outputManifestIds.length > 0,
         errorCode: qualityRun.errorCode
@@ -1646,11 +1647,15 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!options.buildService) {
       return sendError(reply, 503, "BUILD_SERVICE_UNAVAILABLE", "Build service is unavailable");
     }
-    const parsed = z.object({ snapshotId: z.uuid() }).safeParse(request.body);
+    const parsed = z.object({ snapshotId: z.uuid(), allowLlm: z.boolean().optional() }).safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid build request");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const repository = await requireRepositoryRole("member", request, reply);
     if (!repository) return;
+    if (parsed.data.allowLlm) {
+      await requireProjectRole("admin", repository.projectId, request, reply);
+      if (reply.sent) return;
+    }
     const snapshot = await options.store.findSnapshotById(admin.workspaceId, parsed.data.snapshotId);
     if (!snapshot || snapshot.repositoryId !== repository.id) {
       return sendError(reply, 404, "SNAPSHOT_NOT_FOUND", "Snapshot was not found");
@@ -1660,7 +1665,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       repositoryId: repository.id,
       snapshotId: snapshot.id,
       snapshotPath: snapshot.storagePath,
-      commitSha: snapshot.commitSha
+      commitSha: snapshot.commitSha,
+      allowLlm: parsed.data.allowLlm === true,
+      ...(parsed.data.allowLlm ? { llmAudit: { actorId: admin.id, projectId: repository.projectId } } : {})
     });
     return reply.code(result.created ? 202 : 200).send(result);
   });
@@ -1708,7 +1715,12 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (repository.id !== existing.repositoryId) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
     const build = await options.buildService.cancelBuild(admin.workspaceId, existing.id);
     if (!build) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
-    return { build };
+    const pipelineStages = await options.store.cancelPipelineStageRuns(
+      admin.workspaceId,
+      repository.projectId,
+      existing.id
+    );
+    return { build, pipelineStages };
   });
 
   server.get("/api/builds/:id/events", { preHandler: requireAdmin }, async (request, reply) => {
@@ -1791,9 +1803,10 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     );
     return {
       buildId: build.id,
-      legacyStatus: stages.length > 0
-        ? legacyBuildStatus(stages, { published: build.status === "published" })
-        : build.status,
+      legacyStatus: build.status,
+      pipelineStatus: stages.length > 0
+        ? legacyBuildStatus(stages, { published: false })
+        : null,
       stages
     };
   });

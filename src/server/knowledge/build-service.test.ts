@@ -94,6 +94,25 @@ class FakeBuildPersistence implements BuildPersistence {
     return build;
   }
 
+  readonly transitionBuildAndCreateInitialStage = vi.fn(async (
+    buildId: string,
+    expectedStatus: BuildRecord["status"],
+    status: BuildRecord["status"],
+    details: {
+      errorMessage?: string;
+      warnings?: BuildRecord["warnings"];
+      requireNotCancelled?: boolean;
+    },
+    stage: { inputDigest: string }
+  ) => {
+    void stage;
+    const build = await this.transitionBuild(buildId, expectedStatus, status, details);
+    return build ? {
+      build,
+      initialStage: { stageRunId: "stage-1", projectId: "project-1" }
+    } : null;
+  });
+
   async requestBuildCancellation(workspaceId: string, buildId: string) {
     const build = await this.getBuild(workspaceId, buildId);
     if (!build) return null;
@@ -123,6 +142,11 @@ class FakeBuildPersistence implements BuildPersistence {
     if (!build) return new Map<string, string>();
     const index = await analyzeSnapshot(build.snapshotPath, build.commitSha);
     return new Map(index.files.map((file) => [file.path, file.blobHash]));
+  }
+
+  async snapshotFileMetadata(workspaceId: string, snapshotId: string) {
+    const hashes = await this.sourceFileHashes(workspaceId, snapshotId);
+    return [...hashes].map(([path, contentHash]) => ({ path, contentHash, byteSize: 0 }));
   }
 }
 
@@ -195,7 +219,7 @@ function input(repositoryId = "repo-1") {
 }
 
 describe("BuildService", () => {
-  test("resolves an optional enhancer for the build workspace at synthesis time", async () => {
+  test("resolves an optional enhancer only for an explicitly opted-in build", async () => {
     const persistence = new FakeBuildPersistence();
     const enhancer = { enhance: vi.fn() };
     const enhancerForWorkspace = vi.fn(async () => enhancer);
@@ -206,12 +230,25 @@ describe("BuildService", () => {
       enhancerForWorkspace,
       synthesize
     });
-    const { build } = await service.startBuild(input());
+    const { build } = await service.startBuild({ ...input(), allowLlm: true });
 
     await service.process(build.id);
 
     expect(enhancerForWorkspace).toHaveBeenCalledWith("workspace-1");
     expect(synthesize.mock.calls[0][1]).toBe(enhancer);
+  });
+
+  test("does not resolve an enhancer for a deterministic build", async () => {
+    const persistence = new FakeBuildPersistence();
+    const enhancerForWorkspace = vi.fn(async () => ({ enhance: vi.fn() }));
+    const synthesize = vi.fn(async (...args: Parameters<typeof generateKnowledge>) => generateKnowledge(args[0]));
+    const service = new BuildService(persistence, new FakeQueue(), { enhancerForWorkspace, synthesize });
+    const { build } = await service.startBuild(input());
+
+    await service.process(build.id);
+
+    expect(enhancerForWorkspace).not.toHaveBeenCalled();
+    expect(synthesize.mock.calls[0][1]).toBeUndefined();
   });
   test("runs the durable state machine and persists validated knowledge", async () => {
     const persistence = new FakeBuildPersistence();
@@ -242,6 +279,35 @@ describe("BuildService", () => {
 
     expect(schedulePostBuild).toHaveBeenCalledWith(expect.objectContaining({ id: build.id, status: "ready" }));
     expect(persistence.transitions.at(-1)).toBe("ready");
+  });
+
+  test("persists the shadow convert stage with the ready transition before queue delivery", async () => {
+    const persistence = new FakeBuildPersistence();
+    const initialPipelineStage = vi.fn(() => ({ inputDigest: "a".repeat(64) }));
+    const schedulePostBuild = vi.fn(async () => {});
+    const service = new BuildService(persistence, new FakeQueue(), {
+      initialPipelineStage,
+      schedulePostBuild
+    } as never);
+    const { build } = await service.startBuild(input());
+
+    await service.process(build.id);
+
+    expect(persistence.transitionBuildAndCreateInitialStage).toHaveBeenCalledWith(
+      build.id,
+      "validating",
+      "ready",
+      expect.objectContaining({ requireNotCancelled: true }),
+      { inputDigest: "a".repeat(64) }
+    );
+    expect(initialPipelineStage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: build.id }),
+      expect.arrayContaining([expect.objectContaining({ path: expect.any(String), contentHash: expect.any(String) })])
+    );
+    expect(schedulePostBuild).toHaveBeenCalledWith(
+      expect.objectContaining({ id: build.id, status: "ready" }),
+      { stageRunId: "stage-1", projectId: "project-1" }
+    );
   });
 
   test("reuses only a build with the same snapshot and purpose identity", async () => {

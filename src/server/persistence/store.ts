@@ -17,7 +17,7 @@ import type {
 import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
 import type { ImpactMindmap } from "../knowledge/pipeline/mindmap.js";
 import type { AGENT_FEEDBACK_STATUSES } from "../../shared/contracts.js";
-import type { LintIssue } from "../../shared/api-contracts.js";
+import type { LintIssue, SourceRef } from "../../shared/api-contracts.js";
 import type { RemediationState } from "../knowledge/remediation.js";
 
 export interface WorkspaceRecord {
@@ -40,6 +40,35 @@ export interface CreateStageRunInput {
   stage: BuildStage;
   attempt: number;
   inputDigest: string;
+  availableAt?: Date;
+}
+
+export interface CompleteStageRunInput {
+  workspaceId: string;
+  projectId: string;
+  stageRunId: string;
+  status: "succeeded" | "reused";
+  outputManifestIds?: string[];
+  next?: CreateStageRunInput;
+}
+
+export interface CompleteStageRunResult {
+  completed: PipelineStageRunRecord;
+  next: PipelineStageRunRecord | null;
+}
+
+export interface FailStageRunAndCreateRetryInput {
+  workspaceId: string;
+  projectId: string;
+  stageRunId: string;
+  errorCode: string;
+  errorDetail: string;
+  retry?: { inputDigest: string; availableAt: Date };
+}
+
+export interface FailStageRunAndCreateRetryResult {
+  failed: PipelineStageRunRecord | null;
+  retry: PipelineStageRunRecord | null;
 }
 
 export interface PipelineArtifactStore {
@@ -49,6 +78,13 @@ export interface PipelineArtifactStore {
     projectId: string,
     scope?: { buildId?: string; stage?: BuildStage }
   ): Promise<PipelineStageRunRecord | null>;
+  claimStageRun(
+    stageRunId: string,
+    buildId: string,
+    projectId: string
+  ): Promise<PipelineStageRunRecord | null>;
+  listQueuedStageRuns(): Promise<PipelineStageRunRecord[]>;
+  listStaleRunningStageRuns(staleBefore: Date): Promise<PipelineStageRunRecord[]>;
   transitionStageRun(
     workspaceId: string,
     projectId: string,
@@ -57,7 +93,12 @@ export interface PipelineArtifactStore {
     status: StageStatus,
     details?: { outputManifestIds?: string[]; errorCode?: string; errorDetail?: string }
   ): Promise<PipelineStageRunRecord | null>;
+  failStageRunAndCreateRetry(
+    input: FailStageRunAndCreateRetryInput
+  ): Promise<FailStageRunAndCreateRetryResult>;
+  completeStageRunAndCreateNext(input: CompleteStageRunInput): Promise<CompleteStageRunResult | null>;
   createArtifactWithAudit(manifest: ArtifactManifest, actorId?: string): Promise<ArtifactManifest>;
+  findArtifactById(artifactId: string): Promise<ArtifactManifest | null>;
   findReusableArtifact(
     workspaceId: string,
     projectId: string,
@@ -66,6 +107,10 @@ export interface PipelineArtifactStore {
     kind: string,
     inputDigest: string
   ): Promise<ArtifactManifest | null>;
+  recordArtifactCacheMiss(
+    manifest: ArtifactManifest,
+    reason: "content_missing"
+  ): Promise<void>;
 }
 
 export interface KnowledgeGraphRecord {
@@ -85,6 +130,43 @@ export interface SaveKnowledgeGraphInput {
 export interface GraphStore {
   saveKnowledgeGraph(input: SaveKnowledgeGraphInput): Promise<void>;
   getKnowledgeGraph(workspaceId: string, projectId: string, buildId: string): Promise<KnowledgeGraphRecord | null>;
+}
+
+export type PipelineSearchDocumentKind = "page" | "symbol" | "module" | "path" | "table" | "command";
+
+export interface PipelineSearchDocumentInput {
+  documentKey: string;
+  kind: PipelineSearchDocumentKind;
+  title: string;
+  content: string;
+  citations: SourceRef[];
+  metadata: Record<string, string | number | boolean>;
+}
+
+export interface PipelineSearchDocumentRecord extends PipelineSearchDocumentInput {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  snapshotId: string;
+  buildId: string;
+  sourceArtifactId: string;
+  createdAt: Date;
+}
+
+export interface PipelineSearchDocumentStore {
+  savePipelineSearchDocuments(input: {
+    workspaceId: string;
+    projectId: string;
+    snapshotId: string;
+    buildId: string;
+    sourceArtifactId: string;
+    documents: PipelineSearchDocumentInput[];
+  }): Promise<PipelineSearchDocumentRecord[]>;
+  listPipelineSearchDocuments(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineSearchDocumentRecord[]>;
 }
 
 export interface AdminRecord {
@@ -448,6 +530,8 @@ export interface ReleaseRecord {
   buildId: string;
   snapshotId: string;
   version: string;
+  kernelMode: "legacy" | "pipeline";
+  packageArtifactId: string | null;
   createdAt: Date;
   publishedAt: Date | null;
 }
@@ -562,8 +646,13 @@ export interface KnowledgeStore {
   ): Promise<ReleaseRecord[]>;
 }
 
-export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore {
+export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, PipelineSearchDocumentStore {
   listPipelineStageRuns(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineStageRunRecord[]>;
+  cancelPipelineStageRuns(
     workspaceId: string,
     projectId: string,
     buildId: string

@@ -31,6 +31,11 @@ export interface PutJsonResult {
   reused: boolean;
 }
 
+interface ReusableArtifactLookup {
+  manifest: ArtifactManifest | null;
+  cacheMiss: boolean;
+}
+
 function canonicalize(value: unknown): unknown {
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number") {
@@ -121,12 +126,29 @@ export class ArtifactStore {
     kind: string,
     inputDigest: string
   ): Promise<ArtifactManifest | null> {
+    return (await this.lookupReusable(workspaceId, projectId, snapshotId, stage, kind, inputDigest)).manifest;
+  }
+
+  private async lookupReusable(
+    workspaceId: string,
+    projectId: string,
+    snapshotId: string,
+    stage: ArtifactManifest["stage"],
+    kind: string,
+    inputDigest: string
+  ): Promise<ReusableArtifactLookup> {
     const existing = await this.persistence.findReusableArtifact(
       workspaceId, projectId, snapshotId, stage, kind, inputDigest
     );
-    if (!existing) return null;
-    await this.getJson(existing);
-    return existing;
+    if (!existing) return { manifest: null, cacheMiss: false };
+    try {
+      await this.getJson(existing);
+      return { manifest: existing, cacheMiss: false };
+    } catch (error) {
+      if (!(error instanceof ArtifactStoreIntegrityError) || error.message !== "Artifact content is unavailable") throw error;
+      await this.persistence.recordArtifactCacheMiss(existing, "content_missing");
+      return { manifest: null, cacheMiss: true };
+    }
   }
 
   async putJson(input: PutJsonInput): Promise<PutJsonResult> {
@@ -138,11 +160,11 @@ export class ArtifactStore {
       contentDigest,
       storageKey: this.storageKeyFor({ ...input.manifest, contentDigest })
     });
-    const reusable = await this.findReusable(
+    const reusable = await this.lookupReusable(
       candidate.workspaceId, candidate.projectId, candidate.snapshotId,
       candidate.stage, candidate.kind, candidate.inputDigest
     );
-    if (reusable) return { manifest: reusable, reused: true };
+    if (reusable.manifest) return { manifest: reusable.manifest, reused: true };
 
     const destination = this.absolutePath(candidate);
     const directory = path.dirname(destination);
@@ -175,7 +197,7 @@ export class ArtifactStore {
       }
       abortIfRequested(input.signal);
       const persisted = await this.persistence.createArtifactWithAudit(candidate, input.actorId);
-      return { manifest: persisted, reused: persisted.id !== candidate.id };
+      return { manifest: persisted, reused: !reusable.cacheMiss && persisted.id !== candidate.id };
     } catch (error) {
       if (temporary) await fs.rm(temporary, { force: true }).catch(() => undefined);
       if (wroteDestination) await fs.rm(destination, { force: true }).catch(() => undefined);

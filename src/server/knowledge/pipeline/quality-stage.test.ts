@@ -10,7 +10,6 @@ import {
   createKnowledgeQualityStageExecutor,
   knowledgeQualityInputDigest
 } from "./quality-stage";
-import type { PipelineStageJob } from "./worker";
 import type { PipelineStageRunRecord } from "../../persistence/store";
 import { MemoryAppStore } from "../../persistence/memory-store";
 
@@ -70,13 +69,8 @@ describe("knowledge quality pipeline stage", () => {
       stage: "lint", attempt: 1, status: "running", inputDigest, outputManifestIds: [],
       startedAt: "2026-07-15T00:00:00.000Z", finishedAt: null, errorCode: null, errorDetail: null
     };
-    const job: PipelineStageJob = {
-      workspaceId, projectId: project.id, snapshotId: snapshot.id, buildId: build.id,
-      stages: ["lint"], stageIndex: 0, inputDigest
-    };
-
-    const first = await execute(run, job);
-    const second = await execute(run, job);
+    const first = await execute(run);
+    const second = await execute(run);
 
     expect(first).toEqual({ outputManifestIds: [expect.any(String)], reused: false });
     expect(second).toEqual({ outputManifestIds: first.outputManifestIds, reused: true });

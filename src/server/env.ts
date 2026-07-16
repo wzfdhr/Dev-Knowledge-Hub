@@ -15,6 +15,8 @@ const legacySessionReadUntilSchema = z.string().datetime({ offset: true })
     "DEVKH_LEGACY_SESSION_READ_UNTIL must be within 24 hours")
   .transform((value) => new Date(value));
 
+const knowledgeKernelModeSchema = z.enum(["legacy", "shadow", "active"]);
+
 const sharedEnvSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
   HOST: z.string().min(1).default("127.0.0.1"),
@@ -24,7 +26,7 @@ const sharedEnvSchema = z.object({
   DEVKH_SESSION_SECRET: z.string().min(1).optional(),
   PUBLIC_BASE_URL: publicBaseUrlSchema.optional(),
   DEVKH_LEGACY_SESSION_READ_UNTIL: legacySessionReadUntilSchema.optional(),
-  KNOWLEDGE_PIPELINE_V2: z.enum(["true", "false"]).default("false").transform((value) => value === "true")
+  DEVKH_KNOWLEDGE_KERNEL_MODE: knowledgeKernelModeSchema.default("legacy")
 });
 
 const productionEnvSchema = sharedEnvSchema.extend({
@@ -45,7 +47,7 @@ export interface AppEnv {
   sessionSecret?: string;
   publicBaseUrl?: string;
   legacySessionReadUntil?: Date;
-  knowledgePipelineV2: boolean;
+  knowledgeKernelMode: z.infer<typeof knowledgeKernelModeSchema>;
 }
 
 export function loadEnv({
@@ -67,7 +69,7 @@ export function loadEnv({
       sessionSecret: parsed.DEVKH_SESSION_SECRET,
       publicBaseUrl: parsed.PUBLIC_BASE_URL,
       legacySessionReadUntil: parsed.DEVKH_LEGACY_SESSION_READ_UNTIL,
-      knowledgePipelineV2: parsed.KNOWLEDGE_PIPELINE_V2
+      knowledgeKernelMode: parsed.DEVKH_KNOWLEDGE_KERNEL_MODE
     };
   }
 
@@ -82,6 +84,6 @@ export function loadEnv({
     sessionSecret: parsed.DEVKH_SESSION_SECRET,
     publicBaseUrl: parsed.PUBLIC_BASE_URL,
     legacySessionReadUntil: parsed.DEVKH_LEGACY_SESSION_READ_UNTIL,
-    knowledgePipelineV2: parsed.KNOWLEDGE_PIPELINE_V2
+    knowledgeKernelMode: parsed.DEVKH_KNOWLEDGE_KERNEL_MODE
   };
 }

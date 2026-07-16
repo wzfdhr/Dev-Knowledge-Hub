@@ -15,7 +15,7 @@ import { syncRepository } from "./git/snapshot.js";
 import { PostgresSessionStore } from "./security/session-store.js";
 import { ArtifactStore } from "./knowledge/pipeline/artifact-store.js";
 import type { PipelineArtifactStore } from "./persistence/store.js";
-import { PipelineStageWorker, type PipelineStageJob } from "./knowledge/pipeline/worker.js";
+import { PipelineStageWorker, type PipelineStageSchedule } from "./knowledge/pipeline/worker.js";
 import { createKnowledgeQualityStageExecutor, knowledgeQualityInputDigest } from "./knowledge/pipeline/quality-stage.js";
 import { PgBossPipelineStageJobQueue } from "./knowledge/job-queue.js";
 
@@ -28,7 +28,7 @@ interface ArtifactStoreInitializer {
 interface QualityPipelineWorker {
   start(): Promise<void>;
   stop(): Promise<void>;
-  schedule(job: PipelineStageJob): Promise<void>;
+  schedule(job: PipelineStageSchedule): Promise<void>;
 }
 
 export interface BootstrapDependencies {
@@ -68,7 +68,8 @@ const defaultDependencies: BootstrapDependencies = {
     createKnowledgeQualityStageExecutor({
       store: store as AppStore & PipelineArtifactStore,
       artifactStore: artifactStore as ArtifactStore
-    })
+    }),
+    ["lint"]
   ),
   buildServer
 };
@@ -102,7 +103,9 @@ export async function bootstrapServer(
       ? anthropicEnhancer({ apiKey, model: config.model })
       : openAiCompatibleEnhancer({ apiKey, model: config.model });
   };
-  const qualityWorker = env.knowledgePipelineV2
+  // Before F05 the staged pipeline only runs as a shadow build. Legacy remains
+  // the sole source for published knowledge even when the future active mode is set.
+  const qualityWorker = env.knowledgeKernelMode === "shadow"
     ? dependencies.createQualityPipelineWorker(env.databaseUrl, store, artifactStore)
     : undefined;
   const schedulePostBuild = async (build: BuildRecord) => {
@@ -117,8 +120,6 @@ export async function bootstrapServer(
       projectId: repository.projectId,
       snapshotId: snapshot.id,
       buildId: build.id,
-      stages: ["lint"],
-      stageIndex: 0,
       inputDigest: knowledgeQualityInputDigest(snapshot, files, knowledgePageCount)
     });
   };

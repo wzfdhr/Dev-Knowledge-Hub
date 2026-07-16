@@ -16,19 +16,15 @@ vi.mock("pg-boss", () => ({ PgBoss: mocks.PgBoss }));
 import { PgBossPipelineStageJobQueue } from "./job-queue";
 
 const job = {
-  workspaceId: "workspace-1",
-  projectId: "project-1",
-  snapshotId: "snapshot-1",
   buildId: "build-1",
-  stages: ["convert", "extract"] as const,
-  stageIndex: 0,
-  inputDigest: "a".repeat(64)
+  projectId: "project-1",
+  stageRunId: "stage-run-1"
 };
 
 describe("PgBossPipelineStageJobQueue", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  test("uses an idempotency key scoped to one build stage", async () => {
+  test("uses an idempotency key scoped to one durable stage run", async () => {
     const queue = new PgBossPipelineStageJobQueue("postgres://localhost/devkh");
 
     await queue.send(job);
@@ -37,7 +33,7 @@ describe("PgBossPipelineStageJobQueue", () => {
     expect(mocks.boss.upsert).toHaveBeenCalledWith(
       "knowledge-pipeline-stage",
       job,
-      { singletonKey: "build-1:0" }
+      { singletonKey: "stage-run-1" }
     );
   });
 

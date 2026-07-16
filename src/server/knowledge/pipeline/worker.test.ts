@@ -1,6 +1,11 @@
 import { describe, expect, test } from "vitest";
 
-import { PipelineStageWorker, type PipelineStageJob, type PipelineStageJobQueue } from "./worker";
+import {
+  PipelineStageWorker,
+  type PipelineStageJob,
+  type PipelineStageJobQueue,
+  type PipelineStageSchedule
+} from "./worker";
 import type { PipelineArtifactStore, PipelineStageRunRecord } from "../../persistence/store";
 import type { BuildRecord } from "../build-service";
 
@@ -39,6 +44,10 @@ class FakePipelineStore implements PipelineArtifactStore {
     return run;
   }
 
+  async claimStageRun(stageRunId: string, buildId: string, projectId: string) {
+    return this.claimNextStageRun("workspace-1", projectId, { buildId, stage: this.runs.find((run) => run.id === stageRunId)?.stage });
+  }
+
   async transitionStageRun(_workspaceId: string, _projectId: string, stageRunId: string, expectedStatus: PipelineStageRunRecord["status"], status: PipelineStageRunRecord["status"], details = {}) {
     const run = this.runs.find((candidate) => candidate.id === stageRunId);
     if (!run || run.status !== expectedStatus) return null;
@@ -61,35 +70,50 @@ class FakeQueue implements PipelineStageJobQueue {
   async stop() {}
 }
 
-const job: PipelineStageJob = {
-  workspaceId: "workspace-1", projectId: "project-1", snapshotId: "snapshot-1", buildId: "build-1",
-  stages: ["convert", "extract", "graph"], stageIndex: 0, inputDigest: digest
+const job: PipelineStageSchedule = {
+  workspaceId: "workspace-1", projectId: "project-1", snapshotId: "snapshot-1", buildId: "build-1", inputDigest: digest
 };
+const stages = ["convert", "extract", "graph"] as const;
 
 describe("PipelineStageWorker", () => {
+  test("sends only durable stage, build, and project identifiers to the queue", async () => {
+    const store = new FakePipelineStore();
+    const queue = new FakeQueue();
+    const worker = new PipelineStageWorker(store, queue, async () => ({ outputManifestIds: [] }), stages);
+
+    await worker.schedule(job);
+
+    expect(queue.sent).toEqual([
+      { stageRunId: "run-1", buildId: "build-1", projectId: "project-1" }
+    ]);
+  });
+
   test("succeeds one stage, then persists and queues only the next stage", async () => {
     const store = new FakePipelineStore();
     const queue = new FakeQueue();
-    const worker = new PipelineStageWorker(store, queue, async () => ({ outputManifestIds: ["artifact-1"] }));
+    const worker = new PipelineStageWorker(store, queue, async () => ({ outputManifestIds: ["artifact-1"] }), stages);
     await worker.schedule(job);
 
-    await worker.process(job);
+    await worker.process(queue.sent[0]!);
 
     expect(store.runs).toEqual(expect.arrayContaining([
       expect.objectContaining({ stage: "convert", status: "succeeded", outputManifestIds: ["artifact-1"] }),
       expect.objectContaining({ stage: "extract", status: "queued" })
     ]));
     expect(store.runs.some((run) => run.stage === "graph")).toBe(false);
-    expect(queue.sent).toEqual([expect.objectContaining({ stageIndex: 0 }), expect.objectContaining({ stageIndex: 1 })]);
+    expect(queue.sent).toEqual([
+      { stageRunId: "run-1", buildId: "build-1", projectId: "project-1" },
+      { stageRunId: "run-2", buildId: "build-1", projectId: "project-1" }
+    ]);
   });
 
   test("does not schedule a downstream stage after a worker failure", async () => {
     const store = new FakePipelineStore();
     const queue = new FakeQueue();
-    const worker = new PipelineStageWorker(store, queue, async () => { throw new Error("parser failed"); });
+    const worker = new PipelineStageWorker(store, queue, async () => { throw new Error("parser failed"); }, stages);
     await worker.schedule(job);
 
-    await worker.process(job);
+    await worker.process(queue.sent[0]!);
 
     expect(store.runs).toEqual([expect.objectContaining({ stage: "convert", status: "failed", errorCode: "PIPELINE_STAGE_FAILED" })]);
     expect(queue.sent).toHaveLength(1);
@@ -101,10 +125,10 @@ describe("PipelineStageWorker", () => {
     const worker = new PipelineStageWorker(store, queue, async () => ({
       outputManifestIds: ["artifact-1"],
       reused: true
-    }));
+    }), stages);
     await worker.schedule(job);
 
-    await worker.process(job);
+    await worker.process(queue.sent[0]!);
 
     expect(store.runs).toEqual(expect.arrayContaining([
       expect.objectContaining({ stage: "convert", status: "reused", outputManifestIds: ["artifact-1"] }),
@@ -116,10 +140,10 @@ describe("PipelineStageWorker", () => {
     const store = new FakePipelineStore(createBuild(true));
     const queue = new FakeQueue();
     const execute = async () => { throw new Error("must not execute"); };
-    const worker = new PipelineStageWorker(store, queue, execute);
+    const worker = new PipelineStageWorker(store, queue, execute, stages);
     await worker.schedule(job);
 
-    await worker.process(job);
+    await worker.process(queue.sent[0]!);
 
     expect(store.runs).toEqual([expect.objectContaining({ stage: "convert", status: "cancelled" })]);
     expect(queue.sent).toHaveLength(1);
@@ -129,10 +153,10 @@ describe("PipelineStageWorker", () => {
     const store = new FakePipelineStore(null);
     const queue = new FakeQueue();
     const execute = async () => { throw new Error("must not execute"); };
-    const worker = new PipelineStageWorker(store, queue, execute);
+    const worker = new PipelineStageWorker(store, queue, execute, stages);
     await worker.schedule(job);
 
-    await worker.process(job);
+    await worker.process(queue.sent[0]!);
 
     expect(store.runs).toEqual([expect.objectContaining({ stage: "convert", status: "cancelled" })]);
     expect(queue.sent).toHaveLength(1);

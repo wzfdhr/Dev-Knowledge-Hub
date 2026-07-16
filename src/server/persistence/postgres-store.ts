@@ -726,6 +726,32 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     });
   }
 
+  async claimStageRun(
+    stageRunId: string,
+    buildId: string,
+    projectId: string
+  ): Promise<PipelineStageRunRecord | null> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<StageRunRow>(
+        `WITH updated AS (
+           UPDATE build_stage_runs
+           SET status = 'running', started_at = now(), updated_at = now()
+           WHERE id = $1 AND build_job_id = $2 AND project_id = $3 AND status = 'queued'
+           RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+                     input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail
+         ), event AS (
+           INSERT INTO build_stage_events
+             (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+           SELECT workspace_id, project_id, build_job_id, id, stage, status FROM updated
+           ON CONFLICT (stage_run_id, status) DO NOTHING
+         )
+         SELECT * FROM updated`,
+        [stageRunId, buildId, projectId]
+      );
+      return rows[0] ? stageRunRecord(rows[0]) : null;
+    });
+  }
+
   async transitionStageRun(
     workspaceId: string,
     projectId: string,

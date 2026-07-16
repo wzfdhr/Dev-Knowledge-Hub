@@ -41,7 +41,7 @@ export class PgBossPipelineStageJobQueue implements PipelineStageJobQueue {
     await this.boss.upsert(
       PIPELINE_STAGE_QUEUE,
       job,
-      { singletonKey: `${job.buildId}:${job.stageIndex}` }
+      { singletonKey: job.stageRunId }
     );
   }
 

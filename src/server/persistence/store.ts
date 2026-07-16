@@ -49,6 +49,11 @@ export interface PipelineArtifactStore {
     projectId: string,
     scope?: { buildId?: string; stage?: BuildStage }
   ): Promise<PipelineStageRunRecord | null>;
+  claimStageRun(
+    stageRunId: string,
+    buildId: string,
+    projectId: string
+  ): Promise<PipelineStageRunRecord | null>;
   transitionStageRun(
     workspaceId: string,
     projectId: string,

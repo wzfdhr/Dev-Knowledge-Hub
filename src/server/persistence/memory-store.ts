@@ -1669,6 +1669,22 @@ export class MemoryAppStore implements AppStore {
     return run;
   }
 
+  async claimStageRun(
+    stageRunId: string,
+    buildId: string,
+    projectId: string
+  ): Promise<PipelineStageRunRecord | null> {
+    const run = this.pipelineStageRuns.find((candidate) =>
+      candidate.id === stageRunId && candidate.buildId === buildId
+      && candidate.projectId === projectId && candidate.status === "queued"
+    );
+    if (!run) return null;
+    run.status = "running";
+    run.startedAt = new Date().toISOString();
+    this.recordPipelineStageEvent(run);
+    return run;
+  }
+
   async transitionStageRun(
     workspaceId: string,
     projectId: string,

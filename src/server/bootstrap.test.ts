@@ -43,7 +43,7 @@ describe("production bootstrap", () => {
     expect(deps.buildServer).not.toHaveBeenCalled();
   });
 
-  test("starts the staged quality worker only when the pipeline is explicitly enabled", async () => {
+  test("starts the staged pipeline worker only in explicit shadow mode", async () => {
     const deps = dependencies();
     const artifactStore = { initialize: vi.fn(async () => {}) };
     (deps as BootstrapDependencies & { createArtifactStore: (directory: string) => typeof artifactStore }).createArtifactStore = vi.fn(() => artifactStore);
@@ -53,7 +53,7 @@ describe("production bootstrap", () => {
       DEVKH_MASTER_KEY: masterKey,
       DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars",
       DATA_DIR: "/var/lib/devkh",
-      KNOWLEDGE_PIPELINE_V2: "true"
+      DEVKH_KNOWLEDGE_KERNEL_MODE: "shadow"
     }, deps);
 
     const database = vi.mocked(deps.createDatabase).mock.results[0].value;
@@ -85,12 +85,26 @@ describe("production bootstrap", () => {
     expect(server).toBe(vi.mocked(deps.buildServer).mock.results[0].value);
   });
 
-  test("keeps the staged quality worker inactive in the legacy default", async () => {
+  test("keeps the staged pipeline worker inactive in the legacy default", async () => {
     const deps = dependencies();
     await bootstrapProductionServer({
       DATABASE_URL: "postgres://localhost/devkh",
       DEVKH_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
       DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars"
+    }, deps);
+
+    expect(deps.createQualityPipelineWorker).not.toHaveBeenCalled();
+    const schedulePostBuild = vi.mocked(deps.createBuildService).mock.calls[0]![3]!;
+    await expect(schedulePostBuild({ id: "build-1" } as BuildRecord)).resolves.toBeUndefined();
+  });
+
+  test("does not activate the staged pipeline from active mode before F05", async () => {
+    const deps = dependencies();
+    await bootstrapProductionServer({
+      DATABASE_URL: "postgres://localhost/devkh",
+      DEVKH_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
+      DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars",
+      DEVKH_KNOWLEDGE_KERNEL_MODE: "active"
     }, deps);
 
     expect(deps.createQualityPipelineWorker).not.toHaveBeenCalled();
@@ -104,7 +118,7 @@ describe("production bootstrap", () => {
       DATABASE_URL: "postgres://localhost/devkh",
       DEVKH_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
       DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars",
-      KNOWLEDGE_PIPELINE_V2: "true"
+      DEVKH_KNOWLEDGE_KERNEL_MODE: "shadow"
     }, deps);
 
     const persistedStore = vi.mocked(deps.createStore).mock.results[0].value as {
@@ -129,7 +143,7 @@ describe("production bootstrap", () => {
     const qualityWorker = vi.mocked(deps.createQualityPipelineWorker).mock.results[0].value;
     expect(qualityWorker.schedule).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "workspace-1", projectId: "project-1", snapshotId: "snapshot-1", buildId: "build-1",
-      stages: ["lint"], stageIndex: 0, inputDigest: expect.stringMatching(/^[a-f0-9]{64}$/)
+      inputDigest: expect.stringMatching(/^[a-f0-9]{64}$/)
     }));
   });
 

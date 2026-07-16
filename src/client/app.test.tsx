@@ -801,6 +801,8 @@ describe("knowledge citations", () => {
       }] }),
       getKnowledgeMetadata: vi.fn().mockResolvedValue({ symbols: [], dependencies: [] }),
       listKnowledgePages: vi.fn().mockResolvedValue({ pages: [] }),
+      session: vi.fn().mockResolvedValue({ admin: { id: "admin-1", email: "admin@example.com", role: "admin" } }),
+      listProjectMembers: vi.fn().mockResolvedValue({ members: [{ id: "admin-1", email: "admin@example.com", role: "admin" }] }),
       getProjectKnowledgeQuality: vi.fn().mockResolvedValue({
         repository: { id: "repo" }, latestSnapshot: null, currentRelease: null, latestBuild: null,
         pendingFeedbackCount: 0, indexedTextBytes: 0,
@@ -810,7 +812,8 @@ describe("knowledge citations", () => {
         assessment: { trust: { targetKind: "knowledge", targetId: "module:payments", score: 0.8, citationScore: 1, parserScore: 1, freshnessScore: 1, lintPenalty: 0, reasons: ["引用完整"] }, issueTotal: 1, issues: [] },
         change: null, diagnostics: [{ code: "PUBLISHED" }]
       }),
-      listProjectRemediations
+      listProjectRemediations,
+      transitionProjectRemediation: vi.fn().mockResolvedValue({ remediation: { id: "remediation-1", state: "accepted" } })
     } as unknown as ApiClient;
     localStorage.setItem("devkh:active-project-id", "project-1");
 
@@ -830,6 +833,19 @@ describe("knowledge citations", () => {
     expect(within(governance).getByText("src/payments.ts:12-24")).toBeVisible();
     expect(within(governance).getByText("build-1")).toBeVisible();
     expect(within(governance).getByText("引用完整")).toBeVisible();
+    const actions = await within(governance).findByRole("group", { name: "质量问题操作" });
+    await user.click(within(actions).getByRole("button", { name: "接受处理" }));
+    await waitFor(() => expect(api.transitionProjectRemediation).toHaveBeenCalledWith(
+      "project-1", "remediation-1", { state: "accepted" }
+    ));
+    await user.click(within(actions).getByRole("button", { name: "忽略" }));
+    const dismissalReason = within(actions).getByLabelText("忽略理由");
+    expect(within(actions).getByRole("button", { name: "确认忽略" })).toBeDisabled();
+    await user.type(dismissalReason, "该规则不适用于当前项目");
+    await user.click(within(actions).getByRole("button", { name: "确认忽略" }));
+    await waitFor(() => expect(api.transitionProjectRemediation).toHaveBeenLastCalledWith(
+      "project-1", "remediation-1", { state: "dismissed", reason: "该规则不适用于当前项目" }
+    ));
   });
 });
 

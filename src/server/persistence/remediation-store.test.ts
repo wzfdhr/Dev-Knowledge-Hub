@@ -55,6 +55,21 @@ describe("remediation persistence", () => {
     });
     expect(replay.id).toBe(remediation.id);
     await expect(store.listRemediations(setup!.workspace.id, project.id)).resolves.toHaveLength(1);
+
+    await expect(store.transitionRemediationWithAudit(
+      setup!.workspace.id, remediation.id, "dismissed", setup!.admin.id
+    )).rejects.toThrow("Dismissal reason is required");
+    const dismissed = await store.transitionRemediationWithAudit(
+      setup!.workspace.id, remediation.id, "dismissed", setup!.admin.id, "The warning duplicates an accepted policy exception"
+    );
+    const repeatedDismissal = await store.transitionRemediationWithAudit(
+      setup!.workspace.id, remediation.id, "dismissed", setup!.admin.id, "The warning duplicates an accepted policy exception"
+    );
+    expect(repeatedDismissal).toEqual(dismissed);
+    await expect(store.listRemediationEvents(setup!.workspace.id, remediation.id)).resolves.toEqual([
+      expect.objectContaining({ toState: "dismissed", reason: "The warning duplicates an accepted policy exception" })
+    ]);
+    expect(store.auditEvents.filter((event) => event.resourceId === remediation.id)).toHaveLength(1);
   });
 
   test("starts an accepted case as an auditable remediation build without publishing", async () => {

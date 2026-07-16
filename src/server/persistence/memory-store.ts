@@ -1043,7 +1043,8 @@ export class MemoryAppStore implements AppStore {
     workspaceId: string,
     remediationId: string,
     state: RemediationState,
-    actorId: string | null
+    actorId: string | null,
+    reason?: string
   ): RemediationRecord | null {
     const remediation = this.remediations.find((record) =>
       record.workspaceId === workspaceId && record.id === remediationId
@@ -1055,6 +1056,7 @@ export class MemoryAppStore implements AppStore {
     remediation.updatedAt = new Date();
     this.remediationEvents.push({
       id: randomUUID(), workspaceId, remediationId, fromState, toState: state, actorId,
+      reason: reason ?? null,
       createdAt: remediation.updatedAt
     });
     return remediation;
@@ -1064,18 +1066,22 @@ export class MemoryAppStore implements AppStore {
     workspaceId: string,
     remediationId: string,
     state: RemediationState,
-    actorId: string
+    actorId: string,
+    reason?: string
   ): Promise<RemediationRecord | null> {
+    const dismissalReason = reason?.trim();
+    if (state === "dismissed" && !dismissalReason) throw new Error("Dismissal reason is required");
     const remediation = await this.getRemediation(workspaceId, remediationId);
     if (!remediation) return null;
+    if (remediation.state === state) return remediation;
     const previous = { state: remediation.state, updatedAt: remediation.updatedAt };
     const eventLength = this.remediationEvents.length;
     const auditLength = this.auditEvents.length;
     try {
-      const updated = this.transitionRemediation(workspaceId, remediationId, state, actorId)!;
+      const updated = this.transitionRemediation(workspaceId, remediationId, state, actorId, dismissalReason)!;
       await this.recordAudit({
         workspaceId, actorId, action: "remediation.transitioned", resourceType: "remediation",
-        resourceId: remediationId, metadata: { fromState: previous.state, toState: state }
+        resourceId: remediationId, metadata: { fromState: previous.state, toState: state, ...(dismissalReason ? { reason: dismissalReason } : {}) }
       });
       return updated;
     } catch (error) {

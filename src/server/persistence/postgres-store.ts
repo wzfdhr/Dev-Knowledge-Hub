@@ -154,6 +154,7 @@ interface RemediationEventRow extends QueryResultRow {
   from_state: RemediationState;
   to_state: RemediationState;
   actor_id: string | null;
+  reason: string | null;
   created_at: Date;
 }
 
@@ -460,6 +461,7 @@ function remediationEventRecord(row: RemediationEventRow): RemediationEventRecor
     fromState: row.from_state,
     toState: row.to_state,
     actorId: row.actor_id,
+    reason: row.reason,
     createdAt: row.created_at
   };
 }
@@ -2651,7 +2653,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
 
   async listRemediationEvents(workspaceId: string, remediationId: string): Promise<RemediationEventRecord[]> {
     const { rows } = await this.pool.query<RemediationEventRow>(
-      `SELECT id, workspace_id, remediation_id, from_state, to_state, actor_id, created_at
+      `SELECT id, workspace_id, remediation_id, from_state, to_state, actor_id, reason, created_at
        FROM remediation_events
        WHERE workspace_id = $1 AND remediation_id = $2
        ORDER BY sequence ASC`,
@@ -2664,8 +2666,11 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     workspaceId: string,
     remediationId: string,
     state: RemediationState,
-    actorId: string
+    actorId: string,
+    reason?: string
   ): Promise<RemediationRecord | null> {
+    const dismissalReason = reason?.trim();
+    if (state === "dismissed" && !dismissalReason) throw new Error("Dismissal reason is required");
     return this.transaction(async (client) => {
       const selected = await client.query<RemediationRow>(
         `SELECT id, workspace_id, project_id, repository_id, source_build_id, issue, state,
@@ -2675,6 +2680,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       );
       const existing = selected.rows[0];
       if (!existing) return null;
+      if (existing.state === state) return remediationRecord(existing);
       transitionRemediation(existing.state, state);
       const updated = await client.query<RemediationRow>(
         `UPDATE remediation_cases SET state = $3, updated_at = now()
@@ -2685,13 +2691,13 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       );
       const remediation = remediationRecord(updated.rows[0]);
       await client.query(
-        `INSERT INTO remediation_events (workspace_id, remediation_id, from_state, to_state, actor_id)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [workspaceId, remediationId, existing.state, state, actorId]
+        `INSERT INTO remediation_events (workspace_id, remediation_id, from_state, to_state, actor_id, reason)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [workspaceId, remediationId, existing.state, state, actorId, dismissalReason ?? null]
       );
       await this.insertAudit(client, {
         workspaceId, actorId, action: "remediation.transitioned", resourceType: "remediation",
-        resourceId: remediationId, metadata: { fromState: existing.state, toState: state }
+        resourceId: remediationId, metadata: { fromState: existing.state, toState: state, ...(dismissalReason ? { reason: dismissalReason } : {}) }
       });
       return remediation;
     });

@@ -1,5 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
-import { FileCode2, ShieldCheck } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Check, FileCode2, ShieldCheck, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { errorMessage, type ApiClient, type RemediationListParams } from "../api/client";
@@ -37,17 +37,44 @@ export function QualityGovernancePanel({
   const [severity, setSeverity] = useState<"error" | "warning" | "info">();
   const [rule, setRule] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [dismissing, setDismissing] = useState(false);
+  const [dismissalReason, setDismissalReason] = useState("");
+  const queryClient = useQueryClient();
   const params = filterParams(state, severity, rule);
   const query = useQuery({
     queryKey: ["project-remediations", projectId, params],
     queryFn: () => api.listProjectRemediations(projectId, params),
     retry: false
   });
+  const session = useQuery({ queryKey: ["session"], queryFn: api.session, retry: false });
+  const members = useQuery({
+    queryKey: ["project-members", projectId],
+    queryFn: () => api.listProjectMembers(projectId),
+    enabled: Boolean(session.data?.admin.id),
+    retry: false
+  });
+  const transition = useMutation({
+    mutationFn: ({ remediationId, state, reason }: { remediationId: string; state: "accepted" | "dismissed" | "resolved"; reason?: string }) =>
+      api.transitionProjectRemediation(projectId, remediationId, { state, ...(reason ? { reason } : {}) }),
+    onSuccess: () => {
+      setDismissing(false);
+      setDismissalReason("");
+      return Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["project-remediations", projectId] }),
+        queryClient.invalidateQueries({ queryKey: ["project-knowledge-quality", projectId] })
+      ]);
+    }
+  });
   const items = query.data?.remediations ?? [];
   const selected = items.find((item) => item.id === selectedId) ?? null;
+  const ownMembership = members.data?.members.find((member) => member.id === session.data?.admin.id);
+  const canManage = session.data?.admin.role === "admin" || ownMembership?.role === "admin";
 
   useEffect(() => {
-    if (selectedId && !items.some((item) => item.id === selectedId)) setSelectedId(null);
+    if (selectedId && !items.some((item) => item.id === selectedId)) {
+      setSelectedId(null);
+      setDismissing(false);
+    }
   }, [items, selectedId]);
 
   const updateState = (value: string) => {
@@ -88,7 +115,10 @@ export function QualityGovernancePanel({
             <div><dt>重建关联</dt><dd className="mono">{selected.rebuildBuildId ?? "尚未创建局部重建"}</dd></div>
             <div><dt>来源引用</dt><dd>{selected.issue.sourceRefs.length ? <div className="citations">{selected.issue.sourceRefs.map((ref) => <span key={`${ref.path}-${ref.startLine}-${ref.endLine}`}><FileCode2 aria-hidden="true" />{ref.path}:{ref.startLine}-{ref.endLine}</span>)}</div> : "此问题没有来源引用。"}</dd></div>
             <div><dt>质量依据</dt><dd>{assessment?.trust.reasons.length ? assessment.trust.reasons.join("；") : "当前构建尚未产出可验证的 Trust 说明。"}</dd></div>
-          </dl>
+          </dl>{canManage && selected.state === "open" && <div className="quality-actions" role="group" aria-label="质量问题操作">
+            <button className="button primary" disabled={transition.isPending} onClick={() => transition.mutate({ remediationId: selected.id, state: "accepted" })}><Check aria-hidden="true" />接受处理</button>
+            {!dismissing ? <button className="button" disabled={transition.isPending} onClick={() => setDismissing(true)}><XCircle aria-hidden="true" />忽略</button> : <form className="quality-dismiss-form" onSubmit={(event) => { event.preventDefault(); transition.mutate({ remediationId: selected.id, state: "dismissed", reason: dismissalReason.trim() }); }}><label>忽略理由<input aria-label="忽略理由" value={dismissalReason} onChange={(event) => setDismissalReason(event.target.value)} maxLength={500} /></label><button className="button danger" type="submit" disabled={!dismissalReason.trim() || transition.isPending}>确认忽略</button><button className="button" type="button" disabled={transition.isPending} onClick={() => { setDismissing(false); setDismissalReason(""); }}>取消</button></form>}
+          </div>}{transition.error && <ErrorState message={errorMessage(transition.error)} />}
         </> : <div className="document-empty"><ShieldCheck aria-hidden="true" /><h3>选择一个质量问题</h3><p>查看来源引用、关联构建和可信质量依据。</p></div>}
       </aside>
     </div>}

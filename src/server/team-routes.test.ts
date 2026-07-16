@@ -447,6 +447,21 @@ describe("team projects and members", () => {
     });
     expect(accepted.statusCode).toBe(200);
     expect(accepted.json()).toMatchObject({ remediation: { id: remediation.id, state: "accepted" } });
+    const missingDismissalReason = await app.inject({
+      method: "PATCH", url: `/api/projects/${project.id}/remediations/${errorRemediation.id}`,
+      headers: { cookie, ...csrfHeaders(cookie) }, payload: { state: "dismissed" }
+    });
+    expect(missingDismissalReason.statusCode).toBe(400);
+    const dismissed = await app.inject({
+      method: "PATCH", url: `/api/projects/${project.id}/remediations/${errorRemediation.id}`,
+      headers: { cookie, ...csrfHeaders(cookie) }, payload: { state: "dismissed", reason: "误报，边已由来源文件证明" }
+    });
+    expect(dismissed.statusCode).toBe(200);
+    const repeatedDismissal = await app.inject({
+      method: "PATCH", url: `/api/projects/${project.id}/remediations/${errorRemediation.id}`,
+      headers: { cookie, ...csrfHeaders(cookie) }, payload: { state: "dismissed", reason: "误报，边已由来源文件证明" }
+    });
+    expect(repeatedDismissal.statusCode).toBe(200);
     expect((await app.inject({
       method: "POST", url: `/api/projects/${project.id}/remediations/${remediation.id}/rebuild`,
       headers: { cookie, ...csrfHeaders(cookie) }
@@ -456,6 +471,14 @@ describe("team projects and members", () => {
       headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) }
     });
     expect(events.statusCode).toBe(200);
+    const dismissalEvents = await app.inject({
+      method: "GET", url: `/api/projects/${project.id}/remediations/${errorRemediation.id}/events`,
+      headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) }
+    });
+    expect(dismissalEvents.statusCode).toBe(200);
+    expect(dismissalEvents.json()).toMatchObject({
+      events: [expect.objectContaining({ fromState: "open", toState: "dismissed", reason: "误报，边已由来源文件证明" })]
+    });
     expect(events.json()).toMatchObject({ events: [expect.objectContaining({ fromState: "open", toState: "accepted", actorId: admin.id })] });
   });
 

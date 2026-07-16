@@ -524,6 +524,7 @@ export const remediationEvents = pgTable("remediation_events", {
   fromState: text("from_state").$type<RemediationState>().notNull(),
   toState: text("to_state").$type<RemediationState>().notNull(),
   actorId: uuid("actor_id"),
+  reason: text("reason"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
 }, (table) => [
   uniqueIndex("remediation_events_id_workspace_idx").on(table.id, table.workspaceId),

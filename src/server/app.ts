@@ -133,6 +133,14 @@ const remediationListQuerySchema = z.object({
   severity: z.enum(["error", "warning", "info"]).optional(),
   rule: z.string().trim().min(1).max(120).optional()
 });
+const remediationTransitionSchema = z.object({
+  state: z.enum(["accepted", "dismissed", "resolved"]),
+  reason: z.string().trim().min(1).max(500).optional()
+}).superRefine((value, context) => {
+  if (value.state === "dismissed" && !value.reason) {
+    context.addIssue({ code: "custom", path: ["reason"], message: "Dismissal reason is required" });
+  }
+});
 const qualityQuerySchema = z.object({
   issueLimit: z.coerce.number().int().min(1).max(100).default(50)
 });
@@ -1173,7 +1181,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.patch("/api/projects/:projectId/remediations/:remediationId", { preHandler: requireAdmin }, async (request, reply) => {
     const params = z.object({ projectId: z.uuid(), remediationId: z.uuid() }).safeParse(request.params);
-    const body = z.object({ state: z.enum(["accepted", "dismissed", "resolved"]) }).safeParse(request.body);
+    const body = remediationTransitionSchema.safeParse(request.body);
     if (!params.success || !body.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid remediation transition");
     await requireProjectRole("admin", params.data.projectId, request, reply);
     if (reply.sent) return;
@@ -1184,7 +1192,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
     try {
       const remediation = await options.store.transitionRemediationWithAudit(
-        admin.workspaceId, existing.id, body.data.state, admin.id
+        admin.workspaceId, existing.id, body.data.state, admin.id, body.data.reason
       );
       return { remediation };
     } catch (error) {

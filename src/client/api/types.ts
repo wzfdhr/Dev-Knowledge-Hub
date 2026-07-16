@@ -67,6 +67,7 @@ export interface RemediationEvent {
   fromState: RemediationState;
   toState: RemediationState;
   actorId: string | null;
+  reason: string | null;
   createdAt: string;
 }
 export interface WorkspaceOverview {

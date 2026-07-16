@@ -370,6 +370,7 @@ export interface RemediationEventRecord {
   fromState: RemediationState;
   toState: RemediationState;
   actorId: string | null;
+  reason: string | null;
   createdAt: Date;
 }
 
@@ -837,7 +838,8 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
     workspaceId: string,
     remediationId: string,
     state: RemediationState,
-    actorId: string
+    actorId: string,
+    reason?: string
   ): Promise<RemediationRecord | null>;
   requestRemediationBuildWithAudit(
     input: RemediationBuildInput

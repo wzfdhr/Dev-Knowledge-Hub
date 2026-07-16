@@ -41,6 +41,20 @@ describe("release API client", () => {
 });
 
 describe("build API client", () => {
+  test("requests a comparison for one exact encoded build ID", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      buildId: "build / shadow", comparison: { blockingDefects: [], compatibilityDifferences: [], expectedImprovements: [], citations: { valid: true, total: 0, invalid: [] } }
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.getBuildComparison("build / shadow");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/builds/build%20%2F%20shadow/comparison",
+      expect.objectContaining({ credentials: "same-origin" })
+    );
+  });
+
   test("sends an explicit LLM opt-in only when requested", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({
       build: { id: "build-1", status: "queued" }, created: true

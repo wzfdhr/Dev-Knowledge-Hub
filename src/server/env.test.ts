@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 import { describe, expect, test } from "vitest";
 
 import { loadEnv } from "./env";
@@ -19,6 +21,13 @@ describe("loadEnv", () => {
       mode: "development",
       env: { DEVKH_KNOWLEDGE_KERNEL_MODE: "shadow" }
     }).knowledgeKernelMode).toBe("shadow");
+  });
+
+  test("documents the supported legacy kernel baseline instead of the retired pipeline switch", async () => {
+    const example = await readFile(".env.example", "utf8");
+
+    expect(example).toContain("DEVKH_KNOWLEDGE_KERNEL_MODE=legacy");
+    expect(example).not.toContain("KNOWLEDGE_PIPELINE_V2");
   });
 
   test("accepts only the documented knowledge kernel modes", () => {

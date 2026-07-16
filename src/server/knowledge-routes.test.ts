@@ -115,6 +115,20 @@ describe("knowledge API contracts", () => {
     expect(denied.statusCode).toBe(403);
     expect(denied.json()).toMatchObject({ error: { code: "FORBIDDEN" } });
 
+    const originalRecordAudit = store.recordAudit.bind(store);
+    store.recordAudit = async (event) => {
+      if (event.action === "release.rolled_back") throw new Error("audit connection failed");
+      await originalRecordAudit(event);
+    };
+    const failed = await app.inject({
+      method: "POST", url: `/api/releases/${first.id}/rollback`, headers: { cookie, ...csrfHeaders(cookie) }
+    });
+    expect(failed.statusCode).toBe(500);
+    expect(failed.json()).toMatchObject({ error: { code: "ROLLBACK_FAILED", message: "Rollback could not be completed" } });
+    expect(failed.body).not.toContain("audit connection failed");
+    expect((await store.currentRelease(workspaceId, repositoryId))?.id).toBe(second.id);
+
+    store.recordAudit = originalRecordAudit;
     const response = await app.inject({
       method: "POST", url: `/api/releases/${first.id}/rollback`, headers: { cookie, ...csrfHeaders(cookie) }
     });

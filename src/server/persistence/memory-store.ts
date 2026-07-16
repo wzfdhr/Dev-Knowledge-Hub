@@ -5,6 +5,7 @@ import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledg
 import {
   boundedKnowledgePage,
   FeedbackNotAcknowledgedError,
+  InvalidLegacyReleaseRollbackError,
   InvalidFeedbackTransitionError,
   LastProjectAdminError,
   LastWorkspaceAdminError,
@@ -2202,7 +2203,7 @@ export class MemoryAppStore implements AppStore {
       candidate.workspaceId === workspaceId && candidate.id === release.repositoryId
     );
     if (!release || !repository || release.publishedAt === null || release.kernelMode !== "legacy") {
-      throw new Error("Only a published legacy release can be restored");
+      throw new InvalidLegacyReleaseRollbackError();
     }
     const channelKey = `${workspaceId}:${release.repositoryId}:current`;
     const previousReleaseId = this.releaseChannels.get(channelKey) ?? null;

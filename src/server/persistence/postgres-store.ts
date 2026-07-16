@@ -3,6 +3,7 @@ import type { Pool, PoolClient, QueryResultRow } from "pg";
 import {
   boundedKnowledgePage,
   FeedbackNotAcknowledgedError,
+  InvalidLegacyReleaseRollbackError,
   InvalidFeedbackTransitionError,
   LastProjectAdminError,
   LastWorkspaceAdminError,
@@ -4002,7 +4003,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       );
       const release = selected.rows[0];
       if (!release || release.published_at === null || release.kernel_mode !== "legacy") {
-        throw new Error("Only a published legacy release can be restored");
+        throw new InvalidLegacyReleaseRollbackError();
       }
       const current = await client.query<{ release_id: string }>(
         `SELECT release_id FROM release_channels

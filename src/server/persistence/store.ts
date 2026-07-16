@@ -262,6 +262,13 @@ export class LastWorkspaceAdminError extends Error {
   }
 }
 
+export class InvalidLegacyReleaseRollbackError extends Error {
+  constructor() {
+    super("Only a published legacy release can be restored");
+    this.name = "InvalidLegacyReleaseRollbackError";
+  }
+}
+
 export interface AuditEventInput {
   workspaceId: string;
   actorId?: string;

@@ -1,5 +1,5 @@
 import type {
-  ApiErrorShape, Build, PipelineStageRun, Feedback, McpConnection, McpToken, KnowledgePageRecord,
+  ApiErrorShape, Build, PipelineStageRun, Feedback, McpConnection, McpToken, KnowledgePageRecord, KnowledgeKernelComparison,
   ArchivedRepository, KnowledgeMetadata, ProjectKnowledgeQuality, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotChangeSummary, SnapshotSummary, SourceExcerpt,
   UploadSnapshotSummary, ImportReport, TeamMember, ProjectMember, Project, ProjectSummary, ProjectActivity, CodexConnectionPack,
   Remediation, RemediationEvent, RemediationState,
@@ -113,6 +113,7 @@ export interface ApiClient {
     pipelineStatus: Build["status"] | null;
     stages: PipelineStageRun[];
   }>;
+  getBuildComparison(id: string): Promise<{ buildId: string; comparison: KnowledgeKernelComparison }>;
   startBuild(snapshotId: string, options?: { allowLlm?: boolean }): Promise<{ build: Build; created: boolean }>;
   cancelBuild(id: string): Promise<{ build: Build }>;
   listReleases(pagination: PaginationParams): Promise<{ releases: Release[] } & PaginatedResponse>;
@@ -237,6 +238,7 @@ export const api: ApiClient = {
   ),
   listBuilds: (pagination) => request(listPath("/api/builds", pagination)),
   getBuildStages: (id) => request(`/api/builds/${encodeURIComponent(id)}/stages`),
+  getBuildComparison: (id) => request(`/api/builds/${encodeURIComponent(id)}/comparison`),
   startBuild: (snapshotId, options) => request("/api/builds", {
     method: "POST",
     body: json({ snapshotId, ...(options?.allowLlm ? { allowLlm: true } : {}) })

@@ -18,6 +18,7 @@ import { lintIssueSchema, trustScoreSchema, type ArtifactManifest } from "../sha
 import { MAX_IMPORT_TABLE_WORKBOOK_BYTES } from "../shared/import-filter.js";
 import {
   FeedbackNotAcknowledgedError,
+  InvalidLegacyReleaseRollbackError,
   InvalidFeedbackTransitionError,
   LastProjectAdminError,
   LastWorkspaceAdminError,
@@ -2160,7 +2161,10 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       );
       return { release: result.release, previousReleaseId: result.previousReleaseId };
     } catch (error) {
-      return sendError(reply, 409, "ROLLBACK_FAILED", error instanceof Error ? error.message : "Rollback failed");
+      if (error instanceof InvalidLegacyReleaseRollbackError) {
+        return sendError(reply, 409, "ROLLBACK_NOT_ALLOWED", error.message);
+      }
+      return sendError(reply, 500, "ROLLBACK_FAILED", "Rollback could not be completed");
     }
   });
 

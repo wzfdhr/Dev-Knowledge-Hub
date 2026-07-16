@@ -479,7 +479,7 @@ integration("PostgreSQL cited knowledge integration", () => {
   }, 60_000);
 
   test(databaseUrl
-    ? "executes the legacy release backfill in batches and writes its report"
+    ? "retains legacy release provenance and reports absent build snapshots without mutations"
     : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
     if (!databaseUrl) return;
     pool ??= new Pool({ connectionString: databaseUrl });
@@ -517,20 +517,45 @@ integration("PostgreSQL cited knowledge integration", () => {
       await store.transitionBuild(build.id, "queued", "ready");
       const release = await store.createReleaseDraft(setup!.workspace.id, repository!.id, build.id, "1.0.0");
       await store.publishRelease(setup!.workspace.id, release.id);
+      await pool.query("UPDATE build_jobs SET snapshot_id = NULL WHERE id = $1", [build.id]);
+      await pool.query(`
+        CREATE FUNCTION reject_pipeline_history_release_updates()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'pipeline history backfill must not update releases';
+        END;
+        $$;
+        CREATE TRIGGER reject_pipeline_history_release_updates
+          BEFORE UPDATE ON releases
+          FOR EACH ROW EXECUTE FUNCTION reject_pipeline_history_release_updates();
+      `);
 
       await execute(process.execPath, [path.resolve("scripts/backfill-pipeline-history.mjs")], {
         env: { ...process.env, DATABASE_URL: databaseUrl, PIPELINE_HISTORY_REPORT: reportPath }
       });
+      const firstReport = await readFile(reportPath, "utf8");
+      await execute(process.execPath, [path.resolve("scripts/backfill-pipeline-history.mjs")], {
+        env: { ...process.env, DATABASE_URL: databaseUrl, PIPELINE_HISTORY_REPORT: reportPath }
+      });
 
-      await expect(readFile(reportPath, "utf8").then(JSON.parse)).resolves.toMatchObject({
-        schemaVersion: 1,
+      expect(await readFile(reportPath, "utf8")).toBe(firstReport);
+      expect(JSON.parse(firstReport)).toEqual({
+        schemaVersion: 2,
+        policy: "legacy-provenance-only",
         batchSize: 500,
-        backfilled: 1,
-        missingSnapshots: []
+        legacyReleasesRetained: 1,
+        missingSnapshots: [{
+          releaseId: release.id,
+          workspaceId: setup!.workspace.id,
+          buildId: build.id,
+          snapshotId: null
+        }]
       });
       await expect(store.currentRelease(setup!.workspace.id, repository!.id))
         .resolves.toMatchObject({ id: release.id, kernelMode: "legacy", packageArtifactId: null });
     } finally {
+      await pool.query("DROP TRIGGER IF EXISTS reject_pipeline_history_release_updates ON releases");
+      await pool.query("DROP FUNCTION IF EXISTS reject_pipeline_history_release_updates()");
       await rm(reportDirectory, { recursive: true, force: true });
     }
   }, 30_000);

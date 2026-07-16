@@ -7,11 +7,13 @@ import { describe, expect, test } from "vitest";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 describe("pipeline history backfill", () => {
-  test("is batched and reports missing snapshots", async () => {
+  test("scans legacy releases in batches without a release mutation query", async () => {
     const script = await readFile(path.join(root, "scripts/backfill-pipeline-history.mjs"), "utf8");
 
     expect(script).toContain("const BATCH_SIZE = 500");
     expect(script).toContain("missingSnapshots");
-    expect(script).toContain("kernel_mode = 'legacy'");
+    expect(script).toContain("legacyReleasesRetained");
+    expect(script).toContain("legacy-provenance-only");
+    expect(script).not.toContain("UPDATE releases");
   });
 });

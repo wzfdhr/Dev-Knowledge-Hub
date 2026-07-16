@@ -1,0 +1,20 @@
+{
+  "name": "knowledge-evaluation-b",
+  "scripts": {
+    "build": "node ./scripts/build.js",
+    "verify": "node ./scripts/verify.js",
+    "lint": "node ./scripts/lint.js",
+    "unit": "node ./scripts/unit.js",
+    "integration": "node ./scripts/integration.js",
+    "smoke": "node ./scripts/smoke.js",
+    "release-check": "node ./scripts/release-check.js",
+    "format": "node ./scripts/format.js",
+    "typecheck": "node ./scripts/typecheck.js",
+    "security": "node ./scripts/security.js",
+    "migrate": "node ./scripts/migrate.js",
+    "seed": "node ./scripts/seed.js",
+    "dev": "node ./scripts/dev.js",
+    "start": "node ./scripts/start.js",
+    "test": "node ./scripts/test.js"
+  }
+}

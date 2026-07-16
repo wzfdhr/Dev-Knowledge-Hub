@@ -1,7 +1,7 @@
 import { authenticatedCookie, csrfHeaders } from "../test-support/csrf";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -16,6 +16,13 @@ import { requireIsolatedTestDatabase } from "../../test/integration-database";
 import { buildServer } from "../app";
 import { syncRepository } from "../git/snapshot";
 import { BuildService } from "../knowledge/build-service";
+import { analyzeSnapshot } from "../knowledge/intelligence";
+import { generateKnowledge } from "../knowledge/generator";
+import {
+  assertRetrievalQuality,
+  evaluateRetrievalCasesWithDetails,
+  parseRetrievalCases
+} from "../knowledge/retrieval-evaluation-v2";
 import { PgBossBuildJobQueue } from "../knowledge/job-queue";
 import { ArtifactStore } from "../knowledge/pipeline/artifact-store";
 import { createNormalizedSourcesStageExecutor, normalizedSourcesPipelineInputDigest } from "../knowledge/pipeline/convert-stage";
@@ -42,6 +49,7 @@ const databaseUrl = process.env.TEST_DATABASE_URL
 const integration = databaseUrl ? describe : describe.skip;
 let pool: Pool | null = null;
 let temporaryRoot: string | null = null;
+const retrievalFixtureRoots: string[] = [];
 const execute = promisify(execFile);
 
 class RecordedPipelineQueue implements PipelineStageJobQueue {
@@ -68,6 +76,72 @@ async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean):
 }
 
 integration("PostgreSQL cited knowledge integration", () => {
+  test(databaseUrl
+    ? "enforces the versioned retrieval quality gate through the PostgreSQL search implementation"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("retrieval-evaluation@example.com", "hash");
+    const cases = parseRetrievalCases(await readFile(
+      path.resolve("evaluation/knowledge-v2/cases.jsonl"), "utf8"
+    ));
+    const fixtureRoots = {
+      "fixture-a": path.resolve("src/test/fixtures/code-intelligence"),
+      "fixture-b": path.resolve("src/test/fixtures/knowledge-evaluation-b")
+    };
+    const fixtures = new Map<string, { repositoryId: string; releaseId: string }>();
+
+    for (const [name, fixtureRoot] of Object.entries(fixtureRoots)) {
+      const repositoryPath = await mkdtemp(path.join(os.tmpdir(), `devkh-retrieval-${name}-`));
+      retrievalFixtureRoots.push(repositoryPath);
+      await cp(fixtureRoot, repositoryPath, { recursive: true });
+      await execute("git", ["init", "-b", "main"], { cwd: repositoryPath });
+      await execute("git", ["config", "user.email", "retrieval@example.com"], { cwd: repositoryPath });
+      await execute("git", ["config", "user.name", "Retrieval Evaluation"], { cwd: repositoryPath });
+      await execute("git", ["add", "."], { cwd: repositoryPath });
+      await execute("git", ["commit", "-m", "evaluation fixture"], { cwd: repositoryPath });
+
+      const project = await store.createProject(setup!.workspace.id, {
+        name: `Retrieval evaluation ${name}`,
+        slug: `retrieval-${name}`
+      }, setup!.admin.id);
+      const repository = await store.createRepository(setup!.workspace.id, {
+        kind: "local", name: `Retrieval evaluation ${name}`, path: repositoryPath
+      }, project!.id);
+      const summary = await syncRepository({
+        repository: repository!, dataDir: path.join(repositoryPath, "data"), store
+      });
+      const snapshot = await store.findSnapshotById(setup!.workspace.id, summary.snapshotId);
+      const index = await analyzeSnapshot(snapshot!.storagePath, snapshot!.commitSha);
+      const build = (await store.createBuild({
+        workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id,
+        snapshotId: snapshot!.id,
+        snapshotPath: snapshot!.storagePath,
+        commitSha: snapshot!.commitSha
+      })).build;
+      await store.saveKnowledge({ build, index, output: await generateKnowledge(index) });
+      await store.transitionBuild(build.id, "queued", "ready");
+      const release = await store.createReleaseDraft(
+        setup!.workspace.id, repository!.id, build.id, `retrieval-${name}`
+      );
+      await store.publishRelease(setup!.workspace.id, release!.id);
+      fixtures.set(name, { repositoryId: repository!.id, releaseId: release!.id });
+    }
+
+    const report = await evaluateRetrievalCasesWithDetails(cases, (item) => {
+      const fixture = fixtures.get(item.project);
+      if (!fixture) throw new Error(`Unknown retrieval evaluation fixture: ${item.project}`);
+      return store.searchKnowledge(setup!.workspace.id, fixture.repositoryId, item.query, fixture.releaseId);
+    });
+    expect(report.metrics.total).toBeGreaterThanOrEqual(140);
+    expect(report.failures).toEqual([]);
+    expect(() => assertRetrievalQuality(report)).not.toThrow();
+  }, 90_000);
+
   test(databaseUrl
     ? "rolls back LLM builds when their audit event cannot be persisted and preserves allowLlm projections"
     : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
@@ -1207,6 +1281,69 @@ integration("PostgreSQL cited knowledge integration", () => {
     await expect(store.getRemediation("00000000-0000-4000-8000-000000000000", remediation.id))
       .resolves.toBeNull();
   }, 30_000);
+
+  test(databaseUrl
+    ? "claims scheduled Git synchronization once across store instances and preserves retry timing"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const firstStore = new PostgresAppStore(pool);
+    const secondStore = new PostgresAppStore(pool);
+    const setup = await firstStore.createInitialSetup("git-schedule@example.com", "hash");
+    const project = (await firstStore.listProjects(setup!.workspace.id))[0];
+    const repository = await firstStore.createRepository(setup!.workspace.id, {
+      kind: "git", name: "Scheduled Git source", url: "https://github.com/example/scheduled-source.git"
+    }, project.id);
+    const now = new Date();
+
+    const [firstClaims, secondClaims] = await Promise.all([
+      firstStore.claimDueGitSynchronizations(now, 10, 60_000),
+      secondStore.claimDueGitSynchronizations(now, 10, 60_000)
+    ]);
+    const claims = [...firstClaims, ...secondClaims];
+    expect(claims).toHaveLength(1);
+    expect(claims[0]?.repository.id).toBe(repository!.id);
+
+    await expect(firstStore.finishGitSynchronization({
+      repositoryId: repository!.id,
+      leaseToken: claims[0]!.leaseToken,
+      status: "failed",
+      failureCode: "GIT_SYNC_TIMEOUT",
+      now
+    })).resolves.toBe(true);
+    const afterFailure = await pool.query<{ failure_count: number; next_attempt_at: Date }>(
+      `SELECT failure_count, next_attempt_at
+       FROM repository_sync_schedules WHERE repository_id = $1`,
+      [repository!.id]
+    );
+    expect(afterFailure.rows[0]).toMatchObject({ failure_count: 1 });
+    expect(afterFailure.rows[0]!.next_attempt_at.getTime()).toBeGreaterThan(Date.now());
+    await expect(secondStore.claimDueGitSynchronizations(new Date(), 10, 60_000)).resolves.toEqual([]);
+    await pool.query(
+      "UPDATE repository_sync_schedules SET next_attempt_at = clock_timestamp() WHERE repository_id = $1",
+      [repository!.id]
+    );
+
+    const [retry] = await secondStore.claimDueGitSynchronizations(new Date(), 10, 60_000);
+    await expect(secondStore.finishGitSynchronization({
+      repositoryId: repository!.id,
+      leaseToken: retry!.leaseToken,
+      status: "succeeded",
+      now: new Date()
+    })).resolves.toBe(true);
+    const afterSuccess = await pool.query<{ failure_count: number; next_attempt_at: Date }>(
+      `SELECT failure_count, next_attempt_at
+       FROM repository_sync_schedules WHERE repository_id = $1`,
+      [repository!.id]
+    );
+    expect(afterSuccess.rows[0]).toMatchObject({ failure_count: 0 });
+    expect(afterSuccess.rows[0]!.next_attempt_at.getTime()).toBeGreaterThan(Date.now());
+    await expect(firstStore.claimDueGitSynchronizations(
+      new Date(), 10, 60_000
+    )).resolves.toEqual([]);
+  }, 30_000);
 });
 
 afterAll(async () => {
@@ -1215,5 +1352,8 @@ afterAll(async () => {
     await pool.query("DROP FUNCTION IF EXISTS fail_second_release_publish()").catch(() => undefined);
   }
   await pool?.end();
-  if (temporaryRoot) await rm(temporaryRoot, { recursive: true, force: true });
+  await Promise.all([
+    ...(temporaryRoot ? [temporaryRoot] : []),
+    ...retrievalFixtureRoots
+  ].map((directory) => rm(directory, { recursive: true, force: true })));
 });

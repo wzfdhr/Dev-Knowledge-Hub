@@ -15,6 +15,7 @@ import { z } from "zod";
 
 import { APP_VERSION, SERVICE_NAME } from "../../shared/contracts.js";
 import type { Citation } from "../knowledge/intelligence.js";
+import { calculateSearchResultTrust } from "../knowledge/trust.js";
 import type {
   AppStore,
   KnowledgeGraphRecord,
@@ -438,16 +439,20 @@ export function createRegisteredMcpServer(context?: McpToolContext): McpServer {
           slug
         )
       ))).filter((page): page is KnowledgePageRecord => Boolean(page));
-      const support = supportPages.map((page): KnowledgeSearchResult => ({
-        kind: "page",
-        title: page.title,
-        excerpt: page.body.slice(0, 240),
-        matchReason: "变更关联知识页",
-        score: 10,
-        pageId: page.id,
-        releaseId: selected.release.id,
-        citations: pageCitations(page)
-      }));
+      const support = supportPages.map((page): KnowledgeSearchResult => {
+        const citations = pageCitations(page);
+        return {
+          kind: "page",
+          title: page.title,
+          excerpt: page.body.slice(0, 240),
+          matchReason: "变更关联知识页",
+          score: 10,
+          pageId: page.id,
+          releaseId: selected.release.id,
+          citations,
+          trust: calculateSearchResultTrust(page.id, citations)
+        };
+      });
       const supportIds = new Set(support.map((result) => result.pageId));
       const results = boundedResults([
         ...discovered.filter((result) => !supportIds.has(result.pageId)).slice(0, 18),

@@ -9,6 +9,7 @@ import {
   knowledgeMatchReason,
   normalizePagination
 } from "./store.js";
+import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledge/trust.js";
 
 import type {
   AdminRecord,
@@ -23,6 +24,9 @@ import type {
   CreateRemediationInput,
   CreateSnapshotInput,
   FeedbackRebuildInput,
+  FinishGitSynchronizationInput,
+  GitSynchronizationClaim,
+  GitSynchronizationLease,
   ImportReportRecord,
   KnowledgePageRecord,
   KnowledgeMetadata,
@@ -2907,6 +2911,97 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return rows.map(repositoryRecord);
   }
 
+  async claimDueGitSynchronizations(
+    _now: Date,
+    limit: number,
+    leaseDurationMs: number
+  ): Promise<GitSynchronizationClaim[]> {
+    if (!Number.isInteger(limit) || limit < 1) return [];
+    if (!Number.isFinite(leaseDurationMs) || leaseDurationMs <= 0) return [];
+    return this.transaction(async (client) => {
+      await client.query(
+        `INSERT INTO repository_sync_schedules (repository_id, workspace_id, next_attempt_at)
+         SELECT repository.id, repository.workspace_id, clock_timestamp()
+         FROM repositories repository
+         WHERE repository.kind = 'git' AND repository.archived_at IS NULL
+         ON CONFLICT (repository_id) DO NOTHING`
+      );
+      const { rows } = await client.query<RepositoryRow & { lease_token: string }>(
+        `WITH due AS (
+           SELECT schedule.repository_id
+           FROM repository_sync_schedules schedule
+           JOIN repositories repository ON repository.id = schedule.repository_id
+           WHERE repository.kind = 'git' AND repository.archived_at IS NULL
+             AND schedule.next_attempt_at <= clock_timestamp()
+             AND (schedule.lease_expires_at IS NULL OR schedule.lease_expires_at <= clock_timestamp())
+           ORDER BY schedule.next_attempt_at, schedule.repository_id
+           FOR UPDATE OF schedule SKIP LOCKED
+           LIMIT $1
+         ), claimed AS (
+           UPDATE repository_sync_schedules schedule
+           SET lease_token = gen_random_uuid(),
+               lease_expires_at = clock_timestamp() + ($2 * interval '1 millisecond'),
+               last_started_at = clock_timestamp(),
+               updated_at = now()
+           FROM due
+           WHERE schedule.repository_id = due.repository_id
+           RETURNING schedule.repository_id, schedule.lease_token
+         )
+         SELECT repository.id, repository.workspace_id, repository.project_id, repository.kind,
+                repository.name, repository.local_path, repository.clone_url, repository.default_branch,
+                repository.archived_at,
+                EXISTS (
+                  SELECT 1 FROM encrypted_credentials credential
+                  WHERE credential.workspace_id = repository.workspace_id
+                    AND credential.repository_id = repository.id
+                ) AS has_credential,
+                claimed.lease_token
+         FROM claimed
+         JOIN repositories repository ON repository.id = claimed.repository_id
+         ORDER BY repository.workspace_id, repository.project_id, repository.id`,
+        [limit, leaseDurationMs]
+      );
+      return rows.map((row) => ({ repository: repositoryRecord(row), leaseToken: row.lease_token }));
+    });
+  }
+
+  async finishGitSynchronization(input: FinishGitSynchronizationInput): Promise<boolean> {
+    const failed = input.status === "failed";
+    const { rows } = await this.pool.query<{ repository_id: string }>(
+      `UPDATE repository_sync_schedules
+       SET failure_count = CASE WHEN $3 THEN failure_count + 1 ELSE 0 END,
+           next_attempt_at = CASE
+             WHEN $3 THEN clock_timestamp() + (
+               CASE
+                 WHEN failure_count = 0 THEN $4
+                 WHEN failure_count = 1 THEN $5
+                 ELSE LEAST($6 * failure_count, $7)
+               END * interval '1 millisecond'
+             )
+             ELSE clock_timestamp() + ($8 * interval '1 millisecond')
+           END,
+           lease_token = NULL,
+           lease_expires_at = NULL,
+           last_finished_at = clock_timestamp(),
+           last_error_code = CASE WHEN $3 THEN $9 ELSE NULL END,
+           updated_at = now()
+       WHERE repository_id = $1 AND lease_token = $2 AND lease_expires_at > clock_timestamp()
+       RETURNING repository_id`,
+      [
+        input.repositoryId,
+        input.leaseToken,
+        failed,
+        5 * 60 * 1000,
+        30 * 60 * 1000,
+        30 * 60 * 1000,
+        2 * 60 * 60 * 1000,
+        60 * 60 * 1000,
+        input.failureCode ?? "SCHEDULED_SYNC_FAILED"
+      ]
+    );
+    return rows.length === 1;
+  }
+
   async getRepository(workspaceId: string, repositoryId: string): Promise<RepositoryRecord | null> {
     const { rows } = await this.pool.query<RepositoryRow>(
       `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
@@ -3179,25 +3274,53 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
 
   private async insertSnapshot(
     client: Queryable,
-    { snapshot, files }: CreateSnapshotInput
-  ): Promise<{ snapshot: SourceSnapshotRecord; inserted: boolean }> {
+    { snapshot, files }: CreateSnapshotInput,
+    lease?: GitSynchronizationLease
+  ): Promise<{ snapshot: SourceSnapshotRecord; inserted: boolean } | null> {
       const inserted = await client.query<SnapshotRow>(
-        `INSERT INTO source_snapshots
+        lease
+          ? `WITH held_lease AS (
+               SELECT repository_id
+               FROM repository_sync_schedules
+               WHERE repository_id = $1 AND lease_token = $2
+                 AND lease_expires_at > clock_timestamp()
+               FOR UPDATE
+             )
+             INSERT INTO source_snapshots
+             (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path)
+             SELECT $3, $4, $1, $5, $6, $7, $8, $9
+             FROM held_lease
+             ON CONFLICT (repository_id, commit_sha) DO NOTHING
+             RETURNING id, workspace_id, repository_id, commit_sha, ref, remote_url,
+                       commit_timestamp, storage_path`
+          : `INSERT INTO source_snapshots
          (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (repository_id, commit_sha) DO NOTHING
          RETURNING id, workspace_id, repository_id, commit_sha, ref, remote_url,
                    commit_timestamp, storage_path`,
-        [
-          snapshot.id,
-          snapshot.workspaceId,
-          snapshot.repositoryId,
-          snapshot.commitSha,
-          snapshot.ref,
-          snapshot.remoteUrl,
-          snapshot.commitTimestamp,
-          snapshot.storagePath
-        ]
+        lease
+          ? [
+              lease.repositoryId,
+              lease.leaseToken,
+              snapshot.id,
+              snapshot.workspaceId,
+              snapshot.commitSha,
+              snapshot.ref,
+              snapshot.remoteUrl,
+              snapshot.commitTimestamp,
+              snapshot.storagePath
+            ]
+          : [
+              snapshot.id,
+              snapshot.workspaceId,
+              snapshot.repositoryId,
+              snapshot.commitSha,
+              snapshot.ref,
+              snapshot.remoteUrl,
+              snapshot.commitTimestamp,
+              snapshot.storagePath
+            ]
       );
       const insertedSnapshot = inserted.rows[0];
       if (!insertedSnapshot) {
@@ -3208,7 +3331,10 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            WHERE workspace_id = $1 AND repository_id = $2 AND commit_sha = $3`,
           [snapshot.workspaceId, snapshot.repositoryId, snapshot.commitSha]
         );
-        if (!existing.rows[0]) throw new Error("Snapshot conflict winner was not found");
+        if (!existing.rows[0]) {
+          if (lease) return null;
+          throw new Error("Snapshot conflict winner was not found");
+        }
         return { snapshot: snapshotRecord(existing.rows[0]), inserted: false };
       }
       for (const file of files) {
@@ -3231,7 +3357,31 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   }
 
   async createSnapshot(input: CreateSnapshotInput): Promise<SourceSnapshotRecord> {
-    return this.transaction(async (client) => (await this.insertSnapshot(client, input)).snapshot);
+    return this.transaction(async (client) => {
+      const persisted = await this.insertSnapshot(client, input);
+      if (!persisted) throw new Error("Snapshot was not persisted");
+      return persisted.snapshot;
+    });
+  }
+
+  async createSnapshotWithGitSynchronizationLease(
+    input: CreateSnapshotInput,
+    lease: GitSynchronizationLease
+  ): Promise<SourceSnapshotRecord | null> {
+    if (input.snapshot.repositoryId !== lease.repositoryId) return null;
+    return this.transaction(async (client) => {
+      const persisted = await this.insertSnapshot(client, input, lease);
+      if (!persisted) return null;
+      const { rows } = await client.query<{ repository_id: string }>(
+        `SELECT repository_id
+         FROM repository_sync_schedules
+         WHERE repository_id = $1 AND lease_token = $2 AND lease_expires_at > clock_timestamp()
+         FOR UPDATE`,
+        [lease.repositoryId, lease.leaseToken]
+      );
+      if (!rows[0]) throw new Error("Git synchronization lease expired before snapshot commit");
+      return persisted.snapshot;
+    });
   }
 
   async createSnapshotWithAudit(
@@ -3240,6 +3390,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   ): Promise<SourceSnapshotRecord> {
     return this.transaction(async (client) => {
       const persisted = await this.insertSnapshot(client, input);
+      if (!persisted) throw new Error("Snapshot was not persisted");
       await this.insertAudit(client, {
         workspaceId: input.snapshot.workspaceId,
         actorId,
@@ -4095,7 +4246,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            ORDER BY CASE WHEN p.title = cs.name OR p.title IN ('模块：' || sf.path, 'Module: ' || sf.path) THEN 0 ELSE 1 END, p.slug LIMIT 1
          ) kp ON true
          WHERE lower(cs.name) LIKE lower($3) || '%' OR lower(sf.path) LIKE lower($3) || '%'
-            OR similarity(lower(cs.name), lower($3)) > 0.2
+            OR ($3 !~ '[/.]' AND similarity(lower(cs.name), lower($3)) > 0.35)
        ), symbol_matches AS (
          SELECT *, ROW_NUMBER() OVER (ORDER BY score DESC, title, page_id) AS symbol_rank
          FROM symbol_candidates
@@ -4142,7 +4293,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          FROM neighbor_candidates
        ), text_candidates AS (
          SELECT DISTINCT 'page' AS kind, kp.title, left(kp.body, 240) AS excerpt,
-                (20 + ts_rank_cd(to_tsvector('english', kp.title || ' ' || kp.body),
+                (20 + ts_rank_cd(to_tsvector('english', regexp_replace(kp.title || ' ' || kp.body, '([a-z])([A-Z])', '\\1 \\2', 'g')),
                                  plainto_tsquery('english', $3)) * 10
                     + similarity(lower(kp.title), lower($3)))::real AS score,
                 kp.id AS page_id, sr.id AS release_id, kc.citations
@@ -4153,9 +4304,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            WHERE selected_chunk.page_id = kp.id
            ORDER BY selected_chunk.position, selected_chunk.id LIMIT 1
          ) kc ON true
-         WHERE to_tsvector('english', kp.title || ' ' || kp.body) @@ plainto_tsquery('english', $3)
+         WHERE to_tsvector('english', regexp_replace(kp.title || ' ' || kp.body, '([a-z])([A-Z])', '\\1 \\2', 'g')) @@ plainto_tsquery('english', $3)
             OR lower(kp.title || ' ' || kp.body) LIKE '%' || lower($3) || '%'
-            OR similarity(lower(kp.title), lower($3)) > 0.2
+             OR ($3 !~ '[/.]' AND similarity(lower(kp.title), lower($3)) > 0.35)
        ), text_matches AS (
          SELECT *, ROW_NUMBER() OVER (ORDER BY score DESC, title, page_id) AS text_rank
          FROM text_candidates
@@ -4180,8 +4331,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       score: Number(row.score),
       pageId: row.page_id,
       releaseId: row.release_id,
-      citations: row.citations
-    }));
+      citations: row.citations,
+      trust: calculateSearchResultTrust(row.page_id, row.citations)
+    })).filter((result) => result.trust.score >= MIN_SEARCH_RESULT_TRUST);
   }
 
   async knowledgeMetadata(workspaceId: string, releaseId: string): Promise<KnowledgeMetadata> {

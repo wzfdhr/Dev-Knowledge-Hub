@@ -19,6 +19,7 @@ import { PgBossBuildJobQueue } from "./knowledge/job-queue.js";
 import { anthropicEnhancer, openAiCompatibleEnhancer, type KnowledgeEnhancer } from "./knowledge/enhancer.js";
 import { decryptSecret } from "./security/crypto.js";
 import { syncRepository } from "./git/snapshot.js";
+import { GitCommandTimeoutError } from "./git/remote.js";
 import { PostgresSessionStore } from "./security/session-store.js";
 import { ArtifactStore } from "./knowledge/pipeline/artifact-store.js";
 import type { PipelineArtifactStore } from "./persistence/store.js";
@@ -42,6 +43,13 @@ import { createKnowledgePackageStageExecutor } from "./knowledge/pipeline/packag
 import { PgBossPipelineStageJobQueue } from "./knowledge/job-queue.js";
 
 const IMPORT_REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+const GIT_SYNC_CLAIM_LIMIT = 10;
+const GIT_SYNC_LEASE_DURATION_MS = 15 * 60 * 1000;
+const GIT_SYNC_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
+
+function scheduledGitSyncFailureCode(error: unknown): string {
+  return error instanceof GitCommandTimeoutError ? error.code : "SCHEDULED_SYNC_FAILED";
+}
 
 interface ArtifactStoreInitializer {
   initialize(): Promise<void>;
@@ -207,23 +215,45 @@ export async function bootstrapServer(
       });
   };
   const runGitSynchronization = () => {
-    void store.listActiveGitRepositories().then(async (repositories) => {
-      await Promise.all(repositories.map(async (repository) => {
-        const report = await store.createImportReport({
-          workspaceId: repository.workspaceId,
-          projectId: repository.projectId,
-          repositoryId: repository.id,
-          actorId: null,
-          sourceKind: "git"
-        });
+    void store.claimDueGitSynchronizations(
+      new Date(), GIT_SYNC_CLAIM_LIMIT, GIT_SYNC_LEASE_DURATION_MS
+    ).then(async (claims) => {
+      await Promise.all(claims.map(async ({ repository, leaseToken }) => {
+        let report: Awaited<ReturnType<typeof store.createImportReport>> | null = null;
         try {
+          report = await store.createImportReport({
+            workspaceId: repository.workspaceId,
+            projectId: repository.projectId,
+            repositoryId: repository.id,
+            actorId: null,
+            sourceKind: "git"
+          });
           const credential = await store.repositoryCredential(repository.workspaceId, repository.id);
           const summary = await syncRepository({
             repository,
             dataDir: env.dataDir,
             store,
+            gitTimeoutMs: GIT_SYNC_COMMAND_TIMEOUT_MS,
+            gitSynchronizationLease: { repositoryId: repository.id, leaseToken },
             ...(credential ? { token: decryptSecret(credential, env.masterKey!) } : {})
           });
+          const completed = await store.finishGitSynchronization({
+            repositoryId: repository.id,
+            leaseToken,
+            status: "succeeded",
+            now: new Date()
+          });
+          if (!completed) {
+            await store.finishImportReport(repository.workspaceId, report.id, {
+              status: "failed",
+              collectedFileCount: 0,
+              collectedTextBytes: 0,
+              ignored: { total: 0, reasons: {} },
+              snapshotId: null,
+              failureCode: "SCHEDULED_SYNC_LEASE_EXPIRED"
+            }).catch(() => undefined);
+            return;
+          }
           await store.finishImportReport(repository.workspaceId, report.id, {
             status: "succeeded",
             collectedFileCount: summary.fileCount,
@@ -240,22 +270,33 @@ export async function bootstrapServer(
             metadata: { unchanged: summary.unchanged, commitSha: summary.commitSha }
           });
         } catch (error) {
-          await store.finishImportReport(repository.workspaceId, report.id, {
+          const completed = await store.finishGitSynchronization({
+            repositoryId: repository.id,
+            leaseToken,
             status: "failed",
-            collectedFileCount: 0,
-            collectedTextBytes: 0,
-            ignored: { total: 0, reasons: {} },
-            snapshotId: null,
-            failureCode: "SCHEDULED_SYNC_FAILED"
-          }).catch(() => undefined);
-          await store.recordAudit({
-            workspaceId: repository.workspaceId,
-            action: "repository.scheduled_sync_failed",
-            resourceType: "repository",
-            resourceId: repository.id,
-            metadata: { code: "SCHEDULED_SYNC_FAILED" }
-          }).catch(() => undefined);
-          throw error;
+            failureCode: scheduledGitSyncFailureCode(error),
+            now: new Date()
+          }).catch(() => false);
+          if (report) {
+            await store.finishImportReport(repository.workspaceId, report.id, {
+              status: "failed",
+              collectedFileCount: 0,
+              collectedTextBytes: 0,
+              ignored: { total: 0, reasons: {} },
+              snapshotId: null,
+              failureCode: completed ? scheduledGitSyncFailureCode(error) : "SCHEDULED_SYNC_LEASE_EXPIRED"
+            }).catch(() => undefined);
+          }
+          if (completed) {
+            await store.recordAudit({
+              workspaceId: repository.workspaceId,
+              action: "repository.scheduled_sync_failed",
+              resourceType: "repository",
+              resourceId: repository.id,
+              metadata: { code: scheduledGitSyncFailureCode(error) }
+            }).catch(() => undefined);
+          }
+          reportBackgroundError("Git synchronization failed", error);
         }
       }));
     }).catch((error: unknown) => {

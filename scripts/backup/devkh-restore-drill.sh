@@ -131,6 +131,11 @@ done
   exit 69
 }
 
+if ! docker exec "$database_container" psql -U devkh -d postgres -At -v ON_ERROR_STOP=1 -c \
+  "SELECT 1 FROM pg_database WHERE datname = 'dev_knowledge_hub';" | grep -qx 1; then
+  docker exec "$database_container" createdb -U devkh dev_knowledge_hub
+fi
+
 docker exec -i "$database_container" \
   pg_restore -U devkh -d dev_knowledge_hub --no-owner --no-privileges --exit-on-error \
   < "$set_directory/database.pgdump"

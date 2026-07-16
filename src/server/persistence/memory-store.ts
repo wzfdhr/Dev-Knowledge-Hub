@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledge/trust.js";
+
 import {
   boundedKnowledgePage,
   FeedbackNotAcknowledgedError,
@@ -29,6 +31,9 @@ import type {
   CreateRemediationInput,
   EncryptedCredentialRecord,
   FeedbackRebuildInput,
+  FinishGitSynchronizationInput,
+  GitSynchronizationClaim,
+  GitSynchronizationLease,
   ImportReportRecord,
   KnowledgePageRecord,
   KnowledgeMetadata,
@@ -62,6 +67,10 @@ import type {
   WorkspaceProjectOverviewRecord,
   WorkspaceRecord
 } from "./store.js";
+import {
+  GIT_SYNC_FAILURE_BACKOFF_MS,
+  GIT_SYNC_INTERVAL_MS
+} from "./store.js";
 import type { PipelineStageRunRecord } from "./store.js";
 import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
 import {
@@ -78,6 +87,16 @@ import type {
   PersistedKnowledge
 } from "../knowledge/build-service.js";
 import { standardBuildPurpose } from "../knowledge/build-service.js";
+
+function matchesKnowledgeTextQuery(value: string, query: string): boolean {
+  const normalizedValue = value.toLowerCase();
+  const normalizedQuery = query.trim().toLowerCase();
+  if (normalizedValue.includes(normalizedQuery)) return true;
+  const queryTerms = normalizedQuery.match(/[a-z0-9]+/g);
+  if (!queryTerms?.length) return false;
+  const words: string[] = value.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  return queryTerms.every((term) => words.includes(term));
+}
 import { transitionRemediation } from "../knowledge/remediation.js";
 import type { RemediationState } from "../knowledge/remediation.js";
 import type { CodeIndex } from "../knowledge/intelligence.js";
@@ -92,6 +111,13 @@ export class MemoryAppStore implements AppStore {
   private readonly projects: ProjectRecord[] = [];
   private readonly projectMembers: Array<ProjectMemberRecord & { userId: string }> = [];
   private readonly repositories: RepositoryRecord[] = [];
+  private readonly gitSynchronizationSchedules = new Map<string, {
+    nextAttemptAt: Date;
+    failureCount: number;
+    leaseToken: string | null;
+    leaseExpiresAt: Date | null;
+    lastFailureCode: string | null;
+  }>();
   readonly auditEvents: AuditEventRecord[] = [];
   readonly mcpTokens: McpTokenRecord[] = [];
   readonly feedback: AgentFeedbackRecord[] = [];
@@ -1246,6 +1272,56 @@ export class MemoryAppStore implements AppStore {
     return this.repositories.filter((repository) => repository.kind === "git" && repository.archivedAt === null);
   }
 
+  async claimDueGitSynchronizations(
+    now: Date,
+    limit: number,
+    leaseDurationMs: number
+  ): Promise<GitSynchronizationClaim[]> {
+    if (!Number.isInteger(limit) || limit < 1) return [];
+    if (!Number.isFinite(leaseDurationMs) || leaseDurationMs <= 0) return [];
+    const claims: GitSynchronizationClaim[] = [];
+    const repositories = await this.listActiveGitRepositories();
+    for (const repository of repositories) {
+      if (claims.length >= limit) break;
+      const schedule = this.gitSynchronizationSchedules.get(repository.id) ?? {
+        nextAttemptAt: now,
+        failureCount: 0,
+        leaseToken: null,
+        leaseExpiresAt: null,
+        lastFailureCode: null
+      };
+      this.gitSynchronizationSchedules.set(repository.id, schedule);
+      const leaseExpired = schedule.leaseExpiresAt === null || schedule.leaseExpiresAt.getTime() <= now.getTime();
+      if (schedule.nextAttemptAt.getTime() > now.getTime() || !leaseExpired) continue;
+      const leaseToken = randomUUID();
+      schedule.leaseToken = leaseToken;
+      schedule.leaseExpiresAt = new Date(now.getTime() + leaseDurationMs);
+      claims.push({ repository, leaseToken });
+    }
+    return claims;
+  }
+
+  async finishGitSynchronization(input: FinishGitSynchronizationInput): Promise<boolean> {
+    const schedule = this.gitSynchronizationSchedules.get(input.repositoryId);
+    if (!schedule || schedule.leaseToken !== input.leaseToken || !schedule.leaseExpiresAt
+      || schedule.leaseExpiresAt.getTime() <= input.now.getTime()) return false;
+    schedule.leaseToken = null;
+    schedule.leaseExpiresAt = null;
+    if (input.status === "succeeded") {
+      schedule.failureCount = 0;
+      schedule.lastFailureCode = null;
+      schedule.nextAttemptAt = new Date(input.now.getTime() + GIT_SYNC_INTERVAL_MS);
+      return true;
+    }
+    schedule.failureCount += 1;
+    schedule.lastFailureCode = input.failureCode ?? "SCHEDULED_SYNC_FAILED";
+    const delay = schedule.failureCount === 1
+      ? GIT_SYNC_FAILURE_BACKOFF_MS
+      : Math.min(GIT_SYNC_FAILURE_BACKOFF_MS * 6 * (schedule.failureCount - 1), 2 * GIT_SYNC_INTERVAL_MS);
+    schedule.nextAttemptAt = new Date(input.now.getTime() + delay);
+    return true;
+  }
+
   async getRepository(workspaceId: string, repositoryId: string): Promise<RepositoryRecord | null> {
     return this.repositories.find((repository) =>
       repository.workspaceId === workspaceId && repository.id === repositoryId
@@ -1394,6 +1470,18 @@ export class MemoryAppStore implements AppStore {
     this.sourceSnapshots.push(snapshot);
     this.sourceFiles.push(...files);
     return snapshot;
+  }
+
+  async createSnapshotWithGitSynchronizationLease(
+    input: CreateSnapshotInput,
+    lease: GitSynchronizationLease
+  ): Promise<SourceSnapshotRecord | null> {
+    const schedule = this.gitSynchronizationSchedules.get(lease.repositoryId);
+    const now = lease.now ?? new Date();
+    if (input.snapshot.repositoryId !== lease.repositoryId || !schedule
+      || schedule.leaseToken !== lease.leaseToken || !schedule.leaseExpiresAt
+      || schedule.leaseExpiresAt.getTime() <= now.getTime()) return null;
+    return this.createSnapshot(input);
   }
 
   async createSnapshotWithAudit(
@@ -2276,7 +2364,8 @@ export class MemoryAppStore implements AppStore {
         excerpt: foundPage.body.slice(0, 240),
         pageId: foundPage.id,
         releaseId: release.id,
-        citations
+        citations,
+        trust: calculateSearchResultTrust(foundPage.id, citations)
       });
     };
     for (const symbol of index.symbols) {
@@ -2313,7 +2402,7 @@ export class MemoryAppStore implements AppStore {
       }
     }
     for (const candidate of pages) {
-      if (`${candidate.title}\n${candidate.body}`.toLowerCase().includes(normalized)) {
+      if (matchesKnowledgeTextQuery(`${candidate.title}\n${candidate.body}`, query)) {
         add("page", candidate.title, 20, candidate.chunks.flatMap((chunk) => chunk.citations), candidate);
       }
     }
@@ -2323,7 +2412,7 @@ export class MemoryAppStore implements AppStore {
       const existing = unique.get(key);
       if (!existing || existing.score < result.score) unique.set(key, result);
     }
-    const sorted = [...unique.values()].sort((left, right) =>
+    const sorted = [...unique.values()].filter((result) => result.trust.score >= MIN_SEARCH_RESULT_TRUST).sort((left, right) =>
       right.score - left.score || left.title.localeCompare(right.title) || left.pageId.localeCompare(right.pageId)
     );
     const primary = sorted.filter((result) =>

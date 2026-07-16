@@ -421,6 +421,87 @@ describe("PostgresAppStore repository reads", () => {
   });
 });
 
+describe("PostgresAppStore Git synchronization leases", () => {
+  test("uses the PostgreSQL clock instead of the caller clock for lease decisions", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({
+      query,
+      connect: vi.fn(async () => client)
+    } as never);
+    const callerClock = new Date("2040-01-01T00:00:00.000Z");
+
+    await store.claimDueGitSynchronizations(callerClock, 10, 60_000);
+    await store.finishGitSynchronization({
+      repositoryId: "11111111-1111-4111-8111-111111111111",
+      leaseToken: "22222222-2222-4222-8222-222222222222",
+      status: "failed",
+      failureCode: "GIT_SYNC_TIMEOUT",
+      now: callerClock
+    });
+
+    const calls = query.mock.calls as unknown as Array<[string, unknown[]?]>;
+    const schedulingStatements = calls.filter(([sql]) =>
+      sql.includes("repository_sync_schedules")
+    );
+    expect(schedulingStatements).toHaveLength(3);
+    for (const [sql, values] of schedulingStatements) {
+      expect(sql).toContain("clock_timestamp()");
+      expect(values).not.toContain(callerClock);
+    }
+  });
+
+  test("makes the lease check part of the snapshot insert", async () => {
+    const snapshotRow = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspace_id: "workspace-1",
+      repository_id: "11111111-1111-4111-8111-111111111111",
+      commit_sha: "a".repeat(40),
+      ref: "origin/main",
+      remote_url: "https://github.com/example/source.git",
+      commit_timestamp: new Date(),
+      storage_path: "/tmp/snapshot"
+    };
+    const query = vi.fn(async (sql: string) => ({
+      rows: sql.includes("INSERT INTO source_snapshots")
+        ? [snapshotRow]
+        : sql.includes("repository_sync_schedules")
+          ? [{ repository_id: snapshotRow.repository_id }]
+          : []
+    }));
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+
+    await expect(store.createSnapshotWithGitSynchronizationLease({
+      snapshot: {
+        id: snapshotRow.id,
+        workspaceId: snapshotRow.workspace_id,
+        repositoryId: snapshotRow.repository_id,
+        commitSha: snapshotRow.commit_sha,
+        ref: snapshotRow.ref,
+        remoteUrl: snapshotRow.remote_url,
+        commitTimestamp: snapshotRow.commit_timestamp,
+        storagePath: snapshotRow.storage_path
+      },
+      files: []
+    }, {
+      repositoryId: snapshotRow.repository_id,
+      leaseToken: "22222222-2222-4222-8222-222222222222"
+    })).resolves.toMatchObject({ id: snapshotRow.id });
+
+    const snapshotInsert = (query.mock.calls as unknown as Array<[string, unknown[]?]>).find(([sql]) =>
+      sql.includes("INSERT INTO source_snapshots")
+    );
+    expect(snapshotInsert?.[0]).toContain("WITH held_lease AS");
+    expect(snapshotInsert?.[0]).toContain("lease_expires_at > clock_timestamp()");
+    expect(snapshotInsert?.[0]).toContain("FOR UPDATE");
+    const leaseChecks = (query.mock.calls as unknown as Array<[string, unknown[]?]>).filter(([sql]) =>
+      sql.includes("repository_sync_schedules")
+    );
+    expect(leaseChecks).toHaveLength(2);
+  });
+});
+
 describe("PostgresAppStore MCP token rotation", () => {
   test("rotates an active MCP token in one audited transaction", async () => {
     const oldToken = {
@@ -638,8 +719,11 @@ describe("PostgresAppStore knowledge releases", () => {
     await store.searchKnowledge("workspace-1", "repo-1", "架构概览", "release-1");
 
     const sql = String(query.mock.calls[0][0]);
-    expect(sql).toContain("to_tsvector('english', kp.title || ' ' || kp.body)");
+    expect(sql).toContain("to_tsvector('english', regexp_replace(kp.title || ' ' || kp.body");
+    expect(sql).toContain("'([a-z])([A-Z])'");
     expect(sql).toContain("lower(kp.title || ' ' || kp.body) LIKE '%' || lower($3) || '%'");
+    expect(sql).toContain("$3 !~ '[/.]' AND similarity(lower(cs.name), lower($3)) > 0.35");
+    expect(sql).toContain("$3 !~ '[/.]' AND similarity(lower(kp.title), lower($3)) > 0.35");
     expect(sql).toContain("text_rank <= 20");
     expect(sql).toContain("LIMIT 50");
   });

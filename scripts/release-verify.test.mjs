@@ -18,7 +18,7 @@ describe("release verification orchestrator", () => {
   test("keeps the release checks in the approved order", () => {
     expect(VERIFY_STEPS.map((step) => step.name)).toEqual([
       "secrets", "licenses", "runtime", "runtime-tests", "backup-tests", "delivery",
-      "typecheck", "lint", "unit", "postgres-integration", "build", "acceptance", "e2e"
+      "typecheck", "lint", "unit", "postgres-integration", "build", "acceptance", "knowledge-quality", "e2e"
     ]);
     expect(CONTAINER_STEPS.map((step) => step.name)).toEqual([
       "container-build", "compose-config", "compose-up", "application-health", "recovery-drill"

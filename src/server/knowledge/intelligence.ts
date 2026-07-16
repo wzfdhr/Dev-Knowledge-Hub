@@ -63,6 +63,13 @@ export interface ConfigInfo extends Citation {
   keys: string[];
 }
 
+export interface TableInfo extends Citation {
+  name: string;
+  sourcePath: string;
+  rowCount: number;
+  columns: Array<{ name: string; type: string; sensitive: boolean }>;
+}
+
 export interface CodeIndex {
   rootPath: string;
   commitSha: string;
@@ -71,6 +78,7 @@ export interface CodeIndex {
   edges: CodeEdge[];
   documents: DocumentInfo[];
   configs: ConfigInfo[];
+  tables?: TableInfo[];
 }
 
 export class SnapshotIntegrityError extends Error {
@@ -526,6 +534,7 @@ export async function analyzeSnapshot(
   const edges: CodeEdge[] = [];
   const documents: DocumentInfo[] = [];
   const configs: ConfigInfo[] = [];
+  const tables: TableInfo[] = [];
 
   for (const relativePath of relativePaths) {
     const { content, blobHash } = decoded.get(relativePath)!;
@@ -557,6 +566,20 @@ export async function analyzeSnapshot(
       });
       documents.push({ ...citation, headings });
     }
+    if (relativePath.toLowerCase().endsWith(".csv")) {
+      const table = extractCsvTable({
+        snapshotId: "legacy-snapshot", path: relativePath, content, blobHash
+      }).table;
+      tables.push({
+        ...citation,
+        name: table.name,
+        sourcePath: table.sourcePath,
+        rowCount: table.rowCount,
+        columns: table.columns.map((column) => ({
+          name: column.name, type: column.type, sensitive: column.sensitive
+        }))
+      });
+    }
     const kind = configKind(relativePath);
     if (kind && !codeExtensions.has(path.extname(relativePath))) {
       const parsed = structuredConfig(content, kind);
@@ -577,5 +600,5 @@ export async function analyzeSnapshot(
       `${right.path}:${right.startLine}:${right.kind}:${right.name}`
     )
   );
-  return { rootPath, commitSha, files, symbols, edges, documents, configs };
+  return { rootPath, commitSha, files, symbols, edges, documents, configs, tables };
 }

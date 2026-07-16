@@ -45,6 +45,13 @@ jobs:
             playwright-report/
             test-results/
           if-no-files-found: ignore
+      - name: Upload knowledge retrieval evaluation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: knowledge-retrieval-evaluation
+          path: artifacts/knowledge-retrieval-evaluation.json
+          if-no-files-found: error
 
   container-smoke:
     runs-on: ubuntu-latest

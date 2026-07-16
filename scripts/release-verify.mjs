@@ -20,6 +20,7 @@ export const VERIFY_STEPS = Object.freeze([
   { name: "postgres-integration", command: npm, args: ["run", "test:integration"] },
   { name: "build", command: npm, args: ["run", "build"] },
   { name: "acceptance", command: npm, args: ["run", "acceptance"] },
+  { name: "knowledge-quality", command: npm, args: ["run", "evaluate:knowledge"] },
   { name: "e2e", command: npm, args: ["run", "test:e2e"] }
 ]);
 

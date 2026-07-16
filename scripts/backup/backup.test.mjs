@@ -364,6 +364,7 @@ test("restore drill never writes production Docker volumes", () => {
     const calls = readFileSync(fixture.log, "utf8");
     assert.match(calls, new RegExp(`restic snapshots --latest 1 --json[\\s\\S]*restic restore ${latestSnapshotId} --target`));
     assert.match(calls, /docker run .*postgres:16-bookworm pg_restore --list \/backup\/database\.pgdump/);
+    assert.match(calls, /docker exec .* createdb -U devkh dev_knowledge_hub/);
     assert.match(calls, /docker network create devkh-restore-drill-/);
     assert.match(calls, /docker exec -i devkh-restore-drill-.* pg_restore .*--exit-on-error/);
     assert.match(calls, /docker exec .* psql .*workspaceCount/);

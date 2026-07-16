@@ -242,6 +242,7 @@ export interface SearchResult {
   pageId: string;
   releaseId: string;
   citations: Citation[];
+  trust: TrustScore;
 }
 export interface WorkspaceSearchResult extends SearchResult {
   projectId: string;

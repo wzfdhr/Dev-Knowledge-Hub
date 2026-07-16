@@ -17,7 +17,7 @@ import type {
 import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
 import type { ImpactMindmap } from "../knowledge/pipeline/mindmap.js";
 import type { AGENT_FEEDBACK_STATUSES } from "../../shared/contracts.js";
-import type { LintIssue, SourceRef } from "../../shared/api-contracts.js";
+import type { LintIssue, SourceRef, TrustScore } from "../../shared/api-contracts.js";
 import type { RemediationState } from "../knowledge/remediation.js";
 
 export interface WorkspaceRecord {
@@ -405,6 +405,28 @@ export interface RepositoryRecord {
   hasCredential: boolean;
 }
 
+export const GIT_SYNC_INTERVAL_MS = 60 * 60 * 1000;
+export const GIT_SYNC_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
+
+export interface GitSynchronizationClaim {
+  repository: RepositoryRecord;
+  leaseToken: string;
+}
+
+export interface FinishGitSynchronizationInput {
+  repositoryId: string;
+  leaseToken: string;
+  status: "succeeded" | "failed";
+  failureCode?: string;
+  now: Date;
+}
+
+export interface GitSynchronizationLease {
+  repositoryId: string;
+  leaseToken: string;
+  now?: Date;
+}
+
 export interface EncryptedCredentialRecord {
   id: string;
   workspaceId: string;
@@ -549,6 +571,7 @@ export interface KnowledgeSearchResult {
   pageId: string;
   releaseId: string;
   citations: Citation[];
+  trust: TrustScore;
 }
 
 export function knowledgeMatchReason(kind: SearchResultKind, title: string, query: string): string {
@@ -858,6 +881,12 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
   ): Promise<RepositoryRecord | null>;
   currentRepository(workspaceId: string, projectId?: string): Promise<RepositoryRecord | null>;
   listActiveGitRepositories(): Promise<RepositoryRecord[]>;
+  claimDueGitSynchronizations(
+    now: Date,
+    limit: number,
+    leaseDurationMs: number
+  ): Promise<GitSynchronizationClaim[]>;
+  finishGitSynchronization(input: FinishGitSynchronizationInput): Promise<boolean>;
   getRepository(workspaceId: string, repositoryId: string): Promise<RepositoryRecord | null>;
   listArchivedRepositories(workspaceId: string): Promise<RepositoryRecord[]>;
   switchRepositoryWithAudit(
@@ -891,6 +920,10 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
     path: string
   ): Promise<SourceFileRecord | null>;
   createSnapshot(input: CreateSnapshotInput): Promise<SourceSnapshotRecord>;
+  createSnapshotWithGitSynchronizationLease(
+    input: CreateSnapshotInput,
+    lease: GitSynchronizationLease
+  ): Promise<SourceSnapshotRecord | null>;
   createSnapshotWithAudit(input: CreateSnapshotInput, actorId: string): Promise<SourceSnapshotRecord>;
   countSnapshotFiles(snapshotId: string): Promise<number>;
   snapshotTextBytes(snapshotId: string): Promise<number>;

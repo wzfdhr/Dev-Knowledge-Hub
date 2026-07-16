@@ -74,6 +74,35 @@ describe("weighted knowledge search", () => {
     ));
   });
 
+  test("matches spaced wording against camel-cased symbols", async () => {
+    const results = await store.searchKnowledge(workspaceId, repositoryId, "declared callable");
+
+    expect(results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: "DeclaredCallable" })
+    ]));
+  });
+
+  test("excludes an uncited low-trust page from search results", async () => {
+    store.knowledgePages.push({
+      id: "uncited-page",
+      workspaceId,
+      repositoryId,
+      buildId: build.id,
+      slug: "uncited-page",
+      title: "Unverified page",
+      body: "An unverified reference without a source citation.",
+      chunks: [{
+        id: "uncited-chunk",
+        heading: null,
+        content: "An unverified reference without a source citation.",
+        citations: []
+      }]
+    });
+
+    await expect(store.searchKnowledge(workspaceId, repositoryId, "unverified reference"))
+      .resolves.toEqual([]);
+  });
+
   test("binds neighbors to their own pages, dedupes before a stable cap, and retains text results", async () => {
     const citation = index.files.find((file) => file.path === "src/math.ts")!;
     for (let position = 0; position < 55; position += 1) {

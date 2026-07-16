@@ -1,12 +1,19 @@
 import { authenticatedCookie, csrfHeaders } from "./test-support/csrf";
 import { randomBytes } from "node:crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, test } from "vitest";
 
 import { buildServer, type ServerOptions } from "./app";
+import { generateKnowledge } from "./knowledge/generator";
+import { analyzeSnapshot } from "./knowledge/intelligence";
 import { MemoryAppStore } from "./persistence/memory-store";
 
 const apps: ReturnType<typeof buildServer>[] = [];
+const knowledgeFixtureRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)), "../test/fixtures/code-intelligence"
+);
 
 async function authenticatedTeam(overrides: Pick<ServerOptions, "publicBaseUrl" | "qualityArtifactReader"> = {}) {
   const store = new MemoryAppStore();
@@ -184,6 +191,46 @@ describe("team projects and members", () => {
         indexedTextBytes: 0,
         pendingFeedbackCount: 0
       })]
+    });
+  });
+
+  test("returns published workspace search results with project, release, citations, and trust", async () => {
+    const { app, store, cookie } = await authenticatedTeam();
+    const workspace = (await store.defaultWorkspace())!;
+    const project = (await store.listProjects(workspace.id))[0]!;
+    const repository = await store.createRepository(workspace.id, {
+      kind: "local", name: "Search fixture", path: knowledgeFixtureRoot
+    }, project.id);
+    const build = (await store.createBuild({
+      workspaceId: workspace.id,
+      repositoryId: repository!.id,
+      snapshotId: "workspace-search-snapshot",
+      snapshotPath: knowledgeFixtureRoot,
+      commitSha: "a".repeat(40)
+    })).build;
+    const index = await analyzeSnapshot(knowledgeFixtureRoot, build.commitSha);
+    await store.saveKnowledge({ build, index, output: await generateKnowledge(index) });
+    await store.transitionBuild(build.id, "queued", "ready");
+    const release = await store.createReleaseDraft(workspace.id, repository!.id, build.id, "workspace-search");
+    await store.publishRelease(workspace.id, release.id);
+
+    const response = await app.inject({
+      method: "GET", url: "/api/workspace/knowledge/search?q=add", headers: { cookie, ...csrfHeaders(cookie) }
+    });
+
+    expect(response.statusCode).toBe(200);
+    const result = response.json<{ results: Array<{
+      kind: string; title: string; projectId: string; projectName: string; releaseId: string;
+      matchReason: string; citations: Array<{ path: string }>;
+      trust: { targetKind: string; score: number; citationScore: number };
+    }> }>().results.find((item) => item.kind === "symbol" && item.title === "add");
+    expect(result).toMatchObject({
+      projectId: project.id,
+      projectName: project.name,
+      releaseId: release.id,
+      matchReason: "精确符号匹配",
+      citations: [{ path: "src/index.ts" }],
+      trust: { targetKind: "search_result", score: 1, citationScore: 1 }
     });
   });
 

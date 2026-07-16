@@ -1,5 +1,19 @@
 import type { Citation } from "./intelligence.js";
 
+export const retrievalEvaluationCategories = [
+  "symbol",
+  "path",
+  "command",
+  "natural-language",
+  "table",
+  "cross-project",
+  "error-feedback",
+  "no-result"
+] as const;
+
+export type RetrievalEvaluationCategory = typeof retrievalEvaluationCategories[number];
+export type RetrievalEvaluationSource = "fixture" | "admin-approved-sanitized-feedback";
+
 export interface RetrievalEvaluationCase {
   id: string;
   query: string;
@@ -7,6 +21,8 @@ export interface RetrievalEvaluationCase {
   expectedTitles: string[];
   expectedPaths: string[];
   expectEmpty: boolean;
+  category: RetrievalEvaluationCategory;
+  source: RetrievalEvaluationSource;
 }
 
 export interface EvaluationSearchResult {
@@ -39,6 +55,20 @@ function record(value: unknown, line: number): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function category(value: unknown, id: string): RetrievalEvaluationCategory {
+  if (typeof value !== "string" || !retrievalEvaluationCategories.includes(value as RetrievalEvaluationCategory)) {
+    throw new Error(`Retrieval evaluation case ${id} has invalid category`);
+  }
+  return value as RetrievalEvaluationCategory;
+}
+
+function source(value: unknown, id: string): RetrievalEvaluationSource {
+  if (value !== "fixture" && value !== "admin-approved-sanitized-feedback") {
+    throw new Error(`Retrieval evaluation case ${id} has invalid source`);
+  }
+  return value;
+}
+
 export function parseRetrievalCases(input: string): RetrievalEvaluationCase[] {
   const lines = input.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
   if (!lines.length) throw new Error("Retrieval evaluation dataset must not be empty");
@@ -62,13 +92,18 @@ export function parseRetrievalCases(input: string): RetrievalEvaluationCase[] {
     const expectedTitles = stringArray(parsed.expectedTitles, "expectedTitles", id);
     const expectedPaths = stringArray(parsed.expectedPaths, "expectedPaths", id);
     const expectEmpty = parsed.expectEmpty === true;
+    const itemCategory = category(parsed.category, id);
+    const itemSource = source(parsed.source, id);
     if (expectEmpty && (expectedTitles.length || expectedPaths.length)) {
       throw new Error(`Retrieval evaluation case ${id} expects empty results and must not declare expected titles or paths`);
     }
     if (!expectEmpty && !expectedTitles.length && !expectedPaths.length) {
       throw new Error(`Retrieval evaluation case ${id} must declare an expected title or path`);
     }
-    return { id, query, project, expectedTitles, expectedPaths, expectEmpty };
+    return {
+      id, query, project, expectedTitles, expectedPaths, expectEmpty,
+      category: itemCategory, source: itemSource
+    };
   });
 }
 

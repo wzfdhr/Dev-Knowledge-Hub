@@ -19,34 +19,47 @@ describe("knowledge-v2 retrieval evaluation dataset", () => {
   test("rejects empty, duplicate, ambiguous, and malformed cases", () => {
     expect(() => parseRetrievalCases("")).toThrow("must not be empty");
     expect(() => parseRetrievalCases([
-      JSON.stringify({ id: "duplicate", query: "add", project: "fixture-a", expectedTitles: ["add"] }),
-      JSON.stringify({ id: "duplicate", query: "clamp", project: "fixture-a", expectedTitles: ["clamp"] })
+      JSON.stringify({ id: "duplicate", query: "add", project: "fixture-a", expectedTitles: ["add"], category: "symbol", source: "fixture" }),
+      JSON.stringify({ id: "duplicate", query: "clamp", project: "fixture-a", expectedTitles: ["clamp"], category: "symbol", source: "fixture" })
     ].join("\n"))).toThrow("duplicate id");
     expect(() => parseRetrievalCases(JSON.stringify({
-      id: "ambiguous", query: "add", project: "fixture-a", expectEmpty: true, expectedTitles: ["add"]
+      id: "ambiguous", query: "add", project: "fixture-a", expectEmpty: true, expectedTitles: ["add"], category: "symbol", source: "fixture"
     }))).toThrow("must not declare expected titles or paths");
     expect(() => parseRetrievalCases(JSON.stringify({
-      id: "uncited", query: "add", project: "fixture-a"
+      id: "uncited", query: "add", project: "fixture-a", category: "symbol", source: "fixture"
     }))).toThrow("must declare an expected title or path");
+    expect(() => parseRetrievalCases(JSON.stringify({
+      id: "unclassified", query: "add", project: "fixture-a", expectedTitles: ["add"], source: "fixture"
+    }))).toThrow("invalid category");
+    expect(() => parseRetrievalCases(JSON.stringify({
+      id: "unprovenanced", query: "add", project: "fixture-a", expectedTitles: ["add"], category: "symbol"
+    }))).toThrow("invalid source");
+    expect(parseRetrievalCases(JSON.stringify({
+      id: "approved", query: "add", project: "fixture-a", expectedTitles: ["add"],
+      category: "error-feedback", source: "admin-approved-sanitized-feedback"
+    }))[0]?.source).toBe("admin-approved-sanitized-feedback");
   });
 
-  test("ships 100 public fixture cases across Chinese, English, and empty-result intents", async () => {
+  test("ships a 140-case public suite with protected retrieval intents", async () => {
     const cases = parseRetrievalCases(await readFile(casesPath, "utf8"));
     const chinese = cases.filter((item) => /[\u3400-\u9fff]/u.test(item.query));
-    const english = cases.filter((item) => /[a-z]/iu.test(item.query) && !/[\u3400-\u9fff]/u.test(item.query));
     const empty = cases.filter((item) => item.expectEmpty);
+    const categories = new Set(cases.map((item) => item.category));
 
-    expect(cases).toHaveLength(100);
-    expect(chinese).toHaveLength(40);
-    expect(english).toHaveLength(60);
-    expect(empty).toHaveLength(20);
-    expect(cases.every((item) => item.project === "fixture-a")).toBe(true);
+    expect(cases).toHaveLength(140);
+    expect(chinese.length).toBeGreaterThanOrEqual(50);
+    expect(empty.length).toBeGreaterThanOrEqual(15);
+    expect(categories).toEqual(new Set([
+      "symbol", "path", "command", "natural-language", "table", "cross-project", "error-feedback", "no-result"
+    ]));
+    expect(new Set(cases.map((item) => item.project))).toEqual(new Set(["fixture-a", "fixture-b"]));
+    expect(cases.every((item) => item.source === "fixture")).toBe(true);
   });
 
   test("calculates ranking, citation, and empty-result metrics from executable result sets", async () => {
     const cases: RetrievalEvaluationCase[] = parseRetrievalCases([
-      JSON.stringify({ id: "found", query: "add", project: "fixture-a", expectedTitles: ["add"], expectedPaths: ["src/math.ts"] }),
-      JSON.stringify({ id: "empty", query: "missing", project: "fixture-a", expectEmpty: true })
+      JSON.stringify({ id: "found", query: "add", project: "fixture-a", expectedTitles: ["add"], expectedPaths: ["src/math.ts"], category: "symbol", source: "fixture" }),
+      JSON.stringify({ id: "empty", query: "missing", project: "fixture-a", expectEmpty: true, category: "no-result", source: "fixture" })
     ].join("\n"));
     const metrics = await evaluateRetrievalCases(cases, async (item) => item.id === "found" ? [{
       title: "add",

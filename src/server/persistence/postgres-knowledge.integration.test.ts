@@ -262,6 +262,17 @@ integration("PostgreSQL cited knowledge integration", () => {
     expect(stageEvents).toEqual(expect.arrayContaining([
       expect.objectContaining({ stageRunId: convert.id, status: "running" })
     ]));
+    const staleThreshold = new Date(Date.now() - 60_000);
+    expect(await store.listStaleRunningStageRuns(staleThreshold)).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: convert.id })
+    ]));
+    await pool.query(
+      "UPDATE build_stage_runs SET started_at = now() - interval '10 minutes' WHERE id = $1",
+      [convert.id]
+    );
+    await expect(store.listStaleRunningStageRuns(staleThreshold)).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: convert.id, status: "running" })
+    ]));
 
     const artifact = {
       id: randomUUID(), workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId, buildId: build.build.id,

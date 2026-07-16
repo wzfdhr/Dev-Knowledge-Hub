@@ -13,6 +13,7 @@ import { FeedbackPage } from "./pages/feedback-page";
 import { SystemSettingsPage as SettingsPage } from "./pages/system-settings-page";
 import { ProjectCodexPage } from "./pages/project-codex-page";
 import { ProjectImportsPage } from "./pages/project-imports-page";
+import { ProjectGraphPage } from "./pages/project-graph-page";
 import { derivePrimaryAction, ProjectVersionsPage as OverviewPage } from "./pages/project-versions-page";
 import { ApiError, type ApiClient } from "./api/client";
 import { App } from "./app";
@@ -555,6 +556,36 @@ describe("overview primary command", () => {
 
     expect(await screen.findByText("Provider rejected the request")).toBeVisible();
     expect(screen.getByRole("button", { name: "重试知识构建" })).toBeVisible();
+    expect(screen.getByText("当前已发布版本未受影响。重试会创建新的候选构建，不会覆盖现有版本。")).toBeVisible();
+  });
+
+  test("explains safe next steps for empty knowledge, graph, and expired sessions", async () => {
+    const emptyKnowledgeApi = {
+      getRepositoryStatus: vi.fn().mockResolvedValue({ repository: null, latestSnapshot: null }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [] })
+    } as unknown as ApiClient;
+    localStorage.setItem("devkh:active-project-id", "project-1");
+    renderPage(<KnowledgePage api={emptyKnowledgeApi} />);
+    expect(await screen.findByText("尚未接入资料不会影响其他项目或已发布版本。"))
+      .toBeVisible();
+    expect(screen.getByRole("link", { name: "前往资料上传" })).toBeVisible();
+    cleanup();
+
+    const graphApi = {
+      getProjectGraph: vi.fn().mockResolvedValue({ release: null, format: "tree", data: null })
+    } as unknown as ApiClient;
+    renderPageAt(<Routes><Route path="/projects/:projectId/graph" element={<ProjectGraphPage api={graphApi} />} /></Routes>, "/projects/project-1/graph");
+    expect(await screen.findByText("尚未发布图谱不会影响现有资料或知识版本。"))
+      .toBeVisible();
+    cleanup();
+
+    const expiredApi = {
+      setupStatus: vi.fn().mockResolvedValue({ setupRequired: false }),
+      session: vi.fn().mockRejectedValue(new ApiError(401, "SESSION_EXPIRED", "expired"))
+    } as unknown as ApiClient;
+    renderAppAt(expiredApi, "/projects");
+    expect(await screen.findByText("会话已失效。资料、构建和已发布版本均未被修改；请重新登录后继续。"))
+      .toBeVisible();
   });
 
   test("ignores an older failure after the latest build is published", async () => {

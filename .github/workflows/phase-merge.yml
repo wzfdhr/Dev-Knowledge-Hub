@@ -91,6 +91,7 @@ jobs:
       COMPOSE_PROJECT_NAME: devkh-ci-merge-${{ github.run_id }}
       DEVKH_CONTAINER_SMOKE: "true"
       RECOVERY_EVIDENCE_DIR: /tmp/devkh-recovery-evidence
+      RECOVERY_EVIDENCE_DEFER_FINALIZATION: "true"
     steps:
       - uses: actions/checkout@v4
         with:

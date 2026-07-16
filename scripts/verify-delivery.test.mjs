@@ -54,6 +54,7 @@ describe("delivery database isolation", () => {
     const deliveryCheck = await readFile("scripts/verify-delivery.mjs", "utf8");
     const compose = parse(await readFile("docker-compose.yml", "utf8"));
     const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
+    const phaseMerge = parse(await readFile(".github/workflows/phase-merge.yml", "utf8"));
     const verifySteps = ci.jobs.verify.steps
       .map((step) => step.run)
       .filter(Boolean)
@@ -77,6 +78,7 @@ describe("delivery database isolation", () => {
     expect(ci.jobs["container-smoke"].env.COMPOSE_PROJECT_NAME).toBe("devkh-ci");
     expect(ci.jobs["container-smoke"].env.DEVKH_CONTAINER_SMOKE).toBe("true");
     expect(ci.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DIR).toBe("/tmp/devkh-recovery-evidence");
+    expect(phaseMerge.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DEFER_FINALIZATION).toBe("true");
     expect(verifySteps).toContain("npx playwright install --with-deps chromium");
     expect(verifySteps).toContain("npm run release:verify -- --scope verify");
     expect(smokeSteps).toContain("apt-get install -y restic");

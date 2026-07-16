@@ -124,7 +124,7 @@ describe("PipelineStageWorker", () => {
     expect(store.completeStageRunAndCreateNext).toHaveBeenCalledOnce();
     expect(store.runs).toEqual(expect.arrayContaining([
       expect.objectContaining({ stage: "convert", status: "succeeded", outputManifestIds: ["artifact-1"] }),
-      expect.objectContaining({ stage: "extract", status: "queued" })
+      expect.objectContaining({ stage: "extract", status: "queued", inputDigest: expect.not.stringMatching(/^a{64}$/) })
     ]));
     expect(store.runs.some((run) => run.stage === "graph")).toBe(false);
     expect(queue.sent).toEqual([

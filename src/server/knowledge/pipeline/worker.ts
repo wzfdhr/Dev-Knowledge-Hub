@@ -1,6 +1,7 @@
 import type { BuildRecord } from "../build-service.js";
 import type { PipelineArtifactStore, PipelineStageRunRecord } from "../../persistence/store.js";
 import type { BuildStage } from "./contracts.js";
+import { pipelineInputDigest } from "./input-digest.js";
 
 export interface PipelineStageSchedule {
   workspaceId: string;
@@ -84,6 +85,17 @@ export class PipelineStageWorker {
       try {
         const result = await this.execute(run);
         const nextStage = this.stages[this.stages.indexOf(run.stage) + 1];
+        const nextInputDigest = nextStage ? pipelineInputDigest({
+          stage: nextStage,
+          snapshotId: run.snapshotId,
+          upstreamManifestIds: result.outputManifestIds ?? [],
+          parserConfigVersion: "pipeline-v1",
+          purpose: {
+            kind: build.purpose.kind,
+            feedbackIds: build.purpose.feedbackIds,
+            remediationIds: build.purpose.remediationContext?.map((context) => context.remediationId) ?? []
+          }
+        }) : undefined;
         const advanced = await this.store.completeStageRunAndCreateNext({
           workspaceId: run.workspaceId,
           projectId: run.projectId,
@@ -97,7 +109,7 @@ export class PipelineStageWorker {
             buildId: run.buildId,
             stage: nextStage,
             attempt: 1,
-            inputDigest: run.inputDigest
+            inputDigest: nextInputDigest!
           } } : {})
         });
         if (advanced?.next) {

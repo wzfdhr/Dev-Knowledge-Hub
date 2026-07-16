@@ -344,6 +344,8 @@ export const releases = pgTable("releases", {
   buildJobId: uuid("build_job_id").notNull(),
   snapshotId: uuid("snapshot_id").notNull(),
   version: text("version").notNull(),
+  kernelMode: text("kernel_mode").notNull().default("legacy"),
+  packageArtifactId: uuid("package_artifact_id"),
   publishedAt: timestamp("published_at", { withTimezone: true }),
   ...timestamps
 }, (table) => [

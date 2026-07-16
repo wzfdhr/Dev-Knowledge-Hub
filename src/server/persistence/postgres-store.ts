@@ -253,6 +253,8 @@ interface ReleaseRow extends QueryResultRow {
   build_job_id: string;
   snapshot_id: string;
   version: string;
+  kernel_mode?: "legacy" | "pipeline";
+  package_artifact_id?: string | null;
   created_at: Date;
   published_at: Date | null;
   status?: BuildStatus;
@@ -547,6 +549,8 @@ function releaseRecord(row: ReleaseRow): ReleaseRecord {
     buildId: row.build_job_id,
     snapshotId: row.snapshot_id,
     version: row.version,
+    kernelMode: row.kernel_mode ?? "legacy",
+    packageArtifactId: row.package_artifact_id ?? null,
     createdAt: row.created_at,
     publishedAt: row.published_at
   };
@@ -1623,6 +1627,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          SELECT jsonb_build_object(
            'id', r.id, 'workspace_id', r.workspace_id, 'repository_id', r.repository_id,
            'build_job_id', r.build_job_id, 'snapshot_id', r.snapshot_id, 'version', r.version,
+           'kernel_mode', r.kernel_mode, 'package_artifact_id', r.package_artifact_id,
            'created_at', r.created_at, 'published_at', r.published_at
          ) AS value
          FROM release_channels channel JOIN releases r ON r.id = channel.release_id
@@ -1683,6 +1688,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         currentRelease: release ? {
           id: String(release.id), workspaceId: String(release.workspace_id), repositoryId: String(release.repository_id),
           buildId: String(release.build_job_id), snapshotId: String(release.snapshot_id), version: String(release.version),
+          kernelMode: release.kernel_mode === "pipeline" ? "pipeline" : "legacy",
+          packageArtifactId: release.package_artifact_id ? String(release.package_artifact_id) : null,
           createdAt: date(release.created_at), publishedAt: release.published_at ? date(release.published_at) : null
         } : null,
         latestBuild: build ? {
@@ -3494,7 +3501,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
        FROM build_jobs b
        WHERE b.id = $3 AND b.workspace_id = $1 AND b.repository_id = $2 AND b.status = 'ready'
        RETURNING id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-                 created_at, published_at`,
+                 kernel_mode, package_artifact_id, created_at, published_at`,
       [workspaceId, repositoryId, buildId, version]
     );
     if (!rows[0]) throw new Error("Only a ready build can create a release draft");
@@ -3511,7 +3518,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       await client.query("BEGIN");
       const selected = await client.query<ReleaseRow>(
         `SELECT r.id, r.workspace_id, r.repository_id, r.build_job_id, r.snapshot_id,
-                r.version, r.created_at, r.published_at, b.status
+                r.version, r.kernel_mode, r.package_artifact_id, r.created_at, r.published_at, b.status
          FROM releases r JOIN build_jobs b ON b.id = r.build_job_id
          WHERE r.workspace_id = $1 AND r.id = $2 FOR UPDATE`,
         [workspaceId, releaseId]
@@ -3530,7 +3537,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         `UPDATE releases SET published_at = COALESCE(published_at, now()), updated_at = now()
          WHERE id = $1
          RETURNING id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-                   created_at, published_at`,
+                   kernel_mode, package_artifact_id, created_at, published_at`,
         [release.id]
       );
       const publishedBuild = await client.query<{ id: string; workspace_id: string; status: BuildStatus }>(
@@ -3562,7 +3569,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   ): Promise<ReleaseRecord | null> {
     const { rows } = await this.pool.query<ReleaseRow>(
       `SELECT r.id, r.workspace_id, r.repository_id, r.build_job_id, r.snapshot_id,
-              r.version, r.created_at, r.published_at
+              r.version, r.kernel_mode, r.package_artifact_id, r.created_at, r.published_at
        FROM release_channels c JOIN releases r ON r.id = c.release_id
        WHERE c.workspace_id = $1 AND c.repository_id = $2 AND c.name = $3`,
       [workspaceId, repositoryId, channel]
@@ -3573,7 +3580,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   async getRelease(workspaceId: string, releaseId: string): Promise<ReleaseRecord | null> {
     const { rows } = await this.pool.query<ReleaseRow>(
       `SELECT id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-              created_at, published_at
+              kernel_mode, package_artifact_id, created_at, published_at
        FROM releases WHERE workspace_id = $1 AND id = $2 LIMIT 1`,
       [workspaceId, releaseId]
     );
@@ -3588,7 +3595,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     const { limit, offset } = normalizePagination(pagination);
     const { rows } = await this.pool.query<ReleaseRow>(
       `SELECT id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-              created_at, published_at
+              kernel_mode, package_artifact_id, created_at, published_at
        FROM releases WHERE workspace_id = $1 AND repository_id = $2
        ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`,
       [workspaceId, repositoryId, limit, offset]

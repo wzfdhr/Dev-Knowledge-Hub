@@ -1944,6 +1944,8 @@ export class MemoryAppStore implements AppStore {
       buildId,
       snapshotId: build.snapshotId,
       version,
+      kernelMode: "legacy",
+      packageArtifactId: null,
       createdAt: new Date(),
       publishedAt: null
     };

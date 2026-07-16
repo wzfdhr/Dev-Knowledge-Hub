@@ -507,6 +507,8 @@ export interface ReleaseRecord {
   buildId: string;
   snapshotId: string;
   version: string;
+  kernelMode: "legacy" | "pipeline";
+  packageArtifactId: string | null;
   createdAt: Date;
   publishedAt: Date | null;
 }

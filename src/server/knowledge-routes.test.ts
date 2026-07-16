@@ -74,6 +74,63 @@ async function authenticatedApp() {
 }
 
 describe("knowledge API contracts", () => {
+  test("lets a workspace administrator roll current back to a published legacy release with an audit trail", async () => {
+    const { app, store, cookie, repositoryId, workspaceId } = await authenticatedApp();
+    const createReadyBuild = async (commitSha: string) => {
+      const build = (await store.createBuild({
+        workspaceId,
+        repositoryId,
+        snapshotId: "11111111-1111-4111-8111-111111111111",
+        snapshotPath: fixtureRoot,
+        commitSha
+      })).build;
+      await store.transitionBuild(build.id, "queued", "ready");
+      return build;
+    };
+    const firstBuild = await createReadyBuild("a".repeat(40));
+    const first = await store.createReleaseDraft(workspaceId, repositoryId, firstBuild.id, "1.0.0");
+    await store.publishRelease(workspaceId, first.id);
+    const secondBuild = await createReadyBuild("b".repeat(40));
+    const second = await store.createReleaseDraft(workspaceId, repositoryId, secondBuild.id, "2.0.0");
+    await store.publishRelease(workspaceId, second.id);
+    const repository = await store.getRepository(workspaceId, repositoryId);
+    const member = await app.inject({
+      method: "POST", url: "/api/members", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { email: "project-admin@example.com", password: "correct horse battery staple", role: "member" }
+    });
+    const projectAdminId = member.json().member.id as string;
+    await app.inject({
+      method: "POST", url: `/api/projects/${repository!.projectId}/members`, headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { userId: projectAdminId, role: "admin" }
+    });
+    const projectAdminLogin = await app.inject({
+      method: "POST", url: "/api/session",
+      payload: { email: "project-admin@example.com", password: "correct horse battery staple" }
+    });
+    const projectAdminCookie = authenticatedCookie(projectAdminLogin);
+    const denied = await app.inject({
+      method: "POST", url: `/api/releases/${first.id}/rollback`,
+      headers: { cookie: projectAdminCookie, ...csrfHeaders(projectAdminCookie) }
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json()).toMatchObject({ error: { code: "FORBIDDEN" } });
+
+    const response = await app.inject({
+      method: "POST", url: `/api/releases/${first.id}/rollback`, headers: { cookie, ...csrfHeaders(cookie) }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ release: { id: first.id }, previousReleaseId: second.id });
+    expect((await store.currentRelease(workspaceId, repositoryId))?.id).toBe(first.id);
+    expect(store.auditEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "release.rolled_back", resourceType: "release", resourceId: first.id,
+        metadata: expect.objectContaining({ previousReleaseId: second.id })
+      })
+    ]));
+    await app.close();
+  });
+
   test("starts, lists, reads, cancels, and streams build state", async () => {
     const { app, cookie } = await authenticatedApp();
     const started = await app.inject({

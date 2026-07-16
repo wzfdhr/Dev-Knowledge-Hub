@@ -48,6 +48,7 @@ The administration API uses JSON under `/api`. Except health, setup status, setu
 | GET | `/api/releases/current` | Current published release plus commit |
 | GET | `/api/releases/:id` | Exact workspace-scoped release plus commit; stable `RELEASE_NOT_FOUND` |
 | POST | `/api/releases/:id/publish` | Explicit publication |
+| POST | `/api/releases/:id/rollback` | Workspace-admin only: repoint `current` to an already published legacy release, returning the prior release ID |
 | GET | `/api/feedback` | Optional `status` filter |
 | PATCH | `/api/feedback/:id` | `{status}` constrained transition |
 | POST | `/api/feedback/:id/rebuild` | Rebuild acknowledged feedback against published snapshot |

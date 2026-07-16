@@ -2148,6 +2148,22 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
 
+  server.post("/api/releases/:id/rollback", { preHandler: requireAdministrator }, async (request, reply) => {
+    const parsed = z.object({ id: z.uuid() }).safeParse(request.params);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_INPUT", "Invalid release ID");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const existing = await options.store.getRelease(admin.workspaceId, parsed.data.id);
+    if (!existing) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
+    try {
+      const result = await options.store.rollbackReleaseToLegacy(
+        admin.workspaceId, existing.id, admin.id
+      );
+      return { release: result.release, previousReleaseId: result.previousReleaseId };
+    } catch (error) {
+      return sendError(reply, 409, "ROLLBACK_FAILED", error instanceof Error ? error.message : "Rollback failed");
+    }
+  });
+
   server.get("/api/releases/current", { preHandler: requireAdmin }, async (request, reply) => {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const repository = await requireRepositoryRole("reader", request, reply);

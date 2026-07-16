@@ -21,6 +21,23 @@ describe("release API client", () => {
       expect.objectContaining({ credentials: "same-origin" })
     );
   });
+
+  test("uses the dedicated rollback endpoint for one exact release ID", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      release: { id: "release / old", version: "0.1.0" }, previousReleaseId: "release-current"
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.rollbackRelease("release / old");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/releases/release%20%2F%20old/rollback",
+      expect.objectContaining({ method: "POST", credentials: "same-origin" })
+    );
+  });
 });
 
 describe("build API client", () => {

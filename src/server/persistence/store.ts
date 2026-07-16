@@ -560,6 +560,11 @@ export interface ReleaseRecord {
   publishedAt: Date | null;
 }
 
+export interface ReleaseRollbackResult {
+  release: ReleaseRecord;
+  previousReleaseId: string | null;
+}
+
 export type SearchResultKind = "symbol" | "module" | "path" | "dependency-neighbor" | "page";
 
 export interface KnowledgeSearchResult {
@@ -666,6 +671,11 @@ export interface KnowledgeStore {
     version: string
   ): Promise<ReleaseRecord>;
   publishRelease(workspaceId: string, releaseId: string, channel?: string): Promise<ReleaseRecord>;
+  rollbackReleaseToLegacy(
+    workspaceId: string,
+    releaseId: string,
+    actorId: string
+  ): Promise<ReleaseRollbackResult>;
   currentRelease(
     workspaceId: string,
     repositoryId: string,

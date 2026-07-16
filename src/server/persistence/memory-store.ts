@@ -2194,6 +2194,37 @@ export class MemoryAppStore implements AppStore {
     return release;
   }
 
+  async rollbackReleaseToLegacy(workspaceId: string, releaseId: string, actorId: string) {
+    const release = this.releases.find((candidate) =>
+      candidate.workspaceId === workspaceId && candidate.id === releaseId
+    );
+    const repository = release && this.repositories.find((candidate) =>
+      candidate.workspaceId === workspaceId && candidate.id === release.repositoryId
+    );
+    if (!release || !repository || release.publishedAt === null || release.kernelMode !== "legacy") {
+      throw new Error("Only a published legacy release can be restored");
+    }
+    const channelKey = `${workspaceId}:${release.repositoryId}:current`;
+    const previousReleaseId = this.releaseChannels.get(channelKey) ?? null;
+    if (previousReleaseId === release.id) return { release, previousReleaseId };
+    this.releaseChannels.set(channelKey, release.id);
+    try {
+      await this.recordAudit({
+        workspaceId,
+        actorId,
+        action: "release.rolled_back",
+        resourceType: "release",
+        resourceId: release.id,
+        metadata: { projectId: repository.projectId, previousReleaseId }
+      });
+      return { release, previousReleaseId };
+    } catch (error) {
+      if (previousReleaseId === null) this.releaseChannels.delete(channelKey);
+      else this.releaseChannels.set(channelKey, previousReleaseId);
+      throw error;
+    }
+  }
+
   async currentRelease(
     workspaceId: string,
     repositoryId: string,

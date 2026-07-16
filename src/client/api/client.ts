@@ -120,6 +120,7 @@ export interface ApiClient {
   currentRelease(): Promise<{ release: Release }>;
   createRelease(buildId: string, version: string): Promise<{ release: Release }>;
   publishRelease(id: string): Promise<{ release: Release }>;
+  rollbackRelease(id: string): Promise<{ release: Release; previousReleaseId: string | null }>;
   listKnowledgePages(releaseId: string | undefined, pagination: PaginationParams):
     Promise<{ pages: KnowledgePageRecord[] } & PaginatedResponse>;
   getKnowledgePage(id: string): Promise<{ page: KnowledgePageRecord }>;
@@ -246,6 +247,7 @@ export const api: ApiClient = {
   currentRelease: () => request("/api/releases/current"),
   createRelease: (buildId, version) => request("/api/releases", { method: "POST", body: json({ buildId, version }) }),
   publishRelease: (id) => request(`/api/releases/${encodeURIComponent(id)}/publish`, { method: "POST" }),
+  rollbackRelease: (id) => request(`/api/releases/${encodeURIComponent(id)}/rollback`, { method: "POST" }),
   listKnowledgePages: (releaseId, pagination) => request(listPath(
     "/api/knowledge/pages",
     pagination,

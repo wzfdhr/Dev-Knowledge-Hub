@@ -79,6 +79,44 @@ describe("immutable releases", () => {
     expect(await store.currentRelease(setup!.workspace.id, repository!.id)).toBeNull();
   });
 
+  test("only restores a published legacy release and leaves current unchanged when its audit cannot be written", async () => {
+    const store = new MemoryAppStore();
+    const setup = await store.createInitialSetup("admin@example.com", "hash");
+    const repository = await store.createRepository(setup!.workspace.id, {
+      kind: "local", name: "Fixture", path: fixtureRoot
+    });
+    const createPublishedRelease = async (snapshotId: string, version: string) => {
+      const build = (await store.createBuild({
+        workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id,
+        snapshotId,
+        snapshotPath: fixtureRoot,
+        commitSha: version[0]!.repeat(40)
+      })).build;
+      await store.transitionBuild(build.id, "queued", "ready");
+      const release = await store.createReleaseDraft(setup!.workspace.id, repository!.id, build.id, version);
+      await store.publishRelease(setup!.workspace.id, release.id);
+      return release;
+    };
+    const legacy = await createPublishedRelease("snapshot-legacy", "1.0.0");
+    const current = await createPublishedRelease("snapshot-current", "2.0.0");
+
+    store.releases.find((release) => release.id === legacy.id)!.kernelMode = "pipeline";
+    await expect(store.rollbackReleaseToLegacy(setup!.workspace.id, legacy.id, setup!.admin.id))
+      .rejects.toThrow(/published legacy/i);
+    expect((await store.currentRelease(setup!.workspace.id, repository!.id))?.id).toBe(current.id);
+
+    store.releases.find((release) => release.id === legacy.id)!.kernelMode = "legacy";
+    const recordAudit = store.recordAudit.bind(store);
+    store.recordAudit = async (event) => {
+      if (event.action === "release.rolled_back") throw new Error("audit unavailable");
+      await recordAudit(event);
+    };
+    await expect(store.rollbackReleaseToLegacy(setup!.workspace.id, legacy.id, setup!.admin.id))
+      .rejects.toThrow("audit unavailable");
+    expect((await store.currentRelease(setup!.workspace.id, repository!.id))?.id).toBe(current.id);
+  });
+
   test("keeps the intended first fifty chunks in generator order", async () => {
     const store = new MemoryAppStore();
     const setup = await store.createInitialSetup("admin@example.com", "hash");

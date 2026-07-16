@@ -3987,6 +3987,51 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     }
   }
 
+  async rollbackReleaseToLegacy(workspaceId: string, releaseId: string, actorId: string) {
+    return this.transaction(async (client) => {
+      const selected = await client.query<ReleaseRow & { project_id: string }>(
+        `SELECT r.id, r.workspace_id, r.repository_id, r.build_job_id, r.snapshot_id,
+                r.version, r.kernel_mode, r.package_artifact_id, r.created_at, r.published_at,
+                repository.project_id
+         FROM releases r
+         JOIN repositories repository ON repository.id = r.repository_id
+           AND repository.workspace_id = r.workspace_id
+         WHERE r.workspace_id = $1 AND r.id = $2
+         FOR UPDATE`,
+        [workspaceId, releaseId]
+      );
+      const release = selected.rows[0];
+      if (!release || release.published_at === null || release.kernel_mode !== "legacy") {
+        throw new Error("Only a published legacy release can be restored");
+      }
+      const current = await client.query<{ release_id: string }>(
+        `SELECT release_id FROM release_channels
+         WHERE workspace_id = $1 AND repository_id = $2 AND name = 'current'
+         FOR UPDATE`,
+        [workspaceId, release.repository_id]
+      );
+      const previousReleaseId = current.rows[0]?.release_id ?? null;
+      if (previousReleaseId !== release.id) {
+        await client.query(
+          `INSERT INTO release_channels (workspace_id, repository_id, release_id, name)
+           VALUES ($1, $2, $3, 'current')
+           ON CONFLICT (repository_id, name) DO UPDATE
+           SET release_id = EXCLUDED.release_id, updated_at = now()`,
+          [workspaceId, release.repository_id, release.id]
+        );
+        await this.insertAudit(client, {
+          workspaceId,
+          actorId,
+          action: "release.rolled_back",
+          resourceType: "release",
+          resourceId: release.id,
+          metadata: { projectId: release.project_id, previousReleaseId }
+        });
+      }
+      return { release: releaseRecord(release), previousReleaseId };
+    });
+  }
+
   async currentRelease(
     workspaceId: string,
     repositoryId: string,

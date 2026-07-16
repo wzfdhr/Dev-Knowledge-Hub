@@ -1344,6 +1344,80 @@ integration("PostgreSQL cited knowledge integration", () => {
       new Date(), 10, 60_000
     )).resolves.toEqual([]);
   }, 30_000);
+
+  test(databaseUrl
+    ? "rolls current back to a legacy release atomically with its audit event"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("release-rollback@example.com", "hash");
+    const repository = await store.createRepository(
+      setup!.workspace.id, { kind: "upload", name: "Rollback source" }
+    );
+    const snapshotId = randomUUID();
+    await store.createSnapshot({
+      snapshot: {
+        id: snapshotId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+        commitSha: "a".repeat(40), ref: "upload", remoteUrl: null,
+        commitTimestamp: new Date("2026-07-17T00:00:00.000Z"), storagePath: "/tmp/release-rollback"
+      },
+      files: []
+    });
+    const createPublishedRelease = async (version: string) => {
+      const build = await store.createBuild({
+        workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId,
+        snapshotPath: "/tmp/release-rollback", commitSha: version[0]!.repeat(40)
+      });
+      await store.transitionBuild(build.build.id, "queued", "ready");
+      const release = await store.createReleaseDraft(
+        setup!.workspace.id, repository!.id, build.build.id, version
+      );
+      await store.publishRelease(setup!.workspace.id, release.id);
+      return release;
+    };
+    const legacy = await createPublishedRelease("1.0.0");
+    const current = await createPublishedRelease("2.0.0");
+    await pool.query(`
+      CREATE FUNCTION reject_release_rollback_audit()
+      RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.action = 'release.rolled_back' THEN RAISE EXCEPTION 'audit unavailable'; END IF;
+        RETURN NEW;
+      END;
+      $$;
+      CREATE TRIGGER reject_release_rollback_audit
+        BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION reject_release_rollback_audit();
+    `);
+    try {
+      await expect(store.rollbackReleaseToLegacy(
+        setup!.workspace.id, legacy.id, setup!.admin.id
+      )).rejects.toThrow("audit unavailable");
+      await expect(store.currentRelease(setup!.workspace.id, repository!.id))
+        .resolves.toMatchObject({ id: current.id });
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS reject_release_rollback_audit ON audit_events");
+      await pool.query("DROP FUNCTION IF EXISTS reject_release_rollback_audit()");
+    }
+
+    await expect(store.rollbackReleaseToLegacy(
+      setup!.workspace.id, legacy.id, setup!.admin.id
+    )).resolves.toMatchObject({ release: { id: legacy.id }, previousReleaseId: current.id });
+    await expect(store.currentRelease(setup!.workspace.id, repository!.id))
+      .resolves.toMatchObject({ id: legacy.id, kernelMode: "legacy" });
+    const audit = await pool.query<{ action: string; resource_id: string; metadata: { previousReleaseId: string } }>(
+      `SELECT action, resource_id, metadata FROM audit_events
+       WHERE workspace_id = $1 AND action = 'release.rolled_back'`,
+      [setup!.workspace.id]
+    );
+    expect(audit.rows).toEqual([expect.objectContaining({
+      action: "release.rolled_back", resource_id: legacy.id,
+      metadata: expect.objectContaining({ previousReleaseId: current.id })
+    })]);
+  }, 30_000);
 });
 
 afterAll(async () => {

@@ -5,6 +5,7 @@ import { pipelineSearchIndexInputDigest } from "./index-stage.js";
 import { pipelineKnowledgeQualityInputDigest } from "./quality-stage.js";
 import { knowledgeVisualizationPipelineInputDigest } from "./viz-stage.js";
 import { knowledgeValidationPipelineInputDigest } from "./validate-stage.js";
+import { knowledgePackagePipelineInputDigest } from "./package-stage.js";
 import { knowledgeSynthesisPipelineInputDigest } from "./synthesize-stage.js";
 import { tableSchemasPipelineInputDigest } from "./tables-stage.js";
 import type { PipelineStageInputPlanner } from "./worker.js";
@@ -150,6 +151,13 @@ function nextB02InputDigest(input: {
         input.build.purpose,
         [...synthesisManifestIds, ...indexManifestIds, ...lintManifestIds, ...visualizationManifestIds]
       );
+    }
+    case "package": {
+      const validationManifestIds = latestOutputManifestIds(
+        input.runs, "validate", input.currentRun, input.outputManifestIds
+      );
+      assertSingleManifest("package", validationManifestIds);
+      return knowledgePackagePipelineInputDigest(input.snapshot, input.build.purpose, validationManifestIds);
     }
     default:
       throw new Error(`No B02 input digest planner exists for ${input.nextStage}`);

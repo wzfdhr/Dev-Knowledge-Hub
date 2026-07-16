@@ -22,6 +22,7 @@ export interface RemediationGenerationContext {
   remediationId: string;
   issueId: string;
   sourceRefs: SourceRef[];
+  affectedPaths: string[];
 }
 
 export type BuildPurpose =

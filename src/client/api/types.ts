@@ -1,3 +1,4 @@
+import type { LintIssue, TrustScore } from "../../shared/api-contracts";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
 import type { BuildStatus } from "../../server/knowledge/build-service";
 
@@ -44,8 +45,30 @@ export interface ProjectKnowledgeQuality {
     artifactReady: boolean;
     errorCode: string | null;
   } | null;
+  assessment: { trust: TrustScore; issueTotal: number; issues: LintIssue[] } | null;
   change: SnapshotChangeSummary | null;
   diagnostics: Array<{ code: "SOURCE_MISSING" | "SNAPSHOT_MISSING" | "BUILD_FAILED" | "RELEASE_MISSING" | "REBUILD_RECOMMENDED" | "PUBLISHED" }>;
+}
+export type RemediationState = "open" | "accepted" | "rebuilding" | "resolved" | "dismissed";
+export interface Remediation {
+  id: string;
+  projectId: string;
+  repositoryId: string;
+  sourceBuildId: string;
+  issue: LintIssue;
+  state: RemediationState;
+  rebuildBuildId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface RemediationEvent {
+  id: string;
+  remediationId: string;
+  fromState: RemediationState;
+  toState: RemediationState;
+  actorId: string | null;
+  reason: string | null;
+  createdAt: string;
 }
 export interface WorkspaceOverview {
   projects: ProjectSummary[];

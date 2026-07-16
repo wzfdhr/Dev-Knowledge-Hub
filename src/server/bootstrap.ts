@@ -195,7 +195,8 @@ export async function bootstrapServer(
     ...(env.publicBaseUrl ? { publicBaseUrl: env.publicBaseUrl } : {}),
     ...(env.legacySessionReadUntil ? { legacySessionReadUntil: env.legacySessionReadUntil } : {}),
     ...(mode === "production" ? { clientDir: path.resolve("dist/client") } : {}),
-    sessionStore: new PostgresSessionStore(database.pool)
+    sessionStore: new PostgresSessionStore(database.pool),
+    qualityArtifactReader: artifactStore as ArtifactStore
   });
   const reportBackgroundError = dependencies.reportBackgroundError
     ?? ((operation: string, error: unknown) => server.log.error({ err: error }, operation));

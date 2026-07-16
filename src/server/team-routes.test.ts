@@ -8,7 +8,7 @@ import { MemoryAppStore } from "./persistence/memory-store";
 
 const apps: ReturnType<typeof buildServer>[] = [];
 
-async function authenticatedTeam(overrides: { publicBaseUrl?: string } = {}) {
+async function authenticatedTeam(overrides: Pick<ServerOptions, "publicBaseUrl" | "qualityArtifactReader"> = {}) {
   const store = new MemoryAppStore();
   const app = buildServer({
     store,
@@ -278,8 +278,85 @@ describe("team projects and members", () => {
       currentRelease: null,
       knowledge: { pageCount: 0, chunkCount: 0, citationCount: 0 },
       qualityPipeline: null,
+      assessment: null,
       remediation: { open: 0, accepted: 0, rebuilding: 0, resolved: 0, dismissed: 0 },
       diagnostics: [expect.objectContaining({ code: "SOURCE_MISSING" })]
+    });
+  });
+
+  test("returns bounded trusted quality details only from the project's lint artifact", async () => {
+    const qualityArtifactId = "quality-artifact";
+    const { app, store, cookie } = await authenticatedTeam({
+      qualityArtifactReader: {
+        getJson: async () => ({
+          schemaVersion: 1,
+          trust: {
+            targetKind: "knowledge", targetId: "quality-build", score: 0.8,
+            citationScore: 1, parserScore: 1, freshnessScore: 1, lintPenalty: 0.2,
+            reasons: ["cited", "lint_warning"]
+          },
+          issues: [{
+            id: "quality-warning", buildId: "quality-build", rule: "KNOWLEDGE_LOW_COVERAGE",
+            severity: "warning", targetKind: "knowledge", targetId: "overview",
+            message: "Coverage is incomplete", sourceRefs: [], remediationState: "open"
+          }]
+        })
+      }
+    });
+    const workspace = (await store.defaultWorkspace())!;
+    const project = (await store.listProjects(workspace.id))[0]!;
+    const repository = await store.createRepository(workspace.id, { kind: "upload", name: "质量资料" }, project.id);
+    const snapshot = await store.createSnapshot({
+      snapshot: {
+        id: "quality-snapshot", workspaceId: workspace.id, repositoryId: repository!.id,
+        commitSha: "a".repeat(40), ref: "upload", remoteUrl: null,
+        commitTimestamp: new Date(), storagePath: "/tmp/quality-snapshot"
+      },
+      files: []
+    });
+    const { build } = await store.createBuild({
+      workspaceId: workspace.id, repositoryId: repository!.id, snapshotId: snapshot.id,
+      snapshotPath: snapshot.storagePath, commitSha: snapshot.commitSha
+    });
+    await store.transitionBuild(build.id, "queued", "ready");
+    const lint = await store.createStageRun({
+      workspaceId: workspace.id, projectId: project.id, snapshotId: snapshot.id, buildId: build.id,
+      stage: "lint", attempt: 1, inputDigest: "a".repeat(64)
+    });
+    await store.transitionStageRun(workspace.id, project.id, lint.id, "queued", "running");
+    await store.transitionStageRun(workspace.id, project.id, lint.id, "running", "succeeded", {
+      outputManifestIds: [qualityArtifactId]
+    });
+    store.findArtifactById = async (id) => id === qualityArtifactId ? {
+      id,
+      workspaceId: workspace.id,
+      projectId: project.id,
+      snapshotId: snapshot.id,
+      buildId: build.id,
+      stage: "lint",
+      kind: "knowledge-quality",
+      schemaVersion: 1,
+      inputDigest: "a".repeat(64),
+      contentDigest: "b".repeat(64),
+      storageKey: "unused",
+      sourceRefs: [],
+      producer: "deterministic",
+      createdAt: new Date().toISOString()
+    } : null;
+
+    const response = await app.inject({
+      method: "GET", url: `/api/projects/${project.id}/knowledge-quality?issueLimit=1`,
+      headers: { cookie, ...csrfHeaders(cookie) }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      qualityPipeline: { stage: "lint", status: "succeeded", artifactReady: true, errorCode: null },
+      assessment: {
+        trust: { score: 0.8, reasons: ["cited", "lint_warning"] },
+        issueTotal: 1,
+        issues: [expect.objectContaining({ id: "quality-warning", rule: "KNOWLEDGE_LOW_COVERAGE" })]
+      }
     });
   });
 
@@ -312,6 +389,24 @@ describe("team projects and members", () => {
         message: "Knowledge coverage is low", sourceRefs: [], remediationState: "open"
       }
     });
+    const errorRemediation = await store.createRemediation({
+      workspaceId: workspace.id, projectId: project.id, repositoryId: repository.id,
+      sourceBuildId: sourceBuild.build.id,
+      issue: {
+        id: "lint-graph", buildId: sourceBuild.build.id, rule: "GRAPH_DANGLING_FACT_EDGE",
+        severity: "error", targetKind: "graph", targetId: "edge-1",
+        message: "Graph edge is incomplete", sourceRefs: [], remediationState: "open"
+      }
+    });
+    const filtered = await app.inject({
+      method: "GET",
+      url: `/api/projects/${project.id}/remediations?state=open&severity=warning&rule=KNOWLEDGE_LOW_COVERAGE`,
+      headers: { cookie, ...csrfHeaders(cookie) }
+    });
+    expect(filtered.statusCode).toBe(200);
+    expect(filtered.json()).toMatchObject({ remediations: [expect.objectContaining({ id: remediation.id })] });
+    expect(filtered.json<{ remediations: Array<{ id: string }> }>().remediations)
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ id: errorRemediation.id })]));
     const reader = (await app.inject({
       method: "POST", url: "/api/members", headers: { cookie, ...csrfHeaders(cookie) },
       payload: { email: "quality-reader@example.com", password: "a secure reader password", role: "reader" }
@@ -331,7 +426,9 @@ describe("team projects and members", () => {
       headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) }
     });
     expect(visible.statusCode).toBe(200);
-    expect(visible.json()).toMatchObject({ remediations: [expect.objectContaining({ id: remediation.id, state: "open" })] });
+    expect(visible.json()).toMatchObject({
+      remediations: expect.arrayContaining([expect.objectContaining({ id: remediation.id, state: "open" })])
+    });
     const quality = await app.inject({
       method: "GET", url: `/api/projects/${project.id}/knowledge-quality`, headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) }
     });
@@ -350,6 +447,47 @@ describe("team projects and members", () => {
     });
     expect(accepted.statusCode).toBe(200);
     expect(accepted.json()).toMatchObject({ remediation: { id: remediation.id, state: "accepted" } });
+    const candidate = await store.requestRemediationBuildWithAudit({
+      workspaceId: workspace.id,
+      remediationId: remediation.id,
+      actorId: admin.id,
+      affectedPaths: [],
+      build: {
+        workspaceId: workspace.id,
+        repositoryId: repository.id,
+        snapshotId: "quality-snapshot",
+        snapshotPath: "/tmp/quality-snapshot",
+        commitSha: "a".repeat(40)
+      }
+    });
+    const prematureResolution = await app.inject({
+      method: "PATCH", url: `/api/projects/${project.id}/remediations/${remediation.id}`,
+      headers: { cookie, ...csrfHeaders(cookie) }, payload: { state: "resolved" }
+    });
+    expect(prematureResolution.statusCode).toBe(409);
+    expect(prematureResolution.json()).toMatchObject({ error: { code: "REMEDIATION_REBUILD_NOT_READY" } });
+    await store.transitionBuild(candidate.build.id, "queued", "ready");
+    const resolved = await app.inject({
+      method: "PATCH", url: `/api/projects/${project.id}/remediations/${remediation.id}`,
+      headers: { cookie, ...csrfHeaders(cookie) }, payload: { state: "resolved" }
+    });
+    expect(resolved.statusCode).toBe(200);
+    expect(resolved.json()).toMatchObject({ remediation: { id: remediation.id, state: "resolved" } });
+    const missingDismissalReason = await app.inject({
+      method: "PATCH", url: `/api/projects/${project.id}/remediations/${errorRemediation.id}`,
+      headers: { cookie, ...csrfHeaders(cookie) }, payload: { state: "dismissed" }
+    });
+    expect(missingDismissalReason.statusCode).toBe(400);
+    const dismissed = await app.inject({
+      method: "PATCH", url: `/api/projects/${project.id}/remediations/${errorRemediation.id}`,
+      headers: { cookie, ...csrfHeaders(cookie) }, payload: { state: "dismissed", reason: "误报，边已由来源文件证明" }
+    });
+    expect(dismissed.statusCode).toBe(200);
+    const repeatedDismissal = await app.inject({
+      method: "PATCH", url: `/api/projects/${project.id}/remediations/${errorRemediation.id}`,
+      headers: { cookie, ...csrfHeaders(cookie) }, payload: { state: "dismissed", reason: "误报，边已由来源文件证明" }
+    });
+    expect(repeatedDismissal.statusCode).toBe(200);
     expect((await app.inject({
       method: "POST", url: `/api/projects/${project.id}/remediations/${remediation.id}/rebuild`,
       headers: { cookie, ...csrfHeaders(cookie) }
@@ -359,7 +497,19 @@ describe("team projects and members", () => {
       headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) }
     });
     expect(events.statusCode).toBe(200);
-    expect(events.json()).toMatchObject({ events: [expect.objectContaining({ fromState: "open", toState: "accepted", actorId: admin.id })] });
+    const dismissalEvents = await app.inject({
+      method: "GET", url: `/api/projects/${project.id}/remediations/${errorRemediation.id}/events`,
+      headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) }
+    });
+    expect(dismissalEvents.statusCode).toBe(200);
+    expect(dismissalEvents.json()).toMatchObject({
+      events: [expect.objectContaining({ fromState: "open", toState: "dismissed", reason: "误报，边已由来源文件证明" })]
+    });
+    expect(events.json<{ events: Array<{ fromState: string | null; toState: string; actorId: string }> }>().events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ fromState: "open", toState: "accepted", actorId: admin.id }),
+      expect.objectContaining({ fromState: "accepted", toState: "rebuilding", actorId: admin.id }),
+      expect.objectContaining({ fromState: "rebuilding", toState: "resolved", actorId: admin.id })
+    ]));
   });
 
   test("uses the requested project when resolving the current repository", async () => {

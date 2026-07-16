@@ -13,13 +13,15 @@ import { FeedbackPage } from "./pages/feedback-page";
 import { SystemSettingsPage as SettingsPage } from "./pages/system-settings-page";
 import { ProjectCodexPage } from "./pages/project-codex-page";
 import { ProjectImportsPage } from "./pages/project-imports-page";
+import { ProjectGraphPage } from "./pages/project-graph-page";
+import { governanceErrorMessage } from "./components/quality-governance-panel";
 import { derivePrimaryAction, ProjectVersionsPage as OverviewPage } from "./pages/project-versions-page";
 import { ApiError, type ApiClient } from "./api/client";
 import { App } from "./app";
 import { ErrorState } from "./components/ui";
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
-beforeEach(() => sessionStorage.clear());
+beforeEach(() => { sessionStorage.clear(); localStorage.clear(); });
 
 function renderPage(node: React.ReactNode) {
   const queryClient = new QueryClient({
@@ -55,6 +57,14 @@ function renderAppAt(api: ApiClient, path: string) {
 }
 
 describe("shared console copy", () => {
+  test("explains when a remediation candidate is not ready for resolution", () => {
+    expect(governanceErrorMessage(new ApiError(
+      409,
+      "REMEDIATION_REBUILD_NOT_READY",
+      "Remediation rebuild must be ready before resolution"
+    ))).toBe("范围重建候选仍在处理中；当前版本未改变。请在候选构建就绪并审核后再标记已解决。");
+  });
+
   test("uses direct flex containers for collaboration members instead of a table widget", async () => {
     const source = await readFile(resolve(process.cwd(), "src/client/pages/project-collaboration-page.tsx"), "utf8");
     const workspaceSource = await readFile(resolve(process.cwd(), "src/client/pages/members-page.tsx"), "utf8");
@@ -555,6 +565,36 @@ describe("overview primary command", () => {
 
     expect(await screen.findByText("Provider rejected the request")).toBeVisible();
     expect(screen.getByRole("button", { name: "重试知识构建" })).toBeVisible();
+    expect(screen.getByText("当前已发布版本未受影响。重试会创建新的候选构建，不会覆盖现有版本。")).toBeVisible();
+  });
+
+  test("explains safe next steps for empty knowledge, graph, and expired sessions", async () => {
+    const emptyKnowledgeApi = {
+      getRepositoryStatus: vi.fn().mockResolvedValue({ repository: null, latestSnapshot: null }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [] })
+    } as unknown as ApiClient;
+    localStorage.setItem("devkh:active-project-id", "project-1");
+    renderPage(<KnowledgePage api={emptyKnowledgeApi} />);
+    expect(await screen.findByText("尚未接入资料不会影响其他项目或已发布版本。"))
+      .toBeVisible();
+    expect(screen.getByRole("link", { name: "前往资料上传" })).toBeVisible();
+    cleanup();
+
+    const graphApi = {
+      getProjectGraph: vi.fn().mockResolvedValue({ release: null, format: "tree", data: null })
+    } as unknown as ApiClient;
+    renderPageAt(<Routes><Route path="/projects/:projectId/graph" element={<ProjectGraphPage api={graphApi} />} /></Routes>, "/projects/project-1/graph");
+    expect(await screen.findByText("尚未发布图谱不会影响现有资料或知识版本。"))
+      .toBeVisible();
+    cleanup();
+
+    const expiredApi = {
+      setupStatus: vi.fn().mockResolvedValue({ setupRequired: false }),
+      session: vi.fn().mockRejectedValue(new ApiError(401, "SESSION_EXPIRED", "expired"))
+    } as unknown as ApiClient;
+    renderAppAt(expiredApi, "/projects");
+    expect(await screen.findByText("会话已失效。资料、构建和已发布版本均未被修改；请重新登录后继续。"))
+      .toBeVisible();
   });
 
   test("ignores an older failure after the latest build is published", async () => {
@@ -775,6 +815,95 @@ describe("knowledge citations", () => {
     expect(screen.getByText("imports · src/math.ts:1")).toBeVisible();
     expect(consoleError.mock.calls.flat().join(" ")).not.toContain("same key");
     consoleError.mockRestore();
+  });
+
+  test("filters quality governance issues and shows the selected source context", async () => {
+    const user = userEvent.setup();
+    const remediation = {
+      id: "remediation-1", projectId: "project-1", repositoryId: "repo", sourceBuildId: "build-1",
+      issue: {
+        id: "issue-1", buildId: "build-1", rule: "KNOWLEDGE_LOW_COVERAGE", severity: "warning",
+        targetKind: "knowledge", targetId: "module:payments", message: "模块文档覆盖不足",
+        sourceRefs: [{ snapshotId: "snapshot-1", path: "src/payments.ts", startLine: 12, endLine: 24, blobHash: "b".repeat(64) }],
+        remediationState: "open"
+      },
+      state: "open", rebuildBuildId: null,
+      createdAt: "2026-07-16T00:00:00Z", updatedAt: "2026-07-16T00:00:00Z"
+    };
+    const acceptedRemediation = { ...remediation, state: "accepted" as const };
+    const rebuildingRemediation = { ...remediation, state: "rebuilding" as const, rebuildBuildId: "remediation-build" };
+    const listProjectRemediations = vi.fn().mockResolvedValue({ remediations: [remediation] });
+    const transitionProjectRemediation = vi.fn().mockImplementation(async (_projectId: string, _remediationId: string, input: { state: string }) => {
+      if (input.state === "accepted") listProjectRemediations.mockResolvedValue({ remediations: [acceptedRemediation] });
+      return { remediation: { id: "remediation-1", state: input.state } };
+    });
+    const requestProjectRemediationRebuild = vi.fn().mockImplementation(async () => {
+      listProjectRemediations.mockResolvedValue({ remediations: [rebuildingRemediation] });
+      return { build: { id: "remediation-build" }, created: true };
+    });
+    const api = {
+      getRepositoryStatus: vi.fn().mockResolvedValue({
+        repository: { id: "repo" },
+        latestSnapshot: { id: "snapshot-1", commitSha: "a".repeat(40), ref: "main", commitTimestamp: "2026-07-16" }
+      }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [{
+        id: "release-1", buildId: "build-1", snapshotId: "snapshot-1", version: "1.0.0",
+        createdAt: "2026-07-16", publishedAt: "2026-07-16"
+      }] }),
+      getKnowledgeMetadata: vi.fn().mockResolvedValue({ symbols: [], dependencies: [] }),
+      listKnowledgePages: vi.fn().mockResolvedValue({ pages: [] }),
+      session: vi.fn().mockResolvedValue({ admin: { id: "admin-1", email: "admin@example.com", role: "admin" } }),
+      listProjectMembers: vi.fn().mockResolvedValue({ members: [{ id: "admin-1", email: "admin@example.com", role: "admin" }] }),
+      getProjectKnowledgeQuality: vi.fn().mockResolvedValue({
+        repository: { id: "repo" }, latestSnapshot: null, currentRelease: null, latestBuild: null,
+        pendingFeedbackCount: 0, indexedTextBytes: 0,
+        knowledge: { pageCount: 0, chunkCount: 0, citationCount: 0 },
+        remediation: { open: 1, accepted: 0, rebuilding: 0, resolved: 0, dismissed: 0 },
+        qualityPipeline: null,
+        assessment: { trust: { targetKind: "knowledge", targetId: "module:payments", score: 0.8, citationScore: 1, parserScore: 1, freshnessScore: 1, lintPenalty: 0, reasons: ["引用完整"] }, issueTotal: 1, issues: [] },
+        change: null, diagnostics: [{ code: "PUBLISHED" }]
+      }),
+      listProjectRemediations,
+      transitionProjectRemediation,
+      requestProjectRemediationRebuild
+    } as unknown as ApiClient;
+    localStorage.setItem("devkh:active-project-id", "project-1");
+
+    renderPage(<KnowledgePage api={api} />);
+
+    const governance = await screen.findByRole("region", { name: "质量治理" });
+    expect(within(governance).getByText("模块文档覆盖不足")).toBeVisible();
+    await user.selectOptions(within(governance).getByLabelText("严重度"), "warning");
+    await waitFor(() => expect(listProjectRemediations).toHaveBeenLastCalledWith("project-1", {
+      limit: 50, offset: 0, severity: "warning"
+    }));
+    await user.type(within(governance).getByLabelText("规则"), "KNOWLEDGE_LOW_COVERAGE");
+    await waitFor(() => expect(listProjectRemediations).toHaveBeenLastCalledWith("project-1", {
+      limit: 50, offset: 0, severity: "warning", rule: "KNOWLEDGE_LOW_COVERAGE"
+    }));
+    await user.click(within(governance).getByRole("button", { name: /模块文档覆盖不足/ }));
+    expect(within(governance).getByText("src/payments.ts:12-24")).toBeVisible();
+    expect(within(governance).getByText("build-1")).toBeVisible();
+    expect(within(governance).getByText("引用完整")).toBeVisible();
+    const actions = await within(governance).findByRole("group", { name: "质量问题操作" });
+    await user.click(within(actions).getByRole("button", { name: "忽略" }));
+    const dismissalReason = within(actions).getByLabelText("忽略理由");
+    expect(within(actions).getByRole("button", { name: "确认忽略" })).toBeDisabled();
+    await user.type(dismissalReason, "该规则不适用于当前项目");
+    await user.click(within(actions).getByRole("button", { name: "确认忽略" }));
+    await waitFor(() => expect(api.transitionProjectRemediation).toHaveBeenCalledWith(
+      "project-1", "remediation-1", { state: "dismissed", reason: "该规则不适用于当前项目" }
+    ));
+    await user.click(within(actions).getByRole("button", { name: "接受处理" }));
+    await waitFor(() => expect(api.transitionProjectRemediation).toHaveBeenLastCalledWith(
+      "project-1", "remediation-1", { state: "accepted" }
+    ));
+    await user.click(await within(governance).findByRole("button", { name: "请求范围重建" }));
+    await waitFor(() => expect(api.requestProjectRemediationRebuild).toHaveBeenCalledWith("project-1", "remediation-1"));
+    await user.click(await within(governance).findByRole("button", { name: "标记已解决" }));
+    await waitFor(() => expect(api.transitionProjectRemediation).toHaveBeenLastCalledWith(
+      "project-1", "remediation-1", { state: "resolved" }
+    ));
   });
 });
 

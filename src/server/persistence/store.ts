@@ -370,6 +370,7 @@ export interface RemediationEventRecord {
   fromState: RemediationState;
   toState: RemediationState;
   actorId: string | null;
+  reason: string | null;
   createdAt: Date;
 }
 
@@ -385,6 +386,7 @@ export interface RemediationBuildInput {
   workspaceId: string;
   remediationId: string;
   actorId: string;
+  affectedPaths?: string[];
   build: BuildInput;
 }
 
@@ -575,6 +577,12 @@ export interface Pagination {
   offset?: number;
 }
 
+export interface RemediationListOptions extends Pagination {
+  state?: RemediationState;
+  severity?: LintIssue["severity"];
+  rule?: string;
+}
+
 export const DEFAULT_LIST_LIMIT = 50;
 export const MAX_LIST_LIMIT = 100;
 
@@ -646,7 +654,7 @@ export interface KnowledgeStore {
   ): Promise<ReleaseRecord[]>;
 }
 
-export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, PipelineSearchDocumentStore {
+export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, PipelineArtifactStore, PipelineSearchDocumentStore {
   listPipelineStageRuns(
     workspaceId: string,
     projectId: string,
@@ -819,7 +827,7 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
   listRemediations(
     workspaceId: string,
     projectId: string,
-    pagination?: Pagination
+    options?: RemediationListOptions
   ): Promise<RemediationRecord[]>;
   countRemediations(
     workspaceId: string,
@@ -831,7 +839,8 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
     workspaceId: string,
     remediationId: string,
     state: RemediationState,
-    actorId: string
+    actorId: string,
+    reason?: string
   ): Promise<RemediationRecord | null>;
   requestRemediationBuildWithAudit(
     input: RemediationBuildInput

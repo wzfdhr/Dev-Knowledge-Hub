@@ -55,6 +55,21 @@ describe("remediation persistence", () => {
     });
     expect(replay.id).toBe(remediation.id);
     await expect(store.listRemediations(setup!.workspace.id, project.id)).resolves.toHaveLength(1);
+
+    await expect(store.transitionRemediationWithAudit(
+      setup!.workspace.id, remediation.id, "dismissed", setup!.admin.id
+    )).rejects.toThrow("Dismissal reason is required");
+    const dismissed = await store.transitionRemediationWithAudit(
+      setup!.workspace.id, remediation.id, "dismissed", setup!.admin.id, "The warning duplicates an accepted policy exception"
+    );
+    const repeatedDismissal = await store.transitionRemediationWithAudit(
+      setup!.workspace.id, remediation.id, "dismissed", setup!.admin.id, "The warning duplicates an accepted policy exception"
+    );
+    expect(repeatedDismissal).toEqual(dismissed);
+    await expect(store.listRemediationEvents(setup!.workspace.id, remediation.id)).resolves.toEqual([
+      expect.objectContaining({ toState: "dismissed", reason: "The warning duplicates an accepted policy exception" })
+    ]);
+    expect(store.auditEvents.filter((event) => event.resourceId === remediation.id)).toHaveLength(1);
   });
 
   test("starts an accepted case as an auditable remediation build without publishing", async () => {
@@ -83,6 +98,7 @@ describe("remediation persistence", () => {
       workspaceId: setup!.workspace.id,
       remediationId: remediation.id,
       actorId: setup!.admin.id,
+      affectedPaths: ["src/payments.ts", "src/core.ts"],
       build: {
         workspaceId: setup!.workspace.id,
         repositoryId: repository!.id,
@@ -99,9 +115,24 @@ describe("remediation persistence", () => {
       remediationContext: [expect.objectContaining({
         remediationId: remediation.id,
         issueId: "lint-coverage",
-        sourceRefs: []
+        sourceRefs: [],
+        affectedPaths: ["src/core.ts", "src/payments.ts"]
       })]
     });
+    const repeated = await store.requestRemediationBuildWithAudit({
+      workspaceId: setup!.workspace.id,
+      remediationId: remediation.id,
+      actorId: setup!.admin.id,
+      affectedPaths: ["src/payments.ts", "src/core.ts"],
+      build: {
+        workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id,
+        snapshotId: "snapshot-1",
+        snapshotPath: "/tmp/snapshot-1",
+        commitSha: "a".repeat(40)
+      }
+    });
+    expect(repeated).toEqual({ build: result.build, created: false });
     await expect(store.getRemediation(setup!.workspace.id, remediation.id)).resolves.toMatchObject({
       state: "rebuilding",
       rebuildBuildId: result.build.id
@@ -113,7 +144,10 @@ describe("remediation persistence", () => {
     expect(store.releases).toEqual([]);
     expect(store.auditEvents).toEqual(expect.arrayContaining([
       expect.objectContaining({ action: "remediation.transitioned", resourceId: remediation.id }),
-      expect.objectContaining({ action: "remediation.rebuild_requested", resourceId: remediation.id })
+      expect.objectContaining({
+        action: "remediation.rebuild_requested", resourceId: remediation.id,
+        metadata: expect.objectContaining({ affectedPaths: ["src/core.ts", "src/payments.ts"] })
+      })
     ]));
   });
 });

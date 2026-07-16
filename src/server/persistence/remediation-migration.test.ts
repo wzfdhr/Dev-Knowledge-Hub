@@ -16,4 +16,13 @@ describe("remediation identity migration", () => {
     expect(sql).toContain("missing a non-empty issue.id");
     expect(sql).toContain("duplicate issue identities");
   });
+
+  test("preserves legacy history while requiring dismissal reasons for new events", async () => {
+    const sql = await readFile(path.join(repositoryRoot, "drizzle/0029_remediation_dismissal_reason.sql"), "utf8");
+
+    expect(sql).toContain("ADD COLUMN reason text");
+    expect(sql).toContain("remediation_events_dismissal_reason_check");
+    expect(sql).toContain("NOT VALID");
+    expect(sql).toContain("char_length(reason) <= 500");
+  });
 });

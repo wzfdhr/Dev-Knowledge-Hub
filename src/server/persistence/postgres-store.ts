@@ -53,6 +53,7 @@ import type {
   RemediationBuildInput,
   RemediationEventRecord,
   RemediationRecord,
+  RemediationListOptions,
   WorkspaceKnowledgeSearchRecord,
   WorkspaceProjectOverviewRecord,
   SetupResult,
@@ -153,6 +154,7 @@ interface RemediationEventRow extends QueryResultRow {
   from_state: RemediationState;
   to_state: RemediationState;
   actor_id: string | null;
+  reason: string | null;
   created_at: Date;
 }
 
@@ -459,6 +461,7 @@ function remediationEventRecord(row: RemediationEventRow): RemediationEventRecor
     fromState: row.from_state,
     toState: row.to_state,
     actorId: row.actor_id,
+    reason: row.reason,
     createdAt: row.created_at
   };
 }
@@ -2617,16 +2620,20 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   async listRemediations(
     workspaceId: string,
     projectId: string,
-    pagination?: Pagination
+    options?: RemediationListOptions
   ): Promise<RemediationRecord[]> {
-    const { limit, offset } = normalizePagination(pagination);
+    const { limit, offset } = normalizePagination(options);
     const { rows } = await this.pool.query<RemediationRow>(
       `SELECT id, workspace_id, project_id, repository_id, source_build_id, issue, state,
               rebuild_build_id, created_at, updated_at
        FROM remediation_cases
-       WHERE workspace_id = $1 AND project_id = $2
-       ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`,
-      [workspaceId, projectId, limit, offset]
+       WHERE workspace_id = $1
+         AND project_id = $2
+         AND ($3::text IS NULL OR state = $3)
+         AND ($4::text IS NULL OR issue->>'severity' = $4)
+         AND ($5::text IS NULL OR issue->>'rule' = $5)
+       ORDER BY created_at DESC, id DESC LIMIT $6 OFFSET $7`,
+      [workspaceId, projectId, options?.state ?? null, options?.severity ?? null, options?.rule ?? null, limit, offset]
     );
     return rows.map(remediationRecord);
   }
@@ -2646,7 +2653,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
 
   async listRemediationEvents(workspaceId: string, remediationId: string): Promise<RemediationEventRecord[]> {
     const { rows } = await this.pool.query<RemediationEventRow>(
-      `SELECT id, workspace_id, remediation_id, from_state, to_state, actor_id, created_at
+      `SELECT id, workspace_id, remediation_id, from_state, to_state, actor_id, reason, created_at
        FROM remediation_events
        WHERE workspace_id = $1 AND remediation_id = $2
        ORDER BY sequence ASC`,
@@ -2659,8 +2666,11 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     workspaceId: string,
     remediationId: string,
     state: RemediationState,
-    actorId: string
+    actorId: string,
+    reason?: string
   ): Promise<RemediationRecord | null> {
+    const dismissalReason = reason?.trim();
+    if (state === "dismissed" && !dismissalReason) throw new Error("Dismissal reason is required");
     return this.transaction(async (client) => {
       const selected = await client.query<RemediationRow>(
         `SELECT id, workspace_id, project_id, repository_id, source_build_id, issue, state,
@@ -2670,6 +2680,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       );
       const existing = selected.rows[0];
       if (!existing) return null;
+      if (existing.state === state) return remediationRecord(existing);
       transitionRemediation(existing.state, state);
       const updated = await client.query<RemediationRow>(
         `UPDATE remediation_cases SET state = $3, updated_at = now()
@@ -2680,13 +2691,13 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       );
       const remediation = remediationRecord(updated.rows[0]);
       await client.query(
-        `INSERT INTO remediation_events (workspace_id, remediation_id, from_state, to_state, actor_id)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [workspaceId, remediationId, existing.state, state, actorId]
+        `INSERT INTO remediation_events (workspace_id, remediation_id, from_state, to_state, actor_id, reason)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [workspaceId, remediationId, existing.state, state, actorId, dismissalReason ?? null]
       );
       await this.insertAudit(client, {
         workspaceId, actorId, action: "remediation.transitioned", resourceType: "remediation",
-        resourceId: remediationId, metadata: { fromState: existing.state, toState: state }
+        resourceId: remediationId, metadata: { fromState: existing.state, toState: state, ...(dismissalReason ? { reason: dismissalReason } : {}) }
       });
       return remediation;
     });
@@ -2703,11 +2714,24 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         [input.workspaceId, input.remediationId]
       );
       const selectedRow = selected.rows[0];
-      if (!selectedRow || selectedRow.state !== "accepted") throw new Error("Remediation must be accepted first");
+      if (!selectedRow) throw new Error("Remediation must be accepted first");
+      if (selectedRow.state === "rebuilding" && selectedRow.rebuild_build_id) {
+        const existingBuild = await client.query<BuildRow>(
+          `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
+                  status, warnings, cancel_requested, error_message,
+                  purpose, feedback_ids, feedback_context, remediation_context, allow_llm
+           FROM build_jobs WHERE workspace_id = $1 AND id = $2`,
+          [input.workspaceId, selectedRow.rebuild_build_id]
+        );
+        if (existingBuild.rows[0]) return { build: buildRecord(existingBuild.rows[0]), created: false };
+        throw new Error("Remediation rebuild is unavailable");
+      }
+      if (selectedRow.state !== "accepted") throw new Error("Remediation must be accepted first");
       const remediation = remediationRecord(selectedRow);
       if (input.build.workspaceId !== remediation.workspaceId || input.build.repositoryId !== remediation.repositoryId) {
         throw new Error("Remediation build does not match source project");
       }
+      const affectedPaths = [...new Set(input.affectedPaths ?? remediation.issue.sourceRefs.map((reference) => reference.path))].sort();
       const purpose = {
         kind: "remediation" as const,
         feedbackIds: [] as [],
@@ -2715,7 +2739,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         remediationContext: [{
           remediationId: remediation.id,
           issueId: remediation.issue.id,
-          sourceRefs: remediation.issue.sourceRefs
+          sourceRefs: remediation.issue.sourceRefs,
+          affectedPaths
         }]
       };
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [input.build.repositoryId]);
@@ -2774,7 +2799,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       await this.insertAudit(client, {
         workspaceId: input.workspaceId, actorId: input.actorId,
         action: "remediation.rebuild_requested", resourceType: "remediation",
-        resourceId: remediation.id, metadata: { buildId: build.id, issueId: remediation.issue.id }
+        resourceId: remediation.id, metadata: { buildId: build.id, issueId: remediation.issue.id, affectedPaths }
       });
       return { build, created };
     });

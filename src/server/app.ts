@@ -14,6 +14,7 @@ import Fastify, {
 import { z } from "zod";
 
 import { AGENT_FEEDBACK_STATUSES, SERVICE_NAME } from "../shared/contracts.js";
+import { lintIssueSchema, trustScoreSchema, type ArtifactManifest } from "../shared/api-contracts.js";
 import { MAX_IMPORT_TABLE_WORKBOOK_BYTES } from "../shared/import-filter.js";
 import {
   FeedbackNotAcknowledgedError,
@@ -53,6 +54,7 @@ import { MemorySessionStore, type SessionStore } from "./security/session-store.
 import { createCodexConnectionPack } from "./codex/connection-pack.js";
 import type { BuildEvent, BuildService } from "./knowledge/build-service.js";
 import { deriveChangeImpact } from "./knowledge/change-impact.js";
+import { deriveRemediationScope } from "./knowledge/remediation-scope.js";
 import { loadPublishedKnowledgeGraph } from "./knowledge/pipeline/graph-query.js";
 import { exportKnowledgeGraph } from "./knowledge/pipeline/viz.js";
 import { legacyBuildStatus } from "./knowledge/pipeline/contracts.js";
@@ -126,6 +128,27 @@ const paginationQuerySchema = {
   limit: z.coerce.number().int().min(1).max(100).optional(),
   offset: z.coerce.number().int().min(0).optional()
 };
+const remediationListQuerySchema = z.object({
+  ...paginationQuerySchema,
+  state: z.enum(["open", "accepted", "rebuilding", "resolved", "dismissed"]).optional(),
+  severity: z.enum(["error", "warning", "info"]).optional(),
+  rule: z.string().trim().min(1).max(120).optional()
+});
+const remediationTransitionSchema = z.object({
+  state: z.enum(["accepted", "dismissed", "resolved"]),
+  reason: z.string().trim().min(1).max(500).optional()
+}).superRefine((value, context) => {
+  if (value.state === "dismissed" && !value.reason) {
+    context.addIssue({ code: "custom", path: ["reason"], message: "Dismissal reason is required" });
+  }
+});
+const qualityQuerySchema = z.object({
+  issueLimit: z.coerce.number().int().min(1).max(100).default(50)
+});
+const qualityAssessmentArtifactSchema = z.object({
+  trust: trustScoreSchema,
+  issues: z.array(lintIssueSchema)
+});
 
 const teamRoleSchema = z.enum(["admin", "member", "reader"]);
 const projectSchema = z.object({
@@ -187,6 +210,38 @@ export interface ServerOptions {
   publicBaseUrl?: string;
   sessionStore?: SessionStore;
   legacySessionReadUntil?: Date;
+  qualityArtifactReader?: { getJson(manifest: ArtifactManifest): Promise<unknown> };
+}
+
+async function loadQualityAssessment(input: {
+  store: AppStore;
+  reader: ServerOptions["qualityArtifactReader"];
+  run: { workspaceId: string; projectId: string; snapshotId: string; status: string; outputManifestIds: readonly string[] } | undefined;
+  issueLimit: number;
+}) {
+  const { run } = input;
+  if (!input.reader || !run || !["succeeded", "reused"].includes(run.status) || run.outputManifestIds.length !== 1) {
+    return null;
+  }
+  const manifest = await input.store.findArtifactById(run.outputManifestIds[0]!);
+  if (!manifest
+    || manifest.workspaceId !== run.workspaceId
+    || manifest.projectId !== run.projectId
+    || manifest.snapshotId !== run.snapshotId
+    || manifest.stage !== "lint"
+    || manifest.kind !== "knowledge-quality") {
+    return null;
+  }
+  try {
+    const assessment = qualityAssessmentArtifactSchema.parse(await input.reader.getJson(manifest));
+    return {
+      trust: assessment.trust,
+      issueTotal: assessment.issues.length,
+      issues: assessment.issues.slice(0, input.issueLimit)
+    };
+  } catch {
+    return null;
+  }
 }
 
 function sseEvent(event: BuildEvent): string {
@@ -1030,7 +1085,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.get("/api/projects/:projectId/knowledge-quality", { preHandler: requireAdmin }, async (request, reply) => {
     const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
-    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project");
+    const query = qualityQuerySchema.safeParse(request.query);
+    if (!params.success || !query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project quality query");
     await requireProjectRole("reader", params.data.projectId, request, reply);
     if (reply.sent) return;
     const admin = (request as AuthenticatedRequest).sessionAdmin;
@@ -1062,8 +1118,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const qualityRun = overview.latestBuild
       ? (await options.store.listPipelineStageRuns(
         admin.workspaceId, params.data.projectId, overview.latestBuild.id
-      )).at(-1)
+      )).findLast((run) => run.stage === "lint")
       : undefined;
+    const assessment = await loadQualityAssessment({
+      store: options.store,
+      reader: options.qualityArtifactReader,
+      run: qualityRun,
+      issueLimit: query.data.issueLimit
+    });
     const diagnostics: Array<{ code: string }> = [];
     if (!repository) diagnostics.push({ code: "SOURCE_MISSING" });
     else if (!snapshot) diagnostics.push({ code: "SNAPSHOT_MISSING" });
@@ -1086,6 +1148,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         artifactReady: qualityRun.outputManifestIds.length > 0,
         errorCode: qualityRun.errorCode
       } : null,
+      assessment,
       change: enrichedChange,
       diagnostics
     };
@@ -1093,7 +1156,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.get("/api/projects/:projectId/remediations", { preHandler: requireAdmin }, async (request, reply) => {
     const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
-    const query = z.object(paginationQuerySchema).safeParse(request.query);
+    const query = remediationListQuerySchema.safeParse(request.query);
     if (!params.success || !query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid remediation query");
     await requireProjectRole("reader", params.data.projectId, request, reply);
     if (reply.sent) return;
@@ -1119,7 +1182,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.patch("/api/projects/:projectId/remediations/:remediationId", { preHandler: requireAdmin }, async (request, reply) => {
     const params = z.object({ projectId: z.uuid(), remediationId: z.uuid() }).safeParse(request.params);
-    const body = z.object({ state: z.enum(["accepted", "dismissed", "resolved"]) }).safeParse(request.body);
+    const body = remediationTransitionSchema.safeParse(request.body);
     if (!params.success || !body.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid remediation transition");
     await requireProjectRole("admin", params.data.projectId, request, reply);
     if (reply.sent) return;
@@ -1128,9 +1191,17 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!existing || existing.projectId !== params.data.projectId) {
       return sendError(reply, 404, "REMEDIATION_NOT_FOUND", "Remediation was not found");
     }
+    if (body.data.state === "resolved") {
+      const rebuild = existing.rebuildBuildId
+        ? await options.store.getBuild(admin.workspaceId, existing.rebuildBuildId)
+        : null;
+      if (!rebuild || !["ready", "published"].includes(rebuild.status)) {
+        return sendError(reply, 409, "REMEDIATION_REBUILD_NOT_READY", "Remediation rebuild must be ready before resolution");
+      }
+    }
     try {
       const remediation = await options.store.transitionRemediationWithAudit(
-        admin.workspaceId, existing.id, body.data.state, admin.id
+        admin.workspaceId, existing.id, body.data.state, admin.id, body.data.reason
       );
       return { remediation };
     } catch (error) {
@@ -1154,7 +1225,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!remediation || remediation.projectId !== params.data.projectId) {
       return sendError(reply, 404, "REMEDIATION_NOT_FOUND", "Remediation was not found");
     }
-    if (remediation.state !== "accepted") {
+    if (remediation.state !== "accepted" && remediation.state !== "rebuilding") {
       return sendError(reply, 409, "REMEDIATION_NOT_ACCEPTED", "Remediation must be accepted first");
     }
     const sourceBuild = await options.store.getBuild(admin.workspaceId, remediation.sourceBuildId);
@@ -1164,11 +1235,16 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!sourceBuild || sourceBuild.repositoryId !== remediation.repositoryId || !snapshot) {
       return sendError(reply, 409, "REMEDIATION_SOURCE_UNAVAILABLE", "Remediation source snapshot is unavailable");
     }
+    const affectedPaths = deriveRemediationScope({
+      sourceRefs: remediation.issue.sourceRefs,
+      graph: await options.store.getKnowledgeGraph(admin.workspaceId, params.data.projectId, sourceBuild.id)
+    });
     try {
       const result = await options.store.requestRemediationBuildWithAudit({
         workspaceId: admin.workspaceId,
         remediationId: remediation.id,
         actorId: admin.id,
+        affectedPaths,
         build: {
           workspaceId: admin.workspaceId,
           repositoryId: remediation.repositoryId,

@@ -3539,7 +3539,6 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           status,
           details.errorMessage ?? null,
           details.warnings ? JSON.stringify(details.warnings) : null,
-          payload,
           details.requireNotCancelled ?? false
         ]
       );

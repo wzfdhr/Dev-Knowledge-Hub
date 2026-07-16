@@ -1908,6 +1908,21 @@ export class MemoryAppStore implements AppStore {
     );
   }
 
+  async cancelPipelineStageRuns(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineStageRunRecord[]> {
+    const cancelled: PipelineStageRunRecord[] = [];
+    for (const run of this.pipelineStageRuns) {
+      if (run.workspaceId !== workspaceId || run.projectId !== projectId || run.buildId !== buildId) continue;
+      if (run.status !== "queued" && run.status !== "running") continue;
+      const transitioned = await this.transitionStageRun(workspaceId, projectId, run.id, run.status, "cancelled");
+      if (transitioned) cancelled.push(transitioned);
+    }
+    return cancelled;
+  }
+
   async listPipelineStageEvents(
     workspaceId: string,
     projectId: string,

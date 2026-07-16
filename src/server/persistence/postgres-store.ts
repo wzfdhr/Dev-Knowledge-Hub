@@ -990,6 +990,39 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return rows.map(stageRunRecord);
   }
 
+  async cancelPipelineStageRuns(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineStageRunRecord[]> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<StageRunRow>(
+        `UPDATE build_stage_runs
+         SET status = 'cancelled',
+             started_at = COALESCE(started_at, now()),
+             finished_at = now(),
+             error_code = NULL,
+             error_detail = NULL,
+             updated_at = now()
+         WHERE workspace_id = $1 AND project_id = $2 AND build_job_id = $3
+           AND status IN ('queued', 'running')
+         RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+                   input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
+        [workspaceId, projectId, buildId]
+      );
+      for (const row of rows) {
+        await client.query(
+          `INSERT INTO build_stage_events
+             (workspace_id, project_id, build_job_id, stage_run_id, stage, status)
+           VALUES ($1, $2, $3, $4, $5, 'cancelled')
+           ON CONFLICT (stage_run_id, status) DO NOTHING`,
+          [row.workspace_id, row.project_id, row.build_job_id, row.id, row.stage]
+        );
+      }
+      return rows.map(stageRunRecord);
+    });
+  }
+
   async listPipelineStageEvents(
     workspaceId: string,
     projectId: string,

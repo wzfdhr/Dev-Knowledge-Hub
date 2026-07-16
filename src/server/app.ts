@@ -1709,7 +1709,12 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (repository.id !== existing.repositoryId) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
     const build = await options.buildService.cancelBuild(admin.workspaceId, existing.id);
     if (!build) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
-    return { build };
+    const pipelineStages = await options.store.cancelPipelineStageRuns(
+      admin.workspaceId,
+      repository.projectId,
+      existing.id
+    );
+    return { build, pipelineStages };
   });
 
   server.get("/api/builds/:id/events", { preHandler: requireAdmin }, async (request, reply) => {
@@ -1792,9 +1797,10 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     );
     return {
       buildId: build.id,
-      legacyStatus: stages.length > 0
-        ? legacyBuildStatus(stages, { published: build.status === "published" })
-        : build.status,
+      legacyStatus: build.status,
+      pipelineStatus: stages.length > 0
+        ? legacyBuildStatus(stages, { published: false })
+        : null,
       stages
     };
   });

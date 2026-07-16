@@ -22,4 +22,11 @@ describe("pipeline release provenance migration", () => {
     expect(schema).toContain('kernelMode: text("kernel_mode").notNull().default("legacy")');
     expect(schema).toContain('packageArtifactId: uuid("package_artifact_id")');
   });
+
+  test("prevents an existing release from changing its provenance", async () => {
+    const sql = await readFile(path.join(repositoryRoot, "drizzle/0028_release_provenance_immutable.sql"), "utf8");
+
+    expect(sql).toContain("OLD.kernel_mode");
+    expect(sql).toContain("Release pipeline provenance is immutable");
+  });
 });

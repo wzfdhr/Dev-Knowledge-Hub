@@ -652,6 +652,11 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
     projectId: string,
     buildId: string
   ): Promise<PipelineStageRunRecord[]>;
+  cancelPipelineStageRuns(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineStageRunRecord[]>;
   listPipelineStageEvents(
     workspaceId: string,
     projectId: string,

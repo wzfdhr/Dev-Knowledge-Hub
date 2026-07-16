@@ -641,6 +641,8 @@ describe("PostgresAppStore knowledge releases", () => {
     expect(sql).toContain("to_tsvector('english', regexp_replace(kp.title || ' ' || kp.body");
     expect(sql).toContain("'([a-z])([A-Z])'");
     expect(sql).toContain("lower(kp.title || ' ' || kp.body) LIKE '%' || lower($3) || '%'");
+    expect(sql).toContain("$3 !~ '[/.]' AND similarity(lower(cs.name), lower($3)) > 0.35");
+    expect(sql).toContain("$3 !~ '[/.]' AND similarity(lower(kp.title), lower($3)) > 0.35");
     expect(sql).toContain("text_rank <= 20");
     expect(sql).toContain("LIMIT 50");
   });

@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledge/trust.js";
+
 import {
   boundedKnowledgePage,
   FeedbackNotAcknowledgedError,
@@ -2286,7 +2288,8 @@ export class MemoryAppStore implements AppStore {
         excerpt: foundPage.body.slice(0, 240),
         pageId: foundPage.id,
         releaseId: release.id,
-        citations
+        citations,
+        trust: calculateSearchResultTrust(foundPage.id, citations)
       });
     };
     for (const symbol of index.symbols) {
@@ -2333,7 +2336,7 @@ export class MemoryAppStore implements AppStore {
       const existing = unique.get(key);
       if (!existing || existing.score < result.score) unique.set(key, result);
     }
-    const sorted = [...unique.values()].sort((left, right) =>
+    const sorted = [...unique.values()].filter((result) => result.trust.score >= MIN_SEARCH_RESULT_TRUST).sort((left, right) =>
       right.score - left.score || left.title.localeCompare(right.title) || left.pageId.localeCompare(right.pageId)
     );
     const primary = sorted.filter((result) =>

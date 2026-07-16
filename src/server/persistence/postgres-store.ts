@@ -9,6 +9,7 @@ import {
   knowledgeMatchReason,
   normalizePagination
 } from "./store.js";
+import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledge/trust.js";
 
 import type {
   AdminRecord,
@@ -4095,7 +4096,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            ORDER BY CASE WHEN p.title = cs.name OR p.title IN ('模块：' || sf.path, 'Module: ' || sf.path) THEN 0 ELSE 1 END, p.slug LIMIT 1
          ) kp ON true
          WHERE lower(cs.name) LIKE lower($3) || '%' OR lower(sf.path) LIKE lower($3) || '%'
-            OR similarity(lower(cs.name), lower($3)) > 0.2
+            OR ($3 !~ '[/.]' AND similarity(lower(cs.name), lower($3)) > 0.35)
        ), symbol_matches AS (
          SELECT *, ROW_NUMBER() OVER (ORDER BY score DESC, title, page_id) AS symbol_rank
          FROM symbol_candidates
@@ -4155,7 +4156,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          ) kc ON true
          WHERE to_tsvector('english', regexp_replace(kp.title || ' ' || kp.body, '([a-z])([A-Z])', '\\1 \\2', 'g')) @@ plainto_tsquery('english', $3)
             OR lower(kp.title || ' ' || kp.body) LIKE '%' || lower($3) || '%'
-            OR similarity(lower(kp.title), lower($3)) > 0.2
+             OR ($3 !~ '[/.]' AND similarity(lower(kp.title), lower($3)) > 0.35)
        ), text_matches AS (
          SELECT *, ROW_NUMBER() OVER (ORDER BY score DESC, title, page_id) AS text_rank
          FROM text_candidates
@@ -4180,8 +4181,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       score: Number(row.score),
       pageId: row.page_id,
       releaseId: row.release_id,
-      citations: row.citations
-    }));
+      citations: row.citations,
+      trust: calculateSearchResultTrust(row.page_id, row.citations)
+    })).filter((result) => result.trust.score >= MIN_SEARCH_RESULT_TRUST);
   }
 
   async knowledgeMetadata(workspaceId: string, releaseId: string): Promise<KnowledgeMetadata> {

@@ -17,7 +17,7 @@ import type {
 import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
 import type { ImpactMindmap } from "../knowledge/pipeline/mindmap.js";
 import type { AGENT_FEEDBACK_STATUSES } from "../../shared/contracts.js";
-import type { LintIssue, SourceRef } from "../../shared/api-contracts.js";
+import type { LintIssue, SourceRef, TrustScore } from "../../shared/api-contracts.js";
 import type { RemediationState } from "../knowledge/remediation.js";
 
 export interface WorkspaceRecord {
@@ -549,6 +549,7 @@ export interface KnowledgeSearchResult {
   pageId: string;
   releaseId: string;
   citations: Citation[];
+  trust: TrustScore;
 }
 
 export function knowledgeMatchReason(kind: SearchResultKind, title: string, query: string): string {

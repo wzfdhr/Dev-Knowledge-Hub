@@ -5,6 +5,7 @@ import { describe, expect, test } from "vitest";
 import { knowledgeIrPipelineInputDigest } from "./extract-stage";
 import { knowledgeGraphPipelineInputDigest } from "./graph-stage";
 import { createB02StageInputPlanner } from "./stage-planner";
+import { knowledgeSynthesisPipelineInputDigest } from "./synthesize-stage";
 import { tableSchemasPipelineInputDigest } from "./tables-stage";
 import type { PipelineStageRunRecord } from "../../persistence/store";
 import { MemoryAppStore } from "../../persistence/memory-store";
@@ -71,5 +72,14 @@ describe("B02 stage input planner", () => {
       build.purpose,
       ["extract-artifact", "tables-artifact"]
     ));
+
+    const graph = completed({ ...base, id: "graph-run", stage: "graph" }, ["graph-artifact"]);
+    runs.push(graph);
+    await expect(planner.nextInputDigest({
+      currentRun: graph,
+      build,
+      nextStage: "synthesize",
+      outputManifestIds: graph.outputManifestIds
+    })).resolves.toBe(knowledgeSynthesisPipelineInputDigest(snapshot, build.purpose, ["graph-artifact"]));
   });
 });

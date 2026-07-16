@@ -1,6 +1,7 @@
 import type { BuildRecord } from "../build-service.js";
 import { knowledgeIrPipelineInputDigest } from "./extract-stage.js";
 import { knowledgeGraphPipelineInputDigest } from "./graph-stage.js";
+import { knowledgeSynthesisPipelineInputDigest } from "./synthesize-stage.js";
 import { tableSchemasPipelineInputDigest } from "./tables-stage.js";
 import type { PipelineStageInputPlanner } from "./worker.js";
 import type { PipelineArtifactStore, PipelineStageRunRecord, SourceSnapshotRecord } from "../../persistence/store.js";
@@ -80,6 +81,13 @@ function nextB02InputDigest(input: {
         input.build.purpose,
         [...extractManifestIds, ...tableManifestIds]
       );
+    }
+    case "synthesize": {
+      const graphManifestIds = latestOutputManifestIds(
+        input.runs, "graph", input.currentRun, input.outputManifestIds
+      );
+      assertSingleManifest("synthesize", graphManifestIds);
+      return knowledgeSynthesisPipelineInputDigest(input.snapshot, input.build.purpose, graphManifestIds);
     }
     default:
       throw new Error(`No B02 input digest planner exists for ${input.nextStage}`);

@@ -4142,7 +4142,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          FROM neighbor_candidates
        ), text_candidates AS (
          SELECT DISTINCT 'page' AS kind, kp.title, left(kp.body, 240) AS excerpt,
-                (20 + ts_rank_cd(to_tsvector('english', kp.title || ' ' || kp.body),
+                (20 + ts_rank_cd(to_tsvector('english', regexp_replace(kp.title || ' ' || kp.body, '([a-z])([A-Z])', '\\1 \\2', 'g')),
                                  plainto_tsquery('english', $3)) * 10
                     + similarity(lower(kp.title), lower($3)))::real AS score,
                 kp.id AS page_id, sr.id AS release_id, kc.citations
@@ -4153,7 +4153,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            WHERE selected_chunk.page_id = kp.id
            ORDER BY selected_chunk.position, selected_chunk.id LIMIT 1
          ) kc ON true
-         WHERE to_tsvector('english', kp.title || ' ' || kp.body) @@ plainto_tsquery('english', $3)
+         WHERE to_tsvector('english', regexp_replace(kp.title || ' ' || kp.body, '([a-z])([A-Z])', '\\1 \\2', 'g')) @@ plainto_tsquery('english', $3)
             OR lower(kp.title || ' ' || kp.body) LIKE '%' || lower($3) || '%'
             OR similarity(lower(kp.title), lower($3)) > 0.2
        ), text_matches AS (

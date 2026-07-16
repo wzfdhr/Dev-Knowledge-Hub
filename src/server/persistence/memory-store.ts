@@ -78,6 +78,16 @@ import type {
   PersistedKnowledge
 } from "../knowledge/build-service.js";
 import { standardBuildPurpose } from "../knowledge/build-service.js";
+
+function matchesKnowledgeTextQuery(value: string, query: string): boolean {
+  const normalizedValue = value.toLowerCase();
+  const normalizedQuery = query.trim().toLowerCase();
+  if (normalizedValue.includes(normalizedQuery)) return true;
+  const queryTerms = normalizedQuery.match(/[a-z0-9]+/g);
+  if (!queryTerms?.length) return false;
+  const words: string[] = value.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  return queryTerms.every((term) => words.includes(term));
+}
 import { transitionRemediation } from "../knowledge/remediation.js";
 import type { RemediationState } from "../knowledge/remediation.js";
 import type { CodeIndex } from "../knowledge/intelligence.js";
@@ -2313,7 +2323,7 @@ export class MemoryAppStore implements AppStore {
       }
     }
     for (const candidate of pages) {
-      if (`${candidate.title}\n${candidate.body}`.toLowerCase().includes(normalized)) {
+      if (matchesKnowledgeTextQuery(`${candidate.title}\n${candidate.body}`, query)) {
         add("page", candidate.title, 20, candidate.chunks.flatMap((chunk) => chunk.citations), candidate);
       }
     }

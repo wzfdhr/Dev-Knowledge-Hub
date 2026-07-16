@@ -219,9 +219,10 @@ export function assertRetrievalQuality(report: RetrievalEvaluationReport): void 
     metrics.falsePositiveEmptyRate > retrievalQualityThresholds.falsePositiveEmptyRate
       ? `false-positive empty rate ${metrics.falsePositiveEmptyRate.toFixed(4)} > ${retrievalQualityThresholds.falsePositiveEmptyRate.toFixed(2)}` : null
   ].filter((value): value is string => Boolean(value));
-  if (!violations.length) return;
+  if (!violations.length && !report.failures.length) return;
   const failedCaseIds = report.failures.map((failure) => failure.id).join(", ") || "none";
-  throw new Error(`Knowledge retrieval quality gate failed: ${violations.join("; ")}. Failed cases: ${failedCaseIds}`);
+  const message = violations.length ? `${violations.join("; ")}. ` : "";
+  throw new Error(`Knowledge retrieval quality gate failed: ${message}Failed cases: ${failedCaseIds}`);
 }
 
 export function graphRankingImproves(

@@ -74,6 +74,14 @@ describe("weighted knowledge search", () => {
     ));
   });
 
+  test("matches feedback wording against camel-cased symbols", async () => {
+    const results = await store.searchKnowledge(workspaceId, repositoryId, "parse failure");
+
+    expect(results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: "ParseFailureError" })
+    ]));
+  });
+
   test("binds neighbors to their own pages, dedupes before a stable cap, and retains text results", async () => {
     const citation = index.files.find((file) => file.path === "src/math.ts")!;
     for (let position = 0; position < 55; position += 1) {

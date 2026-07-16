@@ -3371,7 +3371,16 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     if (input.snapshot.repositoryId !== lease.repositoryId) return null;
     return this.transaction(async (client) => {
       const persisted = await this.insertSnapshot(client, input, lease);
-      return persisted?.snapshot ?? null;
+      if (!persisted) return null;
+      const { rows } = await client.query<{ repository_id: string }>(
+        `SELECT repository_id
+         FROM repository_sync_schedules
+         WHERE repository_id = $1 AND lease_token = $2 AND lease_expires_at > clock_timestamp()
+         FOR UPDATE`,
+        [lease.repositoryId, lease.leaseToken]
+      );
+      if (!rows[0]) throw new Error("Git synchronization lease expired before snapshot commit");
+      return persisted.snapshot;
     });
   }
 

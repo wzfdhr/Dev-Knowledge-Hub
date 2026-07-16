@@ -495,6 +495,10 @@ describe("PostgresAppStore Git synchronization leases", () => {
     expect(snapshotInsert?.[0]).toContain("WITH held_lease AS");
     expect(snapshotInsert?.[0]).toContain("lease_expires_at > clock_timestamp()");
     expect(snapshotInsert?.[0]).toContain("FOR UPDATE");
+    const leaseChecks = (query.mock.calls as unknown as Array<[string, unknown[]?]>).filter(([sql]) =>
+      sql.includes("repository_sync_schedules")
+    );
+    expect(leaseChecks).toHaveLength(2);
   });
 });
 

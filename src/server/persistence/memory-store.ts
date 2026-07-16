@@ -2249,6 +2249,12 @@ export class MemoryAppStore implements AppStore {
       .slice(offset, offset + limit).map(boundedKnowledgePage);
   }
 
+  async listKnowledgePagesForBuild(workspaceId: string, buildId: string): Promise<KnowledgePageRecord[]> {
+    return this.knowledgePages.filter((page) => page.workspaceId === workspaceId && page.buildId === buildId)
+      .sort((left, right) => left.slug.localeCompare(right.slug) || left.id.localeCompare(right.id))
+      .map(boundedKnowledgePage);
+  }
+
   async countKnowledgePages(workspaceId: string, releaseId?: string): Promise<number> {
     let release = releaseId ? this.releaseById(workspaceId, releaseId) : null;
     if (!release && !releaseId) {
@@ -2429,6 +2435,22 @@ export class MemoryAppStore implements AppStore {
     const release = this.releaseById(workspaceId, releaseId);
     const index = release ? this.indexes.get(release.buildId) : undefined;
     if (!index) return { symbols: [], dependencies: [] };
+    return {
+      symbols: index.symbols.map((symbol) => ({
+        name: symbol.name, kind: symbol.kind, path: symbol.path,
+        startLine: symbol.startLine, endLine: symbol.endLine, exported: symbol.exported
+      })),
+      dependencies: index.edges.map((edge) => ({
+        source: edge.source, target: edge.target, kind: edge.kind, path: edge.citation.path,
+        targetPath: edge.targetPath ?? null,
+        startLine: edge.citation.startLine, endLine: edge.citation.endLine
+      }))
+    };
+  }
+
+  async knowledgeMetadataForBuild(workspaceId: string, buildId: string): Promise<KnowledgeMetadata> {
+    const index = this.indexes.get(buildId);
+    if (!index || !(await this.getBuild(workspaceId, buildId))) return { symbols: [], dependencies: [] };
     return {
       symbols: index.symbols.map((symbol) => ({
         name: symbol.name, kind: symbol.kind, path: symbol.path,

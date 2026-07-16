@@ -4065,6 +4065,27 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return rows.map(knowledgePageRecord);
   }
 
+  async listKnowledgePagesForBuild(workspaceId: string, buildId: string): Promise<KnowledgePageRecord[]> {
+    const { rows } = await this.pool.query<KnowledgePageRow>(
+      `SELECT p.id, p.workspace_id, p.repository_id, p.build_job_id, p.slug, p.title,
+              left(p.body, 20000) AS body,
+              COALESCE(jsonb_agg(jsonb_build_object(
+                'id', c.id, 'heading', c.heading, 'content', left(c.content, 8000),
+                'citations', jsonb_path_query_array(c.citations, '$[0 to 7]')
+              ) ORDER BY c.position, c.id) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
+       FROM knowledge_pages p
+       LEFT JOIN LATERAL (
+         SELECT * FROM knowledge_chunks selected_chunk
+         WHERE selected_chunk.page_id = p.id
+         ORDER BY selected_chunk.position, selected_chunk.id LIMIT 50
+       ) c ON true
+       WHERE p.workspace_id = $1 AND p.build_job_id = $2
+       GROUP BY p.id ORDER BY p.slug, p.id`,
+      [workspaceId, buildId]
+    );
+    return rows.map(knowledgePageRecord);
+  }
+
   async countKnowledgePages(workspaceId: string, releaseId?: string): Promise<number> {
     const { rows } = await this.pool.query<{ total: string }>(
       `SELECT count(DISTINCT p.id)::text AS total
@@ -4367,6 +4388,41 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         source: row.source_name, target: row.target_name, kind: row.kind, path: row.source_path,
         targetPath: row.target_path,
         startLine: row.start_line, endLine: row.end_line
+      }))
+    };
+  }
+
+  async knowledgeMetadataForBuild(workspaceId: string, buildId: string): Promise<KnowledgeMetadata> {
+    const symbols = await this.pool.query<{
+      name: string; kind: string; path: string; start_line: number; end_line: number; exported: boolean;
+    }>(
+      `SELECT cs.name, cs.kind, sf.path, cs.start_line, cs.end_line, cs.exported
+       FROM build_jobs b
+       JOIN source_files sf ON sf.snapshot_id = b.snapshot_id
+       JOIN code_symbols cs ON cs.source_file_id = sf.id
+       WHERE b.workspace_id = $1 AND b.id = $2
+       ORDER BY sf.path, cs.start_line, cs.name LIMIT 500`,
+      [workspaceId, buildId]
+    );
+    const dependencies = await this.pool.query<{
+      source_name: string; target_name: string; kind: string; source_path: string; target_path: string | null;
+      start_line: number; end_line: number;
+    }>(
+      `SELECT ce.source_name, ce.target_name, ce.kind, ce.source_path, ce.target_path, ce.start_line, ce.end_line
+       FROM build_jobs b
+       JOIN code_edges ce ON ce.snapshot_id = b.snapshot_id
+       WHERE b.workspace_id = $1 AND b.id = $2
+       ORDER BY ce.source_path, ce.start_line, ce.source_name, ce.target_name LIMIT 500`,
+      [workspaceId, buildId]
+    );
+    return {
+      symbols: symbols.rows.map((row) => ({
+        name: row.name, kind: row.kind, path: row.path,
+        startLine: row.start_line, endLine: row.end_line, exported: row.exported
+      })),
+      dependencies: dependencies.rows.map((row) => ({
+        source: row.source_name, target: row.target_name, kind: row.kind, path: row.source_path,
+        targetPath: row.target_path, startLine: row.start_line, endLine: row.end_line
       }))
     };
   }

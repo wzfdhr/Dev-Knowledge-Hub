@@ -629,6 +629,7 @@ export interface KnowledgeStore {
     releaseId?: string,
     pagination?: Pagination
   ): Promise<KnowledgePageRecord[]>;
+  listKnowledgePagesForBuild(workspaceId: string, buildId: string): Promise<KnowledgePageRecord[]>;
   getKnowledgePage(workspaceId: string, pageId: string): Promise<KnowledgePageRecord | null>;
   findKnowledgePageBySlug(
     workspaceId: string,
@@ -657,6 +658,7 @@ export interface KnowledgeStore {
     releaseId?: string
   ): Promise<KnowledgeSearchResult[]>;
   knowledgeMetadata(workspaceId: string, releaseId: string): Promise<KnowledgeMetadata>;
+  knowledgeMetadataForBuild(workspaceId: string, buildId: string): Promise<KnowledgeMetadata>;
   createReleaseDraft(
     workspaceId: string,
     repositoryId: string,

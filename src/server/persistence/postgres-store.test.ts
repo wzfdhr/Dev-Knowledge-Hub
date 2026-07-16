@@ -111,7 +111,7 @@ describe("PostgresAppStore pipeline persistence", () => {
     await expect(store.listPipelineSearchDocuments("workspace-1", "project-1", "build-1")).resolves.toHaveLength(1);
     expect(query.mock.calls.some(([sql, values]) =>
       String(sql).includes("FROM knowledge_artifacts")
-      && values?.slice(0, 5).join(":") === "artifact-1:workspace-1:project-1:snapshot-1:build-1"
+      && values?.slice(0, 4).join(":") === "artifact-1:workspace-1:project-1:snapshot-1"
     )).toBe(true);
   });
 

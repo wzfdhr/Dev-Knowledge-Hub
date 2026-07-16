@@ -41,6 +41,7 @@ export interface KnowledgeIrStageStore extends PipelineArtifactStore {
   getRepository(workspaceId: string, repositoryId: string): Promise<RepositoryRecord | null>;
   findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null>;
   findArtifactById(artifactId: string): Promise<ArtifactManifest | null>;
+  listPipelineStageRuns(workspaceId: string, projectId: string, buildId: string): Promise<PipelineStageRunRecord[]>;
 }
 
 export function knowledgeIrPipelineInputDigest(
@@ -52,7 +53,7 @@ export function knowledgeIrPipelineInputDigest(
     stage: "extract",
     snapshotId: snapshot.id,
     upstreamManifestIds,
-    parserConfigVersion: "extract-v1",
+    parserConfigVersion: "pipeline-v1",
     purpose: {
       kind: purpose.kind,
       feedbackIds: purpose.feedbackIds,
@@ -102,6 +103,24 @@ function assertOwnedUpstreamManifest(run: PipelineStageRunRecord, manifest: Arti
   ) {
     throw new Error("Knowledge IR upstream manifest does not match the project build and snapshot");
   }
+}
+
+function convertOutputManifestIds(stageRuns: readonly PipelineStageRunRecord[]): string[] {
+  const convertRuns = stageRuns.filter((candidate) => candidate.stage === "convert");
+  if (convertRuns.length === 0) {
+    throw new Error("Knowledge IR stage requires a convert run");
+  }
+  const convertRun = convertRuns.findLast((candidate) => candidate.status === "succeeded" || candidate.status === "reused");
+  if (!convertRun) {
+    throw new Error("Knowledge IR stage requires a succeeded or reused convert run");
+  }
+  if (convertRun.outputManifestIds.length === 0) {
+    throw new Error("Knowledge IR stage requires at least one upstream manifest");
+  }
+  if (new Set(convertRun.outputManifestIds).size !== convertRun.outputManifestIds.length) {
+    throw new Error("Knowledge IR stage requires unique upstream manifests");
+  }
+  return convertRun.outputManifestIds;
 }
 
 function sourceDigest(source: NormalizedSource): string {
@@ -160,18 +179,15 @@ export function createKnowledgeIrStageExecutor(input: {
     const snapshot = await input.store.findSnapshotById(run.workspaceId, run.snapshotId);
     assertOwnedBuild(run, build, repository, snapshot);
     if (!snapshot) throw new Error("Knowledge IR snapshot is unavailable");
-    if (run.outputManifestIds.length === 0) {
-      throw new Error("Knowledge IR stage requires at least one upstream manifest");
-    }
-    if (new Set(run.outputManifestIds).size !== run.outputManifestIds.length) {
-      throw new Error("Knowledge IR stage requires unique upstream manifests");
-    }
-    const inputDigest = knowledgeIrPipelineInputDigest(snapshot, build.purpose, run.outputManifestIds);
+    const upstreamManifestIds = convertOutputManifestIds(await input.store.listPipelineStageRuns(
+      run.workspaceId, run.projectId, run.buildId
+    ));
+    const inputDigest = knowledgeIrPipelineInputDigest(snapshot, build.purpose, upstreamManifestIds);
     if (run.inputDigest !== inputDigest) {
       throw new Error("Knowledge IR stage input digest does not match the persisted upstream manifests");
     }
 
-    const manifests = await Promise.all(run.outputManifestIds.map(async (artifactId) => {
+    const manifests = await Promise.all(upstreamManifestIds.map(async (artifactId) => {
       const manifest = await input.store.findArtifactById(artifactId);
       if (!manifest) throw new Error("Knowledge IR stage upstream manifest is unavailable");
       assertOwnedUpstreamManifest(run, manifest);

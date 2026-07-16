@@ -70,11 +70,29 @@ async function fixture(files: Record<string, string>) {
   return { artifactStore, build, convertRun, project, repository: repository!, snapshot, snapshotRoot, store };
 }
 
-function stageStore(prepared: Awaited<ReturnType<typeof fixture>>, manifests: Map<string, ArtifactManifest>): KnowledgeIrStageStore {
+function stageStore(
+  prepared: Awaited<ReturnType<typeof fixture>>,
+  manifests: Map<string, ArtifactManifest>,
+  stageRuns: readonly PipelineStageRunRecord[]
+): KnowledgeIrStageStore {
   Object.assign(prepared.store, {
-    findArtifactById: async (artifactId: string) => manifests.get(artifactId) ?? null
+    findArtifactById: async (artifactId: string) => manifests.get(artifactId) ?? null,
+    listPipelineStageRuns: async () => stageRuns
   });
   return prepared.store as unknown as KnowledgeIrStageStore;
+}
+
+function completedConvertRun(
+  prepared: Awaited<ReturnType<typeof fixture>>,
+  outputManifestIds: string[],
+  status: "succeeded" | "reused" | "failed" = "succeeded"
+): PipelineStageRunRecord {
+  return {
+    ...prepared.convertRun,
+    status,
+    outputManifestIds,
+    finishedAt: status === "failed" ? null : "2026-07-16T00:00:01.000Z"
+  };
 }
 
 describe("knowledge IR pipeline stage", () => {
@@ -91,11 +109,12 @@ describe("knowledge IR pipeline stage", () => {
       ...prepared.convertRun,
       id: "extract-run",
       stage: "extract",
-      outputManifestIds: convert.outputManifestIds!,
+      outputManifestIds: ["extract-output-manifest"],
       inputDigest: knowledgeIrPipelineInputDigest(prepared.snapshot, prepared.build.purpose, convert.outputManifestIds!)
     };
     const execute = createKnowledgeIrStageExecutor({
-      store: stageStore(prepared, manifests), artifactStore: prepared.artifactStore
+      store: stageStore(prepared, manifests, [completedConvertRun(prepared, convert.outputManifestIds!, "reused")]),
+      artifactStore: prepared.artifactStore
     });
 
     const first = await execute(run);
@@ -116,26 +135,50 @@ describe("knowledge IR pipeline stage", () => {
       symbols: expect.arrayContaining([expect.objectContaining({ name: "answer" })]),
       documents: expect.arrayContaining([expect.objectContaining({ text: "Deploy safely." })])
     }));
+    await expect(execute({
+      ...run,
+      inputDigest: knowledgeIrPipelineInputDigest(prepared.snapshot, prepared.build.purpose, run.outputManifestIds)
+    })).rejects.toThrow("input digest does not match the persisted upstream manifests");
   });
 
-  test("rejects missing, snapshot-mismatched, and cross-project upstream manifests", async () => {
+  test("rejects missing, non-successful, empty, and duplicate convert outputs", async () => {
+    const prepared = await fixture({ "src/app.ts": "export const answer = 42;\n" });
+    const run: PipelineStageRunRecord = {
+      ...prepared.convertRun,
+      id: "extract-run",
+      stage: "extract",
+      outputManifestIds: ["extract-output-manifest"],
+      inputDigest: knowledgeIrPipelineInputDigest(prepared.snapshot, prepared.build.purpose, ["upstream-manifest"])
+    };
+    const execute = (stageRuns: readonly PipelineStageRunRecord[]) => createKnowledgeIrStageExecutor({
+      store: stageStore(prepared, new Map(), stageRuns), artifactStore: prepared.artifactStore
+    });
+
+    await expect(execute([])(run)).rejects.toThrow("requires a convert run");
+    await expect(execute([completedConvertRun(prepared, ["upstream-manifest"], "failed")])(run))
+      .rejects.toThrow("requires a succeeded or reused convert run");
+    await expect(execute([completedConvertRun(prepared, [])])(run)).rejects.toThrow("requires at least one upstream manifest");
+    await expect(execute([completedConvertRun(prepared, ["upstream-manifest", "upstream-manifest"])])(run))
+      .rejects.toThrow("requires unique upstream manifests");
+  });
+
+  test("rejects snapshot-mismatched and cross-project convert manifests", async () => {
     const prepared = await fixture({ "src/app.ts": "export const answer = 42;\n" });
     const convert = await createNormalizedSourcesStageExecutor({ store: prepared.store, artifactStore: prepared.artifactStore })(prepared.convertRun);
     const upstream = prepared.store.knowledgeArtifacts.find((artifact) => artifact.id === convert.outputManifestIds![0])!;
     const manifests = new Map([[upstream.id, upstream]]);
-    const execute = createKnowledgeIrStageExecutor({
-      store: stageStore(prepared, manifests), artifactStore: prepared.artifactStore
-    });
     const validRun: PipelineStageRunRecord = {
       ...prepared.convertRun,
       id: "extract-run",
       stage: "extract",
-      outputManifestIds: convert.outputManifestIds!,
+      outputManifestIds: ["extract-output-manifest"],
       inputDigest: knowledgeIrPipelineInputDigest(prepared.snapshot, prepared.build.purpose, convert.outputManifestIds!)
     };
+    const convertRun = completedConvertRun(prepared, convert.outputManifestIds!);
+    const execute = createKnowledgeIrStageExecutor({
+      store: stageStore(prepared, manifests, [convertRun]), artifactStore: prepared.artifactStore
+    });
 
-    await expect(execute({ ...validRun, outputManifestIds: [], inputDigest: knowledgeIrPipelineInputDigest(prepared.snapshot, prepared.build.purpose, []) }))
-      .rejects.toThrow("requires at least one upstream manifest");
     await expect(execute({ ...validRun, snapshotId: "other-snapshot" }))
       .rejects.toThrow("does not match the project build and snapshot");
     manifests.set(upstream.id, { ...upstream, projectId: "other-project" });

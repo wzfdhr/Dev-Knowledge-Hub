@@ -251,6 +251,15 @@ integration("PostgreSQL cited knowledge integration", () => {
     await expect(store.createArtifactWithAudit({ ...artifact, id: randomUUID() }, setup!.admin.id))
       .resolves.toMatchObject({ id: artifact.id });
 
+    const searchDocument = {
+      documentKey: "overview:0", kind: "page" as const, title: "Overview", content: "Pipeline overview",
+      citations: [], metadata: { source: "integration" }
+    };
+    await expect(store.savePipelineSearchDocuments({
+      workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId,
+      buildId: build.build.id, sourceArtifactId: artifact.id, documents: [searchDocument]
+    })).resolves.toHaveLength(1);
+
     const otherProject = await store.createProject(
       setup!.workspace.id, { name: "Other pipeline", slug: "other-pipeline" }, setup!.admin.id
     );
@@ -260,6 +269,37 @@ integration("PostgreSQL cited knowledge integration", () => {
     await store.transitionBuild(build.build.id, "queued", "ready");
     const release = await store.createReleaseDraft(setup!.workspace.id, repository!.id, build.build.id, "1.0.0");
     await store.publishRelease(setup!.workspace.id, release.id);
+    const { build: reusedBuild, created } = await store.createBuild({
+      workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId,
+      snapshotPath: "/tmp/pipeline-snapshot", commitSha: "a".repeat(40)
+    });
+    expect(created).toBe(true);
+    await expect(store.savePipelineSearchDocuments({
+      workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId,
+      buildId: reusedBuild.id, sourceArtifactId: artifact.id, documents: [searchDocument]
+    })).resolves.toHaveLength(1);
+    const queuedReuse = await store.createStageRun({
+      ...baseStage, buildId: reusedBuild.id, stage: "convert"
+    });
+    await expect(store.cancelPipelineStageRuns(
+      setup!.workspace.id, repository!.projectId, reusedBuild.id
+    )).resolves.toEqual([expect.objectContaining({ id: queuedReuse.id, status: "cancelled" })]);
+    await expect(store.currentRelease(setup!.workspace.id, repository!.id))
+      .resolves.toMatchObject({ id: release.id, kernelMode: "legacy" });
+
+    const packageArtifact = await store.createArtifactWithAudit({
+      ...artifact,
+      id: randomUUID(),
+      stage: "package",
+      kind: "pipeline-package",
+      inputDigest: "e".repeat(64),
+      contentDigest: "f".repeat(64),
+      storageKey: `${repository!.projectId}/${snapshotId}/package/${"f".repeat(64)}.json`
+    }, setup!.admin.id);
+    await expect(pool.query(
+      "UPDATE releases SET kernel_mode = 'pipeline', package_artifact_id = $1 WHERE id = $2",
+      [packageArtifact.id, release.id]
+    )).rejects.toThrow("Release pipeline provenance is immutable");
     await expect(pool.query("DELETE FROM knowledge_artifacts WHERE id = $1", [artifact.id]))
       .rejects.toThrow("Cannot delete artifacts from a published build");
   }, 30_000);

@@ -437,6 +437,20 @@ integration("PostgreSQL cited knowledge integration", () => {
           ["synthesize", "reused"], ["index", "reused"], ["lint", "reused"], ["viz", "reused"],
           ["validate", "reused"], ["package", "reused"]
         ]);
+      await store.transitionBuild(reusedBuild.id, "queued", "ready");
+      const firstConvert = (await store.listPipelineStageRuns(setup!.workspace.id, project.id, firstBuild.id))
+        .find((run) => run.stage === "convert")!;
+      const firstConvertArtifact = await store.findArtifactById(firstConvert.outputManifestIds[0]!);
+      await rm(path.join(artifactRoot, firstConvertArtifact!.storageKey));
+
+      const regeneratedBuild = await runBuild();
+      expect((await store.listPipelineStageRuns(setup!.workspace.id, project.id, regeneratedBuild.id))
+        .map((run) => [run.stage, run.status]))
+        .toEqual([
+          ["convert", "succeeded"], ["extract", "reused"], ["tables", "reused"], ["graph", "reused"],
+          ["synthesize", "reused"], ["index", "reused"], ["lint", "reused"], ["viz", "reused"],
+          ["validate", "reused"], ["package", "reused"]
+        ]);
       await expect(store.currentRelease(setup!.workspace.id, repository!.id))
         .resolves.toMatchObject({ id: release.id, buildId: firstBuild.id, kernelMode: "legacy" });
     } finally {
@@ -444,6 +458,63 @@ integration("PostgreSQL cited knowledge integration", () => {
       await rm(artifactRoot, { recursive: true, force: true });
     }
   }, 60_000);
+
+  test(databaseUrl
+    ? "executes the legacy release backfill in batches and writes its report"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const reportDirectory = await mkdtemp(path.join(os.tmpdir(), "devkh-pipeline-backfill-"));
+    const reportPath = path.join(reportDirectory, "report.json");
+    try {
+      const store = new PostgresAppStore(pool);
+      const setup = await store.createInitialSetup("backfill@example.com", "hash");
+      const repository = await store.createRepository(
+        setup!.workspace.id, { kind: "upload", name: "Backfill source" }
+      );
+      const snapshotId = randomUUID();
+      await store.createSnapshot({
+        snapshot: {
+          id: snapshotId,
+          workspaceId: setup!.workspace.id,
+          repositoryId: repository!.id,
+          commitSha: "b".repeat(40),
+          ref: "upload",
+          remoteUrl: null,
+          commitTimestamp: new Date("2026-07-16T00:00:00.000Z"),
+          storagePath: "/tmp/backfill-snapshot"
+        },
+        files: []
+      });
+      const { build } = await store.createBuild({
+        workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id,
+        snapshotId,
+        snapshotPath: "/tmp/backfill-snapshot",
+        commitSha: "b".repeat(40)
+      });
+      await store.transitionBuild(build.id, "queued", "ready");
+      const release = await store.createReleaseDraft(setup!.workspace.id, repository!.id, build.id, "1.0.0");
+      await store.publishRelease(setup!.workspace.id, release.id);
+
+      await execute(process.execPath, [path.resolve("scripts/backfill-pipeline-history.mjs")], {
+        env: { ...process.env, DATABASE_URL: databaseUrl, PIPELINE_HISTORY_REPORT: reportPath }
+      });
+
+      await expect(readFile(reportPath, "utf8").then(JSON.parse)).resolves.toMatchObject({
+        schemaVersion: 1,
+        batchSize: 500,
+        backfilled: 1,
+        missingSnapshots: []
+      });
+      await expect(store.currentRelease(setup!.workspace.id, repository!.id))
+        .resolves.toMatchObject({ id: release.id, kernelMode: "legacy", packageArtifactId: null });
+    } finally {
+      await rm(reportDirectory, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   test(databaseUrl
     ? "persists project memberships, rejects cross-workspace users, and protects the final project administrator"

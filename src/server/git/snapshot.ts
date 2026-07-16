@@ -23,9 +23,9 @@ export class DirtyWorktreeError extends Error {
   }
 }
 
-async function optionalGitText(cwd: string, args: string[]): Promise<string | null> {
+async function optionalGitText(cwd: string, args: string[], timeoutMs?: number): Promise<string | null> {
   try {
-    return (await runGit({ cwd, args })).toString("utf8").trim() || null;
+    return (await runGit({ cwd, args, timeoutMs })).toString("utf8").trim() || null;
   } catch {
     return null;
   }
@@ -113,7 +113,8 @@ async function syncRepositoryUnlocked({
   store,
   token,
   actorId,
-  prepareRemote = prepareRemoteRepository
+  prepareRemote = prepareRemoteRepository,
+  gitTimeoutMs
 }: {
   repository: RepositoryRecord;
   dataDir: string;
@@ -121,26 +122,28 @@ async function syncRepositoryUnlocked({
   token?: string;
   actorId?: string;
   prepareRemote?: typeof prepareRemoteRepository;
+  gitTimeoutMs?: number;
 }): Promise<SnapshotSummary> {
   const repositoryPath = repository.kind === "local"
     ? repository.localPath
-    : await prepareRemote({ repository, dataDir, token });
+    : await prepareRemote({ repository, dataDir, token, timeoutMs: gitTimeoutMs });
   if (!repositoryPath) throw new Error("Repository path is missing");
   let resolvedRemoteRef: string | null = null;
   if (repository.kind === "local") {
     const status = await runGit({
       cwd: repositoryPath,
-      args: ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+      args: ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+      timeoutMs: gitTimeoutMs
     });
     if (status.length > 0) throw new DirtyWorktreeError(changedPaths(status));
   } else {
     resolvedRemoteRef = await optionalGitText(repositoryPath, [
       "symbolic-ref", "--short", "refs/remotes/origin/HEAD"
-    ]) ?? `origin/${repository.defaultBranch}`;
-    await runGit({ cwd: repositoryPath, args: ["checkout", "--detach", resolvedRemoteRef] });
+    ], gitTimeoutMs) ?? `origin/${repository.defaultBranch}`;
+    await runGit({ cwd: repositoryPath, args: ["checkout", "--detach", resolvedRemoteRef], timeoutMs: gitTimeoutMs });
   }
 
-  const commitSha = (await runGit({ cwd: repositoryPath, args: ["rev-parse", "HEAD"] }))
+  const commitSha = (await runGit({ cwd: repositoryPath, args: ["rev-parse", "HEAD"], timeoutMs: gitTimeoutMs }))
     .toString("utf8").trim();
   const existing = await store.findSnapshotByCommit(
     repository.workspaceId,
@@ -170,7 +173,7 @@ async function syncRepositoryUnlocked({
   }
 
   const ref = resolvedRemoteRef
-    ?? await optionalGitText(repositoryPath, ["symbolic-ref", "--short", "HEAD"])
+    ?? await optionalGitText(repositoryPath, ["symbolic-ref", "--short", "HEAD"], gitTimeoutMs)
     ?? commitSha;
   const remoteUrl = sanitizeRemoteUrl(
     repository.kind === "git"
@@ -178,10 +181,10 @@ async function syncRepositoryUnlocked({
       : await optionalGitText(repositoryPath, ["config", "--get", "remote.origin.url"])
   );
   const commitTimestamp = new Date(
-    (await runGit({ cwd: repositoryPath, args: ["show", "-s", "--format=%cI", commitSha] }))
+    (await runGit({ cwd: repositoryPath, args: ["show", "-s", "--format=%cI", commitSha], timeoutMs: gitTimeoutMs }))
       .toString("utf8").trim()
   );
-  const tracked = (await runGit({ cwd: repositoryPath, args: ["ls-files", "-z"] }))
+  const tracked = (await runGit({ cwd: repositoryPath, args: ["ls-files", "-z"], timeoutMs: gitTimeoutMs }))
     .toString("utf8")
     .split("\0")
     .filter(Boolean)
@@ -194,7 +197,8 @@ async function syncRepositoryUnlocked({
   for (const filePath of tracked) {
     const byteSize = Number((await runGit({
       cwd: repositoryPath,
-      args: ["cat-file", "-s", `${commitSha}:${filePath}`]
+      args: ["cat-file", "-s", `${commitSha}:${filePath}`],
+      timeoutMs: gitTimeoutMs
     })).toString("utf8").trim());
     if (!Number.isSafeInteger(byteSize)) {
       recordIgnored(ignoredReasons, "file_too_large");
@@ -206,7 +210,11 @@ async function syncRepositoryUnlocked({
       continue;
     }
 
-    const content = await runGit({ cwd: repositoryPath, args: ["show", `${commitSha}:${filePath}`] });
+    const content = await runGit({
+      cwd: repositoryPath,
+      args: ["show", `${commitSha}:${filePath}`],
+      timeoutMs: gitTimeoutMs
+    });
     const contentDecision = filterImportFile({ path: filePath, byteSize, content });
     if (!contentDecision.accepted) {
       recordIgnored(ignoredReasons, contentDecision.reason);

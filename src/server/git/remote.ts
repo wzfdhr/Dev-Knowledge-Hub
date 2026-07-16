@@ -10,9 +10,19 @@ export interface GitRunOptions {
   cwd: string;
   args: string[];
   env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
 }
 
 export type GitRunner = (options: GitRunOptions) => Promise<Buffer>;
+
+export class GitCommandTimeoutError extends Error {
+  readonly code = "GIT_SYNC_TIMEOUT";
+
+  constructor(readonly timeoutMs: number, options?: { cause?: unknown }) {
+    super(`Git command exceeded the ${timeoutMs}ms timeout`, options);
+    this.name = "GitCommandTimeoutError";
+  }
+}
 
 function gitChildEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const childEnvironment = { ...environment };
@@ -24,7 +34,7 @@ function gitChildEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv 
   return childEnvironment;
 }
 
-export const runGit: GitRunner = ({ cwd, args, env }) => new Promise((resolve, reject) => {
+export const runGit: GitRunner = ({ cwd, args, env, timeoutMs }) => new Promise((resolve, reject) => {
   execFile(
     "git",
     args,
@@ -32,10 +42,15 @@ export const runGit: GitRunner = ({ cwd, args, env }) => new Promise((resolve, r
       cwd,
       env: gitChildEnvironment({ ...process.env, ...env }),
       encoding: "buffer",
-      maxBuffer: 4 * 1024 * 1024
+      maxBuffer: 4 * 1024 * 1024,
+      ...(timeoutMs ? { timeout: timeoutMs } : {})
     },
     (error, stdout) => {
-      if (error) reject(error);
+      if (error) {
+        const timedOut = timeoutMs && ((error as { killed?: boolean }).killed
+          || (error as { signal?: string | null }).signal === "SIGTERM");
+        reject(timedOut ? new GitCommandTimeoutError(timeoutMs, { cause: error }) : error);
+      }
       else resolve(Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout));
     }
   );
@@ -56,7 +71,8 @@ export async function prepareRemoteRepository({
   token,
   runner = runGit,
   environment = process.env,
-  assertEgress = assertAllowedGitUrl
+  assertEgress = assertAllowedGitUrl,
+  timeoutMs
 }: {
   repository: RepositoryRecord;
   dataDir: string;
@@ -64,6 +80,7 @@ export async function prepareRemoteRepository({
   runner?: GitRunner;
   environment?: NodeJS.ProcessEnv;
   assertEgress?: typeof assertAllowedGitUrl;
+  timeoutMs?: number;
 }): Promise<string> {
   if (repository.kind !== "git" || !repository.cloneUrl) {
     throw new Error("Remote repository metadata is invalid");
@@ -100,13 +117,15 @@ export async function prepareRemoteRepository({
     await runner({
       cwd: target,
       args: [...credentialIsolation, ...redirectIsolation, "fetch", "--prune", "origin"],
-      env
+      env,
+      timeoutMs
     });
   } else {
     await runner({
       cwd: repositoriesDir,
       args: [...credentialIsolation, ...redirectIsolation, "clone", "--no-checkout", repository.cloneUrl, target],
-      env
+      env,
+      timeoutMs
     });
   }
   return target;

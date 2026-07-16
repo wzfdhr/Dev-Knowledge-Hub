@@ -19,6 +19,7 @@ import { PgBossBuildJobQueue } from "./knowledge/job-queue.js";
 import { anthropicEnhancer, openAiCompatibleEnhancer, type KnowledgeEnhancer } from "./knowledge/enhancer.js";
 import { decryptSecret } from "./security/crypto.js";
 import { syncRepository } from "./git/snapshot.js";
+import { GitCommandTimeoutError } from "./git/remote.js";
 import { PostgresSessionStore } from "./security/session-store.js";
 import { ArtifactStore } from "./knowledge/pipeline/artifact-store.js";
 import type { PipelineArtifactStore } from "./persistence/store.js";
@@ -44,6 +45,11 @@ import { PgBossPipelineStageJobQueue } from "./knowledge/job-queue.js";
 const IMPORT_REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 const GIT_SYNC_CLAIM_LIMIT = 10;
 const GIT_SYNC_LEASE_DURATION_MS = 15 * 60 * 1000;
+const GIT_SYNC_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
+
+function scheduledGitSyncFailureCode(error: unknown): string {
+  return error instanceof GitCommandTimeoutError ? error.code : "SCHEDULED_SYNC_FAILED";
+}
 
 interface ArtifactStoreInitializer {
   initialize(): Promise<void>;
@@ -226,6 +232,7 @@ export async function bootstrapServer(
             repository,
             dataDir: env.dataDir,
             store,
+            gitTimeoutMs: GIT_SYNC_COMMAND_TIMEOUT_MS,
             ...(credential ? { token: decryptSecret(credential, env.masterKey!) } : {})
           });
           const completed = await store.finishGitSynchronization({
@@ -265,7 +272,7 @@ export async function bootstrapServer(
             repositoryId: repository.id,
             leaseToken,
             status: "failed",
-            failureCode: "SCHEDULED_SYNC_FAILED",
+            failureCode: scheduledGitSyncFailureCode(error),
             now: new Date()
           }).catch(() => false);
           await store.finishImportReport(repository.workspaceId, report.id, {
@@ -274,7 +281,7 @@ export async function bootstrapServer(
             collectedTextBytes: 0,
             ignored: { total: 0, reasons: {} },
             snapshotId: null,
-            failureCode: completed ? "SCHEDULED_SYNC_FAILED" : "SCHEDULED_SYNC_LEASE_EXPIRED"
+            failureCode: completed ? scheduledGitSyncFailureCode(error) : "SCHEDULED_SYNC_LEASE_EXPIRED"
           }).catch(() => undefined);
           if (completed) {
             await store.recordAudit({
@@ -282,7 +289,7 @@ export async function bootstrapServer(
               action: "repository.scheduled_sync_failed",
               resourceType: "repository",
               resourceId: repository.id,
-              metadata: { code: "SCHEDULED_SYNC_FAILED" }
+              metadata: { code: scheduledGitSyncFailureCode(error) }
             }).catch(() => undefined);
           }
           reportBackgroundError("Git synchronization failed", error);

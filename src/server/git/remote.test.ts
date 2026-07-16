@@ -144,4 +144,27 @@ describe("HTTPS Git authentication", () => {
       await rm(dataDir, { recursive: true, force: true });
     }
   });
+
+  test("forwards a command timeout to remote fetches and clones", async () => {
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-remote-timeout-test-"));
+    const runner = vi.fn<GitRunner>(async ({ args, timeoutMs }) => {
+      expect(timeoutMs).toBe(12_345);
+      const target = args.at(-1);
+      if (target) await mkdir(path.join(target, ".git"), { recursive: true });
+      return Buffer.alloc(0);
+    });
+
+    try {
+      await prepareRemoteRepository({
+        repository,
+        dataDir,
+        runner,
+        timeoutMs: 12_345,
+        assertEgress: async () => undefined
+      });
+      expect(runner).toHaveBeenCalledOnce();
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
 });

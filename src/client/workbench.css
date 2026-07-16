@@ -320,7 +320,16 @@
 
   .project-tabs {
     width: calc(100% - 32px);
-    gap: 18px;
+    height: auto;
+    align-items: center;
+    flex-wrap: wrap;
+    column-gap: 18px;
+    row-gap: 0;
+    overflow: visible;
+  }
+
+  .project-tabs a {
+    height: 38px;
   }
 
   .project-workbench > .page {

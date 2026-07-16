@@ -871,7 +871,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         `UPDATE build_stage_runs
          SET status = 'failed', started_at = COALESCE(started_at, now()), finished_at = now(),
              error_code = $4, error_detail = $5, updated_at = now()
-         WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND status = 'running'
+         WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND status = $4
          RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
                    input_digest, output_manifest_ids, started_at, finished_at, error_code, error_detail`,
         [input.workspaceId, input.projectId, input.stageRunId, input.errorCode, input.errorDetail]

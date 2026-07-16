@@ -85,6 +85,12 @@ describe("pipeline build routes", () => {
       method: "POST", url: "/api/session", payload: { email: "admin@example.com", password: "a secure admin password" }
     });
     const adminCookie = authenticatedCookie(login);
+    const unavailable = await app.inject({
+      method: "GET", url: `/api/builds/${randomUUID()}/comparison`, headers: { cookie: adminCookie }
+    });
+    expect(unavailable.statusCode).toBe(503);
+    expect(unavailable.json()).toMatchObject({ error: { code: "PIPELINE_COMPARISON_UNAVAILABLE" } });
+
     const createMember = await app.inject({
       method: "POST", url: "/api/members", headers: { cookie: adminCookie, ...csrfHeaders(adminCookie) },
       payload: { email: "reader@example.com", password: "another secure password", role: "reader" }

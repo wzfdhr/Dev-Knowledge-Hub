@@ -23,6 +23,8 @@ export interface RetrievalEvaluationCase {
   expectEmpty: boolean;
   category: RetrievalEvaluationCategory;
   source: RetrievalEvaluationSource;
+  approvalId?: string;
+  sanitizedAt?: string;
 }
 
 export interface EvaluationSearchResult {
@@ -112,6 +114,12 @@ export function parseRetrievalCases(input: string): RetrievalEvaluationCase[] {
     const expectEmpty = parsed.expectEmpty === true;
     const itemCategory = category(parsed.category, id);
     const itemSource = source(parsed.source, id);
+    const approvalId = typeof parsed.approvalId === "string" ? parsed.approvalId.trim() : "";
+    const sanitizedAt = typeof parsed.sanitizedAt === "string" ? parsed.sanitizedAt.trim() : "";
+    if (itemSource === "admin-approved-sanitized-feedback"
+      && (!approvalId || Number.isNaN(Date.parse(sanitizedAt)))) {
+      throw new Error(`Retrieval evaluation case ${id} requires approvalId and sanitizedAt for approved feedback`);
+    }
     if (expectEmpty && (expectedTitles.length || expectedPaths.length)) {
       throw new Error(`Retrieval evaluation case ${id} expects empty results and must not declare expected titles or paths`);
     }
@@ -120,7 +128,9 @@ export function parseRetrievalCases(input: string): RetrievalEvaluationCase[] {
     }
     return {
       id, query, project, expectedTitles, expectedPaths, expectEmpty,
-      category: itemCategory, source: itemSource
+      category: itemCategory,
+      source: itemSource,
+      ...(itemSource === "admin-approved-sanitized-feedback" ? { approvalId, sanitizedAt } : {})
     };
   });
 }

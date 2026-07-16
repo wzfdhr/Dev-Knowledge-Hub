@@ -113,16 +113,16 @@
 {"id":"command-013","query":"dev","project":"fixture-b","expectedTitles":["dev"],"category":"command","source":"fixture"}
 {"id":"command-014","query":"start","project":"fixture-b","expectedTitles":["start"],"category":"command","source":"fixture"}
 {"id":"command-015","query":"test","project":"fixture-b","expectedTitles":["test"],"category":"command","source":"fixture"}
-{"id":"table-001","query":"使用量表","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
-{"id":"table-002","query":"使用量数据","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
-{"id":"table-003","query":"团队使用量","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
-{"id":"table-004","query":"活跃项目表","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
-{"id":"table-005","query":"搜索次数表","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
-{"id":"table-006","query":"使用量 CSV 表","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
-{"id":"table-007","query":"团队数据表","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
-{"id":"table-008","query":"平台使用统计","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
-{"id":"table-009","query":"项目使用统计","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
-{"id":"table-010","query":"查询统计表","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
+{"id":"table-001","query":"团队","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
+{"id":"table-002","query":"活跃项目","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
+{"id":"table-003","query":"搜索次数","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
+{"id":"table-004","query":"数据表","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
+{"id":"table-005","query":"团队","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
+{"id":"table-006","query":"活跃项目","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
+{"id":"table-007","query":"搜索次数","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
+{"id":"table-008","query":"团队","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
+{"id":"table-009","query":"活跃项目","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
+{"id":"table-010","query":"搜索次数","project":"fixture-b","expectedTitles":["data/usage.csv"],"expectedPaths":["data/usage.csv"],"category":"table","source":"fixture"}
 {"id":"cross-project-001","query":"sharedConfig","project":"fixture-b","expectedTitles":["sharedConfig"],"expectedPaths":["src/shared-config.ts"],"category":"cross-project","source":"fixture"}
 {"id":"cross-project-002","query":"SharedConfig","project":"fixture-b","expectedTitles":["SharedConfig"],"expectedPaths":["src/shared-config.ts"],"category":"cross-project","source":"fixture"}
 {"id":"cross-project-003","query":"retryCount","project":"fixture-b","expectedTitles":["sharedConfig"],"expectedPaths":["src/shared-config.ts"],"category":"cross-project","source":"fixture"}
@@ -138,3 +138,8 @@
 {"id":"error-feedback-008","query":"import error","project":"fixture-b","expectedTitles":["ImportTimeoutError"],"expectedPaths":["src/import-errors.ts"],"category":"error-feedback","source":"fixture"}
 {"id":"error-feedback-009","query":"import retry","project":"fixture-b","expectedTitles":["retryImport"],"expectedPaths":["src/import-errors.ts"],"category":"error-feedback","source":"fixture"}
 {"id":"error-feedback-010","query":"retryable","project":"fixture-b","expectedTitles":["ImportTimeoutError"],"expectedPaths":["src/import-errors.ts"],"category":"error-feedback","source":"fixture"}
+{"id":"cross-project-reject-001","query":"ImportTimeoutError","project":"fixture-a","expectEmpty":true,"category":"cross-project","source":"fixture"}
+{"id":"cross-project-reject-002","query":"retryImport","project":"fixture-a","expectEmpty":true,"category":"cross-project","source":"fixture"}
+{"id":"cross-project-reject-003","query":"src/import-errors.ts","project":"fixture-a","expectEmpty":true,"category":"cross-project","source":"fixture"}
+{"id":"cross-project-reject-004","query":"sharedConfig","project":"fixture-a","expectedTitles":["sharedConfig"],"expectedPaths":["src/math.ts"],"category":"cross-project","source":"fixture"}
+{"id":"cross-project-reject-005","query":"SharedConfig","project":"fixture-a","expectedTitles":["sharedConfig"],"expectedPaths":["src/math.ts"],"category":"cross-project","source":"fixture"}

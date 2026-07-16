@@ -15,6 +15,10 @@ const fixtureRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../test/fixtures/code-intelligence"
 );
+const tableFixtureRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../test/fixtures/knowledge-evaluation-b"
+);
 const commitSha = "b".repeat(40);
 let index: CodeIndex;
 
@@ -23,6 +27,23 @@ beforeAll(async () => {
 });
 
 describe("deterministic knowledge generation", () => {
+  test("creates a cited knowledge page for a safely extracted CSV table", async () => {
+    const tableIndex = await analyzeSnapshot(tableFixtureRoot, commitSha);
+    const output = await generateKnowledge(tableIndex);
+    const tablePage = output.pages.find((page) => page.title === "data/usage.csv");
+
+    expect(tableIndex.tables).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourcePath: "data/usage.csv", columns: expect.arrayContaining([
+        expect.objectContaining({ name: "团队" })
+      ]) })
+    ]));
+    expect(tablePage?.body).toContain("活跃项目");
+    expect(tablePage?.citations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "data/usage.csv" })
+    ]));
+    expect(() => validateKnowledge(output, tableIndex)).not.toThrow();
+  });
+
   test("creates required, module, and symbol pages with cited chunks", async () => {
     const output = await generateKnowledge(index);
     const slugs = output.pages.map((page) => page.slug);

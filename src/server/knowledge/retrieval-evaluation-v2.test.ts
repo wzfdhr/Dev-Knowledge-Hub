@@ -39,8 +39,12 @@ describe("knowledge-v2 retrieval evaluation dataset", () => {
     }))).toThrow("invalid source");
     expect(parseRetrievalCases(JSON.stringify({
       id: "approved", query: "add", project: "fixture-a", expectedTitles: ["add"],
-      category: "error-feedback", source: "admin-approved-sanitized-feedback"
+      category: "error-feedback", source: "admin-approved-sanitized-feedback", approvalId: "approval-1", sanitizedAt: "2026-07-16T00:00:00.000Z"
     }))[0]?.source).toBe("admin-approved-sanitized-feedback");
+    expect(() => parseRetrievalCases(JSON.stringify({
+      id: "unapproved-feedback", query: "add", project: "fixture-a", expectedTitles: ["add"],
+      category: "error-feedback", source: "admin-approved-sanitized-feedback"
+    }))).toThrow("approvalId and sanitizedAt");
   });
 
   test("ships a 140-case public suite with protected retrieval intents", async () => {
@@ -49,14 +53,14 @@ describe("knowledge-v2 retrieval evaluation dataset", () => {
     const empty = cases.filter((item) => item.expectEmpty);
     const categories = new Set(cases.map((item) => item.category));
 
-    expect(cases).toHaveLength(140);
+    expect(cases.length).toBeGreaterThanOrEqual(140);
     expect(chinese.length).toBeGreaterThanOrEqual(50);
     expect(empty.length).toBeGreaterThanOrEqual(15);
     expect(categories).toEqual(new Set([
       "symbol", "path", "command", "natural-language", "table", "cross-project", "error-feedback", "no-result"
     ]));
     expect(new Set(cases.map((item) => item.project))).toEqual(new Set(["fixture-a", "fixture-b"]));
-    expect(cases.every((item) => item.source === "fixture")).toBe(true);
+    expect(cases.every((item) => item.source === "fixture" || (item.approvalId && item.sanitizedAt))).toBe(true);
   });
 
   test("calculates ranking, citation, and empty-result metrics from executable result sets", async () => {

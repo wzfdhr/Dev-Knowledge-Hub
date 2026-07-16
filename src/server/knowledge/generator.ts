@@ -18,7 +18,7 @@ export interface KnowledgePageDraft {
   body: string;
   citations: Citation[];
   chunks: KnowledgeChunk[];
-  kind: "required" | "module" | "symbol" | "feedback";
+  kind: "required" | "module" | "symbol" | "table" | "feedback";
 }
 
 export interface KnowledgeWarning {
@@ -149,6 +149,18 @@ function symbolPages(index: CodeIndex): KnowledgePageDraft[] {
   });
 }
 
+function tablePages(index: CodeIndex): KnowledgePageDraft[] {
+  return (index.tables ?? []).map((table) => page(
+    `tables/${slugify(table.sourcePath)}`,
+    table.sourcePath,
+    `# 数据表：${table.sourcePath}\n\n- 名称：${table.name}\n- 数据行：${table.rowCount}\n\n## 字段\n\n${table.columns.length
+      ? table.columns.map((column) => `- ${column.name} (${column.type})${column.sensitive ? "，敏感字段" : ""}`).join("\n")
+      : "未检测到字段。"}`,
+    [table],
+    "table"
+  ));
+}
+
 function feedbackPages(index: CodeIndex, purpose: BuildPurpose): KnowledgePageDraft[] {
   if (purpose.kind !== "feedback") return [];
   const files = new Map(index.files.map((file) => [file.path, file]));
@@ -232,6 +244,7 @@ export async function generateKnowledge(
     ...requiredPages(index),
     ...feedbackPages(index, context.purpose),
     ...modulePages(index),
+    ...tablePages(index),
     ...symbolPages(index)
   ];
   const warnings: KnowledgeWarning[] = [];

@@ -8,7 +8,7 @@ import { MemoryAppStore } from "./persistence/memory-store";
 
 const apps: ReturnType<typeof buildServer>[] = [];
 
-async function authenticatedTeam(overrides: { publicBaseUrl?: string } = {}) {
+async function authenticatedTeam(overrides: Pick<ServerOptions, "publicBaseUrl" | "qualityArtifactReader"> = {}) {
   const store = new MemoryAppStore();
   const app = buildServer({
     store,
@@ -278,8 +278,85 @@ describe("team projects and members", () => {
       currentRelease: null,
       knowledge: { pageCount: 0, chunkCount: 0, citationCount: 0 },
       qualityPipeline: null,
+      assessment: null,
       remediation: { open: 0, accepted: 0, rebuilding: 0, resolved: 0, dismissed: 0 },
       diagnostics: [expect.objectContaining({ code: "SOURCE_MISSING" })]
+    });
+  });
+
+  test("returns bounded trusted quality details only from the project's lint artifact", async () => {
+    const qualityArtifactId = "quality-artifact";
+    const { app, store, cookie } = await authenticatedTeam({
+      qualityArtifactReader: {
+        getJson: async () => ({
+          schemaVersion: 1,
+          trust: {
+            targetKind: "knowledge", targetId: "quality-build", score: 0.8,
+            citationScore: 1, parserScore: 1, freshnessScore: 1, lintPenalty: 0.2,
+            reasons: ["cited", "lint_warning"]
+          },
+          issues: [{
+            id: "quality-warning", buildId: "quality-build", rule: "KNOWLEDGE_LOW_COVERAGE",
+            severity: "warning", targetKind: "knowledge", targetId: "overview",
+            message: "Coverage is incomplete", sourceRefs: [], remediationState: "open"
+          }]
+        })
+      }
+    });
+    const workspace = (await store.defaultWorkspace())!;
+    const project = (await store.listProjects(workspace.id))[0]!;
+    const repository = await store.createRepository(workspace.id, { kind: "upload", name: "质量资料" }, project.id);
+    const snapshot = await store.createSnapshot({
+      snapshot: {
+        id: "quality-snapshot", workspaceId: workspace.id, repositoryId: repository!.id,
+        commitSha: "a".repeat(40), ref: "upload", remoteUrl: null,
+        commitTimestamp: new Date(), storagePath: "/tmp/quality-snapshot"
+      },
+      files: []
+    });
+    const { build } = await store.createBuild({
+      workspaceId: workspace.id, repositoryId: repository!.id, snapshotId: snapshot.id,
+      snapshotPath: snapshot.storagePath, commitSha: snapshot.commitSha
+    });
+    await store.transitionBuild(build.id, "queued", "ready");
+    const lint = await store.createStageRun({
+      workspaceId: workspace.id, projectId: project.id, snapshotId: snapshot.id, buildId: build.id,
+      stage: "lint", attempt: 1, inputDigest: "a".repeat(64)
+    });
+    await store.transitionStageRun(workspace.id, project.id, lint.id, "queued", "running");
+    await store.transitionStageRun(workspace.id, project.id, lint.id, "running", "succeeded", {
+      outputManifestIds: [qualityArtifactId]
+    });
+    store.findArtifactById = async (id) => id === qualityArtifactId ? {
+      id,
+      workspaceId: workspace.id,
+      projectId: project.id,
+      snapshotId: snapshot.id,
+      buildId: build.id,
+      stage: "lint",
+      kind: "knowledge-quality",
+      schemaVersion: 1,
+      inputDigest: "a".repeat(64),
+      contentDigest: "b".repeat(64),
+      storageKey: "unused",
+      sourceRefs: [],
+      producer: "deterministic",
+      createdAt: new Date().toISOString()
+    } : null;
+
+    const response = await app.inject({
+      method: "GET", url: `/api/projects/${project.id}/knowledge-quality?issueLimit=1`,
+      headers: { cookie, ...csrfHeaders(cookie) }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      qualityPipeline: { stage: "lint", status: "succeeded", artifactReady: true, errorCode: null },
+      assessment: {
+        trust: { score: 0.8, reasons: ["cited", "lint_warning"] },
+        issueTotal: 1,
+        issues: [expect.objectContaining({ id: "quality-warning", rule: "KNOWLEDGE_LOW_COVERAGE" })]
+      }
     });
   });
 

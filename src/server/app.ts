@@ -14,6 +14,7 @@ import Fastify, {
 import { z } from "zod";
 
 import { AGENT_FEEDBACK_STATUSES, SERVICE_NAME } from "../shared/contracts.js";
+import { lintIssueSchema, trustScoreSchema, type ArtifactManifest } from "../shared/api-contracts.js";
 import { MAX_IMPORT_TABLE_WORKBOOK_BYTES } from "../shared/import-filter.js";
 import {
   FeedbackNotAcknowledgedError,
@@ -132,6 +133,13 @@ const remediationListQuerySchema = z.object({
   severity: z.enum(["error", "warning", "info"]).optional(),
   rule: z.string().trim().min(1).max(120).optional()
 });
+const qualityQuerySchema = z.object({
+  issueLimit: z.coerce.number().int().min(1).max(100).default(50)
+});
+const qualityAssessmentArtifactSchema = z.object({
+  trust: trustScoreSchema,
+  issues: z.array(lintIssueSchema)
+});
 
 const teamRoleSchema = z.enum(["admin", "member", "reader"]);
 const projectSchema = z.object({
@@ -193,6 +201,38 @@ export interface ServerOptions {
   publicBaseUrl?: string;
   sessionStore?: SessionStore;
   legacySessionReadUntil?: Date;
+  qualityArtifactReader?: { getJson(manifest: ArtifactManifest): Promise<unknown> };
+}
+
+async function loadQualityAssessment(input: {
+  store: AppStore;
+  reader: ServerOptions["qualityArtifactReader"];
+  run: { workspaceId: string; projectId: string; snapshotId: string; status: string; outputManifestIds: readonly string[] } | undefined;
+  issueLimit: number;
+}) {
+  const { run } = input;
+  if (!input.reader || !run || !["succeeded", "reused"].includes(run.status) || run.outputManifestIds.length !== 1) {
+    return null;
+  }
+  const manifest = await input.store.findArtifactById(run.outputManifestIds[0]!);
+  if (!manifest
+    || manifest.workspaceId !== run.workspaceId
+    || manifest.projectId !== run.projectId
+    || manifest.snapshotId !== run.snapshotId
+    || manifest.stage !== "lint"
+    || manifest.kind !== "knowledge-quality") {
+    return null;
+  }
+  try {
+    const assessment = qualityAssessmentArtifactSchema.parse(await input.reader.getJson(manifest));
+    return {
+      trust: assessment.trust,
+      issueTotal: assessment.issues.length,
+      issues: assessment.issues.slice(0, input.issueLimit)
+    };
+  } catch {
+    return null;
+  }
 }
 
 function sseEvent(event: BuildEvent): string {
@@ -1036,7 +1076,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.get("/api/projects/:projectId/knowledge-quality", { preHandler: requireAdmin }, async (request, reply) => {
     const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
-    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project");
+    const query = qualityQuerySchema.safeParse(request.query);
+    if (!params.success || !query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project quality query");
     await requireProjectRole("reader", params.data.projectId, request, reply);
     if (reply.sent) return;
     const admin = (request as AuthenticatedRequest).sessionAdmin;
@@ -1068,8 +1109,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const qualityRun = overview.latestBuild
       ? (await options.store.listPipelineStageRuns(
         admin.workspaceId, params.data.projectId, overview.latestBuild.id
-      )).at(-1)
+      )).findLast((run) => run.stage === "lint")
       : undefined;
+    const assessment = await loadQualityAssessment({
+      store: options.store,
+      reader: options.qualityArtifactReader,
+      run: qualityRun,
+      issueLimit: query.data.issueLimit
+    });
     const diagnostics: Array<{ code: string }> = [];
     if (!repository) diagnostics.push({ code: "SOURCE_MISSING" });
     else if (!snapshot) diagnostics.push({ code: "SNAPSHOT_MISSING" });
@@ -1092,6 +1139,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         artifactReady: qualityRun.outputManifestIds.length > 0,
         errorCode: qualityRun.errorCode
       } : null,
+      assessment,
       change: enrichedChange,
       diagnostics
     };

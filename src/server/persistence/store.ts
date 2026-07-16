@@ -652,7 +652,7 @@ export interface KnowledgeStore {
   ): Promise<ReleaseRecord[]>;
 }
 
-export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, PipelineSearchDocumentStore {
+export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, PipelineArtifactStore, PipelineSearchDocumentStore {
   listPipelineStageRuns(
     workspaceId: string,
     projectId: string,

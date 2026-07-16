@@ -1,3 +1,4 @@
+import type { LintIssue, TrustScore } from "../../shared/api-contracts";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
 import type { BuildStatus } from "../../server/knowledge/build-service";
 
@@ -44,6 +45,7 @@ export interface ProjectKnowledgeQuality {
     artifactReady: boolean;
     errorCode: string | null;
   } | null;
+  assessment: { trust: TrustScore; issueTotal: number; issues: LintIssue[] } | null;
   change: SnapshotChangeSummary | null;
   diagnostics: Array<{ code: "SOURCE_MISSING" | "SNAPSHOT_MISSING" | "BUILD_FAILED" | "RELEASE_MISSING" | "REBUILD_RECOMMENDED" | "PUBLISHED" }>;
 }

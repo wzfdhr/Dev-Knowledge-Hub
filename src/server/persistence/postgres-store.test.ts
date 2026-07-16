@@ -638,7 +638,8 @@ describe("PostgresAppStore knowledge releases", () => {
     await store.searchKnowledge("workspace-1", "repo-1", "架构概览", "release-1");
 
     const sql = String(query.mock.calls[0][0]);
-    expect(sql).toContain("to_tsvector('english', kp.title || ' ' || kp.body)");
+    expect(sql).toContain("to_tsvector('english', regexp_replace(kp.title || ' ' || kp.body");
+    expect(sql).toContain("'([a-z])([A-Z])'");
     expect(sql).toContain("lower(kp.title || ' ' || kp.body) LIKE '%' || lower($3) || '%'");
     expect(sql).toContain("text_rank <= 20");
     expect(sql).toContain("LIMIT 50");

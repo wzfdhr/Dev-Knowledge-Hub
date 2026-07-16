@@ -1,7 +1,7 @@
 import { authenticatedCookie, csrfHeaders } from "../test-support/csrf";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -16,6 +16,13 @@ import { requireIsolatedTestDatabase } from "../../test/integration-database";
 import { buildServer } from "../app";
 import { syncRepository } from "../git/snapshot";
 import { BuildService } from "../knowledge/build-service";
+import { analyzeSnapshot } from "../knowledge/intelligence";
+import { generateKnowledge } from "../knowledge/generator";
+import {
+  assertRetrievalQuality,
+  evaluateRetrievalCasesWithDetails,
+  parseRetrievalCases
+} from "../knowledge/retrieval-evaluation-v2";
 import { PgBossBuildJobQueue } from "../knowledge/job-queue";
 import { ArtifactStore } from "../knowledge/pipeline/artifact-store";
 import { createNormalizedSourcesStageExecutor, normalizedSourcesPipelineInputDigest } from "../knowledge/pipeline/convert-stage";
@@ -42,6 +49,7 @@ const databaseUrl = process.env.TEST_DATABASE_URL
 const integration = databaseUrl ? describe : describe.skip;
 let pool: Pool | null = null;
 let temporaryRoot: string | null = null;
+const retrievalFixtureRoots: string[] = [];
 const execute = promisify(execFile);
 
 class RecordedPipelineQueue implements PipelineStageJobQueue {
@@ -68,6 +76,72 @@ async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean):
 }
 
 integration("PostgreSQL cited knowledge integration", () => {
+  test(databaseUrl
+    ? "enforces the versioned retrieval quality gate through the PostgreSQL search implementation"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("retrieval-evaluation@example.com", "hash");
+    const cases = parseRetrievalCases(await readFile(
+      path.resolve("evaluation/knowledge-v2/cases.jsonl"), "utf8"
+    ));
+    const fixtureRoots = {
+      "fixture-a": path.resolve("src/test/fixtures/code-intelligence"),
+      "fixture-b": path.resolve("src/test/fixtures/knowledge-evaluation-b")
+    };
+    const fixtures = new Map<string, { repositoryId: string; releaseId: string }>();
+
+    for (const [name, fixtureRoot] of Object.entries(fixtureRoots)) {
+      const repositoryPath = await mkdtemp(path.join(os.tmpdir(), `devkh-retrieval-${name}-`));
+      retrievalFixtureRoots.push(repositoryPath);
+      await cp(fixtureRoot, repositoryPath, { recursive: true });
+      await execute("git", ["init", "-b", "main"], { cwd: repositoryPath });
+      await execute("git", ["config", "user.email", "retrieval@example.com"], { cwd: repositoryPath });
+      await execute("git", ["config", "user.name", "Retrieval Evaluation"], { cwd: repositoryPath });
+      await execute("git", ["add", "."], { cwd: repositoryPath });
+      await execute("git", ["commit", "-m", "evaluation fixture"], { cwd: repositoryPath });
+
+      const project = await store.createProject(setup!.workspace.id, {
+        name: `Retrieval evaluation ${name}`,
+        slug: `retrieval-${name}`
+      }, setup!.admin.id);
+      const repository = await store.createRepository(setup!.workspace.id, {
+        kind: "local", name: `Retrieval evaluation ${name}`, path: repositoryPath
+      }, project!.id);
+      const summary = await syncRepository({
+        repository: repository!, dataDir: path.join(repositoryPath, "data"), store
+      });
+      const snapshot = await store.findSnapshotById(setup!.workspace.id, summary.snapshotId);
+      const index = await analyzeSnapshot(snapshot!.storagePath, snapshot!.commitSha);
+      const build = (await store.createBuild({
+        workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id,
+        snapshotId: snapshot!.id,
+        snapshotPath: snapshot!.storagePath,
+        commitSha: snapshot!.commitSha
+      })).build;
+      await store.saveKnowledge({ build, index, output: await generateKnowledge(index) });
+      await store.transitionBuild(build.id, "queued", "ready");
+      const release = await store.createReleaseDraft(
+        setup!.workspace.id, repository!.id, build.id, `retrieval-${name}`
+      );
+      await store.publishRelease(setup!.workspace.id, release!.id);
+      fixtures.set(name, { repositoryId: repository!.id, releaseId: release!.id });
+    }
+
+    const report = await evaluateRetrievalCasesWithDetails(cases, (item) => {
+      const fixture = fixtures.get(item.project);
+      if (!fixture) throw new Error(`Unknown retrieval evaluation fixture: ${item.project}`);
+      return store.searchKnowledge(setup!.workspace.id, fixture.repositoryId, item.query, fixture.releaseId);
+    });
+    expect(report.metrics.total).toBeGreaterThanOrEqual(140);
+    expect(report.failures).toEqual([]);
+    expect(() => assertRetrievalQuality(report)).not.toThrow();
+  }, 90_000);
+
   test(databaseUrl
     ? "rolls back LLM builds when their audit event cannot be persisted and preserves allowLlm projections"
     : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
@@ -1215,5 +1289,8 @@ afterAll(async () => {
     await pool.query("DROP FUNCTION IF EXISTS fail_second_release_publish()").catch(() => undefined);
   }
   await pool?.end();
-  if (temporaryRoot) await rm(temporaryRoot, { recursive: true, force: true });
+  await Promise.all([
+    ...(temporaryRoot ? [temporaryRoot] : []),
+    ...retrievalFixtureRoots
+  ].map((directory) => rm(directory, { recursive: true, force: true })));
 });

@@ -141,5 +141,5 @@
 {"id":"cross-project-reject-001","query":"ImportTimeoutError","project":"fixture-a","expectEmpty":true,"category":"cross-project","source":"fixture"}
 {"id":"cross-project-reject-002","query":"retryImport","project":"fixture-a","expectEmpty":true,"category":"cross-project","source":"fixture"}
 {"id":"cross-project-reject-003","query":"src/import-errors.ts","project":"fixture-a","expectEmpty":true,"category":"cross-project","source":"fixture"}
-{"id":"cross-project-reject-004","query":"sharedConfig","project":"fixture-a","expectedTitles":["sharedConfig"],"expectedPaths":["src/math.ts"],"category":"cross-project","source":"fixture"}
-{"id":"cross-project-reject-005","query":"SharedConfig","project":"fixture-a","expectedTitles":["sharedConfig"],"expectedPaths":["src/math.ts"],"category":"cross-project","source":"fixture"}
+{"id":"cross-project-reject-004","query":"sharedConfig","project":"fixture-a","expectEmpty":true,"category":"cross-project","source":"fixture"}
+{"id":"cross-project-reject-005","query":"SharedConfig","project":"fixture-a","expectEmpty":true,"category":"cross-project","source":"fixture"}

@@ -74,11 +74,11 @@ describe("weighted knowledge search", () => {
     ));
   });
 
-  test("matches feedback wording against camel-cased symbols", async () => {
-    const results = await store.searchKnowledge(workspaceId, repositoryId, "parse failure");
+  test("matches spaced wording against camel-cased symbols", async () => {
+    const results = await store.searchKnowledge(workspaceId, repositoryId, "declared callable");
 
     expect(results).toEqual(expect.arrayContaining([
-      expect.objectContaining({ title: "ParseFailureError" })
+      expect.objectContaining({ title: "DeclaredCallable" })
     ]));
   });
 

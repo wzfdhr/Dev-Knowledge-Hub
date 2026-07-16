@@ -18,4 +18,3 @@ export function add(left: number, right: number): number {
 }
 
 export const VERSION = "1.0.0";
-export const sharedConfig = "fixture-a";

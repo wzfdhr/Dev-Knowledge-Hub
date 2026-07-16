@@ -575,6 +575,12 @@ export interface Pagination {
   offset?: number;
 }
 
+export interface RemediationListOptions extends Pagination {
+  state?: RemediationState;
+  severity?: LintIssue["severity"];
+  rule?: string;
+}
+
 export const DEFAULT_LIST_LIMIT = 50;
 export const MAX_LIST_LIMIT = 100;
 
@@ -819,7 +825,7 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
   listRemediations(
     workspaceId: string,
     projectId: string,
-    pagination?: Pagination
+    options?: RemediationListOptions
   ): Promise<RemediationRecord[]>;
   countRemediations(
     workspaceId: string,

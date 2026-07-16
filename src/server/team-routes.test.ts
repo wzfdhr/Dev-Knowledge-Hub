@@ -312,6 +312,24 @@ describe("team projects and members", () => {
         message: "Knowledge coverage is low", sourceRefs: [], remediationState: "open"
       }
     });
+    const errorRemediation = await store.createRemediation({
+      workspaceId: workspace.id, projectId: project.id, repositoryId: repository.id,
+      sourceBuildId: sourceBuild.build.id,
+      issue: {
+        id: "lint-graph", buildId: sourceBuild.build.id, rule: "GRAPH_DANGLING_FACT_EDGE",
+        severity: "error", targetKind: "graph", targetId: "edge-1",
+        message: "Graph edge is incomplete", sourceRefs: [], remediationState: "open"
+      }
+    });
+    const filtered = await app.inject({
+      method: "GET",
+      url: `/api/projects/${project.id}/remediations?state=open&severity=warning&rule=KNOWLEDGE_LOW_COVERAGE`,
+      headers: { cookie, ...csrfHeaders(cookie) }
+    });
+    expect(filtered.statusCode).toBe(200);
+    expect(filtered.json()).toMatchObject({ remediations: [expect.objectContaining({ id: remediation.id })] });
+    expect(filtered.json<{ remediations: Array<{ id: string }> }>().remediations)
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ id: errorRemediation.id })]));
     const reader = (await app.inject({
       method: "POST", url: "/api/members", headers: { cookie, ...csrfHeaders(cookie) },
       payload: { email: "quality-reader@example.com", password: "a secure reader password", role: "reader" }
@@ -331,7 +349,9 @@ describe("team projects and members", () => {
       headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) }
     });
     expect(visible.statusCode).toBe(200);
-    expect(visible.json()).toMatchObject({ remediations: [expect.objectContaining({ id: remediation.id, state: "open" })] });
+    expect(visible.json()).toMatchObject({
+      remediations: expect.arrayContaining([expect.objectContaining({ id: remediation.id, state: "open" })])
+    });
     const quality = await app.inject({
       method: "GET", url: `/api/projects/${project.id}/knowledge-quality`, headers: { cookie: readerCookie, ...csrfHeaders(readerCookie) }
     });

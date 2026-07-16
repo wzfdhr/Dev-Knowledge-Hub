@@ -126,6 +126,12 @@ const paginationQuerySchema = {
   limit: z.coerce.number().int().min(1).max(100).optional(),
   offset: z.coerce.number().int().min(0).optional()
 };
+const remediationListQuerySchema = z.object({
+  ...paginationQuerySchema,
+  state: z.enum(["open", "accepted", "rebuilding", "resolved", "dismissed"]).optional(),
+  severity: z.enum(["error", "warning", "info"]).optional(),
+  rule: z.string().trim().min(1).max(120).optional()
+});
 
 const teamRoleSchema = z.enum(["admin", "member", "reader"]);
 const projectSchema = z.object({
@@ -1093,7 +1099,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.get("/api/projects/:projectId/remediations", { preHandler: requireAdmin }, async (request, reply) => {
     const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
-    const query = z.object(paginationQuerySchema).safeParse(request.query);
+    const query = remediationListQuerySchema.safeParse(request.query);
     if (!params.success || !query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid remediation query");
     await requireProjectRole("reader", params.data.projectId, request, reply);
     if (reply.sent) return;

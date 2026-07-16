@@ -57,6 +57,7 @@ import type {
   RemediationBuildInput,
   RemediationEventRecord,
   RemediationRecord,
+  RemediationListOptions,
   WorkspaceKnowledgeSearchRecord,
   WorkspaceProjectOverviewRecord,
   WorkspaceRecord
@@ -1007,11 +1008,15 @@ export class MemoryAppStore implements AppStore {
   async listRemediations(
     workspaceId: string,
     projectId: string,
-    pagination?: Pagination
+    options?: RemediationListOptions
   ): Promise<RemediationRecord[]> {
-    const { limit, offset } = normalizePagination(pagination);
+    const { limit, offset } = normalizePagination(options);
     return this.remediations.filter((record) =>
-      record.workspaceId === workspaceId && record.projectId === projectId
+      record.workspaceId === workspaceId
+      && record.projectId === projectId
+      && (!options?.state || record.state === options.state)
+      && (!options?.severity || record.issue.severity === options.severity)
+      && (!options?.rule || record.issue.rule === options.rule)
     ).sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()
       || right.id.localeCompare(left.id)).slice(offset, offset + limit);
   }

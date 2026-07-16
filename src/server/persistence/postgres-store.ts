@@ -53,6 +53,7 @@ import type {
   RemediationBuildInput,
   RemediationEventRecord,
   RemediationRecord,
+  RemediationListOptions,
   WorkspaceKnowledgeSearchRecord,
   WorkspaceProjectOverviewRecord,
   SetupResult,
@@ -2617,16 +2618,20 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   async listRemediations(
     workspaceId: string,
     projectId: string,
-    pagination?: Pagination
+    options?: RemediationListOptions
   ): Promise<RemediationRecord[]> {
-    const { limit, offset } = normalizePagination(pagination);
+    const { limit, offset } = normalizePagination(options);
     const { rows } = await this.pool.query<RemediationRow>(
       `SELECT id, workspace_id, project_id, repository_id, source_build_id, issue, state,
               rebuild_build_id, created_at, updated_at
        FROM remediation_cases
-       WHERE workspace_id = $1 AND project_id = $2
-       ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`,
-      [workspaceId, projectId, limit, offset]
+       WHERE workspace_id = $1
+         AND project_id = $2
+         AND ($3::text IS NULL OR state = $3)
+         AND ($4::text IS NULL OR issue->>'severity' = $4)
+         AND ($5::text IS NULL OR issue->>'rule' = $5)
+       ORDER BY created_at DESC, id DESC LIMIT $6 OFFSET $7`,
+      [workspaceId, projectId, options?.state ?? null, options?.severity ?? null, options?.rule ?? null, limit, offset]
     );
     return rows.map(remediationRecord);
   }

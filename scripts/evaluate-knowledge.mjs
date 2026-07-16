@@ -1,17 +1,19 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { analyzeSnapshot } from "../src/server/knowledge/intelligence.ts";
 import { generateKnowledge } from "../src/server/knowledge/generator.ts";
 import {
-  evaluateRetrievalCases,
+  assertRetrievalQuality,
+  evaluateRetrievalCasesWithDetails,
   parseRetrievalCases
 } from "../src/server/knowledge/retrieval-evaluation-v2.ts";
 import { MemoryAppStore } from "../src/server/persistence/memory-store.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const casesPath = path.join(root, "evaluation/knowledge-v2/cases.jsonl");
+const reportPath = path.join(root, "test-results/knowledge-retrieval-evaluation.json");
 const commitSha = "e".repeat(40);
 
 const cases = parseRetrievalCases(await readFile(casesPath, "utf8"));
@@ -48,10 +50,14 @@ for (const [name, fixtureRoot] of Object.entries(fixtureRoots)) {
   fixtures.set(name, { repository, release });
 }
 
-const metrics = await evaluateRetrievalCases(cases, (item) => {
+const report = await evaluateRetrievalCasesWithDetails(cases, (item) => {
   const fixture = fixtures.get(item.project);
   if (!fixture) throw new Error(`Unknown evaluation fixture project: ${item.project}`);
   return store.searchKnowledge(setup.workspace.id, fixture.repository.id, item.query, fixture.release.id);
 });
 
-console.log(JSON.stringify({ dataset: "knowledge-v2", fixtures: [...fixtures.keys()], metrics }, null, 2));
+const output = { dataset: "knowledge-v2", fixtures: [...fixtures.keys()], ...report };
+await mkdir(path.dirname(reportPath), { recursive: true });
+await writeFile(reportPath, `${JSON.stringify(output, null, 2)}\n`);
+console.log(JSON.stringify(output, null, 2));
+assertRetrievalQuality(report);

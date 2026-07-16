@@ -5,7 +5,10 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 
 import {
+  assertRetrievalQuality,
   evaluateRetrievalCases,
+  evaluateRetrievalCasesWithDetails,
+  graphRankingImproves,
   parseRetrievalCases,
   type RetrievalEvaluationCase
 } from "./retrieval-evaluation-v2";
@@ -75,5 +78,26 @@ describe("knowledge-v2 retrieval evaluation dataset", () => {
       citationValidity: 1,
       falsePositiveEmptyRate: 0
     });
+  });
+
+  test("reports failed case ids and rejects a report below the CI quality thresholds", async () => {
+    const cases = parseRetrievalCases([
+      JSON.stringify({ id: "missed-symbol", query: "add", project: "fixture-a", expectedTitles: ["add"], category: "symbol", source: "fixture" }),
+      JSON.stringify({ id: "false-empty", query: "missing", project: "fixture-a", expectEmpty: true, category: "no-result", source: "fixture" })
+    ].join("\n"));
+    const report = await evaluateRetrievalCasesWithDetails(cases, async (item) => item.id === "false-empty" ? [{
+      title: "unrelated", citations: []
+    }] : []);
+
+    expect(report.failures.map((failure) => failure.id)).toEqual(["missed-symbol", "false-empty"]);
+    expect(() => assertRetrievalQuality(report)).toThrow("missed-symbol, false-empty");
+  });
+
+  test("enables graph ranking only for a non-regressing measurable retrieval improvement", () => {
+    const baseline = { recallAt5: 0.9, mrr: 0.75, citationValidity: 1, falsePositiveEmptyRate: 0 };
+
+    expect(graphRankingImproves(baseline, { ...baseline, recallAt5: 0.91 })).toBe(true);
+    expect(graphRankingImproves(baseline, { ...baseline, mrr: 0.759 })).toBe(false);
+    expect(graphRankingImproves(baseline, { ...baseline, recallAt5: 0.89, mrr: 0.8 })).toBe(false);
   });
 });

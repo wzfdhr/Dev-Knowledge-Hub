@@ -3331,7 +3331,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       const active = await client.query<BuildRow>(
         `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                 status, warnings, cancel_requested, error_message,
-                purpose, feedback_ids, feedback_context, remediation_context
+                purpose, feedback_ids, feedback_context, remediation_context, allow_llm
          FROM build_jobs
          WHERE workspace_id = $1 AND repository_id = $2
            AND snapshot_id = $3 AND purpose = $4 AND feedback_ids = $5::uuid[]

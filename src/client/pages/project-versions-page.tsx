@@ -26,6 +26,13 @@ export function shadowPipelineMessage(status: Build["status"] | null): { title: 
   return { title: "影子验证进行中", detail: "当前正式版本继续使用 legacy 内核。" };
 }
 
+export function canEnableLlmBuild(
+  workspaceRole: "admin" | "member" | "reader" | undefined,
+  projectRole: "admin" | "member" | "reader" | undefined
+): boolean {
+  return workspaceRole === "admin" || projectRole === "admin";
+}
+
 export function derivePrimaryAction(state: OverviewState): { kind: PrimaryKind; label: string } {
   if (!state.repository) return { kind: "connect", label: "连接仓库" };
   const latestBuild = state.builds[0];
@@ -71,12 +78,25 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
   });
   const releasesQuery = useQuery({ queryKey: projectKeys.releases(projectId), queryFn: () => api.listReleases({ limit: LIST_PAGE_SIZE, offset: 0 }), enabled: Boolean(repository), retry: false });
   const feedbackQuery = useFeedback(api, undefined, Boolean(repository));
+  const sessionQuery = useQuery({
+    queryKey: ["session"],
+    queryFn: api.session,
+    enabled: typeof api.session === "function",
+    retry: false
+  });
+  const projectMembersQuery = useQuery({
+    queryKey: ["project-members", projectId],
+    queryFn: () => api.listProjectMembers(projectId),
+    enabled: Boolean(projectId && sessionQuery.data && typeof api.listProjectMembers === "function"),
+    retry: false
+  });
   const [sessionSnapshot, setSessionSnapshot] = useState<SnapshotSummary | null>(() => {
     const raw = sessionStorage.getItem(snapshotKey);
     return raw ? JSON.parse(raw) as SnapshotSummary : null;
   });
   const [reviewBuild, setReviewBuild] = useState<Build | null>(null);
   const [version, setVersion] = useState("1.0.0");
+  const [allowLlm, setAllowLlm] = useState(false);
   const [eventState, setEventState] = useState<"idle" | "connecting" | "connected" | "reconnecting">("idle");
 
   const builds = buildsQuery.data?.pages.flatMap((page) => page.builds) ?? [];
@@ -107,6 +127,8 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
   const action = blockingError || requiredLoading
     ? null
     : derivePrimaryAction({ repository, builds, releases, snapshotId: effectiveSnapshotId });
+  const projectRole = projectMembersQuery.data?.members.find((member) => member.id === sessionQuery.data?.admin.id)?.role;
+  const canUseLlm = canEnableLlmBuild(sessionQuery.data?.admin.role, projectRole);
 
   useEffect(() => {
     if (!activeBuild) {
@@ -134,7 +156,11 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
     setSessionSnapshot(value);
     sessionStorage.setItem(snapshotKey, JSON.stringify(value));
   } });
-  const start = useMutation({ mutationFn: (id: string) => api.startBuild(id), onSuccess: invalidate });
+  const start = useMutation({
+    mutationFn: ({ snapshotId, allowLlm: useLlm }: { snapshotId: string; allowLlm: boolean }) =>
+      api.startBuild(snapshotId, { allowLlm: useLlm }),
+    onSuccess: invalidate
+  });
   const createRelease = useMutation({
     mutationFn: ({ buildId, value }: {
       buildId: string;
@@ -164,7 +190,9 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
       if (repository?.kind === "upload") navigate("../imports");
       else sync.mutate();
     }
-    if (["start-build", "retry-build"].includes(action.kind) && effectiveSnapshotId) start.mutate(effectiveSnapshotId);
+    if (["start-build", "retry-build"].includes(action.kind) && effectiveSnapshotId) {
+      start.mutate({ snapshotId: effectiveSnapshotId, allowLlm: canUseLlm && allowLlm });
+    }
     if (action.kind === "review") setReviewBuild(latestBuild?.status === "ready" ? latestBuild : null);
     if (action.kind === "publish") {
       const draft = releases.find((release) => release.buildId === latestBuild?.id && !release.publishedAt);
@@ -195,9 +223,12 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
   if (repositoryQuery.isLoading) return <Loading label="正在加载操作台" />;
   return <div className="page versions-page">
     <header className="page-header"><div><p className="eyebrow">构建与发布</p><h1>知识版本</h1><p>构建、审核并发布可供团队和 Codex 使用的不可变知识版本。</p></div>
-      {!blockingError && !requiredLoading && (reviewBuild || (action && action.kind !== "none")) && <button className="button primary command" onClick={handlePrimary} disabled={sync.isPending || start.isPending || publish.isPending || createRelease.isPending}>
+      {!blockingError && !requiredLoading && (reviewBuild || (action && action.kind !== "none")) && <div className="page-header-actions">
+        {!reviewBuild && canUseLlm && ["start-build", "retry-build"].includes(action?.kind ?? "") && <label className="llm-build-option"><input type="checkbox" checked={allowLlm} onChange={(event) => setAllowLlm(event.target.checked)} /><span>本次构建使用 LLM 增强</span></label>}
+        <button className="button primary command" onClick={handlePrimary} disabled={sync.isPending || start.isPending || publish.isPending || createRelease.isPending}>
         {!reviewBuild && action?.kind === "sync" && <RefreshCw aria-hidden="true" />}{!reviewBuild && ["start-build", "retry-build"].includes(action?.kind ?? "") && <Play aria-hidden="true" />}{!reviewBuild && action?.kind === "publish" && <Send aria-hidden="true" />}{(reviewBuild || ["connect", "review"].includes(action?.kind ?? "")) && <ArrowRight aria-hidden="true" />}{reviewBuild ? "创建版本草稿" : action?.label}
-      </button>}
+        </button>
+      </div>}
     </header>
     {blockingError && <div className="state error blocking-error" role="alert"><TriangleAlert aria-hidden="true" /><span>{errorMessage(blockingError)}</span><button className="button" onClick={retryOverview}>重试总览数据</button></div>}
     {requiredLoading && <Loading label="正在加载构建和版本状态" />}

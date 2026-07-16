@@ -102,7 +102,7 @@ export interface ApiClient {
     pipelineStatus: Build["status"] | null;
     stages: PipelineStageRun[];
   }>;
-  startBuild(snapshotId: string): Promise<{ build: Build; created: boolean }>;
+  startBuild(snapshotId: string, options?: { allowLlm?: boolean }): Promise<{ build: Build; created: boolean }>;
   cancelBuild(id: string): Promise<{ build: Build }>;
   listReleases(pagination: PaginationParams): Promise<{ releases: Release[] } & PaginatedResponse>;
   getRelease(id: string): Promise<{ release: Release }>;
@@ -207,7 +207,10 @@ export const api: ApiClient = {
   getProjectKnowledgeQuality: (projectId) => request(`/api/projects/${projectId}/knowledge-quality`),
   listBuilds: (pagination) => request(listPath("/api/builds", pagination)),
   getBuildStages: (id) => request(`/api/builds/${encodeURIComponent(id)}/stages`),
-  startBuild: (snapshotId) => request("/api/builds", { method: "POST", body: json({ snapshotId }) }),
+  startBuild: (snapshotId, options) => request("/api/builds", {
+    method: "POST",
+    body: json({ snapshotId, ...(options?.allowLlm ? { allowLlm: true } : {}) })
+  }),
   cancelBuild: (id) => request(`/api/builds/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
   listReleases: (pagination) => request(listPath("/api/releases", pagination)),
   getRelease: (id) => request(`/api/releases/${encodeURIComponent(id)}`),

@@ -23,6 +23,22 @@ describe("release API client", () => {
   });
 });
 
+describe("build API client", () => {
+  test("sends an explicit LLM opt-in only when requested", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      build: { id: "build-1", status: "queued" }, created: true
+    }), { status: 202, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.startBuild("snapshot-1", { allowLlm: true });
+
+    expect(fetch).toHaveBeenCalledWith("/api/builds", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ snapshotId: "snapshot-1", allowLlm: true })
+    }));
+  });
+});
+
 describe("project Codex API client", () => {
   test("sends only the selected filtered folder files with their relative paths", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({

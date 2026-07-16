@@ -145,6 +145,7 @@ export interface Build {
   status: BuildStatus;
   warnings: Array<{ code?: string; message?: string }>;
   cancelRequested: boolean;
+  allowLlm?: boolean;
   errorMessage?: string;
 }
 export type PipelineBuildStage = "convert" | "extract" | "tables" | "graph" | "synthesize" | "index" | "lint" | "viz" | "validate" | "package";

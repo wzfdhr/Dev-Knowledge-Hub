@@ -1524,6 +1524,7 @@ export class MemoryAppStore implements AppStore {
       && build.repositoryId === input.repositoryId
       && build.snapshotId === input.snapshotId
       && build.purpose.kind === purpose.kind
+      && build.allowLlm === (input.allowLlm === true)
       && JSON.stringify(build.purpose.feedbackIds) === JSON.stringify(purpose.feedbackIds)
       && JSON.stringify(build.purpose.remediationContext ?? []) === JSON.stringify(purpose.remediationContext ?? [])
       && !["ready", "published", "failed"].includes(build.status)

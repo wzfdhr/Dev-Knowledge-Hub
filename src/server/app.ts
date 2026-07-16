@@ -1652,6 +1652,10 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const repository = await requireRepositoryRole("member", request, reply);
     if (!repository) return;
+    if (parsed.data.allowLlm) {
+      await requireProjectRole("admin", repository.projectId, request, reply);
+      if (reply.sent) return;
+    }
     const snapshot = await options.store.findSnapshotById(admin.workspaceId, parsed.data.snapshotId);
     if (!snapshot || snapshot.repositoryId !== repository.id) {
       return sendError(reply, 404, "SNAPSHOT_NOT_FOUND", "Snapshot was not found");
@@ -1664,6 +1668,16 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       commitSha: snapshot.commitSha,
       allowLlm: parsed.data.allowLlm === true
     });
+    if (result.created && parsed.data.allowLlm) {
+      await options.store.recordAudit({
+        workspaceId: admin.workspaceId,
+        actorId: admin.id,
+        action: "build.llm_opted_in",
+        resourceType: "build",
+        resourceId: result.build.id,
+        metadata: { projectId: repository.projectId, snapshotId: snapshot.id }
+      });
+    }
     return reply.code(result.created ? 202 : 200).send(result);
   });
 

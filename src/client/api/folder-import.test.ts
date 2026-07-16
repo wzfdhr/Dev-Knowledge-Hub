@@ -86,6 +86,41 @@ describe("folder import scanning", () => {
     expect(report.ignored.reasons).toEqual({ excluded_directory: 50_001 });
   });
 
+  test("skips a 60,000-file dependency directory without reading its files and keeps valid files below the limit", async () => {
+    let dependencyReads = 0;
+    const dependencyFiles = Array.from({ length: 60_000 }, (_, index) => ({
+      kind: "file" as const,
+      name: `${index}.js`,
+      getFile: async (): Promise<File> => {
+        dependencyReads += 1;
+        throw new Error("excluded dependency files must not be read");
+      }
+    }));
+    const accepted = Array.from({ length: 2_000 }, (_, index) => file(`${index}.ts`, `export const value${index} = ${index};`));
+
+    const report = await scanDirectory(directory("demo", [
+      directory("node_modules", dependencyFiles),
+      directory("src", accepted)
+    ]));
+
+    expect(dependencyReads).toBe(0);
+    expect(report.acceptedFiles).toHaveLength(2_000);
+    expect(report.ignored.reasons).toEqual({ excluded_directory: 1 });
+  });
+
+  test("allows exactly 50,000 accepted files and rejects the 50,001st before upload", async () => {
+    const acceptedFiles = Array.from({ length: 50_000 }, (_, index) =>
+      Object.assign(browserFile(`${index}.ts`, "export {};"), { webkitRelativePath: `demo/src/${index}.ts` })
+    );
+    const allowed = await scanSelectedFiles(acceptedFiles);
+    expect(allowed.acceptedFiles).toHaveLength(50_000);
+
+    const tooMany = [...acceptedFiles, Object.assign(browserFile("overflow.ts", "export {};"), {
+      webkitRelativePath: "demo/src/overflow.ts"
+    })];
+    await expect(scanSelectedFiles(tooMany)).rejects.toThrow("可采集文件超过 50,000 个");
+  }, 30_000);
+
   test("reports reading and filtering progress while scanning", async () => {
     const progress: Array<{ phase: string; processedFiles?: number; totalFiles?: number }> = [];
 

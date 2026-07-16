@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -38,6 +38,15 @@ type PipelineStore = MemoryAppStore & PipelineArtifactStore & {
 
 function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+async function directorySize(directory: string): Promise<number> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const sizes = await Promise.all(entries.map(async (entry) => {
+    const entryPath = path.join(directory, entry.name);
+    return entry.isDirectory() ? directorySize(entryPath) : (await stat(entryPath)).size;
+  }));
+  return sizes.reduce((total, size) => total + size, 0);
 }
 
 afterEach(async () => {
@@ -118,6 +127,7 @@ describe("B02 shadow pipeline", () => {
         kind: "module", name: "app.ts", qualifiedName: sourcePath
       })])
     });
+    const initialArtifactBytes = await directorySize(artifactRoot);
 
     await store.transitionBuild(build.id, "queued", "ready");
     const { build: reusedBuild, created } = await store.createBuild({
@@ -141,5 +151,7 @@ describe("B02 shadow pipeline", () => {
         ["synthesize", "reused"], ["index", "reused"], ["lint", "reused"], ["viz", "reused"],
         ["validate", "reused"], ["package", "reused"]
       ]);
+    const reusedArtifactBytes = await directorySize(artifactRoot);
+    expect(reusedArtifactBytes - initialArtifactBytes).toBeLessThanOrEqual(Math.ceil(initialArtifactBytes * 0.05));
   });
 });

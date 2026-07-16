@@ -3274,25 +3274,53 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
 
   private async insertSnapshot(
     client: Queryable,
-    { snapshot, files }: CreateSnapshotInput
-  ): Promise<{ snapshot: SourceSnapshotRecord; inserted: boolean }> {
+    { snapshot, files }: CreateSnapshotInput,
+    lease?: GitSynchronizationLease
+  ): Promise<{ snapshot: SourceSnapshotRecord; inserted: boolean } | null> {
       const inserted = await client.query<SnapshotRow>(
-        `INSERT INTO source_snapshots
+        lease
+          ? `WITH held_lease AS (
+               SELECT repository_id
+               FROM repository_sync_schedules
+               WHERE repository_id = $1 AND lease_token = $2
+                 AND lease_expires_at > clock_timestamp()
+               FOR UPDATE
+             )
+             INSERT INTO source_snapshots
+             (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path)
+             SELECT $3, $4, $1, $5, $6, $7, $8, $9
+             FROM held_lease
+             ON CONFLICT (repository_id, commit_sha) DO NOTHING
+             RETURNING id, workspace_id, repository_id, commit_sha, ref, remote_url,
+                       commit_timestamp, storage_path`
+          : `INSERT INTO source_snapshots
          (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (repository_id, commit_sha) DO NOTHING
          RETURNING id, workspace_id, repository_id, commit_sha, ref, remote_url,
                    commit_timestamp, storage_path`,
-        [
-          snapshot.id,
-          snapshot.workspaceId,
-          snapshot.repositoryId,
-          snapshot.commitSha,
-          snapshot.ref,
-          snapshot.remoteUrl,
-          snapshot.commitTimestamp,
-          snapshot.storagePath
-        ]
+        lease
+          ? [
+              lease.repositoryId,
+              lease.leaseToken,
+              snapshot.id,
+              snapshot.workspaceId,
+              snapshot.commitSha,
+              snapshot.ref,
+              snapshot.remoteUrl,
+              snapshot.commitTimestamp,
+              snapshot.storagePath
+            ]
+          : [
+              snapshot.id,
+              snapshot.workspaceId,
+              snapshot.repositoryId,
+              snapshot.commitSha,
+              snapshot.ref,
+              snapshot.remoteUrl,
+              snapshot.commitTimestamp,
+              snapshot.storagePath
+            ]
       );
       const insertedSnapshot = inserted.rows[0];
       if (!insertedSnapshot) {
@@ -3303,7 +3331,10 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            WHERE workspace_id = $1 AND repository_id = $2 AND commit_sha = $3`,
           [snapshot.workspaceId, snapshot.repositoryId, snapshot.commitSha]
         );
-        if (!existing.rows[0]) throw new Error("Snapshot conflict winner was not found");
+        if (!existing.rows[0]) {
+          if (lease) return null;
+          throw new Error("Snapshot conflict winner was not found");
+        }
         return { snapshot: snapshotRecord(existing.rows[0]), inserted: false };
       }
       for (const file of files) {
@@ -3326,7 +3357,11 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   }
 
   async createSnapshot(input: CreateSnapshotInput): Promise<SourceSnapshotRecord> {
-    return this.transaction(async (client) => (await this.insertSnapshot(client, input)).snapshot);
+    return this.transaction(async (client) => {
+      const persisted = await this.insertSnapshot(client, input);
+      if (!persisted) throw new Error("Snapshot was not persisted");
+      return persisted.snapshot;
+    });
   }
 
   async createSnapshotWithGitSynchronizationLease(
@@ -3335,15 +3370,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   ): Promise<SourceSnapshotRecord | null> {
     if (input.snapshot.repositoryId !== lease.repositoryId) return null;
     return this.transaction(async (client) => {
-      const { rows } = await client.query<{ repository_id: string }>(
-        `SELECT repository_id
-         FROM repository_sync_schedules
-         WHERE repository_id = $1 AND lease_token = $2 AND lease_expires_at > clock_timestamp()
-         FOR UPDATE`,
-        [lease.repositoryId, lease.leaseToken]
-      );
-      if (!rows[0]) return null;
-      return (await this.insertSnapshot(client, input)).snapshot;
+      const persisted = await this.insertSnapshot(client, input, lease);
+      return persisted?.snapshot ?? null;
     });
   }
 
@@ -3353,6 +3381,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   ): Promise<SourceSnapshotRecord> {
     return this.transaction(async (client) => {
       const persisted = await this.insertSnapshot(client, input);
+      if (!persisted) throw new Error("Snapshot was not persisted");
       await this.insertAudit(client, {
         workspaceId: input.snapshot.workspaceId,
         actorId,

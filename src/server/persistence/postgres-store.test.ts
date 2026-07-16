@@ -450,6 +450,52 @@ describe("PostgresAppStore Git synchronization leases", () => {
       expect(values).not.toContain(callerClock);
     }
   });
+
+  test("makes the lease check part of the snapshot insert", async () => {
+    const snapshotRow = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspace_id: "workspace-1",
+      repository_id: "11111111-1111-4111-8111-111111111111",
+      commit_sha: "a".repeat(40),
+      ref: "origin/main",
+      remote_url: "https://github.com/example/source.git",
+      commit_timestamp: new Date(),
+      storage_path: "/tmp/snapshot"
+    };
+    const query = vi.fn(async (sql: string) => ({
+      rows: sql.includes("INSERT INTO source_snapshots")
+        ? [snapshotRow]
+        : sql.includes("repository_sync_schedules")
+          ? [{ repository_id: snapshotRow.repository_id }]
+          : []
+    }));
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+
+    await expect(store.createSnapshotWithGitSynchronizationLease({
+      snapshot: {
+        id: snapshotRow.id,
+        workspaceId: snapshotRow.workspace_id,
+        repositoryId: snapshotRow.repository_id,
+        commitSha: snapshotRow.commit_sha,
+        ref: snapshotRow.ref,
+        remoteUrl: snapshotRow.remote_url,
+        commitTimestamp: snapshotRow.commit_timestamp,
+        storagePath: snapshotRow.storage_path
+      },
+      files: []
+    }, {
+      repositoryId: snapshotRow.repository_id,
+      leaseToken: "22222222-2222-4222-8222-222222222222"
+    })).resolves.toMatchObject({ id: snapshotRow.id });
+
+    const snapshotInsert = (query.mock.calls as unknown as Array<[string, unknown[]?]>).find(([sql]) =>
+      sql.includes("INSERT INTO source_snapshots")
+    );
+    expect(snapshotInsert?.[0]).toContain("WITH held_lease AS");
+    expect(snapshotInsert?.[0]).toContain("lease_expires_at > clock_timestamp()");
+    expect(snapshotInsert?.[0]).toContain("FOR UPDATE");
+  });
 });
 
 describe("PostgresAppStore MCP token rotation", () => {

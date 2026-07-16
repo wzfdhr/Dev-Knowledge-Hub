@@ -25,6 +25,7 @@ import { createB02StageInputPlanner } from "./knowledge/pipeline/stage-planner.j
 import { createKnowledgeSynthesisStageExecutor } from "./knowledge/pipeline/synthesize-stage.js";
 import { createPipelineSearchIndexStageExecutor } from "./knowledge/pipeline/index-stage.js";
 import { createKnowledgeQualityStageExecutor } from "./knowledge/pipeline/quality-stage.js";
+import { createKnowledgeVisualizationStageExecutor } from "./knowledge/pipeline/viz-stage.js";
 import { PgBossPipelineStageJobQueue } from "./knowledge/job-queue.js";
 
 const IMPORT_REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
@@ -83,9 +84,10 @@ const defaultDependencies: BootstrapDependencies = {
         graph: createKnowledgeGraphStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
         synthesize: createKnowledgeSynthesisStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
         index: createPipelineSearchIndexStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        lint: createKnowledgeQualityStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts })
+        lint: createKnowledgeQualityStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
+        viz: createKnowledgeVisualizationStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts })
       }),
-      ["convert", "extract", "tables", "graph", "synthesize", "index", "lint"],
+      ["convert", "extract", "tables", "graph", "synthesize", "index", "lint", "viz"],
       5_000,
       createB02StageInputPlanner(pipelineStore)
     );

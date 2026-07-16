@@ -3,6 +3,7 @@ import { knowledgeIrPipelineInputDigest } from "./extract-stage.js";
 import { knowledgeGraphPipelineInputDigest } from "./graph-stage.js";
 import { pipelineSearchIndexInputDigest } from "./index-stage.js";
 import { pipelineKnowledgeQualityInputDigest } from "./quality-stage.js";
+import { knowledgeVisualizationPipelineInputDigest } from "./viz-stage.js";
 import { knowledgeSynthesisPipelineInputDigest } from "./synthesize-stage.js";
 import { tableSchemasPipelineInputDigest } from "./tables-stage.js";
 import type { PipelineStageInputPlanner } from "./worker.js";
@@ -119,6 +120,13 @@ function nextB02InputDigest(input: {
         input.build.purpose,
         [...extractManifestIds, ...tableManifestIds, ...synthesisManifestIds, ...indexManifestIds]
       );
+    }
+    case "viz": {
+      const graphManifestIds = latestOutputManifestIds(
+        input.runs, "graph", input.currentRun, input.outputManifestIds
+      );
+      assertSingleManifest("viz", graphManifestIds);
+      return knowledgeVisualizationPipelineInputDigest(input.snapshot, input.build.purpose, graphManifestIds);
     }
     default:
       throw new Error(`No B02 input digest planner exists for ${input.nextStage}`);

@@ -10,6 +10,10 @@ import {
   createKnowledgeSynthesisStageExecutor,
   knowledgeSynthesisPipelineInputDigest
 } from "./synthesize-stage";
+import {
+  createPipelineSearchIndexStageExecutor,
+  pipelineSearchIndexInputDigest
+} from "./index-stage";
 import type { ArtifactManifest } from "./contracts";
 import type { PipelineStageRunRecord } from "../../persistence/store";
 import { MemoryAppStore } from "../../persistence/memory-store";
@@ -92,5 +96,32 @@ describe("knowledge synthesis pipeline stage", () => {
     expect(value.output.pages).toEqual(expect.arrayContaining([
       expect.objectContaining({ slug: "architecture-overview" })
     ]));
+
+    const synthRun = await store.createStageRun({
+      workspaceId, projectId: project.id, snapshotId: snapshot.id, buildId: build.id,
+      stage: "synthesize", attempt: 1, inputDigest
+    });
+    await store.transitionStageRun(workspaceId, project.id, synthRun.id, "queued", "running");
+    await store.transitionStageRun(workspaceId, project.id, synthRun.id, "running", "succeeded", {
+      outputManifestIds: first.outputManifestIds
+    });
+    const indexDigest = pipelineSearchIndexInputDigest(snapshot, build.purpose, first.outputManifestIds!);
+    const indexRun: PipelineStageRunRecord = {
+      ...run,
+      id: "index-run",
+      stage: "index",
+      inputDigest: indexDigest,
+      outputManifestIds: []
+    };
+    const index = createPipelineSearchIndexStageExecutor({ store, artifactStore });
+
+    const indexed = await index(indexRun);
+
+    expect(indexed).toEqual({ outputManifestIds: [expect.any(String)], reused: false });
+    await expect(store.listPipelineSearchDocuments(workspaceId, project.id, build.id)).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "page", title: "架构概览", sourceArtifactId: first.outputManifestIds![0] })
+      ])
+    );
   });
 });

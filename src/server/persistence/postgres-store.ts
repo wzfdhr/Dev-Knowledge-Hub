@@ -34,6 +34,8 @@ import type {
   CreateMcpTokenInput,
   Pagination,
   PipelineArtifactStore,
+  PipelineSearchDocumentInput,
+  PipelineSearchDocumentRecord,
   PipelineStageRunRecord,
   CreateStageRunInput,
   CompleteStageRunInput,
@@ -190,6 +192,22 @@ interface ArtifactRow extends QueryResultRow {
   storage_key: string;
   source_refs: ArtifactManifest["sourceRefs"];
   producer: ArtifactManifest["producer"];
+  created_at: Date;
+}
+
+interface PipelineSearchDocumentRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  snapshot_id: string;
+  build_job_id: string;
+  source_artifact_id: string;
+  document_key: string;
+  kind: PipelineSearchDocumentRecord["kind"];
+  title: string;
+  content: string;
+  citations: PipelineSearchDocumentRecord["citations"];
+  metadata: PipelineSearchDocumentRecord["metadata"];
   created_at: Date;
 }
 
@@ -488,6 +506,24 @@ function artifactManifest(row: ArtifactRow): ArtifactManifest {
     producer: row.producer,
     createdAt: row.created_at.toISOString()
   });
+}
+
+function pipelineSearchDocument(row: PipelineSearchDocumentRow): PipelineSearchDocumentRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    projectId: row.project_id,
+    snapshotId: row.snapshot_id,
+    buildId: row.build_job_id,
+    sourceArtifactId: row.source_artifact_id,
+    documentKey: row.document_key,
+    kind: row.kind,
+    title: row.title,
+    content: row.content,
+    citations: row.citations,
+    metadata: row.metadata,
+    createdAt: row.created_at
+  };
 }
 
 function knowledgePageRecord(row: KnowledgePageRow): KnowledgePageRecord {
@@ -975,6 +1011,67 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       [artifactId]
     );
     return rows[0] ? artifactManifest(rows[0]) : null;
+  }
+
+  async savePipelineSearchDocuments(input: {
+    workspaceId: string;
+    projectId: string;
+    snapshotId: string;
+    buildId: string;
+    sourceArtifactId: string;
+    documents: PipelineSearchDocumentInput[];
+  }): Promise<PipelineSearchDocumentRecord[]> {
+    return this.transaction(async (client) => {
+      const source = await client.query(
+        `SELECT 1
+         FROM knowledge_artifacts
+         WHERE id = $1 AND workspace_id = $2 AND project_id = $3
+           AND snapshot_id = $4 AND build_job_id = $5`,
+        [input.sourceArtifactId, input.workspaceId, input.projectId, input.snapshotId, input.buildId]
+      );
+      if (source.rowCount !== 1) {
+        throw new Error("Pipeline search document does not match the source artifact scope");
+      }
+      for (const document of input.documents) {
+        await client.query(
+          `INSERT INTO pipeline_search_documents
+           (workspace_id, project_id, snapshot_id, build_job_id, source_artifact_id,
+            document_key, kind, title, content, citations, metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb)
+           ON CONFLICT (source_artifact_id, document_key) DO NOTHING`,
+          [
+            input.workspaceId, input.projectId, input.snapshotId, input.buildId, input.sourceArtifactId,
+            document.documentKey, document.kind, document.title, document.content,
+            JSON.stringify(document.citations), JSON.stringify(document.metadata)
+          ]
+        );
+      }
+      const { rows } = await client.query<PipelineSearchDocumentRow>(
+        `SELECT id, workspace_id, project_id, snapshot_id, build_job_id, source_artifact_id,
+                document_key, kind, title, content, citations, metadata, created_at
+         FROM pipeline_search_documents
+         WHERE workspace_id = $1 AND project_id = $2 AND build_job_id = $3 AND source_artifact_id = $4
+         ORDER BY document_key, id`,
+        [input.workspaceId, input.projectId, input.buildId, input.sourceArtifactId]
+      );
+      return rows.map(pipelineSearchDocument);
+    });
+  }
+
+  async listPipelineSearchDocuments(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineSearchDocumentRecord[]> {
+    const { rows } = await this.pool.query<PipelineSearchDocumentRow>(
+      `SELECT id, workspace_id, project_id, snapshot_id, build_job_id, source_artifact_id,
+              document_key, kind, title, content, citations, metadata, created_at
+       FROM pipeline_search_documents
+       WHERE workspace_id = $1 AND project_id = $2 AND build_job_id = $3
+       ORDER BY document_key, id`,
+      [workspaceId, projectId, buildId]
+    );
+    return rows.map(pipelineSearchDocument);
   }
 
   async saveKnowledgeGraph(input: SaveKnowledgeGraphInput): Promise<void> {

@@ -17,7 +17,7 @@ import type {
 import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
 import type { ImpactMindmap } from "../knowledge/pipeline/mindmap.js";
 import type { AGENT_FEEDBACK_STATUSES } from "../../shared/contracts.js";
-import type { LintIssue } from "../../shared/api-contracts.js";
+import type { LintIssue, SourceRef } from "../../shared/api-contracts.js";
 import type { RemediationState } from "../knowledge/remediation.js";
 
 export interface WorkspaceRecord {
@@ -107,6 +107,43 @@ export interface SaveKnowledgeGraphInput {
 export interface GraphStore {
   saveKnowledgeGraph(input: SaveKnowledgeGraphInput): Promise<void>;
   getKnowledgeGraph(workspaceId: string, projectId: string, buildId: string): Promise<KnowledgeGraphRecord | null>;
+}
+
+export type PipelineSearchDocumentKind = "page" | "symbol" | "module" | "path" | "table" | "command";
+
+export interface PipelineSearchDocumentInput {
+  documentKey: string;
+  kind: PipelineSearchDocumentKind;
+  title: string;
+  content: string;
+  citations: SourceRef[];
+  metadata: Record<string, string | number | boolean>;
+}
+
+export interface PipelineSearchDocumentRecord extends PipelineSearchDocumentInput {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  snapshotId: string;
+  buildId: string;
+  sourceArtifactId: string;
+  createdAt: Date;
+}
+
+export interface PipelineSearchDocumentStore {
+  savePipelineSearchDocuments(input: {
+    workspaceId: string;
+    projectId: string;
+    snapshotId: string;
+    buildId: string;
+    sourceArtifactId: string;
+    documents: PipelineSearchDocumentInput[];
+  }): Promise<PipelineSearchDocumentRecord[]>;
+  listPipelineSearchDocuments(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineSearchDocumentRecord[]>;
 }
 
 export interface AdminRecord {
@@ -584,7 +621,7 @@ export interface KnowledgeStore {
   ): Promise<ReleaseRecord[]>;
 }
 
-export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore {
+export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, PipelineSearchDocumentStore {
   listPipelineStageRuns(
     workspaceId: string,
     projectId: string,

@@ -20,7 +20,7 @@ import {
 } from "../shared/contracts.js";
 import type { Citation } from "../server/knowledge/intelligence.js";
 import type { FeedbackGenerationContext, RemediationGenerationContext } from "../server/knowledge/build-service.js";
-import type { LintIssue } from "../shared/api-contracts.js";
+import type { LintIssue, SourceRef } from "../shared/api-contracts.js";
 import type { RemediationState } from "../server/knowledge/remediation.js";
 
 export { AGENT_FEEDBACK_STATUSES, BUILD_JOB_STATUSES } from "../shared/contracts.js";
@@ -298,6 +298,42 @@ export const knowledgeChunks = pgTable("knowledge_chunks", {
     columns: [table.pageId, table.workspaceId],
     foreignColumns: [knowledgePages.id, knowledgePages.workspaceId],
     name: "knowledge_chunks_page_workspace_fk"
+  }).onDelete("cascade")
+]);
+
+export const pipelineSearchDocuments = pgTable("pipeline_search_documents", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  projectId: uuid("project_id").notNull(),
+  snapshotId: uuid("snapshot_id").notNull(),
+  buildJobId: uuid("build_job_id").notNull(),
+  sourceArtifactId: uuid("source_artifact_id").notNull(),
+  documentKey: text("document_key").notNull(),
+  kind: text("kind").notNull(),
+  title: text("title").notNull(),
+  content: text("content").notNull(),
+  citations: jsonb("citations").$type<SourceRef[]>().notNull().default([]),
+  metadata: jsonb("metadata").$type<Record<string, string | number | boolean>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+}, (table) => [
+  uniqueIndex("pipeline_search_documents_artifact_key_idx").on(table.sourceArtifactId, table.documentKey),
+  index("pipeline_search_documents_scope_idx").on(
+    table.workspaceId, table.projectId, table.buildJobId, table.kind, table.documentKey
+  ),
+  foreignKey({
+    columns: [table.projectId, table.workspaceId],
+    foreignColumns: [projects.id, projects.workspaceId],
+    name: "pipeline_search_documents_project_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.snapshotId, table.workspaceId],
+    foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId],
+    name: "pipeline_search_documents_snapshot_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.buildJobId, table.workspaceId],
+    foreignColumns: [buildJobs.id, buildJobs.workspaceId],
+    name: "pipeline_search_documents_build_workspace_fk"
   }).onDelete("cascade")
 ]);
 

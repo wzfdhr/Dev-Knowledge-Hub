@@ -6,6 +6,7 @@ import { knowledgeIrPipelineInputDigest } from "./extract-stage";
 import { knowledgeGraphPipelineInputDigest } from "./graph-stage";
 import { createB02StageInputPlanner } from "./stage-planner";
 import { knowledgeSynthesisPipelineInputDigest } from "./synthesize-stage";
+import { pipelineSearchIndexInputDigest } from "./index-stage";
 import { tableSchemasPipelineInputDigest } from "./tables-stage";
 import type { PipelineStageRunRecord } from "../../persistence/store";
 import { MemoryAppStore } from "../../persistence/memory-store";
@@ -81,5 +82,14 @@ describe("B02 stage input planner", () => {
       nextStage: "synthesize",
       outputManifestIds: graph.outputManifestIds
     })).resolves.toBe(knowledgeSynthesisPipelineInputDigest(snapshot, build.purpose, ["graph-artifact"]));
+
+    const synthesize = completed({ ...base, id: "synthesize-run", stage: "synthesize" }, ["pages-artifact"]);
+    runs.push(synthesize);
+    await expect(planner.nextInputDigest({
+      currentRun: synthesize,
+      build,
+      nextStage: "index",
+      outputManifestIds: synthesize.outputManifestIds
+    })).resolves.toBe(pipelineSearchIndexInputDigest(snapshot, build.purpose, ["pages-artifact"]));
   });
 });

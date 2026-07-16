@@ -37,6 +37,8 @@ import type {
   McpTokenRecord,
   CreateMcpTokenInput,
   Pagination,
+  PipelineSearchDocumentInput,
+  PipelineSearchDocumentRecord,
   ReleaseRecord,
   RepositoryConnectionInput,
   RepositoryRecord,
@@ -101,6 +103,7 @@ export class MemoryAppStore implements AppStore {
   readonly pipelineStageRuns: PipelineStageRunRecord[] = [];
   readonly pipelineStageEvents: PipelineStageEvent[] = [];
   readonly knowledgeArtifacts: ArtifactManifest[] = [];
+  readonly pipelineSearchDocuments: PipelineSearchDocumentRecord[] = [];
   private nextPipelineStageEventSequence = 1;
   readonly knowledgePages: KnowledgePageRecord[] = [];
   readonly releases: ReleaseRecord[] = [];
@@ -1784,6 +1787,60 @@ export class MemoryAppStore implements AppStore {
   async findArtifactById(artifactId: string): Promise<ArtifactManifest | null> {
     const artifact = this.knowledgeArtifacts.find((candidate) => candidate.id === artifactId);
     return artifact ? structuredClone(artifact) : null;
+  }
+
+  async savePipelineSearchDocuments(input: {
+    workspaceId: string;
+    projectId: string;
+    snapshotId: string;
+    buildId: string;
+    sourceArtifactId: string;
+    documents: PipelineSearchDocumentInput[];
+  }): Promise<PipelineSearchDocumentRecord[]> {
+    const artifact = this.knowledgeArtifacts.find((candidate) => candidate.id === input.sourceArtifactId);
+    if (!artifact
+      || artifact.workspaceId !== input.workspaceId
+      || artifact.projectId !== input.projectId
+      || artifact.snapshotId !== input.snapshotId
+      || artifact.buildId !== input.buildId
+    ) {
+      throw new Error("Pipeline search document does not match the source artifact scope");
+    }
+    const saved: PipelineSearchDocumentRecord[] = [];
+    for (const document of input.documents) {
+      const existing = this.pipelineSearchDocuments.find((candidate) =>
+        candidate.sourceArtifactId === input.sourceArtifactId && candidate.documentKey === document.documentKey
+      );
+      if (existing) {
+        saved.push(structuredClone(existing));
+        continue;
+      }
+      const record: PipelineSearchDocumentRecord = {
+        ...structuredClone(document),
+        id: randomUUID(),
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        snapshotId: input.snapshotId,
+        buildId: input.buildId,
+        sourceArtifactId: input.sourceArtifactId,
+        createdAt: new Date()
+      };
+      this.pipelineSearchDocuments.push(record);
+      saved.push(structuredClone(record));
+    }
+    return saved;
+  }
+
+  async listPipelineSearchDocuments(
+    workspaceId: string,
+    projectId: string,
+    buildId: string
+  ): Promise<PipelineSearchDocumentRecord[]> {
+    return this.pipelineSearchDocuments.filter((document) =>
+      document.workspaceId === workspaceId
+      && document.projectId === projectId
+      && document.buildId === buildId
+    ).map((document) => structuredClone(document));
   }
 
   async listPipelineStageRuns(

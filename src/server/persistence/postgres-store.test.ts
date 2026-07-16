@@ -78,6 +78,42 @@ describe("PostgresAppStore pipeline persistence", () => {
     )).toBe(true);
   });
 
+  test("persists pipeline search documents only after validating the source artifact scope", async () => {
+    const documentRow = {
+      id: "document-1", workspace_id: "workspace-1", project_id: "project-1", snapshot_id: "snapshot-1",
+      build_job_id: "build-1", source_artifact_id: "artifact-1", document_key: "architecture-overview:0",
+      kind: "page", title: "Architecture", content: "Overview", citations: [], metadata: { pageSlug: "architecture-overview" },
+      created_at: new Date("2026-07-16T00:00:00.000Z")
+    };
+    const query = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
+      if (sql === "BEGIN" || sql === "COMMIT") return { rows: [], rowCount: 0 };
+      if (sql.includes("FROM knowledge_artifacts")) return { rows: [], rowCount: 1 };
+      if (sql.includes("INSERT INTO pipeline_search_documents")) return { rows: [], rowCount: 1 };
+      if (sql.includes("FROM pipeline_search_documents")) return { rows: [documentRow], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ query, connect: vi.fn(async () => client) } as never);
+    const input = {
+      workspaceId: "workspace-1", projectId: "project-1", snapshotId: "snapshot-1", buildId: "build-1",
+      sourceArtifactId: "artifact-1",
+      documents: [{
+        documentKey: "architecture-overview:0", kind: "page" as const, title: "Architecture", content: "Overview",
+        citations: [], metadata: { pageSlug: "architecture-overview" }
+      }]
+    };
+
+    await expect(store.savePipelineSearchDocuments(input)).resolves.toEqual([
+      expect.objectContaining({ sourceArtifactId: "artifact-1", documentKey: "architecture-overview:0" })
+    ]);
+    await expect(store.listPipelineSearchDocuments("workspace-1", "project-1", "build-1")).resolves.toHaveLength(1);
+    expect(query.mock.calls.some(([sql, values]) =>
+      String(sql).includes("FROM knowledge_artifacts")
+      && values?.slice(0, 5).join(":") === "artifact-1:workspace-1:project-1:snapshot-1:build-1"
+    )).toBe(true);
+  });
+
   test("creates a stage run idempotently when the queue replays its schedule request", async () => {
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("INSERT INTO build_stage_runs")) return { rows: [stageRow] };

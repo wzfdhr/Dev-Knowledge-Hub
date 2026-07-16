@@ -423,7 +423,8 @@ integration("PostgreSQL cited knowledge integration", () => {
           inputDigest: normalizedSourcesPipelineInputDigest(snapshot, files, build.purpose)
         });
         for (let index = queueStart; index < queue.sent.length; index += 1) {
-          await worker.process(queue.sent[index]!);
+          const delivery = queue.sent[index]!;
+          await Promise.all([worker.process(delivery), worker.process(delivery)]);
         }
         return build;
       };

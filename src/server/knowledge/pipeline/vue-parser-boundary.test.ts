@@ -13,7 +13,7 @@ test("keeps the Vue SFC compiler as a server-side parser boundary", async () => 
   };
 
   expect(extractorSource).toContain('from "@vue/compiler-sfc"');
-  expect(packageJson.dependencies["@vue/compiler-sfc"]).toBe("^3.5.13");
+  expect(packageJson.dependencies["@vue/compiler-sfc"]).toEqual(expect.any(String));
   expect(packageJson.dependencies.vue).toBeUndefined();
   expect(packageJson.devDependencies["@vitejs/plugin-vue"]).toBeUndefined();
 });

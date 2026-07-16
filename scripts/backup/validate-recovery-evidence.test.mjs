@@ -99,6 +99,8 @@ test("the CI recovery drill uses the strict validator", () => {
   assert.match(script, /validate-recovery-evidence\.mjs/);
   assert.match(script, /recovery_cleanup_failed/);
   assert.match(script, /write_status restore-drill failed/);
+  assert.match(script, /RECOVERY_EVIDENCE_DEFER_FINALIZATION/);
+  assert.match(script, /\*\.json\.pending/);
 });
 
 test("the documented recovery evidence example passes the strict validator", () => {

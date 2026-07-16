@@ -61,7 +61,11 @@ restic init >/dev/null
 "$project_root/scripts/backup/devkh-backup.sh"
 "$project_root/scripts/backup/devkh-restore-drill.sh"
 
-evidence_path="$(find "$evidence_directory/recovery-evidence" -type f -name '*.json' -print -quit)"
+evidence_pattern='*.json'
+if [[ "$RECOVERY_EVIDENCE_DEFER_FINALIZATION" == "true" ]]; then
+  evidence_pattern='*.json.pending'
+fi
+evidence_path="$(find "$evidence_directory/recovery-evidence" -type f -name "$evidence_pattern" -print -quit)"
 [[ -n "$evidence_path" ]] || {
   printf 'recovery drill did not produce evidence\n' >&2
   exit 65

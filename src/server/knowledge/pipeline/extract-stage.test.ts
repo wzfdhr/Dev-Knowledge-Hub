@@ -133,7 +133,8 @@ describe("knowledge IR pipeline stage", () => {
         expect.objectContaining({ path: "src/Panel.vue" })
       ]),
       symbols: expect.arrayContaining([expect.objectContaining({ name: "answer" })]),
-      documents: expect.arrayContaining([expect.objectContaining({ text: "Deploy safely." })])
+      documents: expect.arrayContaining([expect.objectContaining({ text: "Deploy safely." })]),
+      lintIssues: []
     }));
     await expect(execute({
       ...run,

@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import { type ArtifactStore } from "./artifact-store.js";
 import { knowledgeIrSchema, type ArtifactManifest, type KnowledgeIR } from "./contracts.js";
+import type { LintIssue } from "../../../shared/api-contracts.js";
 import { extractDocumentSource } from "./extract-documents.js";
 import { extractVueSfc } from "./extract-vue.js";
 import { extractWebSource } from "./extract-web.js";
@@ -151,12 +152,15 @@ function extractSource(source: NormalizedSource) {
   throw new Error(`Normalized sources artifact contains unsupported source: ${source.path}`);
 }
 
-function combineKnowledgeIr(snapshotId: string, sources: readonly NormalizedSource[]): KnowledgeIR {
+function combineKnowledgeIr(snapshotId: string, sources: readonly NormalizedSource[]): {
+  ir: KnowledgeIR;
+  lintIssues: LintIssue[];
+} {
   const extracted = sources
     .slice()
     .sort((left, right) => Buffer.compare(Buffer.from(left.path, "utf8"), Buffer.from(right.path, "utf8")))
     .map(extractSource);
-  return knowledgeIrSchema.parse({
+  const ir = knowledgeIrSchema.parse({
     schemaVersion: 1,
     snapshotId,
     files: extracted.flatMap((result) => result.ir.files),
@@ -166,6 +170,7 @@ function combineKnowledgeIr(snapshotId: string, sources: readonly NormalizedSour
     tables: [],
     sourceRefs: extracted.flatMap((result) => result.ir.sourceRefs)
   });
+  return { ir, lintIssues: extracted.flatMap((result) => result.lintIssues) };
 }
 
 export function createKnowledgeIrStageExecutor(input: {
@@ -196,7 +201,7 @@ export function createKnowledgeIrStageExecutor(input: {
     const sources = (await Promise.all(manifests.map(async (manifest) =>
       assertNormalizedSources(manifest, await input.artifactStore.getJson(manifest))
     ))).flat();
-    const ir = combineKnowledgeIr(snapshot.id, sources);
+    const { ir, lintIssues } = combineKnowledgeIr(snapshot.id, sources);
     const artifact = await input.artifactStore.putJson({
       manifest: {
         id: randomUUID(),
@@ -214,7 +219,7 @@ export function createKnowledgeIrStageExecutor(input: {
         producer: "deterministic",
         createdAt: new Date().toISOString()
       },
-      value: ir,
+      value: { ...ir, lintIssues },
       actorId: input.actorId
     });
     return { outputManifestIds: [artifact.manifest.id], reused: artifact.reused };

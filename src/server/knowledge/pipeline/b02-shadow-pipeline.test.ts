@@ -13,6 +13,7 @@ import { createPipelineStageExecutor } from "./stage-executor";
 import { createB02StageInputPlanner } from "./stage-planner";
 import { createKnowledgeSynthesisStageExecutor } from "./synthesize-stage";
 import { createPipelineSearchIndexStageExecutor } from "./index-stage";
+import { createKnowledgeQualityStageExecutor } from "./quality-stage";
 import { createTableSchemasStageExecutor } from "./tables-stage";
 import { PipelineStageWorker, type PipelineStageJob, type PipelineStageJobQueue } from "./worker";
 import type { ArtifactManifest } from "./contracts";
@@ -82,9 +83,10 @@ describe("B02 shadow pipeline", () => {
         tables: createTableSchemasStageExecutor({ store, artifactStore }),
         graph: createKnowledgeGraphStageExecutor({ store, artifactStore }),
         synthesize: createKnowledgeSynthesisStageExecutor({ store, artifactStore }),
-        index: createPipelineSearchIndexStageExecutor({ store, artifactStore })
+        index: createPipelineSearchIndexStageExecutor({ store, artifactStore }),
+        lint: createKnowledgeQualityStageExecutor({ store, artifactStore })
       }),
-      ["convert", "extract", "tables", "graph", "synthesize", "index"],
+      ["convert", "extract", "tables", "graph", "synthesize", "index", "lint"],
       5_000,
       createB02StageInputPlanner(store)
     );
@@ -102,7 +104,7 @@ describe("B02 shadow pipeline", () => {
     expect(runs.find((run) => run.stage === "extract")?.errorDetail).toBeNull();
     expect(runs.map((run) => [run.stage, run.status])).toEqual([
       ["convert", "succeeded"], ["extract", "succeeded"], ["tables", "succeeded"], ["graph", "succeeded"],
-      ["synthesize", "succeeded"], ["index", "succeeded"]
+      ["synthesize", "succeeded"], ["index", "succeeded"], ["lint", "succeeded"]
     ]);
     await expect(store.getKnowledgeGraph(workspaceId, project.id, build.id)).resolves.toMatchObject({
       nodes: expect.arrayContaining([expect.objectContaining({

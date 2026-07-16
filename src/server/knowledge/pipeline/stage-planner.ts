@@ -92,7 +92,9 @@ function nextB02InputDigest(input: {
         input.runs, "graph", input.currentRun, input.outputManifestIds
       );
       assertSingleManifest("synthesize", graphManifestIds);
-      return knowledgeSynthesisPipelineInputDigest(input.snapshot, input.build.purpose, graphManifestIds);
+      return knowledgeSynthesisPipelineInputDigest(
+        input.snapshot, input.build.purpose, graphManifestIds, input.build.allowLlm === true
+      );
     }
     case "index": {
       const synthesisManifestIds = latestOutputManifestIds(

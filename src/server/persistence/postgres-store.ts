@@ -129,6 +129,7 @@ interface BuildRow extends QueryResultRow {
   feedback_ids: string[];
   feedback_context: BuildRecord["purpose"]["feedbackContext"];
   remediation_context: Extract<BuildRecord["purpose"], { kind: "remediation" }>["remediationContext"];
+  allow_llm?: boolean;
 }
 
 interface RemediationRow extends QueryResultRow {
@@ -429,6 +430,7 @@ function buildRecord(row: BuildRow): BuildRecord {
     warnings: row.warnings ?? [],
     cancelRequested: row.cancel_requested,
     purpose,
+    allowLlm: row.allow_llm ?? false,
     ...(row.error_message ? { errorMessage: row.error_message } : {})
   };
 }
@@ -2463,7 +2465,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       const active = await client.query<BuildRow>(
         `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                 status, warnings, cancel_requested, error_message,
-                purpose, feedback_ids, feedback_context, remediation_context
+                purpose, feedback_ids, feedback_context, remediation_context, allow_llm
          FROM build_jobs
          WHERE workspace_id = $1 AND repository_id = $2
            AND snapshot_id = $3 AND purpose = 'feedback' AND feedback_ids = $4::uuid[]
@@ -2678,7 +2680,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       const active = await client.query<BuildRow>(
         `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                 status, warnings, cancel_requested, error_message,
-                purpose, feedback_ids, feedback_context, remediation_context
+                purpose, feedback_ids, feedback_context, remediation_context, allow_llm
          FROM build_jobs
          WHERE workspace_id = $1 AND repository_id = $2 AND snapshot_id = $3
            AND purpose = 'remediation' AND remediation_context = $4::jsonb
@@ -3294,7 +3296,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          FROM build_jobs
          WHERE workspace_id = $1 AND repository_id = $2
            AND snapshot_id = $3 AND purpose = $4 AND feedback_ids = $5::uuid[]
-           AND remediation_context = $6::jsonb
+           AND remediation_context = $6::jsonb AND allow_llm = $7
            AND status NOT IN ('ready', 'published', 'failed')
          ORDER BY created_at DESC LIMIT 1`,
         [
@@ -3303,7 +3305,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           input.snapshotId,
           purpose.kind,
           purpose.feedbackIds,
-          JSON.stringify(purpose.remediationContext ?? [])
+          JSON.stringify(purpose.remediationContext ?? []),
+          input.allowLlm === true
         ]
       );
       if (active.rows[0]) {
@@ -3313,11 +3316,11 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       const inserted = await client.query<BuildRow>(
         `INSERT INTO build_jobs
          (workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha, status,
-          purpose, feedback_ids, feedback_context, remediation_context)
-         VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7::uuid[], $8::jsonb, $9::jsonb)
+          purpose, feedback_ids, feedback_context, remediation_context, allow_llm)
+         VALUES ($1, $2, $3, $4, $5, 'queued', $6, $7::uuid[], $8::jsonb, $9::jsonb, $10)
          RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                    status, warnings, cancel_requested, error_message,
-                     purpose, feedback_ids, feedback_context, remediation_context`,
+                     purpose, feedback_ids, feedback_context, remediation_context, allow_llm`,
         [
           input.workspaceId,
           input.repositoryId,
@@ -3327,7 +3330,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           purpose.kind,
           purpose.feedbackIds,
           JSON.stringify(purpose.feedbackContext),
-          JSON.stringify(purpose.remediationContext ?? [])
+          JSON.stringify(purpose.remediationContext ?? []),
+          input.allowLlm === true
         ]
       );
       const build = buildRecord(inserted.rows[0]);
@@ -3350,7 +3354,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     const { rows } = await this.pool.query<BuildRow>(
       `SELECT id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
               status, warnings, cancel_requested, error_message,
-                purpose, feedback_ids, feedback_context, remediation_context
+                purpose, feedback_ids, feedback_context, remediation_context, allow_llm
        FROM build_jobs WHERE workspace_id = $1 AND id = $2`,
       [workspaceId, buildId]
     );
@@ -3387,7 +3391,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
                    candidate.snapshot_id, candidate.snapshot_path, candidate.commit_sha,
                    candidate.status, candidate.warnings, candidate.cancel_requested,
                    candidate.error_message, candidate.purpose, candidate.feedback_ids,
-                   candidate.feedback_context, candidate.remediation_context`,
+                   candidate.feedback_context, candidate.remediation_context, candidate.allow_llm`,
         [buildId]
       );
       if (!rows[0]) return null;
@@ -3418,7 +3422,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          WHERE id = $1 AND status = $2 AND ($7::boolean = false OR cancel_requested = false)
          RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                    status, warnings, cancel_requested, error_message,
-                   purpose, feedback_ids, feedback_context, remediation_context
+                   purpose, feedback_ids, feedback_context, remediation_context, allow_llm
        ), event AS (
          INSERT INTO build_events (workspace_id, build_job_id, status, payload)
          SELECT workspace_id, id, status, $6::jsonb FROM updated RETURNING id

@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { ArtifactStore } from "./artifact-store";
 import {
@@ -58,6 +58,7 @@ describe("knowledge synthesis pipeline stage", () => {
       workspaceId, repositoryId: repository!.id, snapshotId: snapshot.id,
       snapshotPath: snapshot.storagePath, commitSha: snapshot.commitSha
     });
+    Object.assign(build, { allowLlm: true });
     const artifactStore = new ArtifactStore(artifactRoot, store);
     await artifactStore.initialize();
     const graphManifest: ArtifactManifest = {
@@ -78,19 +79,25 @@ describe("knowledge synthesis pipeline stage", () => {
     await store.transitionStageRun(workspaceId, project.id, graphRun.id, "running", "succeeded", {
       outputManifestIds: [graphArtifact.manifest.id]
     });
-    const inputDigest = knowledgeSynthesisPipelineInputDigest(snapshot, build.purpose, [graphArtifact.manifest.id]);
+    const inputDigest = knowledgeSynthesisPipelineInputDigest(snapshot, build.purpose, [graphArtifact.manifest.id], true);
     const run: PipelineStageRunRecord = {
       id: "synthesize-run", workspaceId, projectId: project.id, snapshotId: snapshot.id, buildId: build.id,
       stage: "synthesize", attempt: 1, status: "running", inputDigest, outputManifestIds: [],
       startedAt: "2026-07-16T00:00:01.000Z", finishedAt: null, errorCode: null, errorDetail: null
     };
-    const execute = createKnowledgeSynthesisStageExecutor({ store, artifactStore });
+    const enhancer = { enhance: vi.fn(async (request: { deterministicBody: string }) => `${request.deterministicBody}\n\n增强说明`) };
+    const execute = createKnowledgeSynthesisStageExecutor({
+      store,
+      artifactStore,
+      enhancerForWorkspace: async () => enhancer
+    } as Parameters<typeof createKnowledgeSynthesisStageExecutor>[0]);
 
     const first = await execute(run);
     const second = await execute(run);
 
     expect(first).toEqual({ outputManifestIds: [expect.any(String)], reused: false });
     expect(second).toEqual({ outputManifestIds: first.outputManifestIds, reused: true });
+    expect(enhancer.enhance).toHaveBeenCalled();
     const artifact = await store.findArtifactById(first.outputManifestIds![0]!);
     const value = await artifactStore.getJson(artifact!) as { output: { pages: Array<{ slug: string }> } };
     expect(value.output.pages).toEqual(expect.arrayContaining([

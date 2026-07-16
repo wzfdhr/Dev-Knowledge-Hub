@@ -8,6 +8,7 @@ import { pipelineInputDigest } from "./input-digest.js";
 import type { PipelineStageExecutor } from "./worker.js";
 import type { BuildRecord } from "../build-service.js";
 import { generateKnowledge, validateKnowledge } from "../generator.js";
+import type { KnowledgeEnhancer } from "../enhancer.js";
 import { analyzeSnapshot } from "../intelligence.js";
 import { validateKnowledgeGraph } from "./graph.js";
 import type {
@@ -36,13 +37,14 @@ export interface KnowledgeSynthesisStageStore extends PipelineArtifactStore {
 export function knowledgeSynthesisPipelineInputDigest(
   snapshot: Pick<SourceSnapshotRecord, "id">,
   purpose: BuildRecord["purpose"],
-  upstreamManifestIds: readonly string[]
+  upstreamManifestIds: readonly string[],
+  allowLlm = false
 ): string {
   return pipelineInputDigest({
     stage: "synthesize",
     snapshotId: snapshot.id,
     upstreamManifestIds,
-    parserConfigVersion: "synthesize-v1:deterministic",
+    parserConfigVersion: `synthesize-v1:${allowLlm ? "manual-llm" : "deterministic"}`,
     purpose: {
       kind: purpose.kind,
       feedbackIds: purpose.feedbackIds,
@@ -116,6 +118,7 @@ export function createKnowledgeSynthesisStageExecutor(input: {
   store: KnowledgeSynthesisStageStore;
   artifactStore: ArtifactStore;
   actorId?: string;
+  enhancerForWorkspace?: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>;
 }): PipelineStageExecutor {
   return async (run) => {
     const build = await input.store.getBuild(run.workspaceId, run.buildId);
@@ -125,7 +128,9 @@ export function createKnowledgeSynthesisStageExecutor(input: {
     if (!snapshot) throw new Error("Knowledge synthesis snapshot is unavailable");
 
     const graphManifest = await graphManifestForRun(input.store, run);
-    const inputDigest = knowledgeSynthesisPipelineInputDigest(snapshot, build.purpose, [graphManifest.id]);
+    const inputDigest = knowledgeSynthesisPipelineInputDigest(
+      snapshot, build.purpose, [graphManifest.id], build.allowLlm === true
+    );
     if (run.inputDigest !== inputDigest) {
       throw new Error("Knowledge synthesis input digest does not match the persisted graph artifact");
     }
@@ -140,7 +145,8 @@ export function createKnowledgeSynthesisStageExecutor(input: {
       snapshot.commitSha,
       await input.store.sourceFileHashes(run.workspaceId, snapshot.id)
     );
-    const output = await generateKnowledge(index, undefined, { purpose: build.purpose });
+    const enhancer = build.allowLlm ? await input.enhancerForWorkspace?.(build.workspaceId) : undefined;
+    const output = await generateKnowledge(index, enhancer, { purpose: build.purpose });
     validateKnowledge(output, index);
     const artifact = await input.artifactStore.putJson({
       manifest: {
@@ -156,7 +162,7 @@ export function createKnowledgeSynthesisStageExecutor(input: {
         contentDigest: "0".repeat(64),
         storageKey: "pending",
         sourceRefs: artifactSourceRefs(snapshot.id, output),
-        producer: "deterministic",
+        producer: enhancer ? "llm" : "deterministic",
         createdAt: new Date().toISOString()
       },
       value: { schemaVersion: 1, index, output },

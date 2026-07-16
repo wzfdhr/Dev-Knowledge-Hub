@@ -241,6 +241,7 @@ export const buildJobs = pgTable("build_jobs", {
     .notNull().default([]),
   remediationContext: jsonb("remediation_context").$type<RemediationGenerationContext[]>()
     .notNull().default([]),
+  allowLlm: boolean("allow_llm").notNull().default(false),
   ...timestamps
 }, (table) => [
   uniqueIndex("build_jobs_id_workspace_idx").on(table.id, table.workspaceId),

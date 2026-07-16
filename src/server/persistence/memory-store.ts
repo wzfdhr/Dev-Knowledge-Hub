@@ -1532,6 +1532,7 @@ export class MemoryAppStore implements AppStore {
     const build: BuildRecord = {
       ...input,
       purpose,
+      allowLlm: input.allowLlm === true,
       id: randomUUID(),
       status: "queued",
       warnings: [],

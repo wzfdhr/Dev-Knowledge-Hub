@@ -57,7 +57,8 @@ export interface BootstrapDependencies {
   createQualityPipelineWorker: (
     connectionString: string,
     store: AppStore,
-    artifactStore: ArtifactStoreInitializer
+    artifactStore: ArtifactStoreInitializer,
+    enhancerForWorkspace?: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>
   ) => QualityPipelineWorker;
   buildServer: typeof buildServer;
   setInterval?: (callback: () => void, delay: number) => unknown;
@@ -73,7 +74,7 @@ const defaultDependencies: BootstrapDependencies = {
   createBuildService: (store, queue, enhancerForWorkspace, schedulePostBuild) =>
     new BuildService(store, queue, { enhancerForWorkspace, schedulePostBuild }),
   createArtifactStore: (directory, persistence) => new ArtifactStore(directory, persistence),
-  createQualityPipelineWorker: (connectionString, store, artifactStore) => {
+  createQualityPipelineWorker: (connectionString, store, artifactStore, enhancerForWorkspace) => {
     const pipelineStore = store as AppStore & PipelineArtifactStore;
     const pipelineArtifacts = artifactStore as ArtifactStore;
     return new PipelineStageWorker(
@@ -84,7 +85,9 @@ const defaultDependencies: BootstrapDependencies = {
         extract: createKnowledgeIrStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
         tables: createTableSchemasStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
         graph: createKnowledgeGraphStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        synthesize: createKnowledgeSynthesisStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
+        synthesize: createKnowledgeSynthesisStageExecutor({
+          store: pipelineStore, artifactStore: pipelineArtifacts, enhancerForWorkspace
+        }),
         index: createPipelineSearchIndexStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
         lint: createKnowledgeQualityStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
         viz: createKnowledgeVisualizationStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
@@ -134,7 +137,7 @@ export async function bootstrapServer(
   // Before F05 the staged pipeline only runs as a shadow build. Legacy remains
   // the sole source for published knowledge even when the future active mode is set.
   const qualityWorker = env.knowledgeKernelMode === "shadow"
-    ? dependencies.createQualityPipelineWorker(env.databaseUrl, store, artifactStore)
+    ? dependencies.createQualityPipelineWorker(env.databaseUrl, store, artifactStore, enhancerForWorkspace)
     : undefined;
   const schedulePostBuild = async (build: BuildRecord) => {
     if (!qualityWorker) return;

@@ -53,6 +53,7 @@ export interface BuildInput {
   snapshotPath: string;
   commitSha: string;
   purpose?: BuildPurpose;
+  allowLlm?: boolean;
 }
 
 export interface BuildPagination {
@@ -71,6 +72,7 @@ export interface BuildRecord {
   warnings: KnowledgeOutput["warnings"];
   cancelRequested: boolean;
   purpose: BuildPurpose;
+  allowLlm?: boolean;
   errorMessage?: string;
 }
 

@@ -66,7 +66,9 @@ describe("production bootstrap", () => {
     expect(deps.runMigrations).toHaveBeenCalledWith(database.pool);
     expect(deps.createStore).toHaveBeenCalledWith(database.pool);
     expect(deps.createBuildQueue).toHaveBeenCalledWith("postgres://localhost/devkh");
-    expect(deps.createQualityPipelineWorker).toHaveBeenCalledWith("postgres://localhost/devkh", store, artifactStore);
+    expect(deps.createQualityPipelineWorker).toHaveBeenCalledWith(
+      "postgres://localhost/devkh", store, artifactStore, expect.any(Function)
+    );
     expect(qualityWorker.start).toHaveBeenCalledOnce();
     expect(deps.createBuildService).toHaveBeenCalledWith(store, queue, expect.any(Function), expect.any(Function));
     expect(deps.createArtifactStore).toHaveBeenCalledWith("/var/lib/devkh/artifacts", store);

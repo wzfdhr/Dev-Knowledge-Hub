@@ -1646,7 +1646,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!options.buildService) {
       return sendError(reply, 503, "BUILD_SERVICE_UNAVAILABLE", "Build service is unavailable");
     }
-    const parsed = z.object({ snapshotId: z.uuid() }).safeParse(request.body);
+    const parsed = z.object({ snapshotId: z.uuid(), allowLlm: z.boolean().optional() }).safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid build request");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const repository = await requireRepositoryRole("member", request, reply);
@@ -1660,7 +1660,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       repositoryId: repository.id,
       snapshotId: snapshot.id,
       snapshotPath: snapshot.storagePath,
-      commitSha: snapshot.commitSha
+      commitSha: snapshot.commitSha,
+      allowLlm: parsed.data.allowLlm === true
     });
     return reply.code(result.created ? 202 : 200).send(result);
   });

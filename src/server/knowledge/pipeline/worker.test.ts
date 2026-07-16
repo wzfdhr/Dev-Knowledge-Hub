@@ -72,6 +72,7 @@ class FakePipelineStore implements PipelineArtifactStore {
   }
 
   async findReusableArtifact() { return null; }
+  async findArtifactById() { return null; }
   async createArtifactWithAudit(): Promise<never> { throw new Error("not used"); }
   async getBuild() { return this.build; }
 }
@@ -131,6 +132,32 @@ describe("PipelineStageWorker", () => {
       { stageRunId: "run-1", buildId: "build-1", projectId: "project-1" },
       { stageRunId: "run-2", buildId: "build-1", projectId: "project-1" }
     ]);
+  });
+
+  test("uses the stage input planner for the next durable run", async () => {
+    const store = new FakePipelineStore();
+    const queue = new FakeQueue();
+    const nextInputDigest = vi.fn(async () => "c".repeat(64));
+    const worker = new PipelineStageWorker(
+      store,
+      queue,
+      async () => ({ outputManifestIds: ["artifact-1"] }),
+      stages,
+      5_000,
+      { nextInputDigest }
+    );
+    await worker.schedule(job);
+
+    await worker.process(queue.sent[0]!);
+
+    expect(nextInputDigest).toHaveBeenCalledWith(expect.objectContaining({
+      currentRun: expect.objectContaining({ stage: "convert" }),
+      nextStage: "extract",
+      outputManifestIds: ["artifact-1"]
+    }));
+    expect(store.runs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stage: "extract", inputDigest: "c".repeat(64) })
+    ]));
   });
 
   test("does not schedule a downstream stage after a worker failure", async () => {

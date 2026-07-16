@@ -79,6 +79,7 @@ export interface PipelineArtifactStore {
   ): Promise<PipelineStageRunRecord | null>;
   completeStageRunAndCreateNext(input: CompleteStageRunInput): Promise<CompleteStageRunResult | null>;
   createArtifactWithAudit(manifest: ArtifactManifest, actorId?: string): Promise<ArtifactManifest>;
+  findArtifactById(artifactId: string): Promise<ArtifactManifest | null>;
   findReusableArtifact(
     workspaceId: string,
     projectId: string,

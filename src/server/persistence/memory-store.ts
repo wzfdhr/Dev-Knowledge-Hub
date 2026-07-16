@@ -1781,6 +1781,11 @@ export class MemoryAppStore implements AppStore {
     return artifact ? structuredClone(artifact) : null;
   }
 
+  async findArtifactById(artifactId: string): Promise<ArtifactManifest | null> {
+    const artifact = this.knowledgeArtifacts.find((candidate) => candidate.id === artifactId);
+    return artifact ? structuredClone(artifact) : null;
+  }
+
   async listPipelineStageRuns(
     workspaceId: string,
     projectId: string,

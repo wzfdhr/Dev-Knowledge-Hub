@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { bootstrapProductionServer, type BootstrapDependencies } from "./bootstrap";
 import type { BuildRecord } from "./knowledge/build-service";
+import { normalizedSourcesPipelineInputDigest } from "./knowledge/pipeline/convert-stage";
 
 function dependencies(): BootstrapDependencies {
   const pool = { durable: true, end: vi.fn(async () => {}) };
@@ -112,7 +113,7 @@ describe("production bootstrap", () => {
     expect(deps.createBuildService).not.toHaveBeenCalled();
   });
 
-  test("queues one deterministic quality stage after a durable build", async () => {
+  test("queues the deterministic shadow convert stage after a durable build", async () => {
     const deps = dependencies();
     await bootstrapProductionServer({
       DATABASE_URL: "postgres://localhost/devkh",
@@ -125,12 +126,10 @@ describe("production bootstrap", () => {
       getRepository: ReturnType<typeof vi.fn>;
       findSnapshotById: ReturnType<typeof vi.fn>;
       listSnapshotFiles: ReturnType<typeof vi.fn>;
-      countKnowledgePagesForBuild: ReturnType<typeof vi.fn>;
     };
     persistedStore.getRepository = vi.fn(async () => ({ id: "repo-1", projectId: "project-1" }));
     persistedStore.findSnapshotById = vi.fn(async () => ({ id: "snapshot-1", commitSha: "a".repeat(40) }));
     persistedStore.listSnapshotFiles = vi.fn(async () => []);
-    persistedStore.countKnowledgePagesForBuild = vi.fn(async () => 1);
     const schedulePostBuild = vi.mocked(deps.createBuildService).mock.calls[0]![3]!;
     const build: BuildRecord = {
       id: "build-1", workspaceId: "workspace-1", repositoryId: "repo-1", snapshotId: "snapshot-1",
@@ -143,7 +142,11 @@ describe("production bootstrap", () => {
     const qualityWorker = vi.mocked(deps.createQualityPipelineWorker).mock.results[0].value;
     expect(qualityWorker.schedule).toHaveBeenCalledWith(expect.objectContaining({
       workspaceId: "workspace-1", projectId: "project-1", snapshotId: "snapshot-1", buildId: "build-1",
-      inputDigest: expect.stringMatching(/^[a-f0-9]{64}$/)
+      inputDigest: normalizedSourcesPipelineInputDigest(
+        { id: "snapshot-1", commitSha: "a".repeat(40) },
+        [],
+        build.purpose
+      )
     }));
   });
 

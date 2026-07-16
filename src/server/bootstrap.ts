@@ -16,7 +16,12 @@ import { PostgresSessionStore } from "./security/session-store.js";
 import { ArtifactStore } from "./knowledge/pipeline/artifact-store.js";
 import type { PipelineArtifactStore } from "./persistence/store.js";
 import { PipelineStageWorker, type PipelineStageSchedule } from "./knowledge/pipeline/worker.js";
-import { createKnowledgeQualityStageExecutor, knowledgeQualityPipelineInputDigest } from "./knowledge/pipeline/quality-stage.js";
+import { createNormalizedSourcesStageExecutor, normalizedSourcesPipelineInputDigest } from "./knowledge/pipeline/convert-stage.js";
+import { createKnowledgeIrStageExecutor } from "./knowledge/pipeline/extract-stage.js";
+import { createTableSchemasStageExecutor } from "./knowledge/pipeline/tables-stage.js";
+import { createKnowledgeGraphStageExecutor } from "./knowledge/pipeline/graph-stage.js";
+import { createPipelineStageExecutor } from "./knowledge/pipeline/stage-executor.js";
+import { createB02StageInputPlanner } from "./knowledge/pipeline/stage-planner.js";
 import { PgBossPipelineStageJobQueue } from "./knowledge/job-queue.js";
 
 const IMPORT_REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
@@ -62,15 +67,23 @@ const defaultDependencies: BootstrapDependencies = {
   createBuildService: (store, queue, enhancerForWorkspace, schedulePostBuild) =>
     new BuildService(store, queue, { enhancerForWorkspace, schedulePostBuild }),
   createArtifactStore: (directory, persistence) => new ArtifactStore(directory, persistence),
-  createQualityPipelineWorker: (connectionString, store, artifactStore) => new PipelineStageWorker(
-    store as AppStore & PipelineArtifactStore,
-    new PgBossPipelineStageJobQueue(connectionString),
-    createKnowledgeQualityStageExecutor({
-      store: store as AppStore & PipelineArtifactStore,
-      artifactStore: artifactStore as ArtifactStore
-    }),
-    ["lint"]
-  ),
+  createQualityPipelineWorker: (connectionString, store, artifactStore) => {
+    const pipelineStore = store as AppStore & PipelineArtifactStore;
+    const pipelineArtifacts = artifactStore as ArtifactStore;
+    return new PipelineStageWorker(
+      pipelineStore,
+      new PgBossPipelineStageJobQueue(connectionString),
+      createPipelineStageExecutor({
+        convert: createNormalizedSourcesStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
+        extract: createKnowledgeIrStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
+        tables: createTableSchemasStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
+        graph: createKnowledgeGraphStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts })
+      }),
+      ["convert", "extract", "tables", "graph"],
+      5_000,
+      createB02StageInputPlanner(pipelineStore)
+    );
+  },
   buildServer
 };
 
@@ -115,15 +128,14 @@ export async function bootstrapServer(
     if (!qualityWorker) return;
     const repository = await store.getRepository(build.workspaceId, build.repositoryId);
     const snapshot = await store.findSnapshotById(build.workspaceId, build.snapshotId);
-    if (!repository || !snapshot) throw new Error("Quality stage source is unavailable");
+    if (!repository || !snapshot) throw new Error("Shadow pipeline source is unavailable");
     const files = await store.listSnapshotFiles(build.workspaceId, build.snapshotId);
-    const knowledgePageCount = await store.countKnowledgePagesForBuild(build.workspaceId, build.id);
     await qualityWorker.schedule({
       workspaceId: build.workspaceId,
       projectId: repository.projectId,
       snapshotId: snapshot.id,
       buildId: build.id,
-      inputDigest: knowledgeQualityPipelineInputDigest(snapshot, files, build.purpose, knowledgePageCount)
+      inputDigest: normalizedSourcesPipelineInputDigest(snapshot, files, build.purpose)
     });
   };
   const buildService = dependencies.createBuildService(store, queue, enhancerForWorkspace, schedulePostBuild);

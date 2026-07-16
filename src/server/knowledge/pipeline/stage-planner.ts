@@ -1,0 +1,87 @@
+import type { BuildRecord } from "../build-service.js";
+import { knowledgeIrPipelineInputDigest } from "./extract-stage.js";
+import { knowledgeGraphPipelineInputDigest } from "./graph-stage.js";
+import { tableSchemasPipelineInputDigest } from "./tables-stage.js";
+import type { PipelineStageInputPlanner } from "./worker.js";
+import type { PipelineArtifactStore, PipelineStageRunRecord, SourceSnapshotRecord } from "../../persistence/store.js";
+
+type B02StagePlannerStore = PipelineArtifactStore & {
+  findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null>;
+  listPipelineStageRuns(workspaceId: string, projectId: string, buildId: string): Promise<PipelineStageRunRecord[]>;
+};
+
+function latestOutputManifestIds(
+  runs: readonly PipelineStageRunRecord[],
+  stage: PipelineStageRunRecord["stage"],
+  currentRun: PipelineStageRunRecord,
+  currentOutputManifestIds: readonly string[]
+): string[] {
+  if (currentRun.stage === stage) return [...currentOutputManifestIds];
+  const completed = runs.findLast((run) =>
+    run.stage === stage && (run.status === "succeeded" || run.status === "reused")
+  );
+  if (!completed || completed.outputManifestIds.length === 0) {
+    throw new Error(`Pipeline stage ${stage} requires a completed ${stage} artifact`);
+  }
+  return [...completed.outputManifestIds];
+}
+
+function assertSingleManifest(stage: string, manifestIds: readonly string[]): void {
+  if (manifestIds.length !== 1 || new Set(manifestIds).size !== manifestIds.length) {
+    throw new Error(`Pipeline stage ${stage} requires exactly one upstream manifest`);
+  }
+}
+
+export function createB02StageInputPlanner(store: B02StagePlannerStore): PipelineStageInputPlanner {
+  return {
+    async nextInputDigest({ currentRun, build, nextStage, outputManifestIds }) {
+      const snapshot = await store.findSnapshotById(currentRun.workspaceId, currentRun.snapshotId);
+      if (!snapshot) throw new Error("Pipeline stage snapshot is unavailable");
+      const runs = await store.listPipelineStageRuns(currentRun.workspaceId, currentRun.projectId, currentRun.buildId);
+      return nextB02InputDigest({ snapshot, build, currentRun, nextStage, outputManifestIds, runs });
+    }
+  };
+}
+
+function nextB02InputDigest(input: {
+  snapshot: SourceSnapshotRecord;
+  build: BuildRecord;
+  currentRun: PipelineStageRunRecord;
+  nextStage: PipelineStageRunRecord["stage"];
+  outputManifestIds: readonly string[];
+  runs: readonly PipelineStageRunRecord[];
+}): string {
+  switch (input.nextStage) {
+    case "extract": {
+      const convertManifestIds = latestOutputManifestIds(
+        input.runs, "convert", input.currentRun, input.outputManifestIds
+      );
+      assertSingleManifest("extract", convertManifestIds);
+      return knowledgeIrPipelineInputDigest(input.snapshot, input.build.purpose, convertManifestIds);
+    }
+    case "tables": {
+      const convertManifestIds = latestOutputManifestIds(
+        input.runs, "convert", input.currentRun, input.outputManifestIds
+      );
+      assertSingleManifest("tables", convertManifestIds);
+      return tableSchemasPipelineInputDigest(input.snapshot, input.build.purpose, convertManifestIds);
+    }
+    case "graph": {
+      const extractManifestIds = latestOutputManifestIds(
+        input.runs, "extract", input.currentRun, input.outputManifestIds
+      );
+      const tableManifestIds = latestOutputManifestIds(
+        input.runs, "tables", input.currentRun, input.outputManifestIds
+      );
+      assertSingleManifest("graph", extractManifestIds);
+      assertSingleManifest("graph", tableManifestIds);
+      return knowledgeGraphPipelineInputDigest(
+        input.snapshot,
+        input.build.purpose,
+        [...extractManifestIds, ...tableManifestIds]
+      );
+    }
+    default:
+      throw new Error(`No B02 input digest planner exists for ${input.nextStage}`);
+  }
+}

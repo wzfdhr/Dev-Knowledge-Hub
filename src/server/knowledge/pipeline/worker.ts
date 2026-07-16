@@ -30,6 +30,15 @@ export interface PipelineStageExecutionResult {
 
 export type PipelineStageExecutor = (run: PipelineStageRunRecord) => Promise<PipelineStageExecutionResult>;
 
+export interface PipelineStageInputPlanner {
+  nextInputDigest(input: {
+    currentRun: PipelineStageRunRecord;
+    build: BuildRecord;
+    nextStage: BuildStage;
+    outputManifestIds: readonly string[];
+  }): Promise<string>;
+}
+
 type PipelineWorkerStore = PipelineArtifactStore & {
   getBuild(workspaceId: string, buildId: string): Promise<BuildRecord | null>;
 };
@@ -42,7 +51,8 @@ export class PipelineStageWorker {
     private readonly queue: PipelineStageJobQueue,
     private readonly execute: PipelineStageExecutor,
     private readonly stages: readonly BuildStage[],
-    private readonly reconcileIntervalMs = 5_000
+    private readonly reconcileIntervalMs = 5_000,
+    private readonly inputPlanner?: PipelineStageInputPlanner
   ) {}
 
   async start(): Promise<void> {
@@ -85,10 +95,11 @@ export class PipelineStageWorker {
       try {
         const result = await this.execute(run);
         const nextStage = this.stages[this.stages.indexOf(run.stage) + 1];
-        const nextInputDigest = nextStage ? pipelineInputDigest({
+        const outputManifestIds = result.outputManifestIds ?? [];
+        const defaultNextInputDigest = nextStage ? pipelineInputDigest({
           stage: nextStage,
           snapshotId: run.snapshotId,
-          upstreamManifestIds: result.outputManifestIds ?? [],
+          upstreamManifestIds: outputManifestIds,
           parserConfigVersion: "pipeline-v1",
           purpose: {
             kind: build.purpose.kind,
@@ -96,12 +107,20 @@ export class PipelineStageWorker {
             remediationIds: build.purpose.remediationContext?.map((context) => context.remediationId) ?? []
           }
         }) : undefined;
+        const nextInputDigest = nextStage
+          ? await this.inputPlanner?.nextInputDigest({
+            currentRun: run,
+            build,
+            nextStage,
+            outputManifestIds
+          }) ?? defaultNextInputDigest
+          : undefined;
         const advanced = await this.store.completeStageRunAndCreateNext({
           workspaceId: run.workspaceId,
           projectId: run.projectId,
           stageRunId: run.id,
           status: result.reused ? "reused" : "succeeded",
-          outputManifestIds: result.outputManifestIds,
+          outputManifestIds,
           ...(nextStage ? { next: {
             workspaceId: run.workspaceId,
             projectId: run.projectId,

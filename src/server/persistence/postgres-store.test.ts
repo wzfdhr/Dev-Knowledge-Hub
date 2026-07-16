@@ -68,10 +68,14 @@ describe("PostgresAppStore pipeline persistence", () => {
     await expect(store.findReusableArtifact(
       "workspace-1", "project-1", "snapshot-1", "convert", "normalized-source", "a".repeat(64)
     )).resolves.toMatchObject({ id: "artifact-1" });
+    await expect(store.findArtifactById("artifact-1")).resolves.toMatchObject({ id: "artifact-1" });
 
     expect(query.mock.calls.some(([sql]) => String(sql).includes("workspace_id, project_id, snapshot_id, build_job_id"))).toBe(true);
     expect(query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO knowledge_artifacts"))).toBe(true);
     expect(query.mock.calls.some(([sql]) => String(sql).includes("workspace_id = $1 AND project_id = $2"))).toBe(true);
+    expect(query.mock.calls.some(([sql, values]) =>
+      String(sql).includes("WHERE id = $1") && values?.[0] === "artifact-1"
+    )).toBe(true);
   });
 
   test("creates a stage run idempotently when the queue replays its schedule request", async () => {

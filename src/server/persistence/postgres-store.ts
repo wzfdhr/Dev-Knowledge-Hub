@@ -966,6 +966,17 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return rows[0] ? artifactManifest(rows[0]) : null;
   }
 
+  async findArtifactById(artifactId: string): Promise<ArtifactManifest | null> {
+    const { rows } = await this.pool.query<ArtifactRow>(
+      `SELECT id, workspace_id, project_id, snapshot_id, build_job_id, stage, kind, schema_version,
+              input_digest, content_digest, storage_key, source_refs, producer, created_at
+       FROM knowledge_artifacts
+       WHERE id = $1`,
+      [artifactId]
+    );
+    return rows[0] ? artifactManifest(rows[0]) : null;
+  }
+
   async saveKnowledgeGraph(input: SaveKnowledgeGraphInput): Promise<void> {
     validateKnowledgeGraph(input.graph);
     await this.transaction(async (client) => {

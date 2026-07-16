@@ -40,7 +40,11 @@ import { createKnowledgeVisualizationStageExecutor } from "../knowledge/pipeline
 import { PipelineStageWorker, type PipelineStageJob, type PipelineStageJobQueue } from "../knowledge/pipeline/worker";
 import { hashMcpToken } from "../mcp/auth";
 import { PostgresSessionStore } from "../security/session-store";
-import { LastProjectAdminError } from "./store";
+import {
+  GIT_SYNC_FAILURE_BACKOFF_MS,
+  GIT_SYNC_INTERVAL_MS,
+  LastProjectAdminError
+} from "./store";
 import { PostgresAppStore } from "./postgres-store";
 
 const databaseUrl = process.env.TEST_DATABASE_URL
@@ -1280,6 +1284,55 @@ integration("PostgreSQL cited knowledge integration", () => {
     await expect(store.currentRelease(setup!.workspace.id, repository!.id)).resolves.toBeNull();
     await expect(store.getRemediation("00000000-0000-4000-8000-000000000000", remediation.id))
       .resolves.toBeNull();
+  }, 30_000);
+
+  test(databaseUrl
+    ? "claims scheduled Git synchronization once across store instances and preserves retry timing"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const firstStore = new PostgresAppStore(pool);
+    const secondStore = new PostgresAppStore(pool);
+    const setup = await firstStore.createInitialSetup("git-schedule@example.com", "hash");
+    const project = (await firstStore.listProjects(setup!.workspace.id))[0];
+    const repository = await firstStore.createRepository(setup!.workspace.id, {
+      kind: "git", name: "Scheduled Git source", url: "https://github.com/example/scheduled-source.git"
+    }, project.id);
+    const now = new Date("2040-01-01T00:00:00.000Z");
+
+    const [firstClaims, secondClaims] = await Promise.all([
+      firstStore.claimDueGitSynchronizations(now, 10, 60_000),
+      secondStore.claimDueGitSynchronizations(now, 10, 60_000)
+    ]);
+    const claims = [...firstClaims, ...secondClaims];
+    expect(claims).toHaveLength(1);
+    expect(claims[0]?.repository.id).toBe(repository!.id);
+
+    await expect(firstStore.finishGitSynchronization({
+      repositoryId: repository!.id,
+      leaseToken: claims[0]!.leaseToken,
+      status: "failed",
+      failureCode: "GIT_SYNC_TIMEOUT",
+      now
+    })).resolves.toBe(true);
+    await expect(secondStore.claimDueGitSynchronizations(
+      new Date(now.getTime() + GIT_SYNC_FAILURE_BACKOFF_MS - 1), 10, 60_000
+    )).resolves.toEqual([]);
+
+    const [retry] = await secondStore.claimDueGitSynchronizations(
+      new Date(now.getTime() + GIT_SYNC_FAILURE_BACKOFF_MS), 10, 60_000
+    );
+    await expect(secondStore.finishGitSynchronization({
+      repositoryId: repository!.id,
+      leaseToken: retry!.leaseToken,
+      status: "succeeded",
+      now: new Date(now.getTime() + GIT_SYNC_FAILURE_BACKOFF_MS)
+    })).resolves.toBe(true);
+    await expect(firstStore.claimDueGitSynchronizations(
+      new Date(now.getTime() + GIT_SYNC_FAILURE_BACKOFF_MS + GIT_SYNC_INTERVAL_MS - 1), 10, 60_000
+    )).resolves.toEqual([]);
   }, 30_000);
 });
 

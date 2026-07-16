@@ -34,16 +34,23 @@ type PipelineWorkerStore = PipelineArtifactStore & {
 };
 
 export class PipelineStageWorker {
+  private reconcileTimer: ReturnType<typeof setInterval> | null = null;
+
   constructor(
     private readonly store: PipelineWorkerStore,
     private readonly queue: PipelineStageJobQueue,
     private readonly execute: PipelineStageExecutor,
-    private readonly stages: readonly BuildStage[]
+    private readonly stages: readonly BuildStage[],
+    private readonly reconcileIntervalMs = 5_000
   ) {}
 
   async start(): Promise<void> {
     await this.queue.start((job) => this.process(job));
     await this.reconcileQueuedRuns();
+    this.reconcileTimer = setInterval(() => {
+      void this.reconcileQueuedRuns();
+    }, this.reconcileIntervalMs);
+    this.reconcileTimer.unref?.();
   }
 
   private async reconcileQueuedRuns(): Promise<void> {
@@ -57,6 +64,8 @@ export class PipelineStageWorker {
   }
 
   stop(): Promise<void> {
+    if (this.reconcileTimer) clearInterval(this.reconcileTimer);
+    this.reconcileTimer = null;
     return this.queue.stop();
   }
 

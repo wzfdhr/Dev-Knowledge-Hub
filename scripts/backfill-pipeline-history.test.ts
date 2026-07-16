@@ -24,6 +24,7 @@ describe("pipeline history backfill", () => {
     expect(script).toContain("flag: \"wx\"");
     expect(script).toContain("rename(");
     expect(script).toContain("reportName === \".\" || reportName === \"..\"");
+    expect(script).toContain("reportName === \"\"");
     expect(script).toContain("b.repository_id = r.repository_id");
     expect(script).toContain("s.repository_id = r.repository_id");
     expect(script).toContain("r.snapshot_id = b.snapshot_id");

@@ -9,13 +9,13 @@ const BATCH_SIZE = 500;
 async function writePrivateReport(payload) {
   const reportRoot = path.resolve(process.env.DEVKH_DATA_DIR ?? "var", "reports");
   const reportName = process.env.PIPELINE_HISTORY_REPORT ?? "pipeline-history-backfill.json";
-  if (path.isAbsolute(reportName) || path.basename(reportName) !== reportName
+  if (reportName === "" || path.isAbsolute(reportName) || path.basename(reportName) !== reportName
     || reportName === "." || reportName === ".." || reportName.includes("/") || reportName.includes("\\")) {
     throw new Error("PIPELINE_HISTORY_REPORT must be a filename inside DEVKH_DATA_DIR/reports");
   }
   await mkdir(reportRoot, { recursive: true, mode: 0o700 });
   const root = await lstat(reportRoot);
-  if (!root.isDirectory() || root.isSymbolicLink()) throw new Error("PIPELINE_HISTORY_REPORT_ROOT must be a real directory");
+  if (!root.isDirectory() || root.isSymbolicLink()) throw new Error("DEVKH_DATA_DIR/reports must be a real directory");
   await chmod(reportRoot, 0o700);
   const reportPath = path.join(reportRoot, reportName);
   const temporaryPath = path.join(reportRoot, `.${reportName}.${randomUUID()}.tmp`);

@@ -8,7 +8,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { ArtifactStore } from "./artifact-store";
 import {
   createKnowledgeQualityStageExecutor,
-  knowledgeQualityInputDigest
+  knowledgeQualityPipelineInputDigest
 } from "./quality-stage";
 import type { PipelineStageRunRecord } from "../../persistence/store";
 import { MemoryAppStore } from "../../persistence/memory-store";
@@ -60,7 +60,7 @@ describe("knowledge quality pipeline stage", () => {
       snapshotPath: snapshot.storagePath, commitSha: snapshot.commitSha
     });
     const files = await store.listSnapshotFiles(workspaceId, snapshot.id);
-    const inputDigest = knowledgeQualityInputDigest(snapshot, files);
+    const inputDigest = knowledgeQualityPipelineInputDigest(snapshot, files, build.purpose);
     const artifactStore = new ArtifactStore(artifactRoot, store);
     await artifactStore.initialize();
     const execute = createKnowledgeQualityStageExecutor({ store, artifactStore });

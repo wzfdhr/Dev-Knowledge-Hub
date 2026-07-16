@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { LintIssue } from "../../../shared/api-contracts.js";
 import type { ArtifactManifest } from "./contracts.js";
 import { canonicalJson, type ArtifactStore } from "./artifact-store.js";
+import { pipelineInputDigest } from "./input-digest.js";
 import type { PipelineStageExecutor } from "./worker.js";
 import type { BuildRecord } from "../build-service.js";
 import { extractSnapshotKnowledgeIR } from "../intelligence.js";
@@ -49,6 +50,25 @@ export function knowledgeQualityInputDigest(
     files: [...files].map((file) => ({
       path: file.path, byteSize: file.byteSize, contentHash: file.contentHash
     })).sort((left, right) => left.path.localeCompare(right.path))
+  });
+}
+
+export function knowledgeQualityPipelineInputDigest(
+  snapshot: Pick<SourceSnapshotRecord, "id" | "commitSha">,
+  files: readonly Pick<SourceFileRecord, "path" | "byteSize" | "contentHash">[],
+  purpose: BuildRecord["purpose"],
+  knowledgePageCount = 0
+): string {
+  return pipelineInputDigest({
+    stage: "lint",
+    snapshotId: snapshot.id,
+    upstreamManifestIds: [],
+    parserConfigVersion: `quality-v1:${knowledgeQualityInputDigest(snapshot, files, knowledgePageCount)}`,
+    purpose: {
+      kind: purpose.kind,
+      feedbackIds: purpose.feedbackIds,
+      remediationIds: purpose.remediationContext?.map((context) => context.remediationId) ?? []
+    }
   });
 }
 
@@ -99,7 +119,7 @@ export function createKnowledgeQualityStageExecutor(input: {
 
     const files = await input.store.listSnapshotFiles(run.workspaceId, run.snapshotId);
     const knowledgePageCount = await input.store.countKnowledgePagesForBuild(run.workspaceId, run.buildId);
-    const inputDigest = knowledgeQualityInputDigest(snapshot, files, knowledgePageCount);
+    const inputDigest = knowledgeQualityPipelineInputDigest(snapshot, files, build.purpose, knowledgePageCount);
     if (run.inputDigest !== inputDigest) {
       throw new Error("Knowledge quality stage input digest does not match the persisted snapshot");
     }

@@ -16,7 +16,7 @@ import { PostgresSessionStore } from "./security/session-store.js";
 import { ArtifactStore } from "./knowledge/pipeline/artifact-store.js";
 import type { PipelineArtifactStore } from "./persistence/store.js";
 import { PipelineStageWorker, type PipelineStageSchedule } from "./knowledge/pipeline/worker.js";
-import { createKnowledgeQualityStageExecutor, knowledgeQualityInputDigest } from "./knowledge/pipeline/quality-stage.js";
+import { createKnowledgeQualityStageExecutor, knowledgeQualityPipelineInputDigest } from "./knowledge/pipeline/quality-stage.js";
 import { PgBossPipelineStageJobQueue } from "./knowledge/job-queue.js";
 
 const IMPORT_REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
@@ -123,7 +123,7 @@ export async function bootstrapServer(
       projectId: repository.projectId,
       snapshotId: snapshot.id,
       buildId: build.id,
-      inputDigest: knowledgeQualityInputDigest(snapshot, files, knowledgePageCount)
+      inputDigest: knowledgeQualityPipelineInputDigest(snapshot, files, build.purpose, knowledgePageCount)
     });
   };
   const buildService = dependencies.createBuildService(store, queue, enhancerForWorkspace, schedulePostBuild);

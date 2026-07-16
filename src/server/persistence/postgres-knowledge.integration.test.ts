@@ -418,12 +418,19 @@ integration("PostgreSQL cited knowledge integration", () => {
       };
 
       const firstBuild = await runBuild();
-      expect((await store.listPipelineStageRuns(setup!.workspace.id, project.id, firstBuild.id))
-        .map((run) => [run.stage, run.status]))
+      const firstRuns = await store.listPipelineStageRuns(setup!.workspace.id, project.id, firstBuild.id);
+      expect(firstRuns.map((run) => ({ stage: run.stage, status: run.status, errorDetail: run.errorDetail })))
         .toEqual([
-          ["convert", "succeeded"], ["extract", "succeeded"], ["tables", "succeeded"], ["graph", "succeeded"],
-          ["synthesize", "succeeded"], ["index", "succeeded"], ["lint", "succeeded"], ["viz", "succeeded"],
-          ["validate", "succeeded"], ["package", "succeeded"]
+          { stage: "convert", status: "succeeded", errorDetail: null },
+          { stage: "extract", status: "succeeded", errorDetail: null },
+          { stage: "tables", status: "succeeded", errorDetail: null },
+          { stage: "graph", status: "succeeded", errorDetail: null },
+          { stage: "synthesize", status: "succeeded", errorDetail: null },
+          { stage: "index", status: "succeeded", errorDetail: null },
+          { stage: "lint", status: "succeeded", errorDetail: null },
+          { stage: "viz", status: "succeeded", errorDetail: null },
+          { stage: "validate", status: "succeeded", errorDetail: null },
+          { stage: "package", status: "succeeded", errorDetail: null }
         ]);
 
       await store.transitionBuild(firstBuild.id, "queued", "ready");

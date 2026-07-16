@@ -16,7 +16,8 @@ function dependencies(): BootstrapDependencies {
   const qualityWorker = {
     start: vi.fn(async () => {}),
     stop: vi.fn(async () => {}),
-    schedule: vi.fn(async () => {})
+    schedule: vi.fn(async () => {}),
+    dispatch: vi.fn(async () => {})
   };
   const buildService = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
   const server = { durable: true, addHook: vi.fn() };
@@ -126,15 +127,7 @@ describe("production bootstrap", () => {
       DEVKH_KNOWLEDGE_KERNEL_MODE: "shadow"
     }, deps);
 
-    const persistedStore = vi.mocked(deps.createStore).mock.results[0].value as {
-      getRepository: ReturnType<typeof vi.fn>;
-      findSnapshotById: ReturnType<typeof vi.fn>;
-      listSnapshotFiles: ReturnType<typeof vi.fn>;
-    };
-    persistedStore.getRepository = vi.fn(async () => ({ id: "repo-1", projectId: "project-1" }));
-    persistedStore.findSnapshotById = vi.fn(async () => ({ id: "snapshot-1", commitSha: "a".repeat(40) }));
-    persistedStore.listSnapshotFiles = vi.fn(async () => []);
-    const preparePostBuild = vi.mocked(deps.createBuildService).mock.calls[0]![3]!;
+    const initialPipelineStage = vi.mocked(deps.createBuildService).mock.calls[0]![3]!;
     const schedulePostBuild = vi.mocked(deps.createBuildService).mock.calls[0]![4]!;
     const build: BuildRecord = {
       id: "build-1", workspaceId: "workspace-1", repositoryId: "repo-1", snapshotId: "snapshot-1",
@@ -142,18 +135,20 @@ describe("production bootstrap", () => {
       purpose: { kind: "standard", feedbackIds: [], feedbackContext: [], remediationContext: [] }
     };
 
-    const initialStage = await preparePostBuild(build);
-    await schedulePostBuild(build, initialStage);
+    const initialStage = initialPipelineStage!(build, []);
+    await schedulePostBuild(build, { stageRunId: "stage-1", projectId: "project-1" });
 
     const qualityWorker = vi.mocked(deps.createQualityPipelineWorker).mock.results[0].value;
-    expect(qualityWorker.schedule).toHaveBeenCalledWith(expect.objectContaining({
-      workspaceId: "workspace-1", projectId: "project-1", snapshotId: "snapshot-1", buildId: "build-1",
+    expect(initialStage).toEqual({
       inputDigest: normalizedSourcesPipelineInputDigest(
         { id: "snapshot-1", commitSha: "a".repeat(40) },
         [],
         build.purpose
       )
-    }));
+    });
+    expect(qualityWorker.dispatch).toHaveBeenCalledWith({
+      stageRunId: "stage-1", buildId: "build-1", projectId: "project-1"
+    });
   });
 
   test("stops the build queue before closing the database", async () => {

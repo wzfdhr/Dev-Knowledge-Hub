@@ -103,10 +103,14 @@ class FakeBuildPersistence implements BuildPersistence {
       warnings?: BuildRecord["warnings"];
       requireNotCancelled?: boolean;
     },
-    stage: { projectId: string; inputDigest: string }
+    stage: { inputDigest: string }
   ) => {
     void stage;
-    return this.transitionBuild(buildId, expectedStatus, status, details);
+    const build = await this.transitionBuild(buildId, expectedStatus, status, details);
+    return build ? {
+      build,
+      initialStage: { stageRunId: "stage-1", projectId: "project-1" }
+    } : null;
   });
 
   async requestBuildCancellation(workspaceId: string, buildId: string) {
@@ -138,6 +142,11 @@ class FakeBuildPersistence implements BuildPersistence {
     if (!build) return new Map<string, string>();
     const index = await analyzeSnapshot(build.snapshotPath, build.commitSha);
     return new Map(index.files.map((file) => [file.path, file.blobHash]));
+  }
+
+  async snapshotFileMetadata(workspaceId: string, snapshotId: string) {
+    const hashes = await this.sourceFileHashes(workspaceId, snapshotId);
+    return [...hashes].map(([path, contentHash]) => ({ path, contentHash, byteSize: 0 }));
   }
 }
 
@@ -274,10 +283,10 @@ describe("BuildService", () => {
 
   test("persists the shadow convert stage with the ready transition before queue delivery", async () => {
     const persistence = new FakeBuildPersistence();
-    const preparePostBuild = vi.fn(async () => ({ projectId: "project-1", inputDigest: "a".repeat(64) }));
+    const initialPipelineStage = vi.fn(() => ({ inputDigest: "a".repeat(64) }));
     const schedulePostBuild = vi.fn(async () => {});
     const service = new BuildService(persistence, new FakeQueue(), {
-      preparePostBuild,
+      initialPipelineStage,
       schedulePostBuild
     } as never);
     const { build } = await service.startBuild(input());
@@ -289,11 +298,15 @@ describe("BuildService", () => {
       "validating",
       "ready",
       expect.objectContaining({ requireNotCancelled: true }),
-      { projectId: "project-1", inputDigest: "a".repeat(64) }
+      { inputDigest: "a".repeat(64) }
+    );
+    expect(initialPipelineStage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: build.id }),
+      expect.arrayContaining([expect.objectContaining({ path: expect.any(String), contentHash: expect.any(String) })])
     );
     expect(schedulePostBuild).toHaveBeenCalledWith(
       expect.objectContaining({ id: build.id, status: "ready" }),
-      { projectId: "project-1", inputDigest: "a".repeat(64) }
+      { stageRunId: "stage-1", projectId: "project-1" }
     );
   });
 

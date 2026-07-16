@@ -1468,6 +1468,12 @@ export class MemoryAppStore implements AppStore {
     ).map((file) => [file.path, file.contentHash]));
   }
 
+  async snapshotFileMetadata(workspaceId: string, snapshotId: string) {
+    return this.sourceFiles
+      .filter((file) => file.workspaceId === workspaceId && file.snapshotId === snapshotId)
+      .map(({ path, byteSize, contentHash }) => ({ path, byteSize, contentHash }));
+  }
+
   async repositoryCredential(workspaceId: string, repositoryId: string): Promise<string | null> {
     return this.encryptedCredentials.find((credential) =>
       credential.workspaceId === workspaceId && credential.repositoryId === repositoryId
@@ -1617,19 +1623,21 @@ export class MemoryAppStore implements AppStore {
       requireNotCancelled?: boolean;
     },
     stage: InitialPipelineStage
-  ): Promise<BuildRecord | null> {
+  ): Promise<{ build: BuildRecord; initialStage: { stageRunId: string; projectId: string } } | null> {
+    const repository = this.repositories.find((candidate) => candidate.id === this.builds.find((build) => build.id === buildId)?.repositoryId);
+    if (!repository) throw new Error("Initial stage run does not match the project build and snapshot");
     const build = await this.transitionBuild(buildId, expectedStatus, status, details);
     if (!build) return null;
-    await this.createStageRun({
+    const run = await this.createStageRun({
       workspaceId: build.workspaceId,
-      projectId: stage.projectId,
+      projectId: repository.projectId,
       snapshotId: build.snapshotId,
       buildId: build.id,
       stage: "convert",
       attempt: 1,
       inputDigest: stage.inputDigest
     });
-    return build;
+    return { build, initialStage: { stageRunId: run.id, projectId: run.projectId } };
   }
 
   async requestBuildCancellation(workspaceId: string, buildId: string): Promise<BuildRecord | null> {

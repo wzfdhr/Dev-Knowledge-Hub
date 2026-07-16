@@ -3255,6 +3255,19 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return new Map(rows.map((row) => [row.path, row.content_hash]));
   }
 
+  async snapshotFileMetadata(workspaceId: string, snapshotId: string) {
+    const { rows } = await this.pool.query<{ path: string; byte_size: string; content_hash: string }>(
+      `SELECT path, byte_size::text AS byte_size, content_hash FROM source_files
+       WHERE workspace_id = $1 AND snapshot_id = $2 ORDER BY path`,
+      [workspaceId, snapshotId]
+    );
+    return rows.map((row) => ({
+      path: row.path,
+      byteSize: Number(row.byte_size),
+      contentHash: row.content_hash
+    }));
+  }
+
   async repositoryCredential(workspaceId: string, repositoryId: string): Promise<string | null> {
     const { rows } = await this.pool.query<{ ciphertext: string }>(
       `SELECT ciphertext FROM encrypted_credentials
@@ -3484,13 +3497,13 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         buildId,
         expectedStatus,
         status,
-        details?.errorMessage ?? null,
-        details?.warnings ? JSON.stringify(details.warnings) : null,
-        JSON.stringify({
-          ...(details?.errorMessage ? { errorMessage: details.errorMessage } : {}),
-          ...(details?.warnings ? { warnings: details.warnings } : {})
-        }),
-        details?.requireNotCancelled ?? false
+          details?.errorMessage ?? null,
+          details?.warnings ? JSON.stringify(details.warnings) : null,
+          JSON.stringify({
+            ...(details?.errorMessage ? { errorMessage: details.errorMessage } : {}),
+            ...(details?.warnings ? { warnings: details.warnings } : {})
+          }),
+          details?.requireNotCancelled ?? false
       ]
     );
     return rows[0] ? buildRecord(rows[0]) : null;
@@ -3506,7 +3519,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       requireNotCancelled?: boolean;
     },
     stage: InitialPipelineStage
-  ): Promise<BuildRecord | null> {
+  ): Promise<{ build: BuildRecord; initialStage: { stageRunId: string; projectId: string } } | null> {
     const queued = stageRunSchema.parse({
       id: "pending",
       buildId,
@@ -3529,7 +3542,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         `UPDATE build_jobs
          SET status = $3, error_message = COALESCE($4, error_message),
              warnings = COALESCE($5::jsonb, warnings), updated_at = now()
-         WHERE id = $1 AND status = $2 AND ($7::boolean = false OR cancel_requested = false)
+         WHERE id = $1 AND status = $2 AND ($6::boolean = false OR cancel_requested = false)
          RETURNING id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha,
                    status, warnings, cancel_requested, error_message,
                    purpose, feedback_ids, feedback_context, remediation_context, allow_llm`,
@@ -3553,14 +3566,14 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         `WITH run AS (
            INSERT INTO build_stage_runs
              (workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status, input_digest)
-           SELECT $1, $2, build.snapshot_id, build.id, $3, $4, $5, $6
+           SELECT $1, repository.project_id, build.snapshot_id, build.id, $2, $3, $4, $5
            FROM build_jobs build
            JOIN repositories repository
              ON repository.id = build.repository_id AND repository.workspace_id = build.workspace_id
            JOIN source_snapshots snapshot
              ON snapshot.id = build.snapshot_id AND snapshot.workspace_id = build.workspace_id
-           WHERE build.workspace_id = $1 AND build.id = $7
-             AND repository.project_id = $2 AND snapshot.repository_id = build.repository_id
+           WHERE build.workspace_id = $1 AND build.id = $6
+             AND snapshot.repository_id = build.repository_id
            ON CONFLICT (build_job_id, stage, attempt) DO UPDATE
              SET updated_at = build_stage_runs.updated_at
            RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
@@ -3574,7 +3587,6 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          SELECT * FROM run`,
         [
           build.workspaceId,
-          stage.projectId,
           queued.stage,
           queued.attempt,
           queued.status,
@@ -3583,7 +3595,11 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         ]
       );
       if (!stageRows[0]) throw new Error("Initial stage run does not match the project build and snapshot");
-      return build;
+      const persistedStage = stageRunRecord(stageRows[0]);
+      return {
+        build,
+        initialStage: { stageRunId: persistedStage.id, projectId: persistedStage.projectId }
+      };
     });
   }
 

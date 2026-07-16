@@ -58,8 +58,23 @@ export interface BuildInput {
 }
 
 export interface InitialPipelineStage {
-  projectId: string;
   inputDigest: string;
+}
+
+export interface PersistedInitialPipelineStage {
+  stageRunId: string;
+  projectId: string;
+}
+
+export interface SnapshotFileMetadata {
+  path: string;
+  byteSize: number;
+  contentHash: string;
+}
+
+export interface ReadyBuildWithInitialStage {
+  build: BuildRecord;
+  initialStage: PersistedInitialPipelineStage;
 }
 
 export interface BuildPagination {
@@ -114,7 +129,7 @@ export interface BuildPersistence {
       requireNotCancelled?: boolean;
     },
     stage: InitialPipelineStage
-  ): Promise<BuildRecord | null>;
+  ): Promise<ReadyBuildWithInitialStage | null>;
   requestBuildCancellation(workspaceId: string, buildId: string): Promise<BuildRecord | null>;
   saveKnowledge(value: PersistedKnowledge): Promise<void>;
   listUnfinishedBuilds(): Promise<BuildRecord[]>;
@@ -129,6 +144,7 @@ export interface BuildPersistence {
     pagination?: BuildPagination
   ): Promise<BuildEvent[]>;
   sourceFileHashes(workspaceId: string, snapshotId: string): Promise<ReadonlyMap<string, string>>;
+  snapshotFileMetadata(workspaceId: string, snapshotId: string): Promise<SnapshotFileMetadata[]>;
 }
 
 export interface BuildJobQueue {
@@ -162,8 +178,14 @@ export class BuildService {
   private readonly enhancerForWorkspace?: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>;
   private readonly reconcileIntervalMs: number;
   private readonly onReconciliationError: (error: unknown) => void;
-  private readonly preparePostBuild?: (build: BuildRecord) => Promise<InitialPipelineStage | undefined>;
-  private readonly schedulePostBuild?: (build: BuildRecord, stage?: InitialPipelineStage) => Promise<void>;
+  private readonly initialPipelineStage?: (
+    build: BuildRecord,
+    files: readonly SnapshotFileMetadata[]
+  ) => InitialPipelineStage | undefined;
+  private readonly schedulePostBuild?: (
+    build: BuildRecord,
+    stage?: PersistedInitialPipelineStage
+  ) => Promise<void>;
   private readonly onPostBuildSchedulingError: (error: unknown) => void;
   private reconcileTimer: ReturnType<typeof setInterval> | null = null;
   private reconciliationPromise: Promise<void> | null = null;
@@ -180,8 +202,11 @@ export class BuildService {
       enhancerForWorkspace?: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>;
       reconcileIntervalMs?: number;
       onReconciliationError?: (error: unknown) => void;
-      preparePostBuild?: (build: BuildRecord) => Promise<InitialPipelineStage | undefined>;
-      schedulePostBuild?: (build: BuildRecord, stage?: InitialPipelineStage) => Promise<void>;
+      initialPipelineStage?: (
+        build: BuildRecord,
+        files: readonly SnapshotFileMetadata[]
+      ) => InitialPipelineStage | undefined;
+      schedulePostBuild?: (build: BuildRecord, stage?: PersistedInitialPipelineStage) => Promise<void>;
       onPostBuildSchedulingError?: (error: unknown) => void;
     } = {}
   ) {
@@ -193,7 +218,7 @@ export class BuildService {
     this.reconcileIntervalMs = dependencies.reconcileIntervalMs ?? 5_000;
     this.onReconciliationError = dependencies.onReconciliationError
       ?? ((error) => console.error("Build reconciliation failed", error));
-    this.preparePostBuild = dependencies.preparePostBuild;
+    this.initialPipelineStage = dependencies.initialPipelineStage;
     this.schedulePostBuild = dependencies.schedulePostBuild;
     this.onPostBuildSchedulingError = dependencies.onPostBuildSchedulingError
       ?? ((error) => console.error("Post-build scheduling failed", error));
@@ -330,10 +355,11 @@ export class BuildService {
       await this.checkCancellation(original);
       await this.transition(buildId, status, "parsing");
       status = "parsing";
-      const hashes = await this.persistence.sourceFileHashes(
+      const sourceFiles = await this.persistence.snapshotFileMetadata(
         original.workspaceId,
         original.snapshotId
       );
+      const hashes = new Map(sourceFiles.map((file) => [file.path, file.contentHash]));
       const index = await this.analyze(original.snapshotPath, original.commitSha, hashes);
       await this.checkCancellation(original);
       await this.transition(buildId, status, "synthesizing");
@@ -351,14 +377,17 @@ export class BuildService {
       await this.checkCancellation(original);
       await this.persistence.saveKnowledge({ build: original, index, output });
       await this.checkCancellation(original);
-      const initialPipelineStage = this.preparePostBuild
-        ? await this.preparePostBuild(original)
+      const initialPipelineStage = this.initialPipelineStage
+        ? this.initialPipelineStage(original, sourceFiles)
         : undefined;
-      const ready = initialPipelineStage
+      const readyWithStage = initialPipelineStage
         ? await this.persistence.transitionBuildAndCreateInitialStage(buildId, status, "ready", {
           warnings: output.warnings,
           requireNotCancelled: true
         }, initialPipelineStage)
+        : null;
+      const ready = readyWithStage
+        ? readyWithStage.build
         : await this.persistence.transitionBuild(buildId, status, "ready", {
           warnings: output.warnings,
           requireNotCancelled: true
@@ -371,7 +400,7 @@ export class BuildService {
       await this.emitLatest(ready);
       if (this.schedulePostBuild) {
         try {
-          if (initialPipelineStage) await this.schedulePostBuild(ready, initialPipelineStage);
+          if (readyWithStage) await this.schedulePostBuild(ready, readyWithStage.initialStage);
           else await this.schedulePostBuild(ready);
         } catch (error) {
           this.onPostBuildSchedulingError(error);

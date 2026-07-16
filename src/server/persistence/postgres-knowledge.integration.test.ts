@@ -442,13 +442,25 @@ integration("PostgreSQL cited knowledge integration", () => {
       await expect(store.transitionBuild(build.id, from, to)).resolves.toMatchObject({ status: to });
     }
 
+    await pool.query(`
+      CREATE FUNCTION reject_initial_stage() RETURNS trigger AS $$
+      BEGIN
+        RAISE EXCEPTION 'initial stage unavailable';
+      END
+      $$ LANGUAGE plpgsql;
+      CREATE TRIGGER reject_initial_stage_insert
+      BEFORE INSERT ON build_stage_runs
+      FOR EACH ROW EXECUTE FUNCTION reject_initial_stage();
+    `);
     await expect(store.transitionBuildAndCreateInitialStage(
       build.id,
       "validating",
       "ready",
       { requireNotCancelled: true },
-      { projectId: randomUUID(), inputDigest: "b".repeat(64) }
-    )).rejects.toThrow("Initial stage run does not match");
+      { inputDigest: "b".repeat(64) }
+    )).rejects.toThrow("initial stage unavailable");
+    await pool.query("DROP TRIGGER reject_initial_stage_insert ON build_stage_runs");
+    await pool.query("DROP FUNCTION reject_initial_stage()");
     await expect(store.getBuild(setup!.workspace.id, build.id)).resolves.toMatchObject({ status: "validating" });
     await expect(store.listPipelineStageRuns(
       setup!.workspace.id,
@@ -461,8 +473,8 @@ integration("PostgreSQL cited knowledge integration", () => {
       "validating",
       "ready",
       { requireNotCancelled: true },
-      { projectId: repository!.projectId, inputDigest: "b".repeat(64) }
-    )).resolves.toMatchObject({ status: "ready" });
+      { inputDigest: "b".repeat(64) }
+    )).resolves.toMatchObject({ build: { status: "ready" } });
     await expect(store.listPipelineStageRuns(
       setup!.workspace.id,
       repository!.projectId,

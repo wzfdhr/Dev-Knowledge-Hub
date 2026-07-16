@@ -11,7 +11,9 @@ import {
   BuildService,
   type BuildJobQueue,
   type BuildRecord,
-  type InitialPipelineStage
+  type InitialPipelineStage,
+  type PersistedInitialPipelineStage,
+  type SnapshotFileMetadata
 } from "./knowledge/build-service.js";
 import { PgBossBuildJobQueue } from "./knowledge/job-queue.js";
 import { anthropicEnhancer, openAiCompatibleEnhancer, type KnowledgeEnhancer } from "./knowledge/enhancer.js";
@@ -20,7 +22,11 @@ import { syncRepository } from "./git/snapshot.js";
 import { PostgresSessionStore } from "./security/session-store.js";
 import { ArtifactStore } from "./knowledge/pipeline/artifact-store.js";
 import type { PipelineArtifactStore } from "./persistence/store.js";
-import { PipelineStageWorker, type PipelineStageSchedule } from "./knowledge/pipeline/worker.js";
+import {
+  PipelineStageWorker,
+  type PipelineStageJob,
+  type PipelineStageSchedule
+} from "./knowledge/pipeline/worker.js";
 import { createNormalizedSourcesStageExecutor, normalizedSourcesPipelineInputDigest } from "./knowledge/pipeline/convert-stage.js";
 import { createKnowledgeIrStageExecutor } from "./knowledge/pipeline/extract-stage.js";
 import { createTableSchemasStageExecutor } from "./knowledge/pipeline/tables-stage.js";
@@ -45,6 +51,7 @@ interface QualityPipelineWorker {
   start(): Promise<void>;
   stop(): Promise<void>;
   schedule(job: PipelineStageSchedule): Promise<void>;
+  dispatch(job: PipelineStageJob): Promise<void>;
 }
 
 export interface BootstrapDependencies {
@@ -56,8 +63,11 @@ export interface BootstrapDependencies {
     store: AppStore,
     queue: BuildJobQueue,
     enhancerForWorkspace: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>,
-    preparePostBuild: (build: BuildRecord) => Promise<InitialPipelineStage | undefined>,
-    schedulePostBuild: (build: BuildRecord, stage?: InitialPipelineStage) => Promise<void>
+    initialPipelineStage: (
+      build: BuildRecord,
+      files: readonly SnapshotFileMetadata[]
+    ) => InitialPipelineStage | undefined,
+    schedulePostBuild: (build: BuildRecord, stage?: PersistedInitialPipelineStage) => Promise<void>
   ) => BuildService;
   createArtifactStore: (directory: string, persistence: PipelineArtifactStore) => ArtifactStoreInitializer;
   createQualityPipelineWorker: (
@@ -77,8 +87,8 @@ const defaultDependencies: BootstrapDependencies = {
   runMigrations,
   createStore: (pool) => new PostgresAppStore(pool),
   createBuildQueue: (connectionString) => new PgBossBuildJobQueue(connectionString),
-  createBuildService: (store, queue, enhancerForWorkspace, preparePostBuild, schedulePostBuild) =>
-    new BuildService(store, queue, { enhancerForWorkspace, preparePostBuild, schedulePostBuild }),
+  createBuildService: (store, queue, enhancerForWorkspace, initialPipelineStage, schedulePostBuild) =>
+    new BuildService(store, queue, { enhancerForWorkspace, initialPipelineStage, schedulePostBuild }),
   createArtifactStore: (directory, persistence) => new ArtifactStore(directory, persistence),
   createQualityPipelineWorker: (connectionString, store, artifactStore, enhancerForWorkspace) => {
     const pipelineStore = store as AppStore & PipelineArtifactStore;
@@ -145,32 +155,27 @@ export async function bootstrapServer(
   const qualityWorker = env.knowledgeKernelMode === "shadow"
     ? dependencies.createQualityPipelineWorker(env.databaseUrl, store, artifactStore, enhancerForWorkspace)
     : undefined;
-  const preparePostBuild = async (build: BuildRecord): Promise<InitialPipelineStage | undefined> => {
-    if (!qualityWorker) return;
-    const repository = await store.getRepository(build.workspaceId, build.repositoryId);
-    const snapshot = await store.findSnapshotById(build.workspaceId, build.snapshotId);
-    if (!repository || !snapshot) throw new Error("Shadow pipeline source is unavailable");
-    const files = await store.listSnapshotFiles(build.workspaceId, build.snapshotId);
-    return {
-      projectId: repository.projectId,
-      inputDigest: normalizedSourcesPipelineInputDigest(snapshot, files, build.purpose)
-    };
-  };
-  const schedulePostBuild = async (build: BuildRecord, stage?: InitialPipelineStage) => {
+  const initialPipelineStage = qualityWorker
+    ? (build: BuildRecord, files: readonly SnapshotFileMetadata[]): InitialPipelineStage => ({
+      inputDigest: normalizedSourcesPipelineInputDigest({
+        id: build.snapshotId,
+        commitSha: build.commitSha
+      }, files, build.purpose)
+    })
+    : () => undefined;
+  const schedulePostBuild = async (build: BuildRecord, stage?: PersistedInitialPipelineStage) => {
     if (!qualityWorker || !stage) return;
-    await qualityWorker.schedule({
-      workspaceId: build.workspaceId,
-      projectId: stage.projectId,
-      snapshotId: build.snapshotId,
+    await qualityWorker.dispatch({
+      stageRunId: stage.stageRunId,
       buildId: build.id,
-      inputDigest: stage.inputDigest
+      projectId: stage.projectId
     });
   };
   const buildService = dependencies.createBuildService(
     store,
     queue,
     enhancerForWorkspace,
-    preparePostBuild,
+    initialPipelineStage,
     schedulePostBuild
   );
   await qualityWorker?.start();

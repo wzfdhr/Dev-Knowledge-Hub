@@ -129,6 +129,10 @@ export class PipelineStageWorker {
     await this.enqueue({ stageRunId: run.id, buildId: run.buildId, projectId: run.projectId });
   }
 
+  async dispatch(job: PipelineStageJob): Promise<void> {
+    await this.enqueue(job);
+  }
+
   async process(job: PipelineStageJob): Promise<void> {
     const run = await this.store.claimStageRun(job.stageRunId, job.buildId, job.projectId);
     if (!run) return;

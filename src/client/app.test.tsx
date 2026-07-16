@@ -14,6 +14,7 @@ import { SystemSettingsPage as SettingsPage } from "./pages/system-settings-page
 import { ProjectCodexPage } from "./pages/project-codex-page";
 import { ProjectImportsPage } from "./pages/project-imports-page";
 import { ProjectGraphPage } from "./pages/project-graph-page";
+import { governanceErrorMessage } from "./components/quality-governance-panel";
 import { derivePrimaryAction, ProjectVersionsPage as OverviewPage } from "./pages/project-versions-page";
 import { ApiError, type ApiClient } from "./api/client";
 import { App } from "./app";
@@ -56,6 +57,14 @@ function renderAppAt(api: ApiClient, path: string) {
 }
 
 describe("shared console copy", () => {
+  test("explains when a remediation candidate is not ready for resolution", () => {
+    expect(governanceErrorMessage(new ApiError(
+      409,
+      "REMEDIATION_REBUILD_NOT_READY",
+      "Remediation rebuild must be ready before resolution"
+    ))).toBe("范围重建候选仍在处理中；当前版本未改变。请在候选构建就绪并审核后再标记已解决。");
+  });
+
   test("uses direct flex containers for collaboration members instead of a table widget", async () => {
     const source = await readFile(resolve(process.cwd(), "src/client/pages/project-collaboration-page.tsx"), "utf8");
     const workspaceSource = await readFile(resolve(process.cwd(), "src/client/pages/members-page.tsx"), "utf8");

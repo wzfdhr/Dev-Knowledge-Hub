@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, FileCode2, Hammer, ShieldCheck, XCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { errorMessage, type ApiClient, type RemediationListParams } from "../api/client";
+import { ApiError, errorMessage, type ApiClient, type RemediationListParams } from "../api/client";
 import type { ProjectKnowledgeQuality, RemediationState } from "../api/types";
 import { Empty, ErrorState, Loading } from "./ui";
 
@@ -13,6 +13,13 @@ const stateLabels: Record<RemediationState, string> = {
   resolved: "已解决",
   dismissed: "已忽略"
 };
+
+export function governanceErrorMessage(error: unknown): string {
+  if (error instanceof ApiError && error.code === "REMEDIATION_REBUILD_NOT_READY") {
+    return "范围重建候选仍在处理中；当前版本未改变。请在候选构建就绪并审核后再标记已解决。";
+  }
+  return errorMessage(error);
+}
 
 function filterParams(state: RemediationState | undefined, severity: "error" | "warning" | "info" | undefined, rule: string): RemediationListParams {
   return {
@@ -126,7 +133,7 @@ export function QualityGovernancePanel({
           </dl>{canManage && selected.state === "open" && <div className="quality-actions" role="group" aria-label="质量问题操作">
             <button className="button primary" disabled={transition.isPending} onClick={() => transition.mutate({ remediationId: selected.id, state: "accepted" })}><Check aria-hidden="true" />接受处理</button>
             {!dismissing ? <button className="button" disabled={transition.isPending} onClick={() => setDismissing(true)}><XCircle aria-hidden="true" />忽略</button> : <form className="quality-dismiss-form" onSubmit={(event) => { event.preventDefault(); transition.mutate({ remediationId: selected.id, state: "dismissed", reason: dismissalReason.trim() }); }}><label>忽略理由<input aria-label="忽略理由" value={dismissalReason} onChange={(event) => setDismissalReason(event.target.value)} maxLength={500} /></label><button className="button danger" type="submit" disabled={!dismissalReason.trim() || transition.isPending}>确认忽略</button><button className="button" type="button" disabled={transition.isPending} onClick={() => { setDismissing(false); setDismissalReason(""); }}>取消</button></form>}
-          </div>}{canManage && selected.state === "accepted" && <div className="quality-actions" role="group" aria-label="质量问题操作"><button className="button primary" disabled={rebuild.isPending} onClick={() => rebuild.mutate(selected.id)}><Hammer aria-hidden="true" />请求范围重建</button></div>}{canManage && selected.state === "rebuilding" && <div className="quality-actions" role="group" aria-label="质量问题操作"><button className="button primary" disabled={transition.isPending} onClick={() => transition.mutate({ remediationId: selected.id, state: "resolved" })}><Check aria-hidden="true" />标记已解决</button><small className="quality-action-note">确认候选构建已就绪并完成审核后再标记；这不会自动发布。</small></div>}{transition.error || rebuild.error ? <ErrorState message={errorMessage(transition.error ?? rebuild.error)} /> : null}{rebuild.isSuccess && <p className="success-message">已创建范围重建候选，当前已发布版本未改变。</p>}
+          </div>}{canManage && selected.state === "accepted" && <div className="quality-actions" role="group" aria-label="质量问题操作"><button className="button primary" disabled={rebuild.isPending} onClick={() => rebuild.mutate(selected.id)}><Hammer aria-hidden="true" />请求范围重建</button></div>}{canManage && selected.state === "rebuilding" && <div className="quality-actions" role="group" aria-label="质量问题操作"><button className="button primary" disabled={transition.isPending} onClick={() => transition.mutate({ remediationId: selected.id, state: "resolved" })}><Check aria-hidden="true" />标记已解决</button><small className="quality-action-note">确认候选构建已就绪并完成审核后再标记；这不会自动发布。</small></div>}{transition.error || rebuild.error ? <ErrorState message={governanceErrorMessage(transition.error ?? rebuild.error)} /> : null}{rebuild.isSuccess && <p className="success-message">已创建范围重建候选，当前已发布版本未改变。</p>}
         </> : <div className="document-empty"><ShieldCheck aria-hidden="true" /><h3>选择一个质量问题</h3><p>查看来源引用、关联构建和可信质量依据。</p></div>}
       </aside>
     </div>}

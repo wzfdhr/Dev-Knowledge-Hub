@@ -7,10 +7,11 @@ import { Pool } from "pg";
 const BATCH_SIZE = 500;
 
 async function writePrivateReport(payload) {
-  const reportRoot = path.resolve(process.env.PIPELINE_HISTORY_REPORT_ROOT ?? "var/reports");
+  const reportRoot = path.resolve(process.env.DEVKH_DATA_DIR ?? "var", "reports");
   const reportName = process.env.PIPELINE_HISTORY_REPORT ?? "pipeline-history-backfill.json";
-  if (path.isAbsolute(reportName) || path.basename(reportName) !== reportName) {
-    throw new Error("PIPELINE_HISTORY_REPORT must be a filename inside PIPELINE_HISTORY_REPORT_ROOT");
+  if (path.isAbsolute(reportName) || path.basename(reportName) !== reportName
+    || reportName === "." || reportName === ".." || reportName.includes("/") || reportName.includes("\\")) {
+    throw new Error("PIPELINE_HISTORY_REPORT must be a filename inside DEVKH_DATA_DIR/reports");
   }
   await mkdir(reportRoot, { recursive: true, mode: 0o700 });
   const root = await lstat(reportRoot);
@@ -43,6 +44,7 @@ async function main() {
                     AND s.workspace_id = r.workspace_id
                     AND b.repository_id = r.repository_id
                     AND s.repository_id = r.repository_id
+                    AND r.snapshot_id = b.snapshot_id
                 ) AS snapshot_exists
          FROM releases r JOIN build_jobs b ON b.id = r.build_job_id AND b.workspace_id = r.workspace_id
          WHERE r.id::text > $1 AND r.kernel_mode = 'legacy'

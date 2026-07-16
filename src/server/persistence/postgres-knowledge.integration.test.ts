@@ -551,7 +551,7 @@ integration("PostgreSQL cited knowledge integration", () => {
     await pool.query("TRUNCATE workspaces CASCADE");
     const reportDirectory = await mkdtemp(path.join(os.tmpdir(), "devkh-pipeline-backfill-"));
     const reportName = "report.json";
-    const reportPath = path.join(reportDirectory, reportName);
+    const reportPath = path.join(reportDirectory, "reports", reportName);
     try {
       const store = new PostgresAppStore(pool);
       const setup = await store.createInitialSetup("backfill@example.com", "hash");
@@ -611,7 +611,7 @@ integration("PostgreSQL cited knowledge integration", () => {
       await execute(process.execPath, [path.resolve("scripts/backfill-pipeline-history.mjs")], {
         env: {
           ...process.env, DATABASE_URL: databaseUrl,
-          PIPELINE_HISTORY_REPORT_ROOT: reportDirectory, PIPELINE_HISTORY_REPORT: reportName
+          DEVKH_DATA_DIR: reportDirectory, PIPELINE_HISTORY_REPORT: reportName
         }
       });
       const firstReport = await readFile(reportPath, "utf8");
@@ -619,7 +619,7 @@ integration("PostgreSQL cited knowledge integration", () => {
       await execute(process.execPath, [path.resolve("scripts/backfill-pipeline-history.mjs")], {
         env: {
           ...process.env, DATABASE_URL: databaseUrl,
-          PIPELINE_HISTORY_REPORT_ROOT: reportDirectory, PIPELINE_HISTORY_REPORT: reportName
+          DEVKH_DATA_DIR: reportDirectory, PIPELINE_HISTORY_REPORT: reportName
         }
       });
 

@@ -20,10 +20,12 @@ describe("pipeline history backfill", () => {
   test("limits reports to a protected root and validates repository provenance", async () => {
     const script = await readFile(path.join(root, "scripts/backfill-pipeline-history.mjs"), "utf8");
 
-    expect(script).toContain("PIPELINE_HISTORY_REPORT_ROOT");
+    expect(script).toContain("DEVKH_DATA_DIR");
     expect(script).toContain("flag: \"wx\"");
     expect(script).toContain("rename(");
+    expect(script).toContain("reportName === \".\" || reportName === \"..\"");
     expect(script).toContain("b.repository_id = r.repository_id");
     expect(script).toContain("s.repository_id = r.repository_id");
+    expect(script).toContain("r.snapshot_id = b.snapshot_id");
   });
 });

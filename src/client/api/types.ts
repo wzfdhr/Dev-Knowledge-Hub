@@ -231,6 +231,62 @@ export interface Citation {
   symbol?: string;
   kind?: string;
 }
+export type GraphNodeKind = "module" | "symbol" | "document" | "table" | "column" | "command";
+export type GraphEdgeKind = "imports" | "exports" | "calls" | "contains" | "documents" | "reads" | "writes" | "depends_on";
+export interface GraphSourceRef {
+  snapshotId: string;
+  path: string;
+  startLine: number;
+  endLine: number;
+  startColumn?: number;
+  endColumn?: number;
+  blobHash: string;
+}
+export interface KnowledgeGraphNode {
+  id: string;
+  projectId: string;
+  snapshotId: string;
+  kind: GraphNodeKind;
+  name: string;
+  qualifiedName: string;
+  candidate: boolean;
+  sourceRefs: GraphSourceRef[];
+  attributes: Record<string, string | number | boolean>;
+}
+export interface KnowledgeGraphEdge {
+  id: string;
+  fromNodeId: string;
+  toNodeId: string;
+  kind: GraphEdgeKind;
+  candidate: boolean;
+  candidateReason?: string;
+  confidence: number;
+  sourceRefs: GraphSourceRef[];
+}
+export interface KnowledgeGraph {
+  nodes: KnowledgeGraphNode[];
+  edges: KnowledgeGraphEdge[];
+}
+export interface GraphTreeNode {
+  id: string;
+  name: string;
+  kind: GraphNodeKind;
+  candidate: boolean;
+  children: GraphTreeNode[];
+}
+export interface GraphTreeCrossLink extends KnowledgeGraphEdge { cycle: boolean }
+export type ProjectGraphFormat = "json" | "tree" | "mermaid" | "markmap";
+export interface ProjectGraphDataByFormat {
+  json: KnowledgeGraph;
+  tree: { roots: GraphTreeNode[]; crossLinks: GraphTreeCrossLink[] };
+  mermaid: string;
+  markmap: string;
+}
+export interface ProjectGraphResponse<F extends ProjectGraphFormat = ProjectGraphFormat> {
+  release: { id: string; version: string } | null;
+  format: F;
+  data: ProjectGraphDataByFormat[F] | null;
+}
 export interface KnowledgeChunk {
   id: string;
   heading: string | null;

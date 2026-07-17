@@ -413,6 +413,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
   if (options.clientDir) {
     const clientEntrypointPath = path.join(options.clientDir, "index.html");
+    server.get("/", async (_request, reply) => reply.code(302).header("location", "/projects").send());
     void server.register(fastifyStatic, { root: options.clientDir, index: false });
     server.setNotFoundHandler((request, reply) => {
       if (request.method === "GET" && !request.url.startsWith("/api/") && request.url !== "/mcp") {

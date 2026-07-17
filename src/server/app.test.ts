@@ -64,6 +64,25 @@ describe("buildServer", () => {
     await app.close();
   });
 
+  test("redirects the root path to the project center before static directory handling", async () => {
+    const clientDir = await mkdtemp(path.join(os.tmpdir(), "devkh-root-redirect-"));
+    await writeFile(path.join(clientDir, "index.html"), "<head><!-- devkh:csp-nonce --></head><main>console entrypoint</main>");
+    const app = buildServer({
+      store: new MemoryAppStore(),
+      masterKey: Buffer.alloc(32, 1).toString("base64"),
+      sessionSecret: "root-redirect-test-session-secret",
+      dataDir: "/tmp/devkh-root-redirect-test",
+      nodeEnv: "production",
+      clientDir
+    });
+
+    const response = await app.inject({ method: "GET", url: "/" });
+
+    expect(response.statusCode).toBe(302);
+    expect(response.headers.location).toBe("/projects");
+    await app.close();
+  });
+
   test("keeps built client assets on the static file route", async () => {
     const clientDir = await mkdtemp(path.join(os.tmpdir(), "devkh-client-"));
     await mkdir(path.join(clientDir, "assets"));

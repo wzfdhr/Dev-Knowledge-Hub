@@ -10,7 +10,11 @@ const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(scriptDirectory, "../..");
 const monitorScript = join(scriptDirectory, "devkh-monitor.sh");
 
-function fixture({ snapshotTime = "1970-01-02T03:45:00.000Z", importCounts = "0|0" } = {}) {
+function fixture({
+  snapshotTime = "1970-01-02T03:45:00.000Z",
+  snapshots = [{ time: snapshotTime }],
+  importCounts = "0|0"
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), "devkh-monitor-"));
   const bin = join(root, "bin");
   const state = join(root, "state");
@@ -27,7 +31,7 @@ function fixture({ snapshotTime = "1970-01-02T03:45:00.000Z", importCounts = "0|
   writeExecutable("curl", "#!/usr/bin/env sh\nexit 0\n");
   writeExecutable("docker", `#!/usr/bin/env sh\ncase "$*" in *exec*) printf '%s\\n' '${importCounts}' ;; *) printf "app healthy\\npostgres healthy\\n" ;; esac\n`);
   writeExecutable("df", "#!/usr/bin/env sh\nprintf \"Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/vda 100 70 30 70%% /\\n\"\n");
-  writeExecutable("restic", `#!/usr/bin/env sh\nprintf '%s\\n' '${JSON.stringify([{ time: snapshotTime }])}'\n`);
+  writeExecutable("restic", `#!/usr/bin/env sh\nprintf '%s\\n' '${JSON.stringify(snapshots)}'\n`);
 
   return {
     root,
@@ -83,6 +87,23 @@ test("fails when the latest encrypted backup is stale", () => {
     assert.equal(status.result, "failed");
     assert.deepEqual(status.failures, ["backup_freshness"]);
     assert.doesNotMatch(readFileSync(join(value.root, "state", "status.json"), "utf8"), /example\.invalid/);
+  } finally {
+    rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
+test("uses the newest remote snapshot instead of the first grouped result", () => {
+  const value = fixture({
+    snapshots: [
+      { time: "1969-12-30T00:00:00.000Z" },
+      { time: "1970-01-02T03:45:00.000Z" }
+    ]
+  });
+  try {
+    const result = spawnSync(monitorScript, [], { env: value.environment, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const status = JSON.parse(readFileSync(join(value.root, "state", "status.json"), "utf8"));
+    assert.equal(status.result, "success");
   } finally {
     rmSync(value.root, { recursive: true, force: true });
   }

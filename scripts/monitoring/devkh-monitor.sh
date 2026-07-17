@@ -62,7 +62,7 @@ check_backup() {
     # shellcheck disable=SC1090
     . "$BACKUP_ENV_FILE"
     set +a
-    restic snapshots --latest 1 --json | node -e 'let raw=""; process.stdin.on("data",d=>raw+=d); process.stdin.on("end",()=>{const snapshot=JSON.parse(raw)[0]; const timestamp=Date.parse(snapshot?.time ?? ""); const now=Number(process.env.DEVKH_MONITOR_NOW_EPOCH_SECONDS ?? Math.floor(Date.now()/1000)); if (!Number.isFinite(timestamp) || !Number.isFinite(now)) process.exit(1); process.stdout.write(String(now - Math.floor(timestamp / 1000)));});'
+    restic snapshots --json | node -e 'let raw=""; process.stdin.on("data",d=>raw+=d); process.stdin.on("end",()=>{const timestamps=JSON.parse(raw).map((snapshot)=>Date.parse(snapshot?.time ?? "")).filter(Number.isFinite); const timestamp=Math.max(...timestamps); const now=Number(process.env.DEVKH_MONITOR_NOW_EPOCH_SECONDS ?? Math.floor(Date.now()/1000)); if (!Number.isFinite(timestamp) || !Number.isFinite(now)) process.exit(1); process.stdout.write(String(now - Math.floor(timestamp / 1000)));});'
   )" || { failures+=("backup_snapshot"); return; }
   [[ "$age" =~ ^[0-9]+$ && "$age" -le "$MAX_BACKUP_AGE_SECONDS" ]] || failures+=("backup_freshness")
 }

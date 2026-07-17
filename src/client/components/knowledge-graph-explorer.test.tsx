@@ -69,6 +69,9 @@ describe("KnowledgeGraphExplorer", () => {
     render(<KnowledgeGraphExplorer layout={layout} selectedNodeId={null} onSelectNode={vi.fn()} onSelectEdge={vi.fn()} />);
     const svg = screen.getByRole("group", { name: "知识图谱画布" });
     const transform = svg.querySelector("g")!;
+    vi.spyOn(svg, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, width: 1040, height: 240, top: 0, right: 1040, bottom: 240, left: 0, toJSON: () => ({})
+    });
 
     fireEvent.pointerDown(svg, { button: 0, isPrimary: true, clientX: 20, clientY: 30 });
     fireEvent.pointerMove(svg, { button: 0, isPrimary: true, clientX: 50, clientY: 45 });
@@ -79,6 +82,25 @@ describe("KnowledgeGraphExplorer", () => {
     await user.click(screen.getByRole("button", { name: "重置图谱视图" }));
     expect(screen.getByText("缩放 100%")).toBeVisible();
     expect(transform).toHaveAttribute("transform", "translate(0 0)");
+    const svgNode = screen.getAllByRole("button", { name: "API 模块" }).find((button) => button.closest("svg"))!;
+    fireEvent.pointerDown(svgNode, { button: 0, isPrimary: true, clientX: 20, clientY: 30 });
+    fireEvent.pointerMove(svgNode, { button: 0, isPrimary: true, clientX: 50, clientY: 45 });
+    fireEvent.pointerDown(screen.getByRole("button", { name: "事实关系 contains" }), { button: 0, isPrimary: true, clientX: 20, clientY: 30 });
+    fireEvent.pointerMove(screen.getByRole("button", { name: "事实关系 contains" }), { button: 0, isPrimary: true, clientX: 50, clientY: 45 });
+    expect(transform).toHaveAttribute("transform", "translate(0 0)");
+
+    Object.defineProperty(svg, "getScreenCTM", { configurable: true, value: () => ({ inverse: () => ({}) }) });
+    Object.defineProperty(svg, "createSVGPoint", { configurable: true, value: () => {
+      const point = {
+        x: 0,
+        y: 0,
+        matrixTransform: () => ({ x: point.x / 2, y: point.y / 2 })
+      };
+      return point as unknown as SVGPoint;
+    } });
+    fireEvent.pointerDown(svg, { button: 0, isPrimary: true, clientX: 20, clientY: 30 });
+    fireEvent.pointerMove(svg, { button: 0, isPrimary: true, clientX: 50, clientY: 45 });
+    expect(transform).toHaveAttribute("transform", "translate(15 7.5)");
   });
 
   test("does not expose edge controls without an edge selection callback", () => {

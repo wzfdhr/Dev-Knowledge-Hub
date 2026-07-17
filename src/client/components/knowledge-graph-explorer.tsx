@@ -14,6 +14,7 @@ const kindLabels: Record<PositionedGraphNode["kind"], string> = {
 
 interface KnowledgeGraphExplorerProps {
   layout: GraphLayout;
+  compact?: boolean;
   selectedNodeId: string | null;
   selectedEdgeId?: string | null;
   onSelectNode: (nodeId: string) => void;
@@ -24,8 +25,30 @@ function isSelectionKey(key: string): boolean {
   return key === "Enter" || key === " ";
 }
 
+function pointInSvg(svg: SVGSVGElement | null, layout: GraphLayout, clientX: number, clientY: number) {
+  if (!svg) return { x: clientX, y: clientY };
+  const matrix = svg.getScreenCTM?.();
+  const point = svg.createSVGPoint?.();
+  if (matrix && point) {
+    point.x = clientX;
+    point.y = clientY;
+    const transformed = point.matrixTransform(matrix.inverse());
+    return { x: transformed.x, y: transformed.y };
+  }
+  const bounds = svg.getBoundingClientRect();
+  const scale = Math.min(
+    bounds.width > 0 ? bounds.width / layout.width : 1,
+    bounds.height > 0 ? bounds.height / layout.height : 1
+  );
+  return {
+    x: (clientX - bounds.left - Math.max(0, bounds.width - layout.width * scale) / 2) / scale,
+    y: (clientY - bounds.top - Math.max(0, bounds.height - layout.height * scale) / 2) / scale
+  };
+}
+
 export function KnowledgeGraphExplorer({
   layout,
+  compact = false,
   selectedNodeId,
   selectedEdgeId = null,
   onSelectNode,
@@ -49,21 +72,18 @@ export function KnowledgeGraphExplorer({
   };
   const startPan = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || event.isPrimary === false || (event.target as Element).closest('[role="button"]')) return;
-    pointer.current = { x: event.clientX, y: event.clientY };
+    pointer.current = pointInSvg(event.currentTarget.querySelector("svg"), layout, event.clientX, event.clientY);
     event.currentTarget.setPointerCapture?.(event.pointerId);
   };
   const movePan = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!pointer.current) return;
-    const svg = event.currentTarget.querySelector("svg");
-    const bounds = svg?.getBoundingClientRect();
-    const scaleX = bounds?.width ? layout.width / bounds.width : 1;
-    const scaleY = bounds?.height ? layout.height / bounds.height : 1;
-    const delta = { x: (event.clientX - pointer.current.x) * scaleX, y: (event.clientY - pointer.current.y) * scaleY };
-    pointer.current = { x: event.clientX, y: event.clientY };
+    const next = pointInSvg(event.currentTarget.querySelector("svg"), layout, event.clientX, event.clientY);
+    const delta = { x: next.x - pointer.current.x, y: next.y - pointer.current.y };
+    pointer.current = next;
     setOffset((value) => ({ x: value.x + delta.x, y: value.y + delta.y }));
   };
 
-  return <section className="knowledge-graph-explorer" aria-label="知识图谱浏览器">
+  return <section className={`knowledge-graph-explorer${compact ? " is-compact" : ""}`} aria-label="知识图谱浏览器">
     <header className="knowledge-graph-toolbar">
       <div className="knowledge-graph-legend" aria-label="关系图例">
         <span><i className="knowledge-graph-fact" aria-hidden="true" />事实关系</span>

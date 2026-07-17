@@ -84,7 +84,9 @@ export function filterGraph({ graph, query, enabledKinds, includeCandidates, lim
 
   const contextNodes = availableNodes.filter((node) => !matchingIds.has(node.id) && contextIds.has(node.id));
   const fillNodes = availableNodes.filter((node) => !matchingIds.has(node.id) && !contextIds.has(node.id));
-  const selectedNodes = [...matchingNodes, ...contextNodes, ...fillNodes];
+  const selectedNodes = normalizedQuery && matchingNodes.length === 0
+    ? []
+    : [...matchingNodes, ...contextNodes, ...fillNodes];
   const nodes = selectedNodes.slice(0, Math.max(1, limit));
   const visibleNodeIds = new Set(nodes.map((node) => node.id));
 

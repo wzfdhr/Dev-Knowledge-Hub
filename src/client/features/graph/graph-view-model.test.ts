@@ -49,6 +49,14 @@ describe("knowledge graph view model", () => {
     expect(result.edges.map((edge) => edge.id)).toEqual(["contains-client", "imports-web"]);
   });
 
+  test("returns no visible nodes when an active search has no matches", () => {
+    const result = filterGraph({ graph: graph(), query: "does-not-exist", enabledKinds: new Set(["module", "symbol", "document"]), includeCandidates: false });
+
+    expect(result.nodes).toEqual([]);
+    expect(result.edges).toEqual([]);
+    expect(result.omittedNodeCount).toBe(0);
+  });
+
   test("keeps candidate nodes eligible while toggling candidate edge visibility", () => {
     const base = graph({ nodes: [...graph().nodes, { id: "candidate-command", projectId: "project", snapshotId: "snapshot", kind: "command", name: "Start", qualifiedName: "npm start", candidate: true, sourceRefs: [], attributes: {} }] });
     const hidden = filterGraph({ graph: base, query: "", enabledKinds: new Set(["module", "symbol", "document", "command"]), includeCandidates: false });

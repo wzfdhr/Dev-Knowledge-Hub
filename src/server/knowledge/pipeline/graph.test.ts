@@ -68,4 +68,28 @@ describe("buildKnowledgeGraph", () => {
     expect(() => validateKnowledgeGraph({ ...graph, edges: [{ ...graph.edges[0]!, candidate: false, sourceRefs: [] }] }))
       .toThrow("Graph fact edge has no source references");
   });
+
+  test("merges repeated deterministic edges while retaining every source reference", () => {
+    const secondImport = { ...sourceRef, startLine: 3, endLine: 3 };
+    const graph = buildKnowledgeGraph({
+      projectId: "project-1",
+      ir: {
+        schemaVersion: 1, snapshotId: "snapshot-1",
+        files: [
+          { path: "src/main.ts", language: "typescript", contentDigest: "b".repeat(64), lineCount: 3, sourceRef },
+          { path: "src/util.ts", language: "typescript", contentDigest: "c".repeat(64), lineCount: 1, sourceRef: { ...sourceRef, path: "src/util.ts", endLine: 1 } }
+        ],
+        symbols: [],
+        imports: [
+          { fromPath: "src/main.ts", specifier: "./util", kind: "static", sourceRef },
+          { fromPath: "src/main.ts", specifier: "./util", kind: "static", sourceRef: secondImport }
+        ],
+        documents: [], tables: [], sourceRefs: [sourceRef, secondImport]
+      }
+    });
+
+    const imports = graph.edges.filter((item) => item.kind === "imports");
+    expect(imports).toHaveLength(1);
+    expect(imports[0]?.sourceRefs).toEqual([sourceRef, secondImport]);
+  });
 });

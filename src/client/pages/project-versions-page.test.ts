@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { canEnableLlmBuild, shadowPipelineMessage, shouldPollShadowPipeline } from "./project-versions-page";
+import { canEnableLlmBuild, shadowPipelineMessage, shouldPollShadowPipeline, suggestNextReleaseVersion } from "./project-versions-page";
 
 describe("ProjectVersionsPage shadow pipeline status", () => {
   test("explains a failed shadow stage without reporting a formal build failure", () => {
@@ -21,5 +21,13 @@ describe("ProjectVersionsPage LLM build permission", () => {
     expect(canEnableLlmBuild("member", "admin")).toBe(true);
     expect(canEnableLlmBuild("member", "member")).toBe(false);
     expect(canEnableLlmBuild("reader", "reader")).toBe(false);
+  });
+});
+
+describe("ProjectVersionsPage release versions", () => {
+  test("suggests the next patch version from existing semantic releases", () => {
+    expect(suggestNextReleaseVersion([])).toBe("1.0.0");
+    expect(suggestNextReleaseVersion([{ version: "1.0.0" }, { version: "1.0.1" }])).toBe("1.0.2");
+    expect(suggestNextReleaseVersion([{ version: "1.9.9" }, { version: "2.0.0" }])).toBe("2.0.1");
   });
 });

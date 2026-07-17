@@ -261,6 +261,14 @@ function sendError(reply: FastifyReply, statusCode: number, code: string, messag
   return reply.code(statusCode).send({ error: { code, message } });
 }
 
+function isReleaseVersionConflict(error: unknown): boolean {
+  if (error instanceof Error && error.message === "Release version already exists") return true;
+  return typeof error === "object" && error !== null
+    && "code" in error && "constraint" in error
+    && (error as { code?: unknown }).code === "23505"
+    && (error as { constraint?: unknown }).constraint === "releases_repository_version_idx";
+}
+
 function repositoryDto(repository: RepositoryRecord) {
   const kind = (repository as { kind: string }).kind;
   return {
@@ -2130,6 +2138,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       );
       return reply.code(201).send({ release });
     } catch (error) {
+      if (isReleaseVersionConflict(error)) {
+        return sendError(reply, 409, "RELEASE_VERSION_EXISTS", "A release with this version already exists");
+      }
       return sendError(reply, 409, "RELEASE_NOT_READY", error instanceof Error ? error.message : "Release failed");
     }
   });

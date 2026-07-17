@@ -33,6 +33,21 @@ export function canEnableLlmBuild(
   return workspaceRole === "admin" || projectRole === "admin";
 }
 
+export function suggestNextReleaseVersion(releases: Array<Pick<Release, "version">>): string {
+  let highest: [number, number, number] | null = null;
+  for (const release of releases) {
+    const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(release.version);
+    if (!match) continue;
+    const candidate: [number, number, number] = [Number(match[1]), Number(match[2]), Number(match[3])];
+    if (!highest || candidate[0] > highest[0]
+      || (candidate[0] === highest[0] && candidate[1] > highest[1])
+      || (candidate[0] === highest[0] && candidate[1] === highest[1] && candidate[2] > highest[2])) {
+      highest = candidate;
+    }
+  }
+  return highest ? `${highest[0]}.${highest[1]}.${highest[2] + 1}` : "1.0.0";
+}
+
 export function derivePrimaryAction(state: OverviewState): { kind: PrimaryKind; label: string } {
   if (!state.repository) return { kind: "connect", label: "连接仓库" };
   const latestBuild = state.builds[0];
@@ -206,7 +221,10 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
     if (["start-build", "retry-build"].includes(action.kind) && effectiveSnapshotId) {
       start.mutate({ snapshotId: effectiveSnapshotId, allowLlm: canUseLlm && allowLlm });
     }
-    if (action.kind === "review") setReviewBuild(latestBuild?.status === "ready" ? latestBuild : null);
+    if (action.kind === "review") {
+      setVersion(suggestNextReleaseVersion(releases));
+      setReviewBuild(latestBuild?.status === "ready" ? latestBuild : null);
+    }
     if (action.kind === "publish") {
       const draft = releases.find((release) => release.buildId === latestBuild?.id && !release.publishedAt);
       if (draft) publish.mutate(draft.id);

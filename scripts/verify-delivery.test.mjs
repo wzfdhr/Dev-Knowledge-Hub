@@ -32,6 +32,13 @@ describe("delivery database isolation", () => {
     expect(compose).toContain("${PUBLIC_BASE_URL:-https://${DEVKH_DOMAIN:?set DEVKH_DOMAIN}}");
   });
 
+  test("passes the documented knowledge kernel mode into the Compose application", async () => {
+    const compose = parse(await readFile("docker-compose.yml", "utf8"));
+
+    expect(compose.services.app.environment.DEVKH_KNOWLEDGE_KERNEL_MODE)
+      .toBe("${DEVKH_KNOWLEDGE_KERNEL_MODE:-legacy}");
+  });
+
   test("boots both development surfaces, forces production start, and loads dotenv explicitly", async () => {
     const packageJson = JSON.parse(await readFile("package.json", "utf8"));
     const packageLock = JSON.parse(await readFile("package-lock.json", "utf8"));

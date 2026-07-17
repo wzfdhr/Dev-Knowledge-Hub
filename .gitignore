@@ -6,4 +6,5 @@ test-results
 artifacts
 .env
 docker-compose.override.yml
+.worktrees/
 *.log

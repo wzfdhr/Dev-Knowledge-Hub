@@ -660,8 +660,8 @@ integration("PostgreSQL cited knowledge integration", () => {
       };
       const output = await generateKnowledge(index);
       await store.saveKnowledge({ build: build.build, index, output });
-      const moduleNodeId = randomUUID();
-      const symbolNodeId = randomUUID();
+      const moduleNodeId = "1".repeat(64);
+      const symbolNodeId = "2".repeat(64);
       await store.saveKnowledgeGraph({
         workspaceId: workspace!.id, projectId: repository!.projectId, snapshotId, buildId: build.build.id,
         actorId: administrator!.id,
@@ -670,7 +670,7 @@ integration("PostgreSQL cited knowledge integration", () => {
             { id: moduleNodeId, projectId: repository!.projectId, snapshotId, kind: "module", name: "math.ts", qualifiedName: citation.path, candidate: false, sourceRefs: [{ ...citation, snapshotId }], attributes: {} },
             { id: symbolNodeId, projectId: repository!.projectId, snapshotId, kind: "symbol", name: "math", qualifiedName: "math", candidate: false, sourceRefs: [{ ...citation, snapshotId }], attributes: {} }
           ],
-          edges: [{ id: randomUUID(), fromNodeId: moduleNodeId, toNodeId: symbolNodeId, kind: "contains", candidate: false, confidence: 1, sourceRefs: [{ ...citation, snapshotId }] }]
+          edges: [{ id: "3".repeat(64), fromNodeId: moduleNodeId, toNodeId: symbolNodeId, kind: "contains", candidate: false, confidence: 1, sourceRefs: [{ ...citation, snapshotId }] }]
         }
       });
       const createArtifact = async (stage: "synthesize" | "lint", kind: "knowledge-pages" | "knowledge-quality", digest: string) => store.createArtifactWithAudit({

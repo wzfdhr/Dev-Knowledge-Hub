@@ -14,6 +14,7 @@ import { SystemSettingsPage as SettingsPage } from "./pages/system-settings-page
 import { ProjectCodexPage } from "./pages/project-codex-page";
 import { ProjectImportsPage } from "./pages/project-imports-page";
 import { ProjectGraphPage } from "./pages/project-graph-page";
+import { MembersPage } from "./pages/members-page";
 import { governanceErrorMessage } from "./components/quality-governance-panel";
 import { derivePrimaryAction, ProjectVersionsPage as OverviewPage } from "./pages/project-versions-page";
 import { ApiError, type ApiClient } from "./api/client";
@@ -73,6 +74,20 @@ describe("shared console copy", () => {
     expect(source).not.toContain("<Table");
     expect(workspaceSource).toContain('className="member-list workspace-member-list"');
     expect(workspaceSource).not.toContain("<Table");
+  });
+
+  test("does not let member creation fields reuse the administrator login autofill", async () => {
+    const user = userEvent.setup();
+    const api = {
+      listMembers: vi.fn().mockResolvedValue({ members: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<MembersPage api={api} />);
+
+    await user.click(await screen.findByRole("button", { name: "添加成员" }));
+
+    expect(screen.getByLabelText("邮箱")).toHaveAttribute("autocomplete", "off");
+    expect(screen.getByLabelText("初始密码")).toHaveAttribute("autocomplete", "new-password");
   });
 
   test("keeps project navigation scoped to the project URL", async () => {

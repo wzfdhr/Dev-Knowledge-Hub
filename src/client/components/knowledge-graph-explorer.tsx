@@ -47,6 +47,21 @@ export function KnowledgeGraphExplorer({
     setZoom(1);
     setOffset({ x: 0, y: 0 });
   };
+  const startPan = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || event.isPrimary === false || (event.target as Element).closest('[role="button"]')) return;
+    pointer.current = { x: event.clientX, y: event.clientY };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+  const movePan = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!pointer.current) return;
+    const svg = event.currentTarget.querySelector("svg");
+    const bounds = svg?.getBoundingClientRect();
+    const scaleX = bounds?.width ? layout.width / bounds.width : 1;
+    const scaleY = bounds?.height ? layout.height / bounds.height : 1;
+    const delta = { x: (event.clientX - pointer.current.x) * scaleX, y: (event.clientY - pointer.current.y) * scaleY };
+    pointer.current = { x: event.clientX, y: event.clientY };
+    setOffset((value) => ({ x: value.x + delta.x, y: value.y + delta.y }));
+  };
 
   return <section className="knowledge-graph-explorer" aria-label="知识图谱浏览器">
     <header className="knowledge-graph-toolbar">
@@ -63,13 +78,8 @@ export function KnowledgeGraphExplorer({
     </header>
     <div
       className="knowledge-graph-canvas"
-      onPointerDown={(event) => { pointer.current = { x: event.clientX, y: event.clientY }; event.currentTarget.setPointerCapture?.(event.pointerId); }}
-      onPointerMove={(event) => {
-        if (!pointer.current) return;
-        const delta = { x: event.clientX - pointer.current.x, y: event.clientY - pointer.current.y };
-        pointer.current = { x: event.clientX, y: event.clientY };
-        setOffset((value) => ({ x: value.x + delta.x, y: value.y + delta.y }));
-      }}
+      onPointerDown={startPan}
+      onPointerMove={movePan}
       onPointerUp={() => { pointer.current = null; }}
       onPointerCancel={() => { pointer.current = null; }}
       onWheel={(event) => {
@@ -77,19 +87,22 @@ export function KnowledgeGraphExplorer({
         setZoom((value) => Math.max(0.5, Math.min(2, value + (event.deltaY < 0 ? 0.1 : -0.1))));
       }}
     >
-      <svg role="img" aria-label="知识图谱画布" viewBox={`0 0 ${layout.width} ${layout.height}`}>
-        <g transform={`translate(${offset.x} ${offset.y}) scale(${zoom})`}>
+      <svg role="group" aria-label="知识图谱画布" viewBox={`0 0 ${layout.width} ${layout.height}`}>
+        <g transform={`translate(${offset.x} ${offset.y})`}>
+          <g transform={`scale(${zoom})`}>
           {layout.edges.map((edge) => <path
             key={edge.id}
             d={edge.path}
             className={`knowledge-graph-edge ${edge.candidate ? "candidate" : "fact"} ${selectedEdgeId === edge.id ? "selected" : ""}`}
-            role="button"
-            tabIndex={0}
-            aria-label={`${edge.candidate ? "候选关系" : "事实关系"} ${edge.kind}`}
-            aria-pressed={selectedEdgeId === edge.id}
+            {...(onSelectEdge ? {
+              role: "button",
+              tabIndex: 0,
+              "aria-label": `${edge.candidate ? "候选关系" : "事实关系"} ${edge.kind}`,
+              "aria-pressed": selectedEdgeId === edge.id,
+              onClick: () => selectEdge(edge),
+              onKeyDown: (event: React.KeyboardEvent<SVGPathElement>) => { if (isSelectionKey(event.key)) { event.preventDefault(); selectEdge(edge); } }
+            } : { "aria-hidden": true })}
             strokeDasharray={edge.candidate ? "6 5" : undefined}
-            onClick={() => selectEdge(edge)}
-            onKeyDown={(event) => { if (isSelectionKey(event.key)) { event.preventDefault(); selectEdge(edge); } }}
           />)}
           {layout.nodes.map((node) => <g
             key={node.id}
@@ -105,7 +118,7 @@ export function KnowledgeGraphExplorer({
             <rect width={node.width} height={node.height} rx="6" />
             <text x="12" y="20">{node.name}</text>
             <text x="12" y="36" className="knowledge-graph-node-kind">{kindLabels[node.kind]}</text>
-          </g>)}
+          </g>)}</g>
         </g>
       </svg>
     </div>
@@ -118,6 +131,7 @@ export function KnowledgeGraphExplorer({
         }}
         type="button"
         className={selectedNodeId === node.id ? "active" : ""}
+        aria-label={`${node.name} ${kindLabels[node.kind]}`}
         aria-pressed={selectedNodeId === node.id}
         onClick={() => selectNode(node)}
         onKeyDown={(event) => {

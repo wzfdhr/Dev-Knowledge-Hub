@@ -56,6 +56,16 @@ export function derivePrimaryAction(state: OverviewState): { kind: PrimaryKind; 
 const snapshotKey = "devkh:last-snapshot";
 const terminal = new Set(["ready", "published", "failed"]);
 
+export function shouldPollShadowPipeline(
+  legacyStatus: Build["status"] | null,
+  pipelineStatus: Build["status"] | null
+): boolean {
+  return Boolean(legacyStatus && (
+    !terminal.has(legacyStatus)
+    || (pipelineStatus && !terminal.has(pipelineStatus))
+  ));
+}
+
 export function ProjectVersionsPage({ api }: { api: ApiClient }) {
   const navigate = useNavigate();
   const { projectId = "" } = useParams();
@@ -118,7 +128,10 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
     queryFn: () => api.getBuildStages(latestBuild!.id),
     enabled: Boolean(latestBuild),
     retry: false,
-    refetchInterval: latestBuild && !terminal.has(latestBuild.status) ? 3000 : false
+    refetchInterval: (query) => shouldPollShadowPipeline(
+      latestBuild?.status ?? null,
+      query.state.data?.pipelineStatus ?? null
+    ) ? 3000 : false
   });
   const requiredLoading = Boolean(repository) && (buildsQuery.isLoading || releasesQuery.isLoading || repositoryStatusQuery.isLoading);
   const blockingError = repositoryQuery.error

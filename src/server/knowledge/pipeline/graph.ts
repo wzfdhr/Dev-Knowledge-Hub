@@ -32,6 +32,32 @@ function edge(
   };
 }
 
+function uniqueSourceRefs(sourceRefs: SourceRef[]): SourceRef[] {
+  const seen = new Set<string>();
+  return sourceRefs.filter((sourceRef) => {
+    const key = JSON.stringify(sourceRef);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function mergeGraphItems<T extends GraphNode | GraphEdge>(items: T[]): T[] {
+  const merged = new Map<string, T>();
+  for (const item of items) {
+    const previous = merged.get(item.id);
+    if (!previous) {
+      merged.set(item.id, item);
+      continue;
+    }
+    merged.set(item.id, {
+      ...previous,
+      sourceRefs: uniqueSourceRefs([...previous.sourceRefs, ...item.sourceRefs])
+    } as T);
+  }
+  return [...merged.values()].sort((left, right) => left.id.localeCompare(right.id));
+}
+
 function moduleNode(projectId: string, snapshotId: string, file: KnowledgeIR["files"][number]): GraphNode {
   return {
     id: id("module", file.path), projectId, snapshotId, kind: "module", name: path.posix.basename(file.path),
@@ -98,7 +124,7 @@ export function buildKnowledgeGraph({ projectId, ir }: { projectId: string; ir: 
     const reason = imported.kind === "dynamic" ? "dynamic_import" : "unresolved_import";
     edges.push(edge("imports", fromNodeId, id("unresolved_import", `${imported.fromPath}:${imported.specifier}`), [imported.sourceRef], reason));
   }
-  const graph = { nodes: nodes.sort((left, right) => left.id.localeCompare(right.id)), edges: edges.sort((left, right) => left.id.localeCompare(right.id)) };
+  const graph = { nodes: mergeGraphItems(nodes), edges: mergeGraphItems(edges) };
   validateKnowledgeGraph(graph);
   return graph;
 }

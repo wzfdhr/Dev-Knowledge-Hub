@@ -33,6 +33,7 @@ function createFixture({
   resticRestoreDelay = "0",
   resticBackupBlock = false,
   resticRestoreBlock = false,
+  resticSnapshots = [{ id: latestSnapshotId, time: "1970-01-02T03:45:00.000Z" }],
   integrityResult = '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":0}',
   artifactStorageKey = "33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json",
   artifactContent = '{"fixture":true}'
@@ -77,7 +78,7 @@ case "$1" in
     if [ "$RESTIC_BACKUP_EXIT" != "0" ]; then exit "$RESTIC_BACKUP_EXIT"; fi
     printf '{"message_type":"summary","snapshot_id":"%s"}\n' "$RESTIC_BACKUP_SNAPSHOT_ID"
     ;;
-  snapshots) printf '[{"id":"%s"}]' "$RESTIC_LATEST_SNAPSHOT_ID" ;;
+  snapshots) printf '%s' "$RESTIC_SNAPSHOTS_JSON" ;;
   restore)
     while [ -n "$RESTIC_RESTORE_BLOCK_FILE" ] && [ ! -e "$RESTIC_RESTORE_BLOCK_FILE" ]; do sleep 0.05; done
     sleep "$RESTIC_RESTORE_DELAY"
@@ -127,7 +128,7 @@ exec /bin/rm "$@"
       RESTIC_BACKUP_BLOCK_FILE: resticBackupBlock ? backupBlockFile : "",
       RESTIC_RESTORE_BLOCK_FILE: resticRestoreBlock ? restoreBlockFile : "",
       RESTIC_BACKUP_SNAPSHOT_ID: backupSnapshotId,
-      RESTIC_LATEST_SNAPSHOT_ID: latestSnapshotId,
+      RESTIC_SNAPSHOTS_JSON: JSON.stringify(resticSnapshots),
       FAKE_INTEGRITY_RESULT: integrityResult,
       FAKE_ARTIFACT_STORAGE_KEY: artifactStorageKey,
       FAKE_ARTIFACT_CONTENT: artifactContent,
@@ -362,7 +363,7 @@ test("restore drill never writes production Docker volumes", () => {
 
     assert.equal(result.status, 0, result.stderr);
     const calls = readFileSync(fixture.log, "utf8");
-    assert.match(calls, new RegExp(`restic snapshots --latest 1 --json[\\s\\S]*restic restore ${latestSnapshotId} --target`));
+    assert.match(calls, new RegExp(`restic snapshots --json[\\s\\S]*restic restore ${latestSnapshotId} --target`));
     assert.match(calls, /docker run .*postgres:16-bookworm pg_restore --list \/backup\/database\.pgdump/);
     assert.match(calls, /docker exec .* createdb -U devkh dev_knowledge_hub/);
     assert.match(calls, /docker network create devkh-restore-drill-/);
@@ -408,6 +409,30 @@ test("restore drill never writes production Docker volumes", () => {
     }
     assert.equal(evidence.artifactContentVerifiedCount, 1);
     assert.equal(evidence.resticSnapshotId, latestSnapshotId);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("restore drill selects the globally newest remote snapshot", () => {
+  const olderSnapshotId = "c".repeat(64);
+  const fixture = createFixture({
+    resticSnapshots: [
+      { id: olderSnapshotId, time: "1969-12-30T00:00:00.000Z" },
+      { id: latestSnapshotId, time: "1970-01-02T03:45:00.000Z" }
+    ]
+  });
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], {
+      env: fixture.environment,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const calls = readFileSync(fixture.log, "utf8");
+    assert.match(calls, new RegExp(`restic restore ${latestSnapshotId} --target`));
+    assert.doesNotMatch(calls, new RegExp(`restic restore ${olderSnapshotId} --target`));
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

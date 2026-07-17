@@ -73,6 +73,27 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   await page.getByRole("button", { name: "发布版本" }).click();
   await expect(page.getByText("1.0.0").first()).toBeVisible();
 
+  const graphFixture = await request.post("/__test__/graph");
+  expect(graphFixture.ok()).toBeTruthy();
+
+  await page.goto(`/projects/${projectId}/graph`);
+  await expect(page.getByRole("heading", { name: "知识图谱" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "搜索图谱" })).toBeVisible();
+  const graphNodes = page.locator(".knowledge-graph-node-list button");
+  await expect(graphNodes.first()).toBeVisible();
+  await graphNodes.first().click();
+  await expect(page.getByRole("complementary", { name: "图谱详情" })).toContainText(/路径|可信度/);
+  await page.screenshot({ path: "test-results/graph-1440x1024.png", fullPage: true });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/projects/${projectId}/graph`);
+  await expect(page.getByRole("heading", { name: "知识图谱" })).toBeVisible();
+  const graphOverflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(graphOverflow).toBeLessThanOrEqual(0);
+  await page.screenshot({ path: "test-results/graph-390x844.png", fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1024 });
+  await page.goto(`/projects/${projectId}/versions`);
+
   const shadowFailure = await request.post("/__test__/shadow-failure");
   expect(shadowFailure.ok()).toBeTruthy();
   await page.reload();
@@ -104,6 +125,9 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   await page.goto("/members");
   await page.getByRole("button", { name: "添加成员" }).click();
   const createMemberPanel = page.locator(".members-page .panel");
+  await expect(createMemberPanel.getByLabel("邮箱")).toHaveAttribute("autocomplete", "off");
+  await expect(createMemberPanel.getByLabel("初始密码")).toHaveAttribute("autocomplete", "new-password");
+  await page.screenshot({ path: "test-results/member-creation-1440x1024.png", fullPage: true });
   await createMemberPanel.getByLabel("邮箱").fill("collaborator@example.com");
   await createMemberPanel.getByLabel("初始密码").fill("correct horse battery staple");
   await createMemberPanel.getByRole("button", { name: "创建成员" }).click();

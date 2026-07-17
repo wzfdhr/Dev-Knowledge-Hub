@@ -3,7 +3,7 @@ import type {
   ArchivedRepository, KnowledgeMetadata, ProjectKnowledgeQuality, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotChangeSummary, SnapshotSummary, SourceExcerpt,
   UploadSnapshotSummary, ImportReport, TeamMember, ProjectMember, Project, ProjectSummary, ProjectActivity, CodexConnectionPack,
   Remediation, RemediationEvent, RemediationState,
-  WorkspaceOverview, WorkspaceSearchResult, MfaStatus
+  WorkspaceOverview, WorkspaceSearchResult, MfaStatus, ProjectGraphFormat, ProjectGraphResponse
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
@@ -19,6 +19,10 @@ export class ApiError extends Error {
 export interface PaginationParams {
   limit: number;
   offset: number;
+}
+
+export interface ProjectGraphRequestOptions {
+  releaseId?: string;
 }
 
 export interface RemediationListParams extends PaginationParams {
@@ -100,7 +104,7 @@ export interface ApiClient {
   getRepositoryStatus(): Promise<RepositoryStatus>;
   syncRepository(): Promise<SnapshotSummary>;
   getProjectChanges(projectId: string): Promise<{ change: SnapshotChangeSummary | null }>;
-  getProjectGraph(projectId: string): Promise<{ release: { id: string; version: string } | null; format: "tree"; data: { roots: unknown[]; crossLinks: unknown[] } | null }>;
+  getProjectGraph<F extends ProjectGraphFormat = "tree">(projectId: string, format?: F, options?: ProjectGraphRequestOptions): Promise<ProjectGraphResponse<F>>;
   getProjectKnowledgeQuality(projectId: string): Promise<ProjectKnowledgeQuality>;
   listProjectRemediations(projectId: string, params: RemediationListParams): Promise<{ remediations: Remediation[] }>;
   listProjectRemediationEvents(projectId: string, remediationId: string): Promise<{ events: RemediationEvent[] }>;
@@ -216,7 +220,11 @@ export const api: ApiClient = {
   getRepositoryStatus: () => request("/api/repositories/current/status"),
   syncRepository: () => request("/api/repositories/current/sync", { method: "POST" }),
   getProjectChanges: (projectId) => request(`/api/projects/${projectId}/changes`),
-  getProjectGraph: (projectId) => request(`/api/projects/${encodeURIComponent(projectId)}/graph?format=tree`),
+  getProjectGraph: <F extends ProjectGraphFormat = "tree">(projectId: string, format: F = "tree" as F, options?: ProjectGraphRequestOptions) => {
+    const params = new URLSearchParams({ format });
+    if (options?.releaseId) params.set("releaseId", options.releaseId);
+    return request<ProjectGraphResponse<F>>(`/api/projects/${encodeURIComponent(projectId)}/graph?${params}`);
+  },
   getProjectKnowledgeQuality: (projectId) => request(`/api/projects/${projectId}/knowledge-quality`),
   listProjectRemediations: (projectId, params) => request(listPath(
     `/api/projects/${encodeURIComponent(projectId)}/remediations`, params, {

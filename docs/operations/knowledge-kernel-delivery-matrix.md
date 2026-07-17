@@ -1,6 +1,6 @@
 # Knowledge Kernel Delivery Matrix
 
-Updated: 2026-07-15
+Updated: 2026-07-17
 
 ## Phase A baseline
 
@@ -38,17 +38,30 @@ The supplemental commits remain separate commits in Phase A. They are existing w
 | --- | --- | --- | --- |
 | 0. Baseline hardening | Implemented; release evidence verified | MCP token rotation, scoped activity output, Vue console experiment, retrieval evaluation v2 | Keep the green container and PostgreSQL gates mandatory; remove the retired Vue console in Phase E while retaining Vue source parsing |
 | 1. Security and operations | Implemented; isolated recovery verified | Persistent sessions, CSRF, administrator MFA, expiring scoped MCP tokens, Git egress policy, secret/license/runtime checks, backup and restore scripts | Retain production rollout as a later user-authorized action |
-| 2. Durable pipeline foundation | Foundation implemented; full pipeline not wired | Stage contracts, stage/event tables, content-addressed artifacts, pg-boss worker, stage API/SSE, invalidation planning | Add kernel modes, database-led orchestration, retry/reconciliation, all ten executors, release provenance and shadow compatibility |
-| 3. Knowledge IR and adapters | Parsers implemented; durable execution incomplete | Web and Vue extraction, document/config parsing, bounded CSV/XLSX extraction, optional validated LLM enhancement | Run adapters through immutable stage artifacts and verify production limits and fallback behavior |
-| 4. Graph | Core implementation present; pipeline integration incomplete | Graph construction, persistence, release-scoped queries, REST/MCP reads, Mermaid/Markmap exports and React graph page | Produce Graph through the durable pipeline, compare it with legacy output and keep visualization non-blocking |
-| 5. Retrieval, quality and remediation | Partially implemented | Chinese-aware evaluation, Graph-aware ranking foundations, deterministic lint/trust, remediation persistence/API, quality artifacts and stage status | Complete the quality workbench, local rebuild semantics, PostgreSQL search artifacts, CI quality thresholds and explainable ranking |
-| 6. Frontend migration | Vue experiment only; migration cancelled by product decision | Isolated Vue shell and CSP/build proof | Remove the Vue administration entry and dependencies in Phase E; keep the React product and `@vue/compiler-sfc` knowledge adapter |
-| 7. Shadow rollout and production | Not implemented | Existing health, backup and public-domain operations provide prerequisites | Complete shadow comparison, load tests, rollback rehearsal, project-based rollout and user-authorized production activation |
+| 2. Durable pipeline foundation | Implemented and merged | Database-led stage runs, pg-boss delivery/reconciliation/retry recovery, all ten executors, content-addressed artifacts, immutable release provenance, legacy/shadow isolation, and stage API/SSE | F04 proves the same path on representative production projects; F05 is the only phase that may activate it. |
+| 3. Knowledge IR and adapters | Implemented and merged | Immutable convert artifacts, Web/Vue/document/config extraction, bounded CSV/XLSX processing, deterministic synthesis, and opt-in manual-build LLM fallback | F04 validates production-sized representative sources and fallback evidence. |
+| 4. Graph | Implemented and merged | Pipeline-produced Graph persistence, project-scoped REST/MCP reads, comparison output, Mermaid/Markmap artifacts, and React graph browsing | F04 compares representative legacy and shadow Graph results without publishing a pipeline release. |
+| 5. Retrieval, quality and remediation | Implemented and merged | PostgreSQL search artifacts, Chinese-aware evaluation gates, explainable ranking, governance workbench, Trust/Lint, and scoped remediation candidates | F04 validates administrator/member/reader flows and preserves the project-admin publication boundary. |
+| 6. Frontend migration | React-only console completed | React is the sole administration entry; Vue runtime/route assets are removed while `@vue/compiler-sfc` remains a server-side knowledge parser dependency | F04 performs desktop/mobile product acceptance on the retained React product. |
+| 7. Shadow rollout and production | F01-F03 implemented; F04 in progress | Administrator-only shadow comparison, PostgreSQL-backed load guardrails, immutable legacy rollback, fresh trusted CI verification, production backup, and `shadow` deployment | Complete an administrator test project, then the project-level role rollout and its 24-hour observations; do not enable `active` before F05 authorization |
+
+## Phase F rollout evidence
+
+| Item | Result | Evidence boundary |
+| --- | --- | --- |
+| F01 shadow comparison | Implemented and merged | Workspace-administrator-only comparison API reads persisted legacy and pipeline artifacts without changing a release. |
+| F02 load guardrails | Implemented and merged | Tests cover ignored dependency directories, valid-file limits, concurrent imports/builds/searches, memory, and search latency. |
+| F03 rollback | Implemented and merged | Only a published legacy release can atomically become current again; provenance and pipeline artifacts remain immutable. |
+| F04 server preparation | Complete | A verified backup ran before deployment; the production app is healthy with `DEVKH_KNOWLEDGE_KERNEL_MODE=shadow`. Legacy remains the formal read path. The post-deployment monitor also passed after the installed operations scripts were synchronized. |
+| F04 operations follow-up | Remediated | The monitor and recovery helper incorrectly treated the first grouped `restic snapshots --latest 1` result as globally newest. `898b008` and `62bc177` now select the latest remote timestamp explicitly; the installed backup script and protected configuration also include artifact storage. A manual run and the next scheduled monitor run completed with no failures. |
+| F04 project rollout | In progress | The administrator test project completed import, legacy release and shadow comparison. Real temporary project-admin/member/reader sessions verified project-admin member-role management (`200`), member read/build (`200`/`202`), reader read (`200`), and reader cross-project denial (`403 PROJECT_ACCESS_DENIED`); the member-triggered shadow build completed all 10 stages. The temporary identities and sessions were deleted after the check. `15fe4b3` makes Compose pass the production `shadow` mode into the app, which was rechecked from the running container. The operational monitor now fails on more than one shadow build with a terminal failed stage in the trailing 24 hours, after discounting attempts that later succeeded. Desktop/mobile browser acceptance and the 24-hour role observation remain required before claiming completion. A workstation command-line TLS reset is a local tooling symptom, not evidence that the public site is unavailable. |
+| F05 activation | Not started | `active` remains a configuration error before explicit user authorization after all F04 evidence is complete. |
 
 ## Release-gate policy
 
 - Existing implementations are audited and completed in place; they are not rewritten without a failed requirement or test.
-- A phase cannot merge while either `verify` or `container-smoke` is red. The private repository enforces this through `npm run phase:merge`, which dispatches the trusted `phase-merge.yml` workflow from `main` because its GitHub account plan does not provide private branch protection. Phase B must additionally close the queued/running stage reconciliation and interrupted-run recovery gate before its own review can pass.
+- A phase cannot merge while either `verify` or `container-smoke` is red. The private repository enforces this through `npm run phase:merge`, which dispatches the trusted `phase-merge.yml` workflow from `main` because its GitHub account plan does not provide private branch protection. The Phase B queued/running reconciliation and interrupted-run recovery gate is merged and remains covered by the PostgreSQL integration suite.
 - PostgreSQL integration tests must execute with a real database for a release result; a conditional skip is not a release pass.
 - A production change requires a separate user authorization during Phase F.
 - `docker-compose.override.yml` is a local operator file and must remain untracked.
+- A `shadow` deployment changes only future build processing. It cannot change the provenance or content read by an existing legacy release.

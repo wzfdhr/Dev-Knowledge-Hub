@@ -35,6 +35,7 @@ services:
       DEVKH_MASTER_KEY: ${DEVKH_MASTER_KEY:?set DEVKH_MASTER_KEY}
       DEVKH_SESSION_SECRET: ${DEVKH_SESSION_SECRET:?set DEVKH_SESSION_SECRET}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://${DEVKH_DOMAIN:?set DEVKH_DOMAIN}}
+      DEVKH_KNOWLEDGE_KERNEL_MODE: ${DEVKH_KNOWLEDGE_KERNEL_MODE:-legacy}
     volumes:
       - snapshot_data:/var/lib/devkh/snapshots
       - repository_mirrors:/var/lib/devkh/repos

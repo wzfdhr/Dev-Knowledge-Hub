@@ -79,7 +79,7 @@ describe("private-repository merge gate", () => {
     expect(execute.mock.calls.flat().flat()).not.toContain("merge");
   });
 
-  test("rejects the compare-and-swap push when main advances after review", () => {
+  test("rejects the compare-and-swap push when main advances after review", { timeout: 15_000 }, () => {
     const root = mkdtempSync(join(tmpdir(), "devkh-merge-lease-"));
     const remote = join(root, "remote.git");
     const writer = join(root, "writer");

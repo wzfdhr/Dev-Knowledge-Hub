@@ -33,6 +33,21 @@ export function canEnableLlmBuild(
   return workspaceRole === "admin" || projectRole === "admin";
 }
 
+export function suggestNextReleaseVersion(releases: Array<Pick<Release, "version">>): string {
+  let highest: [number, number, number] | null = null;
+  for (const release of releases) {
+    const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(release.version);
+    if (!match) continue;
+    const candidate: [number, number, number] = [Number(match[1]), Number(match[2]), Number(match[3])];
+    if (!highest || candidate[0] > highest[0]
+      || (candidate[0] === highest[0] && candidate[1] > highest[1])
+      || (candidate[0] === highest[0] && candidate[1] === highest[1] && candidate[2] > highest[2])) {
+      highest = candidate;
+    }
+  }
+  return highest ? `${highest[0]}.${highest[1]}.${highest[2] + 1}` : "1.0.0";
+}
+
 export function derivePrimaryAction(state: OverviewState): { kind: PrimaryKind; label: string } {
   if (!state.repository) return { kind: "connect", label: "连接仓库" };
   const latestBuild = state.builds[0];
@@ -55,6 +70,16 @@ export function derivePrimaryAction(state: OverviewState): { kind: PrimaryKind; 
 
 const snapshotKey = "devkh:last-snapshot";
 const terminal = new Set(["ready", "published", "failed"]);
+
+export function shouldPollShadowPipeline(
+  legacyStatus: Build["status"] | null,
+  pipelineStatus: Build["status"] | null
+): boolean {
+  return Boolean(legacyStatus && (
+    !terminal.has(legacyStatus)
+    || (pipelineStatus && !terminal.has(pipelineStatus))
+  ));
+}
 
 export function ProjectVersionsPage({ api }: { api: ApiClient }) {
   const navigate = useNavigate();
@@ -118,7 +143,10 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
     queryFn: () => api.getBuildStages(latestBuild!.id),
     enabled: Boolean(latestBuild),
     retry: false,
-    refetchInterval: latestBuild && !terminal.has(latestBuild.status) ? 3000 : false
+    refetchInterval: (query) => shouldPollShadowPipeline(
+      latestBuild?.status ?? null,
+      query.state.data?.pipelineStatus ?? null
+    ) ? 3000 : false
   });
   const requiredLoading = Boolean(repository) && (buildsQuery.isLoading || releasesQuery.isLoading || repositoryStatusQuery.isLoading);
   const blockingError = repositoryQuery.error
@@ -193,7 +221,10 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
     if (["start-build", "retry-build"].includes(action.kind) && effectiveSnapshotId) {
       start.mutate({ snapshotId: effectiveSnapshotId, allowLlm: canUseLlm && allowLlm });
     }
-    if (action.kind === "review") setReviewBuild(latestBuild?.status === "ready" ? latestBuild : null);
+    if (action.kind === "review") {
+      setVersion(suggestNextReleaseVersion(releases));
+      setReviewBuild(latestBuild?.status === "ready" ? latestBuild : null);
+    }
     if (action.kind === "publish") {
       const draft = releases.find((release) => release.buildId === latestBuild?.id && !release.publishedAt);
       if (draft) publish.mutate(draft.id);

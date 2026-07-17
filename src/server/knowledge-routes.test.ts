@@ -472,6 +472,62 @@ describe("knowledge API contracts", () => {
     await app.close();
   });
 
+  test("returns a stable conflict when a release version already exists", async () => {
+    const { app, store, cookie, repositoryId, workspaceId, index } = await authenticatedApp();
+    const createReadyBuild = async (commitSha: string) => {
+      const build = (await store.createBuild({
+        workspaceId,
+        repositoryId,
+        snapshotId: "11111111-1111-4111-8111-111111111111",
+        snapshotPath: fixtureRoot,
+        commitSha
+      })).build;
+      await store.saveKnowledge({ build, index, output: await generateKnowledge(index) });
+      await store.transitionBuild(build.id, "queued", "ready");
+      return build;
+    };
+    const first = await createReadyBuild("a".repeat(40));
+    const second = await createReadyBuild("b".repeat(40));
+    const headers = { cookie, ...csrfHeaders(cookie) };
+
+    expect((await app.inject({
+      method: "POST", url: "/api/releases", headers,
+      payload: { buildId: first.id, version: "1.0.0" }
+    })).statusCode).toBe(201);
+
+    const duplicate = await app.inject({
+      method: "POST", url: "/api/releases", headers,
+      payload: { buildId: second.id, version: "1.0.0" }
+    });
+    expect(duplicate.statusCode).toBe(409);
+    expect(duplicate.json().error).toEqual({
+      code: "RELEASE_VERSION_EXISTS",
+      message: "A release with this version already exists"
+    });
+    expect(duplicate.body).not.toContain("duplicate key");
+    await app.close();
+  });
+
+  test("hides the PostgreSQL release-version constraint from API responses", async () => {
+    const { app, store, cookie } = await authenticatedApp();
+    vi.spyOn(store, "createReleaseDraft").mockRejectedValue(Object.assign(
+      new Error("duplicate key value violates unique constraint \"releases_repository_version_idx\""),
+      { code: "23505", constraint: "releases_repository_version_idx" }
+    ));
+
+    const response = await app.inject({
+      method: "POST", url: "/api/releases", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { buildId: "11111111-1111-4111-8111-111111111111", version: "1.0.0" }
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error).toEqual({
+      code: "RELEASE_VERSION_EXISTS",
+      message: "A release with this version already exists"
+    });
+    expect(response.body).not.toContain("releases_repository_version_idx");
+    await app.close();
+  });
+
   test("rejects a malformed exact release ID before querying the store", async () => {
     const { app, store, cookie } = await authenticatedApp();
     const getRelease = vi.spyOn(store, "getRelease");

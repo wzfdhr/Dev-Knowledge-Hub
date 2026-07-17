@@ -104,6 +104,9 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   await page.goto("/members");
   await page.getByRole("button", { name: "添加成员" }).click();
   const createMemberPanel = page.locator(".members-page .panel");
+  await expect(createMemberPanel.getByLabel("邮箱")).toHaveAttribute("autocomplete", "off");
+  await expect(createMemberPanel.getByLabel("初始密码")).toHaveAttribute("autocomplete", "new-password");
+  await page.screenshot({ path: "test-results/member-creation-1440x1024.png", fullPage: true });
   await createMemberPanel.getByLabel("邮箱").fill("collaborator@example.com");
   await createMemberPanel.getByLabel("初始密码").fill("correct horse battery staple");
   await createMemberPanel.getByRole("button", { name: "创建成员" }).click();

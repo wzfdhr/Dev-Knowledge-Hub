@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
@@ -53,15 +53,37 @@ describe("KnowledgeGraphExplorer", () => {
     expect(onSelectNode).toHaveBeenCalledWith("symbol-client");
   });
 
-  test("marks candidate relationships as dashed and supports zoom reset", async () => {
+  test("selects edges and marks candidate relationships as dashed", async () => {
     const user = userEvent.setup();
-    render(<KnowledgeGraphExplorer layout={layout} selectedNodeId={null} onSelectNode={vi.fn()} onSelectEdge={vi.fn()} />);
+    const onSelectEdge = vi.fn();
+    render(<KnowledgeGraphExplorer layout={layout} selectedNodeId={null} onSelectNode={vi.fn()} onSelectEdge={onSelectEdge} />);
 
     expect(screen.getByRole("button", { name: "候选关系 imports" })).toHaveAttribute("stroke-dasharray", "6 5");
+    expect(screen.getByRole("button", { name: "事实关系 contains" })).not.toHaveAttribute("stroke-dasharray");
+    await user.click(screen.getByRole("button", { name: "候选关系 imports" }));
+    expect(onSelectEdge).toHaveBeenCalledWith("candidate-import");
+  });
+
+  test("pans only on the canvas background and resets a changed view", async () => {
+    const user = userEvent.setup();
+    render(<KnowledgeGraphExplorer layout={layout} selectedNodeId={null} onSelectNode={vi.fn()} onSelectEdge={vi.fn()} />);
+    const svg = screen.getByRole("group", { name: "知识图谱画布" });
+    const transform = svg.querySelector("g")!;
+
+    fireEvent.pointerDown(svg, { button: 0, isPrimary: true, clientX: 20, clientY: 30 });
+    fireEvent.pointerMove(svg, { button: 0, isPrimary: true, clientX: 50, clientY: 45 });
+    expect(transform).toHaveAttribute("transform", "translate(30 15)");
     expect(screen.getByText("缩放 100%")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "放大图谱" }));
     expect(screen.getByText("缩放 125%")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "重置图谱视图" }));
     expect(screen.getByText("缩放 100%")).toBeVisible();
+    expect(transform).toHaveAttribute("transform", "translate(0 0)");
+  });
+
+  test("does not expose edge controls without an edge selection callback", () => {
+    render(<KnowledgeGraphExplorer layout={layout} selectedNodeId={null} onSelectNode={vi.fn()} />);
+
+    expect(screen.queryByRole("button", { name: "候选关系 imports" })).not.toBeInTheDocument();
   });
 });

@@ -612,6 +612,41 @@ describe("overview primary command", () => {
       .toBeVisible();
   });
 
+  test("explores a published graph and reads its release-bound source citation", async () => {
+    const user = userEvent.setup();
+    const graphApi = {
+      getProjectGraph: vi.fn().mockResolvedValue({
+        release: { id: "release-1", version: "1.0.0" },
+        format: "json",
+        data: {
+          nodes: [{
+            id: "module-api", projectId: "project-1", snapshotId: "snapshot-1", kind: "module", name: "API", qualifiedName: "src/api.ts", candidate: false,
+            sourceRefs: [{ snapshotId: "snapshot-1", path: "src/api.ts", startLine: 1, endLine: 2, blobHash: "a".repeat(40) }], attributes: {}
+          }, {
+            id: "symbol-client", projectId: "project-1", snapshotId: "snapshot-1", kind: "symbol", name: "Client", qualifiedName: "src/api.ts.Client", candidate: false,
+            sourceRefs: [{ snapshotId: "snapshot-1", path: "src/api.ts", startLine: 3, endLine: 5, blobHash: "a".repeat(40) }], attributes: {}
+          }],
+          edges: [{ id: "contains-client", fromNodeId: "module-api", toNodeId: "symbol-client", kind: "contains", candidate: false, confidence: 1, sourceRefs: [] }]
+        }
+      }),
+      getSource: vi.fn().mockResolvedValue({
+        path: "src/api.ts", startLine: 1, endLine: 2, commitSha: "b".repeat(40), blobHash: "a".repeat(40), content: "export const api = {};"
+      })
+    } as unknown as ApiClient;
+
+    renderPageAt(<Routes><Route path="/projects/:projectId/graph" element={<ProjectGraphPage api={graphApi} />} /></Routes>, "/projects/project-1/graph");
+
+    expect(await screen.findByRole("heading", { name: "知识图谱" })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "搜索图谱" })).toBeVisible();
+    const apiNode = screen.getAllByRole("button", { name: "API 模块" }).find((button) => button.closest(".knowledge-graph-node-list"))!;
+    await user.click(apiNode);
+    await user.click(screen.getByRole("button", { name: "src/api.ts 第 1 至 2 行" }));
+
+    expect(await screen.findByRole("complementary", { name: "来源代码" })).toHaveTextContent("export const api");
+    expect(graphApi.getProjectGraph).toHaveBeenCalledWith("project-1", "json");
+    expect(graphApi.getSource).toHaveBeenCalledWith({ path: "src/api.ts", startLine: 1, endLine: 2, releaseId: "release-1" });
+  });
+
   test("ignores an older failure after the latest build is published", async () => {
     sessionStorage.setItem("devkh:last-snapshot", JSON.stringify({
       snapshotId: "current-snap", commitSha: "b".repeat(40), ref: "main", fileCount: 4, unchanged: true

@@ -614,8 +614,11 @@ describe("overview primary command", () => {
 
   test("explores a published graph and reads its release-bound source citation", async () => {
     const user = userEvent.setup();
-    const graphApi = {
-      getProjectGraph: vi.fn().mockResolvedValue({
+    const clipboard = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText: clipboard } });
+    const getProjectGraph = vi.fn().mockImplementation((_projectId: string, format = "json") => {
+      if (format === "mermaid") return Promise.resolve({ release: { id: "release-1", version: "1.0.0" }, format, data: "flowchart TD\n  api[API]" });
+      return Promise.resolve({
         release: { id: "release-1", version: "1.0.0" },
         format: "json",
         data: {
@@ -628,7 +631,10 @@ describe("overview primary command", () => {
           }],
           edges: [{ id: "contains-client", fromNodeId: "module-api", toNodeId: "symbol-client", kind: "contains", candidate: false, confidence: 1, sourceRefs: [] }]
         }
-      }),
+      });
+    });
+    const graphApi = {
+      getProjectGraph,
       getSource: vi.fn().mockResolvedValue({
         path: "src/api.ts", startLine: 1, endLine: 2, commitSha: "b".repeat(40), blobHash: "a".repeat(40), content: "export const api = {};"
       })
@@ -637,14 +643,66 @@ describe("overview primary command", () => {
     renderPageAt(<Routes><Route path="/projects/:projectId/graph" element={<ProjectGraphPage api={graphApi} />} /></Routes>, "/projects/project-1/graph");
 
     expect(await screen.findByRole("heading", { name: "知识图谱" })).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent("当前筛选显示 2/2 个节点，1/1 条关系。");
+    expect(document.querySelector(".knowledge-graph-explorer.is-compact")).not.toBeInTheDocument();
+    const graphSearch = screen.getByRole("textbox", { name: "搜索图谱" });
+    await user.type(graphSearch, "no-match");
+    expect(screen.getByText("当前筛选条件下没有匹配的图谱节点。调整筛选或搜索条件后继续查看。")).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent("当前筛选显示 0/2 个节点，0/1 条关系。");
     expect(screen.getByRole("textbox", { name: "搜索图谱" })).toBeVisible();
+    await user.clear(graphSearch);
     const apiNode = screen.getAllByRole("button", { name: "API 模块" }).find((button) => button.closest(".knowledge-graph-node-list"))!;
     await user.click(apiNode);
+    expect(screen.getByRole("complementary", { name: "图谱详情" })).toHaveTextContent("知识版本1.0.0");
+    expect(screen.getByRole("complementary", { name: "图谱详情" })).toHaveTextContent("关联");
     await user.click(screen.getByRole("button", { name: "src/api.ts 第 1 至 2 行" }));
+    await user.click(screen.getByRole("button", { name: "复制 Mermaid" }));
 
     expect(await screen.findByRole("complementary", { name: "来源代码" })).toHaveTextContent("export const api");
-    expect(graphApi.getProjectGraph).toHaveBeenCalledWith("project-1", "json");
+    expect(screen.getByText("Mermaid 已复制到剪贴板。")).toBeVisible();
+    expect(getProjectGraph).toHaveBeenCalledWith("project-1", "json");
+    expect(getProjectGraph).toHaveBeenCalledWith("project-1", "mermaid", { releaseId: "release-1" });
+    expect(clipboard).toHaveBeenCalledWith("flowchart TD\n  api[API]");
     expect(graphApi.getSource).toHaveBeenCalledWith({ path: "src/api.ts", startLine: 1, endLine: 2, releaseId: "release-1" });
+
+    await user.type(graphSearch, "no-match");
+    await waitFor(() => expect(screen.queryByRole("complementary", { name: "来源代码" })).not.toBeInTheDocument());
+    expect(screen.getByRole("complementary", { name: "图谱详情" })).toHaveTextContent("选择图谱节点");
+  });
+
+  test("keeps graph controls available for an empty published graph", async () => {
+    const graphApi = {
+      getProjectGraph: vi.fn().mockResolvedValue({ release: { id: "release-1", version: "1.0.0" }, format: "json", data: { nodes: [], edges: [] } })
+    } as unknown as ApiClient;
+
+    renderPageAt(<Routes><Route path="/projects/:projectId/graph" element={<ProjectGraphPage api={graphApi} />} /></Routes>, "/projects/project-1/graph");
+
+    expect(await screen.findByRole("textbox", { name: "搜索图谱" })).toBeVisible();
+    expect(screen.getByText("当前发布版本没有可展示的图谱节点。")).toBeVisible();
+  });
+
+  test("uses a compact graph canvas for one published node without relationships", async () => {
+    const graphApi = {
+      getProjectGraph: vi.fn().mockResolvedValue({
+        release: { id: "release-1", version: "1.0.0" }, format: "json",
+        data: { nodes: [{ id: "module-readme", projectId: "project-1", snapshotId: "snapshot-1", kind: "module", name: "README.md", qualifiedName: "README.md", candidate: false, sourceRefs: [], attributes: {} }], edges: [] }
+      })
+    } as unknown as ApiClient;
+
+    renderPageAt(<Routes><Route path="/projects/:projectId/graph" element={<ProjectGraphPage api={graphApi} />} /></Routes>, "/projects/project-1/graph");
+
+    expect(await screen.findByRole("heading", { name: "知识图谱" })).toBeVisible();
+    expect(document.querySelector(".knowledge-graph-explorer.is-compact")).toBeInTheDocument();
+  });
+
+  test("shows a real graph request failure instead of an empty state", async () => {
+    const graphApi = {
+      getProjectGraph: vi.fn().mockRejectedValue(new ApiError(500, "GRAPH_UNAVAILABLE", "Graph read failed"))
+    } as unknown as ApiClient;
+
+    renderPageAt(<Routes><Route path="/projects/:projectId/graph" element={<ProjectGraphPage api={graphApi} />} /></Routes>, "/projects/project-1/graph");
+
+    expect(await screen.findByText("Graph read failed")).toBeVisible();
   });
 
   test("ignores an older failure after the latest build is published", async () => {

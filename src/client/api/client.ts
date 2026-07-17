@@ -21,6 +21,10 @@ export interface PaginationParams {
   offset: number;
 }
 
+export interface ProjectGraphRequestOptions {
+  releaseId?: string;
+}
+
 export interface RemediationListParams extends PaginationParams {
   state?: RemediationState;
   severity?: "error" | "warning" | "info";
@@ -100,7 +104,7 @@ export interface ApiClient {
   getRepositoryStatus(): Promise<RepositoryStatus>;
   syncRepository(): Promise<SnapshotSummary>;
   getProjectChanges(projectId: string): Promise<{ change: SnapshotChangeSummary | null }>;
-  getProjectGraph<F extends ProjectGraphFormat = "tree">(projectId: string, format?: F): Promise<ProjectGraphResponse<F>>;
+  getProjectGraph<F extends ProjectGraphFormat = "tree">(projectId: string, format?: F, options?: ProjectGraphRequestOptions): Promise<ProjectGraphResponse<F>>;
   getProjectKnowledgeQuality(projectId: string): Promise<ProjectKnowledgeQuality>;
   listProjectRemediations(projectId: string, params: RemediationListParams): Promise<{ remediations: Remediation[] }>;
   listProjectRemediationEvents(projectId: string, remediationId: string): Promise<{ events: RemediationEvent[] }>;
@@ -216,7 +220,11 @@ export const api: ApiClient = {
   getRepositoryStatus: () => request("/api/repositories/current/status"),
   syncRepository: () => request("/api/repositories/current/sync", { method: "POST" }),
   getProjectChanges: (projectId) => request(`/api/projects/${projectId}/changes`),
-  getProjectGraph: <F extends ProjectGraphFormat = "tree">(projectId: string, format: F = "tree" as F) => request<ProjectGraphResponse<F>>(`/api/projects/${encodeURIComponent(projectId)}/graph?format=${encodeURIComponent(format)}`),
+  getProjectGraph: <F extends ProjectGraphFormat = "tree">(projectId: string, format: F = "tree" as F, options?: ProjectGraphRequestOptions) => {
+    const params = new URLSearchParams({ format });
+    if (options?.releaseId) params.set("releaseId", options.releaseId);
+    return request<ProjectGraphResponse<F>>(`/api/projects/${encodeURIComponent(projectId)}/graph?${params}`);
+  },
   getProjectKnowledgeQuality: (projectId) => request(`/api/projects/${projectId}/knowledge-quality`),
   listProjectRemediations: (projectId, params) => request(listPath(
     `/api/projects/${encodeURIComponent(projectId)}/remediations`, params, {

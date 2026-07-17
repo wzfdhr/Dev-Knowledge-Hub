@@ -70,6 +70,22 @@ describe("build API client", () => {
   });
 });
 
+describe("project graph API client", () => {
+  test("pins graph exports to the selected published release", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      release: { id: "release / old", version: "1.0.0" }, format: "mermaid", data: "flowchart TD"
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.getProjectGraph("project / one", "mermaid", { releaseId: "release / old" });
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/projects/project%20%2F%20one/graph?format=mermaid&releaseId=release+%2F+old",
+      expect.objectContaining({ credentials: "same-origin" })
+    );
+  });
+});
+
 describe("project Codex API client", () => {
   test("sends only the selected filtered folder files with their relative paths", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({

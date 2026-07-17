@@ -1,6 +1,6 @@
 # Knowledge Kernel Delivery Matrix
 
-Updated: 2026-07-15
+Updated: 2026-07-17
 
 ## Phase A baseline
 
@@ -43,7 +43,18 @@ The supplemental commits remain separate commits in Phase A. They are existing w
 | 4. Graph | Core implementation present; pipeline integration incomplete | Graph construction, persistence, release-scoped queries, REST/MCP reads, Mermaid/Markmap exports and React graph page | Produce Graph through the durable pipeline, compare it with legacy output and keep visualization non-blocking |
 | 5. Retrieval, quality and remediation | Partially implemented | Chinese-aware evaluation, Graph-aware ranking foundations, deterministic lint/trust, remediation persistence/API, quality artifacts and stage status | Complete the quality workbench, local rebuild semantics, PostgreSQL search artifacts, CI quality thresholds and explainable ranking |
 | 6. Frontend migration | Vue experiment only; migration cancelled by product decision | Isolated Vue shell and CSP/build proof | Remove the Vue administration entry and dependencies in Phase E; keep the React product and `@vue/compiler-sfc` knowledge adapter |
-| 7. Shadow rollout and production | Not implemented | Existing health, backup and public-domain operations provide prerequisites | Complete shadow comparison, load tests, rollback rehearsal, project-based rollout and user-authorized production activation |
+| 7. Shadow rollout and production | F01-F03 implemented; F04 in progress | Administrator-only shadow comparison, PostgreSQL-backed load guardrails, immutable legacy rollback, fresh trusted CI verification, production backup, and `shadow` deployment | Complete an administrator test project, then the project-level role rollout and its 24-hour observations; do not enable `active` before F05 authorization |
+
+## Phase F rollout evidence
+
+| Item | Result | Evidence boundary |
+| --- | --- | --- |
+| F01 shadow comparison | Implemented and merged | Workspace-administrator-only comparison API reads persisted legacy and pipeline artifacts without changing a release. |
+| F02 load guardrails | Implemented and merged | Tests cover ignored dependency directories, valid-file limits, concurrent imports/builds/searches, memory, and search latency. |
+| F03 rollback | Implemented and merged | Only a published legacy release can atomically become current again; provenance and pipeline artifacts remain immutable. |
+| F04 server preparation | Complete | A verified backup ran before deployment; the production app is healthy with `DEVKH_KNOWLEDGE_KERNEL_MODE=shadow`. Legacy remains the formal read path. |
+| F04 project rollout | Pending | The administrator test-project flow and the subsequent 24-hour role observations require an externally reachable, authenticated administrator session. The current workstation's public network injects/resets TLS for the domain, so this evidence is intentionally not claimed yet. |
+| F05 activation | Not started | `active` remains a configuration error before explicit user authorization after all F04 evidence is complete. |
 
 ## Release-gate policy
 
@@ -52,3 +63,4 @@ The supplemental commits remain separate commits in Phase A. They are existing w
 - PostgreSQL integration tests must execute with a real database for a release result; a conditional skip is not a release pass.
 - A production change requires a separate user authorization during Phase F.
 - `docker-compose.override.yml` is a local operator file and must remain untracked.
+- A `shadow` deployment changes only future build processing. It cannot change the provenance or content read by an existing legacy release.

@@ -10,6 +10,7 @@ set -uo pipefail
 : "${MAX_DISK_USED_PERCENT:?missing MAX_DISK_USED_PERCENT}"
 : "${MAX_BACKUP_AGE_SECONDS:?missing MAX_BACKUP_AGE_SECONDS}"
 : "${MAX_IMPORT_FAILURE_RATE_PERCENT:?missing MAX_IMPORT_FAILURE_RATE_PERCENT}"
+: "${MAX_SHADOW_PIPELINE_FAILURES_24H:?missing MAX_SHADOW_PIPELINE_FAILURES_24H}"
 
 [[ "$COMPOSE_DIR" == /* ]] || {
   printf 'COMPOSE_DIR must be an absolute path\n' >&2
@@ -75,11 +76,33 @@ check_import_failure_rate() {
   (( total < 4 || failed * 100 <= total * MAX_IMPORT_FAILURE_RATE_PERCENT )) || failures+=("import_failure_rate")
 }
 
+check_shadow_pipeline_failures() {
+  local failed_builds
+  failed_builds="$(docker compose -f "$COMPOSE_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" exec -T postgres psql -U devkh -d dev_knowledge_hub -Atqc "
+    WITH latest_stage_attempt AS (
+      SELECT DISTINCT ON (build_job_id, stage) build_job_id, stage, status
+      FROM build_stage_runs
+      WHERE updated_at >= now() - interval '24 hours'
+      ORDER BY build_job_id, stage, attempt DESC
+    )
+    SELECT count(*)
+    FROM (
+      SELECT build_job_id
+      FROM latest_stage_attempt
+      GROUP BY build_job_id
+      HAVING bool_or(status = 'failed')
+    ) failed_builds
+  ")" || { failures+=("shadow_pipeline_query"); return; }
+  [[ "$failed_builds" =~ ^[0-9]+$ ]] || { failures+=("shadow_pipeline_query"); return; }
+  (( failed_builds <= MAX_SHADOW_PIPELINE_FAILURES_24H )) || failures+=("shadow_pipeline_failures")
+}
+
 check_application
 check_containers
 check_disk
 check_backup
 check_import_failure_rate
+check_shadow_pipeline_failures
 
 if (( ${#failures[@]} )); then
   write_status failed

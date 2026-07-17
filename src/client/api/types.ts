@@ -251,18 +251,23 @@ export interface KnowledgeGraphNode {
   qualifiedName: string;
   candidate: boolean;
   sourceRefs: GraphSourceRef[];
-  attributes: Record<string, string | number | boolean>;
+  attributes: Record<string, unknown>;
 }
-export interface KnowledgeGraphEdge {
+interface KnowledgeGraphEdgeBase {
   id: string;
   fromNodeId: string;
   toNodeId: string;
   kind: GraphEdgeKind;
-  candidate: boolean;
-  candidateReason?: string;
   confidence: number;
   sourceRefs: GraphSourceRef[];
 }
+export type KnowledgeGraphEdge = (KnowledgeGraphEdgeBase & {
+  candidate: false;
+  candidateReason?: never;
+}) | (KnowledgeGraphEdgeBase & {
+  candidate: true;
+  candidateReason: string;
+});
 export interface KnowledgeGraph {
   nodes: KnowledgeGraphNode[];
   edges: KnowledgeGraphEdge[];
@@ -274,7 +279,7 @@ export interface GraphTreeNode {
   candidate: boolean;
   children: GraphTreeNode[];
 }
-export interface GraphTreeCrossLink extends KnowledgeGraphEdge { cycle: boolean }
+export type GraphTreeCrossLink = KnowledgeGraphEdge & { cycle: boolean };
 export type ProjectGraphFormat = "json" | "tree" | "mermaid" | "markmap";
 export interface ProjectGraphDataByFormat {
   json: KnowledgeGraph;
@@ -282,11 +287,11 @@ export interface ProjectGraphDataByFormat {
   mermaid: string;
   markmap: string;
 }
-export interface ProjectGraphResponse<F extends ProjectGraphFormat = ProjectGraphFormat> {
+export type ProjectGraphResponse<F extends ProjectGraphFormat = ProjectGraphFormat> = F extends ProjectGraphFormat ? {
   release: { id: string; version: string } | null;
   format: F;
   data: ProjectGraphDataByFormat[F] | null;
-}
+} : never;
 export interface KnowledgeChunk {
   id: string;
   heading: string | null;

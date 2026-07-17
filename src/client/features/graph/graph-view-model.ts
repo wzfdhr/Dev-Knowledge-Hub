@@ -37,7 +37,7 @@ export interface PositionedGraphNode extends KnowledgeGraphNode {
   height: number;
 }
 
-export interface PositionedGraphEdge extends KnowledgeGraphEdge { path: string }
+export type PositionedGraphEdge = KnowledgeGraphEdge & { path: string };
 
 export interface GraphLayout {
   nodes: PositionedGraphNode[];
@@ -66,12 +66,13 @@ function visibleEdges(edges: readonly KnowledgeGraphEdge[], visibleNodeIds: Read
 }
 
 export function filterGraph({ graph, query, enabledKinds, includeCandidates, limit = DEFAULT_NODE_LIMIT }: FilterGraphInput): FilteredGraph {
-  const availableNodes = graph.nodes.filter((node) => enabledKinds.has(node.kind) && (includeCandidates || !node.candidate)).sort(compareNodes);
+  const availableNodes = graph.nodes.filter((node) => enabledKinds.has(node.kind)).sort(compareNodes);
   const normalizedQuery = query.trim().toLocaleLowerCase();
-  const matchingIds = normalizedQuery
-    ? new Set(availableNodes.filter((node) => matchesQuery(node, normalizedQuery)).map((node) => node.id))
-    : new Set(availableNodes.map((node) => node.id));
-  const contextIds = new Set(matchingIds);
+  const matchingNodes = normalizedQuery
+    ? availableNodes.filter((node) => matchesQuery(node, normalizedQuery))
+    : availableNodes;
+  const matchingIds = new Set(matchingNodes.map((node) => node.id));
+  const contextIds = new Set<string>();
 
   if (normalizedQuery) {
     for (const edge of graph.edges) {
@@ -81,10 +82,9 @@ export function filterGraph({ graph, query, enabledKinds, includeCandidates, lim
     }
   }
 
-  const contextNodes = availableNodes.filter((node) => contextIds.has(node.id));
-  const selectedNodes = normalizedQuery
-    ? [...contextNodes, ...availableNodes.filter((node) => !contextIds.has(node.id))]
-    : availableNodes;
+  const contextNodes = availableNodes.filter((node) => !matchingIds.has(node.id) && contextIds.has(node.id));
+  const fillNodes = availableNodes.filter((node) => !matchingIds.has(node.id) && !contextIds.has(node.id));
+  const selectedNodes = [...matchingNodes, ...contextNodes, ...fillNodes];
   const nodes = selectedNodes.slice(0, Math.max(1, limit));
   const visibleNodeIds = new Set(nodes.map((node) => node.id));
 
@@ -104,7 +104,7 @@ export function describeGraphReduction(graph: FilteredGraph): string | null {
 function parentModuleIds(graph: FilteredGraph): Map<string, string> {
   const modules = new Set(graph.nodes.filter((node) => node.kind === "module").map((node) => node.id));
   const parents = new Map<string, string>();
-  for (const edge of graph.edges) {
+  for (const edge of [...graph.edges].sort((left, right) => left.id.localeCompare(right.id))) {
     if (edge.kind === "contains" && !edge.candidate && modules.has(edge.fromNodeId)) parents.set(edge.toNodeId, edge.fromNodeId);
   }
   return parents;
@@ -149,7 +149,7 @@ export function layoutGraph(graph: FilteredGraph): GraphLayout {
   }));
   const nodes = [...positionedModules, ...positionedChildren, ...positionedUngrouped];
   const byId = new Map(nodes.map((node) => [node.id, node]));
-  const edges = graph.edges.flatMap((edge) => {
+  const edges = [...graph.edges].sort((left, right) => left.id.localeCompare(right.id)).flatMap((edge) => {
     const from = byId.get(edge.fromNodeId);
     const to = byId.get(edge.toNodeId);
     return from && to ? [{ ...edge, path: edgePath(from, to) }] : [];

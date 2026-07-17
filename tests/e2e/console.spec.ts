@@ -73,6 +73,27 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   await page.getByRole("button", { name: "发布版本" }).click();
   await expect(page.getByText("1.0.0").first()).toBeVisible();
 
+  const graphFixture = await request.post("/__test__/graph");
+  expect(graphFixture.ok()).toBeTruthy();
+
+  await page.goto(`/projects/${projectId}/graph`);
+  await expect(page.getByRole("heading", { name: "知识图谱" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "搜索图谱" })).toBeVisible();
+  const graphNodes = page.locator(".knowledge-graph-node-list button");
+  await expect(graphNodes.first()).toBeVisible();
+  await graphNodes.first().click();
+  await expect(page.getByRole("complementary", { name: "图谱详情" })).toContainText(/路径|可信度/);
+  await page.screenshot({ path: "test-results/graph-1440x1024.png", fullPage: true });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`/projects/${projectId}/graph`);
+  await expect(page.getByRole("heading", { name: "知识图谱" })).toBeVisible();
+  const graphOverflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(graphOverflow).toBeLessThanOrEqual(0);
+  await page.screenshot({ path: "test-results/graph-390x844.png", fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1024 });
+  await page.goto(`/projects/${projectId}/versions`);
+
   const shadowFailure = await request.post("/__test__/shadow-failure");
   expect(shadowFailure.ok()).toBeTruthy();
   await page.reload();

@@ -63,6 +63,45 @@ app.post("/__test__/feedback", async (_request, reply) => {
   }) });
 });
 
+app.post("/__test__/graph", async (_request, reply) => {
+  const workspace = await store.defaultWorkspace();
+  const repository = workspace ? await store.currentRepository(workspace.id) : null;
+  const release = workspace && repository ? await store.currentRelease(workspace.id, repository.id) : null;
+  if (!workspace || !repository || !release || !release.publishedAt) return reply.code(409).send({ error: "Publish a release first" });
+  if (await store.getKnowledgeGraph(workspace.id, repository.projectId, release.buildId)) return { created: false };
+  const source = (await store.listSnapshotFiles(workspace.id, release.snapshotId)).at(0);
+  if (!source) return reply.code(409).send({ error: "Release snapshot has no source files" });
+  const sourceRef = {
+    snapshotId: release.snapshotId,
+    path: source.path,
+    startLine: 1,
+    endLine: 1,
+    blobHash: source.contentHash
+  };
+  const moduleId = `e2e-module-${release.buildId}`;
+  await store.saveKnowledgeGraph({
+    workspaceId: workspace.id,
+    projectId: repository.projectId,
+    snapshotId: release.snapshotId,
+    buildId: release.buildId,
+    graph: {
+      nodes: [{
+        id: moduleId,
+        projectId: repository.projectId,
+        snapshotId: release.snapshotId,
+        kind: "module",
+        name: path.posix.basename(source.path),
+        qualifiedName: source.path,
+        candidate: false,
+        sourceRefs: [sourceRef],
+        attributes: { language: source.language ?? "unknown" }
+      }],
+      edges: []
+    }
+  });
+  return { created: true };
+});
+
 app.post("/__test__/shadow-failure", async (_request, reply) => {
   const workspace = await store.defaultWorkspace();
   const repository = workspace ? await store.currentRepository(workspace.id) : null;

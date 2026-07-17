@@ -5,6 +5,7 @@ import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledg
 import {
   boundedKnowledgePage,
   FeedbackNotAcknowledgedError,
+  InvalidLegacyReleaseRollbackError,
   InvalidFeedbackTransitionError,
   LastProjectAdminError,
   LastWorkspaceAdminError,
@@ -2194,6 +2195,37 @@ export class MemoryAppStore implements AppStore {
     return release;
   }
 
+  async rollbackReleaseToLegacy(workspaceId: string, releaseId: string, actorId: string) {
+    const release = this.releases.find((candidate) =>
+      candidate.workspaceId === workspaceId && candidate.id === releaseId
+    );
+    const repository = release && this.repositories.find((candidate) =>
+      candidate.workspaceId === workspaceId && candidate.id === release.repositoryId
+    );
+    if (!release || !repository || release.publishedAt === null || release.kernelMode !== "legacy") {
+      throw new InvalidLegacyReleaseRollbackError();
+    }
+    const channelKey = `${workspaceId}:${release.repositoryId}:current`;
+    const previousReleaseId = this.releaseChannels.get(channelKey) ?? null;
+    if (previousReleaseId === release.id) return { release, previousReleaseId };
+    this.releaseChannels.set(channelKey, release.id);
+    try {
+      await this.recordAudit({
+        workspaceId,
+        actorId,
+        action: "release.rolled_back",
+        resourceType: "release",
+        resourceId: release.id,
+        metadata: { projectId: repository.projectId, previousReleaseId }
+      });
+      return { release, previousReleaseId };
+    } catch (error) {
+      if (previousReleaseId === null) this.releaseChannels.delete(channelKey);
+      else this.releaseChannels.set(channelKey, previousReleaseId);
+      throw error;
+    }
+  }
+
   async currentRelease(
     workspaceId: string,
     repositoryId: string,
@@ -2247,6 +2279,12 @@ export class MemoryAppStore implements AppStore {
       page.workspaceId === workspaceId && page.buildId === release.buildId
     ).sort((left, right) => left.slug.localeCompare(right.slug) || left.id.localeCompare(right.id))
       .slice(offset, offset + limit).map(boundedKnowledgePage);
+  }
+
+  async listKnowledgePagesForBuild(workspaceId: string, buildId: string): Promise<KnowledgePageRecord[]> {
+    return this.knowledgePages.filter((page) => page.workspaceId === workspaceId && page.buildId === buildId)
+      .sort((left, right) => left.slug.localeCompare(right.slug) || left.id.localeCompare(right.id))
+      .map(boundedKnowledgePage);
   }
 
   async countKnowledgePages(workspaceId: string, releaseId?: string): Promise<number> {
@@ -2429,6 +2467,22 @@ export class MemoryAppStore implements AppStore {
     const release = this.releaseById(workspaceId, releaseId);
     const index = release ? this.indexes.get(release.buildId) : undefined;
     if (!index) return { symbols: [], dependencies: [] };
+    return {
+      symbols: index.symbols.map((symbol) => ({
+        name: symbol.name, kind: symbol.kind, path: symbol.path,
+        startLine: symbol.startLine, endLine: symbol.endLine, exported: symbol.exported
+      })),
+      dependencies: index.edges.map((edge) => ({
+        source: edge.source, target: edge.target, kind: edge.kind, path: edge.citation.path,
+        targetPath: edge.targetPath ?? null,
+        startLine: edge.citation.startLine, endLine: edge.citation.endLine
+      }))
+    };
+  }
+
+  async knowledgeMetadataForBuild(workspaceId: string, buildId: string): Promise<KnowledgeMetadata> {
+    const index = this.indexes.get(buildId);
+    if (!index || !(await this.getBuild(workspaceId, buildId))) return { symbols: [], dependencies: [] };
     return {
       symbols: index.symbols.map((symbol) => ({
         name: symbol.name, kind: symbol.kind, path: symbol.path,

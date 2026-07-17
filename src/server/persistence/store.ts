@@ -262,6 +262,13 @@ export class LastWorkspaceAdminError extends Error {
   }
 }
 
+export class InvalidLegacyReleaseRollbackError extends Error {
+  constructor() {
+    super("Only a published legacy release can be restored");
+    this.name = "InvalidLegacyReleaseRollbackError";
+  }
+}
+
 export interface AuditEventInput {
   workspaceId: string;
   actorId?: string;
@@ -560,6 +567,11 @@ export interface ReleaseRecord {
   publishedAt: Date | null;
 }
 
+export interface ReleaseRollbackResult {
+  release: ReleaseRecord;
+  previousReleaseId: string | null;
+}
+
 export type SearchResultKind = "symbol" | "module" | "path" | "dependency-neighbor" | "page";
 
 export interface KnowledgeSearchResult {
@@ -629,6 +641,7 @@ export interface KnowledgeStore {
     releaseId?: string,
     pagination?: Pagination
   ): Promise<KnowledgePageRecord[]>;
+  listKnowledgePagesForBuild(workspaceId: string, buildId: string): Promise<KnowledgePageRecord[]>;
   getKnowledgePage(workspaceId: string, pageId: string): Promise<KnowledgePageRecord | null>;
   findKnowledgePageBySlug(
     workspaceId: string,
@@ -657,6 +670,7 @@ export interface KnowledgeStore {
     releaseId?: string
   ): Promise<KnowledgeSearchResult[]>;
   knowledgeMetadata(workspaceId: string, releaseId: string): Promise<KnowledgeMetadata>;
+  knowledgeMetadataForBuild(workspaceId: string, buildId: string): Promise<KnowledgeMetadata>;
   createReleaseDraft(
     workspaceId: string,
     repositoryId: string,
@@ -664,6 +678,11 @@ export interface KnowledgeStore {
     version: string
   ): Promise<ReleaseRecord>;
   publishRelease(workspaceId: string, releaseId: string, channel?: string): Promise<ReleaseRecord>;
+  rollbackReleaseToLegacy(
+    workspaceId: string,
+    releaseId: string,
+    actorId: string
+  ): Promise<ReleaseRollbackResult>;
   currentRelease(
     workspaceId: string,
     repositoryId: string,

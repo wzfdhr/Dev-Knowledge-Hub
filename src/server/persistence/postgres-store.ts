@@ -3,6 +3,7 @@ import type { Pool, PoolClient, QueryResultRow } from "pg";
 import {
   boundedKnowledgePage,
   FeedbackNotAcknowledgedError,
+  InvalidLegacyReleaseRollbackError,
   InvalidFeedbackTransitionError,
   LastProjectAdminError,
   LastWorkspaceAdminError,
@@ -3987,6 +3988,51 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     }
   }
 
+  async rollbackReleaseToLegacy(workspaceId: string, releaseId: string, actorId: string) {
+    return this.transaction(async (client) => {
+      const selected = await client.query<ReleaseRow & { project_id: string }>(
+        `SELECT r.id, r.workspace_id, r.repository_id, r.build_job_id, r.snapshot_id,
+                r.version, r.kernel_mode, r.package_artifact_id, r.created_at, r.published_at,
+                repository.project_id
+         FROM releases r
+         JOIN repositories repository ON repository.id = r.repository_id
+           AND repository.workspace_id = r.workspace_id
+         WHERE r.workspace_id = $1 AND r.id = $2
+         FOR UPDATE`,
+        [workspaceId, releaseId]
+      );
+      const release = selected.rows[0];
+      if (!release || release.published_at === null || release.kernel_mode !== "legacy") {
+        throw new InvalidLegacyReleaseRollbackError();
+      }
+      const current = await client.query<{ release_id: string }>(
+        `SELECT release_id FROM release_channels
+         WHERE workspace_id = $1 AND repository_id = $2 AND name = 'current'
+         FOR UPDATE`,
+        [workspaceId, release.repository_id]
+      );
+      const previousReleaseId = current.rows[0]?.release_id ?? null;
+      if (previousReleaseId !== release.id) {
+        await client.query(
+          `INSERT INTO release_channels (workspace_id, repository_id, release_id, name)
+           VALUES ($1, $2, $3, 'current')
+           ON CONFLICT (repository_id, name) DO UPDATE
+           SET release_id = EXCLUDED.release_id, updated_at = now()`,
+          [workspaceId, release.repository_id, release.id]
+        );
+        await this.insertAudit(client, {
+          workspaceId,
+          actorId,
+          action: "release.rolled_back",
+          resourceType: "release",
+          resourceId: release.id,
+          metadata: { projectId: release.project_id, previousReleaseId }
+        });
+      }
+      return { release: releaseRecord(release), previousReleaseId };
+    });
+  }
+
   async currentRelease(
     workspaceId: string,
     repositoryId: string,
@@ -4061,6 +4107,27 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
        WHERE p.workspace_id = $1 AND (($2::uuid IS NOT NULL AND r.id = $2) OR ($2::uuid IS NULL AND rc.id IS NOT NULL))
        GROUP BY p.id ORDER BY p.slug, p.id LIMIT $3 OFFSET $4`,
       [workspaceId, releaseId ?? null, limit, offset]
+    );
+    return rows.map(knowledgePageRecord);
+  }
+
+  async listKnowledgePagesForBuild(workspaceId: string, buildId: string): Promise<KnowledgePageRecord[]> {
+    const { rows } = await this.pool.query<KnowledgePageRow>(
+      `SELECT p.id, p.workspace_id, p.repository_id, p.build_job_id, p.slug, p.title,
+              left(p.body, 20000) AS body,
+              COALESCE(jsonb_agg(jsonb_build_object(
+                'id', c.id, 'heading', c.heading, 'content', left(c.content, 8000),
+                'citations', jsonb_path_query_array(c.citations, '$[0 to 7]')
+              ) ORDER BY c.position, c.id) FILTER (WHERE c.id IS NOT NULL), '[]'::jsonb) AS chunks
+       FROM knowledge_pages p
+       LEFT JOIN LATERAL (
+         SELECT * FROM knowledge_chunks selected_chunk
+         WHERE selected_chunk.page_id = p.id
+         ORDER BY selected_chunk.position, selected_chunk.id LIMIT 50
+       ) c ON true
+       WHERE p.workspace_id = $1 AND p.build_job_id = $2
+       GROUP BY p.id ORDER BY p.slug, p.id`,
+      [workspaceId, buildId]
     );
     return rows.map(knowledgePageRecord);
   }
@@ -4367,6 +4434,41 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         source: row.source_name, target: row.target_name, kind: row.kind, path: row.source_path,
         targetPath: row.target_path,
         startLine: row.start_line, endLine: row.end_line
+      }))
+    };
+  }
+
+  async knowledgeMetadataForBuild(workspaceId: string, buildId: string): Promise<KnowledgeMetadata> {
+    const symbols = await this.pool.query<{
+      name: string; kind: string; path: string; start_line: number; end_line: number; exported: boolean;
+    }>(
+      `SELECT cs.name, cs.kind, sf.path, cs.start_line, cs.end_line, cs.exported
+       FROM build_jobs b
+       JOIN source_files sf ON sf.snapshot_id = b.snapshot_id
+       JOIN code_symbols cs ON cs.source_file_id = sf.id
+       WHERE b.workspace_id = $1 AND b.id = $2
+       ORDER BY sf.path, cs.start_line, cs.name LIMIT 500`,
+      [workspaceId, buildId]
+    );
+    const dependencies = await this.pool.query<{
+      source_name: string; target_name: string; kind: string; source_path: string; target_path: string | null;
+      start_line: number; end_line: number;
+    }>(
+      `SELECT ce.source_name, ce.target_name, ce.kind, ce.source_path, ce.target_path, ce.start_line, ce.end_line
+       FROM build_jobs b
+       JOIN code_edges ce ON ce.snapshot_id = b.snapshot_id
+       WHERE b.workspace_id = $1 AND b.id = $2
+       ORDER BY ce.source_path, ce.start_line, ce.source_name, ce.target_name LIMIT 500`,
+      [workspaceId, buildId]
+    );
+    return {
+      symbols: symbols.rows.map((row) => ({
+        name: row.name, kind: row.kind, path: row.path,
+        startLine: row.start_line, endLine: row.end_line, exported: row.exported
+      })),
+      dependencies: dependencies.rows.map((row) => ({
+        source: row.source_name, target: row.target_name, kind: row.kind, path: row.source_path,
+        targetPath: row.target_path, startLine: row.start_line, endLine: row.end_line
       }))
     };
   }

@@ -18,6 +18,7 @@ import { lintIssueSchema, trustScoreSchema, type ArtifactManifest } from "../sha
 import { MAX_IMPORT_TABLE_WORKBOOK_BYTES } from "../shared/import-filter.js";
 import {
   FeedbackNotAcknowledgedError,
+  InvalidLegacyReleaseRollbackError,
   InvalidFeedbackTransitionError,
   LastProjectAdminError,
   LastWorkspaceAdminError,
@@ -55,6 +56,10 @@ import { createCodexConnectionPack } from "./codex/connection-pack.js";
 import type { BuildEvent, BuildService } from "./knowledge/build-service.js";
 import { deriveChangeImpact } from "./knowledge/change-impact.js";
 import { deriveRemediationScope } from "./knowledge/remediation-scope.js";
+import {
+  buildKnowledgeKernelComparison,
+  PipelineComparisonUnavailableError
+} from "./knowledge/pipeline/build-comparison.js";
 import { loadPublishedKnowledgeGraph } from "./knowledge/pipeline/graph-query.js";
 import { exportKnowledgeGraph } from "./knowledge/pipeline/viz.js";
 import { legacyBuildStatus } from "./knowledge/pipeline/contracts.js";
@@ -1778,6 +1783,32 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return { build };
   });
 
+  server.get("/api/builds/:id/comparison", { preHandler: requireAdministrator }, async (request, reply) => {
+    if (!options.qualityArtifactReader) {
+      return sendError(reply, 503, "PIPELINE_COMPARISON_UNAVAILABLE", "Pipeline artifacts are unavailable");
+    }
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const params = z.object({ id: z.uuid() }).safeParse(request.params);
+    const build = params.success ? await options.store.getBuild(admin.workspaceId, params.data.id) : null;
+    if (!build) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    const repository = await options.store.getRepository(admin.workspaceId, build.repositoryId);
+    if (!repository) return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    try {
+      return await buildKnowledgeKernelComparison({
+        store: options.store,
+        reader: options.qualityArtifactReader,
+        workspaceId: admin.workspaceId,
+        projectId: repository.projectId,
+        buildId: build.id
+      });
+    } catch (error) {
+      if (error instanceof PipelineComparisonUnavailableError) {
+        return sendError(reply, 409, "PIPELINE_COMPARISON_UNAVAILABLE", error.message);
+      }
+      throw error;
+    }
+  });
+
   server.post("/api/builds/:id/cancel", { preHandler: requireContributor }, async (request, reply) => {
     if (!options.buildService) {
       return sendError(reply, 503, "BUILD_SERVICE_UNAVAILABLE", "Build service is unavailable");
@@ -2115,6 +2146,25 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       return { release: await options.store.publishRelease(admin.workspaceId, parsed.data.id) };
     } catch (error) {
       return sendError(reply, 409, "PUBLISH_FAILED", error instanceof Error ? error.message : "Publish failed");
+    }
+  });
+
+  server.post("/api/releases/:id/rollback", { preHandler: requireAdministrator }, async (request, reply) => {
+    const parsed = z.object({ id: z.uuid() }).safeParse(request.params);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_INPUT", "Invalid release ID");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    try {
+      const existing = await options.store.getRelease(admin.workspaceId, parsed.data.id);
+      if (!existing) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
+      const result = await options.store.rollbackReleaseToLegacy(
+        admin.workspaceId, existing.id, admin.id
+      );
+      return { release: result.release, previousReleaseId: result.previousReleaseId };
+    } catch (error) {
+      if (error instanceof InvalidLegacyReleaseRollbackError) {
+        return sendError(reply, 409, "ROLLBACK_NOT_ALLOWED", error.message);
+      }
+      return sendError(reply, 500, "ROLLBACK_FAILED", "Rollback could not be completed");
     }
   });
 

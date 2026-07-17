@@ -37,6 +37,7 @@ The administration API uses JSON under `/api`. Except health, setup status, setu
 | POST | `/api/repositories/:repositoryId/folder-import` | Multipart `files`: import a pre-filtered pending replacement and atomically activate it |
 | GET/POST | `/api/builds` | List newest-first or start `{snapshotId}` |
 | GET | `/api/builds/:id` | Build details |
+| GET | `/api/builds/:id/comparison` | Workspace-admin-only, read-only comparison of legacy and persisted shadow-pipeline output for one build |
 | POST | `/api/builds/:id/cancel` | Request cancellation |
 | GET | `/api/builds/:id/events` | SSE history/live stream; `once=true` returns buffered events |
 | GET | `/api/knowledge/search` | `q`, optional `releaseId` |
@@ -48,6 +49,7 @@ The administration API uses JSON under `/api`. Except health, setup status, setu
 | GET | `/api/releases/current` | Current published release plus commit |
 | GET | `/api/releases/:id` | Exact workspace-scoped release plus commit; stable `RELEASE_NOT_FOUND` |
 | POST | `/api/releases/:id/publish` | Explicit publication |
+| POST | `/api/releases/:id/rollback` | Workspace-admin only: repoint `current` to an already published legacy release, returning the prior release ID; `409 ROLLBACK_NOT_ALLOWED` for an ineligible target |
 | GET | `/api/feedback` | Optional `status` filter |
 | PATCH | `/api/feedback/:id` | `{status}` constrained transition |
 | POST | `/api/feedback/:id/rebuild` | Rebuild acknowledged feedback against published snapshot |

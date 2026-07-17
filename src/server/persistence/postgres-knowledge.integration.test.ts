@@ -1,7 +1,7 @@
 import { authenticatedCookie, csrfHeaders } from "../test-support/csrf";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { cp, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -16,7 +16,7 @@ import { requireIsolatedTestDatabase } from "../../test/integration-database";
 import { buildServer } from "../app";
 import { syncRepository } from "../git/snapshot";
 import { BuildService } from "../knowledge/build-service";
-import { analyzeSnapshot } from "../knowledge/intelligence";
+import { analyzeSnapshot, type CodeIndex } from "../knowledge/intelligence";
 import { generateKnowledge } from "../knowledge/generator";
 import {
   assertRetrievalQuality,
@@ -40,6 +40,7 @@ import { createKnowledgeVisualizationStageExecutor } from "../knowledge/pipeline
 import { PipelineStageWorker, type PipelineStageJob, type PipelineStageJobQueue } from "../knowledge/pipeline/worker";
 import { hashMcpToken } from "../mcp/auth";
 import { PostgresSessionStore } from "../security/session-store";
+import { importFolderFiles, type FolderUploadFile } from "../uploads/folder-import";
 import { LastProjectAdminError } from "./store";
 import { PostgresAppStore } from "./postgres-store";
 
@@ -61,6 +62,26 @@ class RecordedPipelineQueue implements PipelineStageJobQueue {
 
   async start(): Promise<void> {}
   async stop(): Promise<void> {}
+}
+
+async function* phaseFSourceFiles(project: string, revision = "baseline"): AsyncGenerator<FolderUploadFile> {
+  yield {
+    path: `src/${project}.ts`,
+    content: Buffer.from(`export const ${project.replace(/-/g, "_")} = "${project}-${revision}";\n`)
+  };
+  yield { path: "README.md", content: Buffer.from(`# ${project} ${revision}\n`) };
+}
+
+async function removeReadonlyDirectory(directory: string): Promise<void> {
+  async function makeWritable(candidate: string): Promise<void> {
+    await chmod(candidate, 0o700).catch(() => undefined);
+    const entries = await readdir(candidate, { withFileTypes: true }).catch(() => []);
+    await Promise.all(entries.filter((entry) => entry.isDirectory()).map((entry) =>
+      makeWritable(path.join(candidate, entry.name))
+    ));
+  }
+  await makeWritable(directory);
+  await rm(directory, { recursive: true, force: true });
 }
 
 async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean): Promise<T> {
@@ -141,6 +162,105 @@ integration("PostgreSQL cited knowledge integration", () => {
     expect(report.failures).toEqual([]);
     expect(() => assertRetrievalQuality(report)).not.toThrow();
   }, 90_000);
+
+  test(databaseUrl
+    ? "keeps overlapping PostgreSQL imports, queued builds, and searches project-isolated under the Phase F budget"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-phase-f-postgres-"));
+    const store = new PostgresAppStore(pool);
+    const queue = new PgBossBuildJobQueue(databaseUrl);
+    const buildService = new BuildService(store, queue, { reconcileIntervalMs: 25 });
+    try {
+      await buildService.start();
+      const setup = await store.createInitialSetup("phase-f-load@example.com", "hash");
+      const workspaceId = setup!.workspace.id;
+      const firstProject = (await store.listProjects(workspaceId))[0]!;
+      const projects = [
+        firstProject,
+        (await store.createProject(workspaceId, { name: "Second project", slug: "second-project" }, setup!.admin.id))!,
+        (await store.createProject(workspaceId, { name: "Third project", slug: "third-project" }, setup!.admin.id))!
+      ];
+      const repositories = await Promise.all(projects.map((project) => store.createRepository(
+        workspaceId, { kind: "upload", name: project.slug }, project.id
+      )));
+      const importAndQueueBuild = async (repositoryIndex: number, revision: string) => {
+        const snapshot = await importFolderFiles({
+          files: phaseFSourceFiles(projects[repositoryIndex]!.slug, revision), dataDir, workspaceId,
+          repositoryId: repositories[repositoryIndex]!.id, actorId: setup!.admin.id, store
+        });
+        const started = await buildService.startBuild({
+          workspaceId, repositoryId: repositories[repositoryIndex]!.id, snapshotId: snapshot.snapshotId,
+          snapshotPath: snapshot.storagePath, commitSha: snapshot.sourceVersion
+        });
+        const build = await waitFor(
+          () => store.getBuild(workspaceId, started.build.id),
+          (candidate) => candidate?.status === "ready"
+        );
+        return { snapshot, build: build! };
+      };
+      const baseline = await Promise.all([importAndQueueBuild(0, "baseline"), importAndQueueBuild(1, "baseline")]);
+      await Promise.all(baseline.map(async ({ build }, index) => {
+        const release = await store.createReleaseDraft(workspaceId, repositories[index]!.id, build.id, `1.0.${index}`);
+        await store.publishRelease(workspaceId, release.id);
+      }));
+
+      const operationStartedAt = performance.now();
+      const imports = repositories.map((repository, index) => importFolderFiles({
+        files: phaseFSourceFiles(projects[index]!.slug, "updated"), dataDir, workspaceId, repositoryId: repository!.id,
+        actorId: setup!.admin.id, store
+      }));
+      const queuedBuilds = imports.slice(0, 2).map(async (snapshotPromise, index) => {
+        const snapshot = await snapshotPromise;
+        const started = await buildService.startBuild({
+          workspaceId, repositoryId: repositories[index]!.id, snapshotId: snapshot.snapshotId,
+          snapshotPath: snapshot.storagePath, commitSha: snapshot.sourceVersion
+        });
+        return waitFor(
+          () => store.getBuild(workspaceId, started.build.id),
+          (candidate) => candidate?.status === "ready"
+        );
+      });
+      const searches = Promise.all(Array.from({ length: 10 }, async (_, index) => {
+        const repositoryIndex = index % 2;
+        const searchStartedAt = performance.now();
+        const results = await store.searchKnowledge(
+          workspaceId, repositories[repositoryIndex]!.id, projects[repositoryIndex]!.slug
+        );
+        return { repositoryIndex, results, durationMs: performance.now() - searchStartedAt };
+      }));
+      const [completedImports, completedBuilds, completedSearches] = await Promise.all([
+        Promise.all(imports), Promise.all(queuedBuilds), searches
+      ]);
+      const elapsedMs = performance.now() - operationStartedAt;
+      expect(completedImports.map((item) => item.fileCount)).toEqual([2, 2, 2]);
+      expect(new Set(completedImports.map((item) => item.snapshotId)).size).toBe(3);
+      expect(completedBuilds).toEqual(expect.arrayContaining([
+        expect.objectContaining({ status: "ready", repositoryId: repositories[0]!.id }),
+        expect.objectContaining({ status: "ready", repositoryId: repositories[1]!.id })
+      ]));
+      const searchResults = await completedSearches;
+      const durations = searchResults.map((search) => search.durationMs).sort((left, right) => left - right);
+      const p95Ms = durations[Math.ceil(durations.length * 0.95) - 1]!;
+      expect(searchResults).toHaveLength(10);
+      expect(searchResults.every(({ results }) => results.length > 0)).toBe(true);
+      expect(searchResults.filter(({ repositoryIndex }) => repositoryIndex === 0).every(({ results }) =>
+        results.every((result) => result.citations.every((citation) => citation.path.includes("default-project")))
+      )).toBe(true);
+      expect(searchResults.filter(({ repositoryIndex }) => repositoryIndex === 1).every(({ results }) =>
+        results.every((result) => result.citations.every((citation) => citation.path.includes("second-project")))
+      )).toBe(true);
+      expect(p95Ms).toBeLessThanOrEqual(1_000);
+      expect(elapsedMs).toBeLessThanOrEqual(15_000);
+      expect(process.memoryUsage().rss).toBeLessThanOrEqual(1.5 * 1024 * 1024 * 1024);
+    } finally {
+      await buildService.stop();
+      await removeReadonlyDirectory(dataDir);
+    }
+  }, 30_000);
 
   test(databaseUrl
     ? "rolls back LLM builds when their audit event cannot be persisted and preserves allowLlm projections"
@@ -476,6 +596,130 @@ integration("PostgreSQL cited knowledge integration", () => {
     )).rejects.toThrow("Release pipeline provenance is immutable");
     await expect(pool.query("DELETE FROM knowledge_artifacts WHERE id = $1", [artifact.id]))
       .rejects.toThrow("Cannot delete artifacts from a published build");
+  }, 30_000);
+
+  test(databaseUrl
+    ? "serves a successful comparison from persisted PostgreSQL shadow artifacts to a workspace administrator"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const artifactContents = new Map<string, unknown>();
+    const app = buildServer({
+      store,
+      sessionStore: new PostgresSessionStore(pool),
+      qualityArtifactReader: { getJson: async (artifact) => artifactContents.get(artifact.id) },
+      masterKey: Buffer.alloc(32, 14).toString("base64"),
+      sessionSecret: "postgres-comparison-route-session-secret",
+      dataDir: "/tmp/devkh-postgres-comparison-route",
+      nodeEnv: "test"
+    });
+
+    try {
+      const setupResponse = await app.inject({
+        method: "POST", url: "/api/setup",
+        payload: { email: "comparison-admin@example.com", password: "correct horse battery staple" }
+      });
+      expect(setupResponse.statusCode).toBe(201);
+      const login = await app.inject({
+        method: "POST", url: "/api/session",
+        payload: { email: "comparison-admin@example.com", password: "correct horse battery staple" }
+      });
+      const cookie = authenticatedCookie(login);
+      const workspace = await store.defaultWorkspace();
+      const administrator = await store.findAdminByEmail("comparison-admin@example.com");
+      const repository = await store.createRepository(
+        workspace!.id, { kind: "upload", name: "Comparison source" }
+      );
+      const snapshotId = randomUUID();
+      const citation = {
+        path: "src/math.ts", startLine: 1, endLine: 1,
+        commitSha: "d".repeat(40), blobHash: "e".repeat(64)
+      };
+      await store.createSnapshot({
+        snapshot: {
+          id: snapshotId, workspaceId: workspace!.id, repositoryId: repository!.id,
+          commitSha: citation.commitSha, ref: "upload", remoteUrl: null,
+          commitTimestamp: new Date("2026-07-17T00:00:00.000Z"), storagePath: "/tmp/comparison-route"
+        },
+        files: [{
+          id: randomUUID(), workspaceId: workspace!.id, snapshotId, path: citation.path,
+          byteSize: 20, contentHash: citation.blobHash, language: "typescript"
+        }]
+      });
+      const build = await store.createBuild({
+        workspaceId: workspace!.id, repositoryId: repository!.id, snapshotId,
+        snapshotPath: "/tmp/comparison-route", commitSha: citation.commitSha
+      });
+      const index: CodeIndex = {
+        rootPath: "/tmp/comparison-route", commitSha: citation.commitSha, files: [citation],
+        symbols: [{ ...citation, name: "math", kind: "module", exported: true }],
+        edges: [], documents: [], configs: []
+      };
+      const output = await generateKnowledge(index);
+      await store.saveKnowledge({ build: build.build, index, output });
+      const moduleNodeId = "1".repeat(64);
+      const symbolNodeId = "2".repeat(64);
+      await store.saveKnowledgeGraph({
+        workspaceId: workspace!.id, projectId: repository!.projectId, snapshotId, buildId: build.build.id,
+        actorId: administrator!.id,
+        graph: {
+          nodes: [
+            { id: moduleNodeId, projectId: repository!.projectId, snapshotId, kind: "module", name: "math.ts", qualifiedName: citation.path, candidate: false, sourceRefs: [{ ...citation, snapshotId }], attributes: {} },
+            { id: symbolNodeId, projectId: repository!.projectId, snapshotId, kind: "symbol", name: "math", qualifiedName: "math", candidate: false, sourceRefs: [{ ...citation, snapshotId }], attributes: {} }
+          ],
+          edges: [{ id: "3".repeat(64), fromNodeId: moduleNodeId, toNodeId: symbolNodeId, kind: "contains", candidate: false, confidence: 1, sourceRefs: [{ ...citation, snapshotId }] }]
+        }
+      });
+      const createArtifact = async (stage: "synthesize" | "lint", kind: "knowledge-pages" | "knowledge-quality", digest: string) => store.createArtifactWithAudit({
+        id: randomUUID(), workspaceId: workspace!.id, projectId: repository!.projectId, snapshotId, buildId: build.build.id,
+        stage, kind, schemaVersion: 1, inputDigest: digest, contentDigest: digest,
+        storageKey: `${repository!.projectId}/${snapshotId}/${stage}/${digest}.json`, sourceRefs: [], producer: "deterministic",
+        createdAt: new Date().toISOString()
+      }, administrator!.id);
+      const synthesis = await createArtifact("synthesize", "knowledge-pages", "1".repeat(64));
+      const quality = await createArtifact("lint", "knowledge-quality", "2".repeat(64));
+      artifactContents.set(synthesis.id, { schemaVersion: 1, output });
+      artifactContents.set(quality.id, {
+        trust: { targetKind: "knowledge", targetId: build.build.id, score: 0.95, citationScore: 1, parserScore: 1, freshnessScore: 1, lintPenalty: 0.05, reasons: ["integration"] },
+        issues: []
+      });
+      const completeArtifactStage = async (stage: "synthesize" | "lint", artifactId: string, digest: string) => {
+        const run = await store.createStageRun({
+          workspaceId: workspace!.id, projectId: repository!.projectId, snapshotId, buildId: build.build.id,
+          stage, attempt: 1, inputDigest: digest
+        });
+        const claimed = await store.claimNextStageRun(workspace!.id, repository!.projectId, { buildId: build.build.id, stage });
+        expect(claimed?.id).toBe(run.id);
+        await store.completeStageRunAndCreateNext({
+          workspaceId: workspace!.id, projectId: repository!.projectId, stageRunId: run.id,
+          status: "succeeded", outputManifestIds: [artifactId]
+        });
+      };
+      await completeArtifactStage("synthesize", synthesis.id, "3".repeat(64));
+      await completeArtifactStage("lint", quality.id, "4".repeat(64));
+      await store.savePipelineSearchDocuments({
+        workspaceId: workspace!.id, projectId: repository!.projectId, snapshotId, buildId: build.build.id,
+        sourceArtifactId: synthesis.id,
+        documents: output.pages.flatMap((page) => page.chunks.map((chunk, position) => ({
+          documentKey: `${page.slug}:${position}`, kind: "page" as const, title: page.title, content: chunk.content,
+          citations: chunk.citations.map((entry) => ({ ...entry, snapshotId })), metadata: {}
+        })))
+      });
+
+      const response = await app.inject({
+        method: "GET", url: `/api/builds/${build.build.id}/comparison`, headers: { cookie }
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        buildId: build.build.id,
+        comparison: { blockingDefects: [], citations: { valid: true } }
+      });
+    } finally {
+      await app.close();
+    }
   }, 30_000);
 
   test(databaseUrl
@@ -1343,6 +1587,171 @@ integration("PostgreSQL cited knowledge integration", () => {
     await expect(firstStore.claimDueGitSynchronizations(
       new Date(), 10, 60_000
     )).resolves.toEqual([]);
+  }, 30_000);
+
+  test(databaseUrl
+    ? "rolls current back to a legacy release atomically with its audit event"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("release-rollback@example.com", "hash");
+    const repository = await store.createRepository(
+      setup!.workspace.id, { kind: "upload", name: "Rollback source" }
+    );
+    const snapshotId = randomUUID();
+    await store.createSnapshot({
+      snapshot: {
+        id: snapshotId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+        commitSha: "a".repeat(40), ref: "upload", remoteUrl: null,
+        commitTimestamp: new Date("2026-07-17T00:00:00.000Z"), storagePath: "/tmp/release-rollback"
+      },
+      files: []
+    });
+    const createPublishedRelease = async (version: string) => {
+      const build = await store.createBuild({
+        workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId,
+        snapshotPath: "/tmp/release-rollback", commitSha: version[0]!.repeat(40)
+      });
+      await store.transitionBuild(build.build.id, "queued", "ready");
+      const release = await store.createReleaseDraft(
+        setup!.workspace.id, repository!.id, build.build.id, version
+      );
+      await store.publishRelease(setup!.workspace.id, release.id);
+      return release;
+    };
+    const legacy = await createPublishedRelease("1.0.0");
+    const current = await createPublishedRelease("2.0.0");
+    await pool.query(`
+      CREATE FUNCTION reject_release_rollback_audit()
+      RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.action = 'release.rolled_back' THEN RAISE EXCEPTION 'audit unavailable'; END IF;
+        RETURN NEW;
+      END;
+      $$;
+      CREATE TRIGGER reject_release_rollback_audit
+        BEFORE INSERT ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION reject_release_rollback_audit();
+    `);
+    try {
+      await expect(store.rollbackReleaseToLegacy(
+        setup!.workspace.id, legacy.id, setup!.admin.id
+      )).rejects.toThrow("audit unavailable");
+      await expect(store.currentRelease(setup!.workspace.id, repository!.id))
+        .resolves.toMatchObject({ id: current.id });
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS reject_release_rollback_audit ON audit_events");
+      await pool.query("DROP FUNCTION IF EXISTS reject_release_rollback_audit()");
+    }
+
+    await expect(store.rollbackReleaseToLegacy(
+      setup!.workspace.id, legacy.id, setup!.admin.id
+    )).resolves.toMatchObject({ release: { id: legacy.id }, previousReleaseId: current.id });
+    await expect(store.currentRelease(setup!.workspace.id, repository!.id))
+      .resolves.toMatchObject({ id: legacy.id, kernelMode: "legacy" });
+    await expect(store.rollbackReleaseToLegacy(
+      setup!.workspace.id, legacy.id, setup!.admin.id
+    )).resolves.toMatchObject({ release: { id: legacy.id }, previousReleaseId: legacy.id });
+    const audit = await pool.query<{ action: string; resource_id: string; metadata: { previousReleaseId: string } }>(
+      `SELECT action, resource_id, metadata FROM audit_events
+       WHERE workspace_id = $1 AND action = 'release.rolled_back'`,
+      [setup!.workspace.id]
+    );
+    expect(audit.rows).toEqual([expect.objectContaining({
+      action: "release.rolled_back", resource_id: legacy.id,
+      metadata: expect.objectContaining({ previousReleaseId: current.id })
+    })]);
+  }, 30_000);
+
+  test(databaseUrl
+    ? "enforces PostgreSQL-backed HTTP rollback authorization for anonymous, project, and workspace roles"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const app = buildServer({
+      store,
+      sessionStore: new PostgresSessionStore(pool),
+      masterKey: Buffer.alloc(32, 12).toString("base64"),
+      sessionSecret: "postgres-rollback-http-session-secret",
+      dataDir: "/tmp/devkh-postgres-rollback-http",
+      nodeEnv: "test"
+    });
+
+    try {
+      const setupResponse = await app.inject({
+        method: "POST", url: "/api/setup",
+        payload: { email: "workspace-admin@example.com", password: "correct horse battery staple" }
+      });
+      expect(setupResponse.statusCode).toBe(201);
+      const adminLogin = await app.inject({
+        method: "POST", url: "/api/session",
+        payload: { email: "workspace-admin@example.com", password: "correct horse battery staple" }
+      });
+      const adminCookie = authenticatedCookie(adminLogin);
+      const workspace = await store.defaultWorkspace();
+      const repository = await store.createRepository(
+        workspace!.id, { kind: "upload", name: "HTTP rollback source" }
+      );
+      const snapshotId = randomUUID();
+      await store.createSnapshot({
+        snapshot: {
+          id: snapshotId, workspaceId: workspace!.id, repositoryId: repository!.id,
+          commitSha: "c".repeat(40), ref: "upload", remoteUrl: null,
+          commitTimestamp: new Date("2026-07-17T00:00:00.000Z"), storagePath: "/tmp/release-rollback-http"
+        },
+        files: []
+      });
+      const createPublishedRelease = async (version: string) => {
+        const build = await store.createBuild({
+          workspaceId: workspace!.id, repositoryId: repository!.id, snapshotId,
+          snapshotPath: "/tmp/release-rollback-http", commitSha: version[0]!.repeat(40)
+        });
+        await store.transitionBuild(build.build.id, "queued", "ready");
+        const release = await store.createReleaseDraft(workspace!.id, repository!.id, build.build.id, version);
+        await store.publishRelease(workspace!.id, release.id);
+        return release;
+      };
+      const legacy = await createPublishedRelease("1.0.0");
+      const current = await createPublishedRelease("2.0.0");
+      const memberResponse = await app.inject({
+        method: "POST", url: "/api/members", headers: { cookie: adminCookie, ...csrfHeaders(adminCookie) },
+        payload: { email: "project-admin@example.com", password: "correct horse battery staple", role: "member" }
+      });
+      expect(memberResponse.statusCode).toBe(201);
+      const projectAdministratorId = memberResponse.json().member.id as string;
+      const added = await app.inject({
+        method: "POST", url: `/api/projects/${repository!.projectId}/members`, headers: { cookie: adminCookie, ...csrfHeaders(adminCookie) },
+        payload: { userId: projectAdministratorId, role: "admin" }
+      });
+      expect(added.statusCode).toBe(201);
+      const projectAdminLogin = await app.inject({
+        method: "POST", url: "/api/session",
+        payload: { email: "project-admin@example.com", password: "correct horse battery staple" }
+      });
+      const projectAdminCookie = authenticatedCookie(projectAdminLogin);
+
+      const anonymous = await app.inject({ method: "POST", url: `/api/releases/${legacy.id}/rollback` });
+      expect(anonymous.statusCode).toBe(401);
+      const projectAdmin = await app.inject({
+        method: "POST", url: `/api/releases/${legacy.id}/rollback`,
+        headers: { cookie: projectAdminCookie, ...csrfHeaders(projectAdminCookie) }
+      });
+      expect(projectAdmin.statusCode).toBe(403);
+      const workspaceAdmin = await app.inject({
+        method: "POST", url: `/api/releases/${legacy.id}/rollback`,
+        headers: { cookie: adminCookie, ...csrfHeaders(adminCookie) }
+      });
+      expect(workspaceAdmin.statusCode).toBe(200);
+      expect(workspaceAdmin.json()).toMatchObject({ release: { id: legacy.id }, previousReleaseId: current.id });
+    } finally {
+      await app.close();
+    }
   }, 30_000);
 });
 

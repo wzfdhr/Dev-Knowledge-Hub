@@ -67,6 +67,45 @@ describe("pipeline build routes", () => {
     expect((await store.listPipelineStageRuns(workspaceId, projectId, build.id))
       .find((candidate) => candidate.id === queued.id)).toMatchObject({ status: "cancelled" });
   });
+
+  test("reserves build comparison for workspace administrators", async () => {
+    const store = new MemoryAppStore();
+    const app = buildServer({
+      store,
+      masterKey: randomBytes(32).toString("base64"),
+      sessionSecret: "pipeline-comparison-session-secret",
+      dataDir: "/tmp/devkh-pipeline-comparison",
+      nodeEnv: "test"
+    });
+    apps.push(app);
+    await app.inject({
+      method: "POST", url: "/api/setup", payload: { email: "admin@example.com", password: "a secure admin password" }
+    });
+    const login = await app.inject({
+      method: "POST", url: "/api/session", payload: { email: "admin@example.com", password: "a secure admin password" }
+    });
+    const adminCookie = authenticatedCookie(login);
+    const unavailable = await app.inject({
+      method: "GET", url: `/api/builds/${randomUUID()}/comparison`, headers: { cookie: adminCookie }
+    });
+    expect(unavailable.statusCode).toBe(503);
+    expect(unavailable.json()).toMatchObject({ error: { code: "PIPELINE_COMPARISON_UNAVAILABLE" } });
+
+    const createMember = await app.inject({
+      method: "POST", url: "/api/members", headers: { cookie: adminCookie, ...csrfHeaders(adminCookie) },
+      payload: { email: "reader@example.com", password: "another secure password", role: "reader" }
+    });
+    expect(createMember.statusCode).toBe(201);
+    const readerLogin = await app.inject({
+      method: "POST", url: "/api/session", payload: { email: "reader@example.com", password: "another secure password" }
+    });
+    const response = await app.inject({
+      method: "GET", url: `/api/builds/${randomUUID()}/comparison`, headers: { cookie: authenticatedCookie(readerLogin) }
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toMatchObject({ error: { code: "FORBIDDEN" } });
+  });
 });
 
 afterEach(async () => {

@@ -186,6 +186,17 @@ export interface PipelineStageRun {
   errorCode: string | null;
   errorDetail: string | null;
 }
+export interface KnowledgeKernelDifference {
+  area: "pages" | "graph_nodes" | "graph_edges" | "search" | "quality" | "citations";
+  key: string;
+  reason: "missing_in_pipeline" | "additional_in_pipeline" | "invalid_citation" | "quality_changed";
+}
+export interface KnowledgeKernelComparison {
+  blockingDefects: KnowledgeKernelDifference[];
+  compatibilityDifferences: KnowledgeKernelDifference[];
+  expectedImprovements: KnowledgeKernelDifference[];
+  citations: { valid: boolean; total: number; invalid: KnowledgeKernelDifference[] };
+}
 export interface Release {
   id: string;
   buildId: string;

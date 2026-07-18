@@ -132,6 +132,34 @@ describe("ParserService", () => {
     await new Promise<void>((resolve) => stalledServer.close(() => resolve()));
   });
 
+  test("fails the active request when the service exits and accepts work after restart", async () => {
+    const socket = await socketPath();
+    let block = true;
+    const service = new ParserService({
+      socketPath: socket,
+      execute: (_input, signal) => block
+        ? new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(new Error("service stopped")), { once: true });
+          })
+        : Promise.resolve({ outputs: [] })
+    });
+    await service.start();
+    const running = new ParserClient({ socketPath: socket, requestTimeoutMs: 1_000 }).analyze(request());
+    const stoppedResult = running.then(
+      () => null,
+      (error: unknown) => error
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await service.stop();
+    await expect(stoppedResult).resolves.toMatchObject({ code: "PARSER_RUNTIME_UNAVAILABLE" });
+
+    block = false;
+    await service.start();
+    await expect(new ParserClient({ socketPath: socket }).analyze(request()))
+      .resolves.toEqual({ outputs: [] });
+    await service.stop();
+  });
+
   test("does not execute a request cancelled before connecting", async () => {
     const controller = new AbortController();
     controller.abort();

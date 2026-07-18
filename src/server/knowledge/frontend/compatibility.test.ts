@@ -1,10 +1,15 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
+
+import { BUILD_STAGES, type ArtifactManifest } from "../pipeline/contracts.js";
+import type { PipelineStageRunRecord } from "../../persistence/store.js";
 
 import {
   assertFrontendArtifactFamily,
+  ARTIFACT_KINDS,
+  createVerifiedFrontendReleaseDraft,
   EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
   frontendGraphV2Schema,
   frontendPipelinePackageSchema,
@@ -13,6 +18,73 @@ import {
 } from "./compatibility.js";
 
 const root = process.cwd();
+
+function releaseFixture() {
+  const workspaceId = "workspace-1";
+  const projectId = "project-1";
+  const repositoryId = "repository-1";
+  const snapshotId = "snapshot-1";
+  const buildId = "build-1";
+  const artifacts = {} as Record<(typeof BUILD_STAGES)[number], string[]>;
+  const manifests = new Map<string, ArtifactManifest>();
+  const runs: PipelineStageRunRecord[] = [];
+  for (const stage of BUILD_STAGES) {
+    const families = stage === "package" ? ["knowledge-v1"] as const : ["knowledge-v1", "frontend-v2"] as const;
+    const contracts = [...new Map(families.map((family) => {
+      const expected = ARTIFACT_KINDS[stage][family];
+      return [`${expected.kind}@${expected.schemaVersion}`, expected] as const;
+    })).values()];
+    const ids = contracts.map((expected, index) => {
+      const id = `${stage}-artifact-${index}`;
+      manifests.set(id, {
+        id, workspaceId, projectId, snapshotId, buildId, stage,
+        kind: expected.kind, schemaVersion: expected.schemaVersion,
+        inputDigest: "a".repeat(64), contentDigest: "b".repeat(64),
+        storageKey: `${stage}/${id}.json`, sourceRefs: [], producer: "deterministic",
+        createdAt: "2026-07-18T00:00:00.000Z"
+      });
+      return id;
+    });
+    artifacts[stage] = ids;
+    runs.push({
+      id: `${stage}-run`, workspaceId, projectId, snapshotId, buildId, stage,
+      attempt: 1, status: "succeeded", inputDigest: "a".repeat(64),
+      outputManifestIds: [...ids], startedAt: "2026-07-18T00:00:00.000Z",
+      finishedAt: "2026-07-18T00:00:01.000Z", errorCode: null, errorDetail: null
+    });
+  }
+  const packageArtifactId = "frontend-package";
+  manifests.set(packageArtifactId, {
+    id: packageArtifactId, workspaceId, projectId, snapshotId, buildId, stage: "package",
+    kind: "frontend-pipeline-package", schemaVersion: 2,
+    inputDigest: "c".repeat(64), contentDigest: "d".repeat(64),
+    storageKey: "package/frontend-package.json", sourceRefs: [], producer: "deterministic",
+    createdAt: "2026-07-18T00:00:00.000Z"
+  });
+  runs.at(-1)!.outputManifestIds.push(packageArtifactId);
+  const packageValue = {
+    schemaVersion: 2 as const, family: "frontend-v2" as const, stage: "package" as const, snapshotId,
+    analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+    upstreamManifestIds: artifacts.validate, sourceArtifactId: artifacts.package[0]!,
+    irSchemaVersion: 2 as const, graphSchemaVersion: 2 as const, artifacts
+  };
+  const createReleaseDraft = vi.fn(async () => ({ id: "release-1" }) as never);
+  const store = {
+    getBuild: async () => ({ id: buildId, workspaceId, repositoryId, snapshotId, status: "ready" }),
+    getRepository: async () => ({ id: repositoryId, workspaceId, projectId }),
+    listPipelineStageRuns: async () => runs,
+    findArtifactById: async (id: string) => manifests.get(id) ?? null,
+    createReleaseDraft
+  };
+  const artifactReader = {
+    getJson: vi.fn(async (manifest: ArtifactManifest) => manifest.id === packageArtifactId ? packageValue : { ok: true })
+  };
+  const releaseInput = {
+    store, artifactReader, workspaceId, repositoryId, buildId, version: "frontend-v2.0.0",
+    packageStageRunId: "package-run", packageArtifactId
+  };
+  return { artifacts, manifests, runs, packageValue, artifactReader, createReleaseDraft, releaseInput };
+}
 
 describe("frontend v2 compatibility contracts", () => {
   test("keeps old releases on knowledge-v1 and recognizes explicit frontend-v2 only", () => {
@@ -64,6 +136,36 @@ describe("frontend v2 compatibility contracts", () => {
       nodes: [],
       edges: []
     })).toMatchObject({ schemaVersion: 2, nodes: [], edges: [] });
+  });
+
+  test("verifies every physical artifact inside a frontend release package", async () => {
+    const fixture = releaseFixture();
+    await expect(createVerifiedFrontendReleaseDraft(fixture.releaseInput)).resolves.toEqual({ id: "release-1" });
+    expect(fixture.artifactReader.getJson).toHaveBeenCalledTimes(
+      1 + Object.values(fixture.artifacts).flat().length
+    );
+    expect(fixture.createReleaseDraft).toHaveBeenCalledOnce();
+  });
+
+  test("rejects cross-project, missing, and unreadable internal package artifacts", async () => {
+    const crossProject = releaseFixture();
+    const crossId = crossProject.artifacts.extract[0]!;
+    crossProject.manifests.set(crossId, { ...crossProject.manifests.get(crossId)!, projectId: "other-project" });
+    await expect(createVerifiedFrontendReleaseDraft(crossProject.releaseInput)).rejects.toThrow("build scope");
+
+    const missing = releaseFixture();
+    missing.manifests.delete(missing.artifacts.graph[0]!);
+    await expect(createVerifiedFrontendReleaseDraft(missing.releaseInput)).rejects.toThrow("build scope");
+
+    const unreadable = releaseFixture();
+    const unreadableId = unreadable.artifacts.synthesize[0]!;
+    unreadable.artifactReader.getJson.mockImplementation(async (manifest) => {
+      if (manifest.id === unreadableId) throw new Error("Artifact content digest mismatch");
+      return manifest.id === unreadable.releaseInput.packageArtifactId
+        ? unreadable.packageValue
+        : { ok: true };
+    });
+    await expect(createVerifiedFrontendReleaseDraft(unreadable.releaseInput)).rejects.toThrow("digest mismatch");
   });
 
   test("defines additive immutable v2 release provenance and project rollout storage", async () => {

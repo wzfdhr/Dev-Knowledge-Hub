@@ -61,6 +61,18 @@ describe("AnalyzerWorkerHost", () => {
     await expect(host.run()).rejects.toMatchObject({ code: "PARSER_WORKER_CRASH" });
   });
 
+  test("maps a worker heap exhaustion candidate to a stable crash error", async () => {
+    const host = new AnalyzerWorkerHost({
+      workerFactory: () => new Worker(
+        "const values = []; while (true) values.push({ value: 'x'.repeat(1024) });",
+        { eval: true, resourceLimits: { maxOldGenerationSizeMb: 8, maxYoungGenerationSizeMb: 2 } }
+      ),
+      timeoutMs: 5_000,
+      maxOutputBytes: 1_024
+    });
+    await expect(host.run()).rejects.toMatchObject({ code: "PARSER_WORKER_CRASH" });
+  });
+
   test("rejects unframed worker values instead of cloning them into the result contract", async () => {
     const host = new AnalyzerWorkerHost({
       workerFactory: evalWorker("require('node:worker_threads').parentPort.postMessage({ outputs: [] })"),

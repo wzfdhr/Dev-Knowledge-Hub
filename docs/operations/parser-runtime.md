@@ -13,6 +13,9 @@ or executable configuration.
 - CPU, memory, PID, worker heap, stack, request, output, and wall-clock limits are enforced.
 - A parser container accepts one socket and one active worker; incomplete request frames are
   closed after five seconds so the 64 MiB protocol frame limit stays within the 512 MiB container budget.
+- Analyzer output is rejected above 100,000 structural values, 256 levels of nesting, or 16 MiB
+  of serialized JSON. Worker heap exhaustion, structural overflow, and byte overflow stay scoped
+  to the current shadow stage.
 - Every source path is a relative POSIX virtual path and every byte payload must match its SHA-256 hash.
 - The socket is recreated on service start with mode `0600`.
 
@@ -28,6 +31,16 @@ fails only the current v2 stage. Legacy project builds and all historical releas
 
 Restarting `parser` recreates the socket and does not require restarting PostgreSQL. Queued stage runs
 are retried only according to the existing pipeline retry policy.
+
+```bash
+docker compose -f docker-compose.yml restart parser
+docker compose -f docker-compose.yml ps parser
+docker compose -f docker-compose.yml logs --tail=100 parser
+```
+
+Wait until `parser` is healthy, then start a new shadow validation from the project's Knowledge Versions
+page. Failed stage attempts remain immutable evidence; restarting the parser never changes the current
+release or retries a completed failure in place.
 
 ## Verification
 

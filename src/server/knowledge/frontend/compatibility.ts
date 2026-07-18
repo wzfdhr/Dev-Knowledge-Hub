@@ -131,9 +131,10 @@ export async function createVerifiedFrontendReleaseDraft(input: {
     || build.workspaceId !== input.workspaceId || build.repositoryId !== repository.id) {
     throw new Error("Only a ready project build can create a frontend v2 release draft");
   }
-  const run = (await input.store.listPipelineStageRuns(
+  const runs = await input.store.listPipelineStageRuns(
     input.workspaceId, repository.projectId, input.buildId
-  )).find((candidate) => candidate.id === input.packageStageRunId);
+  );
+  const run = runs.find((candidate) => candidate.id === input.packageStageRunId);
   if (!run || run.stage !== "package" || !["succeeded", "reused"].includes(run.status)
     || run.snapshotId !== build.snapshotId || !run.outputManifestIds.includes(input.packageArtifactId)) {
     throw new Error("Frontend v2 package stage is not a terminal output of this build");
@@ -152,6 +153,32 @@ export async function createVerifiedFrontendReleaseDraft(input: {
   if (!value.artifacts.package.includes(value.sourceArtifactId)
     || value.upstreamManifestIds.join("\0") !== value.artifacts.validate.join("\0")) {
     throw new Error("Frontend v2 package manifest is incomplete");
+  }
+  const artifactEntries = Object.entries(value.artifacts) as Array<[BuildStage, string[]]>;
+  const artifactIds = artifactEntries.flatMap(([, ids]) => ids);
+  if (new Set(artifactIds).size !== artifactIds.length) {
+    throw new Error("Frontend v2 package manifest contains duplicate artifacts");
+  }
+  for (const [stage, ids] of artifactEntries) {
+    const stageRun = runs.findLast((candidate) => candidate.stage === stage
+      && ["succeeded", "reused"].includes(candidate.status)
+      && ids.every((id) => candidate.outputManifestIds.includes(id)));
+    if (!stageRun) throw new Error(`Frontend v2 package ${stage} artifacts are not completed build outputs`);
+    const manifests = await Promise.all(ids.map(async (id) => {
+      const internal = await input.store.findArtifactById(id);
+      if (!internal || internal.workspaceId !== input.workspaceId
+        || internal.projectId !== repository.projectId || internal.snapshotId !== build.snapshotId
+        || internal.stage !== stage) {
+        throw new Error(`Frontend v2 package ${stage} artifact does not belong to this build scope`);
+      }
+      await input.artifactReader.getJson(internal);
+      return internal;
+    }));
+    assertFrontendArtifactFamily(
+      stage,
+      stage === "package" ? ["knowledge-v1"] : ["knowledge-v1", "frontend-v2"],
+      manifests
+    );
   }
   return input.store.createReleaseDraft(input.workspaceId, repository.id, build.id, input.version, {
     releaseArtifactFamily: "frontend-v2",

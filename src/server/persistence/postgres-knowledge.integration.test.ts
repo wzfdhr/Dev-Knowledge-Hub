@@ -25,6 +25,7 @@ import {
 } from "../knowledge/retrieval-evaluation-v2";
 import { PgBossBuildJobQueue } from "../knowledge/job-queue";
 import { ArtifactStore } from "../knowledge/pipeline/artifact-store";
+import { BUILD_STAGES, type BuildStage } from "../knowledge/pipeline/contracts";
 import { createNormalizedSourcesStageExecutor, normalizedSourcesPipelineInputDigest } from "../knowledge/pipeline/convert-stage";
 import { createKnowledgeIrStageExecutor } from "../knowledge/pipeline/extract-stage";
 import { createKnowledgeGraphStageExecutor } from "../knowledge/pipeline/graph-stage";
@@ -2031,6 +2032,40 @@ integration("PostgreSQL cited knowledge integration", () => {
       };
 
       const first = await createReadyBuildAndRun();
+      const packagedArtifacts = Object.fromEntries(await Promise.all(BUILD_STAGES.map(async (stage) => {
+        const families = stage === "package"
+          ? ["knowledge-v1"] as const
+          : ["knowledge-v1", "frontend-v2"] as const;
+        const contracts = [...new Map(families.map((family) => {
+          const expected = ARTIFACT_KINDS[stage][family];
+          return [`${expected.kind}@${expected.schemaVersion}`, expected] as const;
+        })).values()];
+        const manifests = await Promise.all(contracts.map(async (expected, index) => (await artifactStore.putJson({
+          manifest: {
+            id: randomUUID(), workspaceId: setup!.workspace.id, projectId: repository!.projectId,
+            snapshotId, buildId: first.build.id, stage, kind: expected.kind,
+            schemaVersion: expected.schemaVersion,
+            inputDigest: createHash("sha256").update(`${stage}:${index}`).digest("hex"),
+            contentDigest: "0".repeat(64), storageKey: "pending", sourceRefs: [],
+            producer: "deterministic", createdAt: new Date().toISOString()
+          },
+          value: { schemaVersion: expected.schemaVersion, stage, kind: expected.kind }
+        })).manifest));
+        if (stage !== "package") {
+          const stageRun = await store.createStageRun({
+            workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId,
+            buildId: first.build.id, stage, attempt: 1,
+            inputDigest: createHash("sha256").update(`run:${stage}`).digest("hex")
+          });
+          await store.claimStageRun(stageRun.id, first.build.id, repository!.projectId);
+          await store.completeStageRunAndCreateNext({
+            workspaceId: setup!.workspace.id, projectId: repository!.projectId,
+            stageRunId: stageRun.id, status: "succeeded",
+            outputManifestIds: manifests.map((manifest) => manifest.id)
+          });
+        }
+        return [stage, manifests.map((manifest) => manifest.id)] as const;
+      }))) as Record<BuildStage, string[]>;
       const saved = await artifactStore.putJson({
         manifest: {
           id: randomUUID(), workspaceId: setup!.workspace.id, projectId: repository!.projectId,
@@ -2041,20 +2076,16 @@ integration("PostgreSQL cited knowledge integration", () => {
         value: {
           schemaVersion: 2, family: "frontend-v2", stage: "package", snapshotId,
           analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
-          upstreamManifestIds: ["validation-manifest", "validation-v2"], sourceArtifactId: "legacy-package",
+          upstreamManifestIds: packagedArtifacts.validate,
+          sourceArtifactId: packagedArtifacts.package[0]!,
           irSchemaVersion: 2, graphSchemaVersion: 2,
-          artifacts: {
-            convert: ["convert-v1"], extract: ["extract-v1", "extract-v2"],
-            tables: ["tables-v1", "tables-v2"], graph: ["graph-v1", "graph-v2"],
-            synthesize: ["synthesize-v1", "synthesize-v2"], index: ["index-v1", "index-v2"],
-            lint: ["lint-v1", "lint-v2"], viz: ["viz-v1", "viz-v2"],
-            validate: ["validation-manifest", "validation-v2"], package: ["legacy-package"]
-          }
+          artifacts: packagedArtifacts
         }
       });
       await store.completeStageRunAndCreateNext({
         workspaceId: setup!.workspace.id, projectId: repository!.projectId,
-        stageRunId: first.run.id, status: "succeeded", outputManifestIds: [saved.manifest.id]
+        stageRunId: first.run.id, status: "succeeded",
+        outputManifestIds: [...packagedArtifacts.package, saved.manifest.id]
       });
       const firstRelease = await createVerifiedFrontendReleaseDraft({
         store, artifactReader: artifactStore, workspaceId: setup!.workspace.id,

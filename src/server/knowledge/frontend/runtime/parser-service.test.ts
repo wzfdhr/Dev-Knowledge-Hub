@@ -153,7 +153,7 @@ describe("ParserService", () => {
     await service.stop();
   });
 
-  test("limits concurrent executions and closes incomplete frames", async () => {
+  test("rejects a second connection before reading its request body", async () => {
     const socket = await socketPath();
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
@@ -164,8 +164,6 @@ describe("ParserService", () => {
     const service = new ParserService({
       socketPath: socket,
       execute,
-      maxConnections: 3,
-      maxConcurrentRequests: 1,
       frameTimeoutMs: 25
     });
     await service.start();
@@ -173,34 +171,23 @@ describe("ParserService", () => {
     await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
     await expect(new ParserClient({ socketPath: socket, requestTimeoutMs: 100 }).analyze(request()))
       .rejects.toMatchObject({ code: "PARSER_RUNTIME_UNAVAILABLE" });
-
-    const partial = net.createConnection(socket);
-    await new Promise<void>((resolve) => partial.once("connect", resolve));
-    partial.write(Buffer.from([0, 0]));
-    await new Promise<void>((resolve) => partial.once("close", resolve));
+    expect(execute).toHaveBeenCalledTimes(1);
     release();
     await expect(first).resolves.toEqual({ outputs: [] });
     await service.stop();
   });
 
-  test("defaults to a single worker and two bounded socket decoders", async () => {
+  test("closes an incomplete frame after the bounded read deadline", async () => {
     const socket = await socketPath();
-    let release!: () => void;
-    const blocked = new Promise<void>((resolve) => { release = resolve; });
-    const execute = vi.fn(async () => {
-      await blocked;
-      return { outputs: [] };
-    });
-    const service = new ParserService({ socketPath: socket, execute });
+    const execute = vi.fn(async () => ({ outputs: [] }));
+    const service = new ParserService({ socketPath: socket, execute, frameTimeoutMs: 25 });
     await service.start();
-    const first = new ParserClient({ socketPath: socket, requestTimeoutMs: 500 }).analyze(request());
-    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
-    await expect(new ParserClient({ socketPath: socket, requestTimeoutMs: 100 }).analyze(request()))
-      .rejects.toMatchObject({ code: "PARSER_RUNTIME_UNAVAILABLE" });
-    const third = net.createConnection(socket);
-    await new Promise<void>((resolve) => third.once("close", resolve));
-    release();
-    await expect(first).resolves.toEqual({ outputs: [] });
+    const partial = net.createConnection(socket);
+    partial.on("error", () => undefined);
+    await new Promise<void>((resolve) => partial.once("connect", resolve));
+    partial.write(Buffer.from([0, 0]));
+    await new Promise<void>((resolve) => partial.once("close", resolve));
+    expect(execute).not.toHaveBeenCalled();
     await service.stop();
   });
 });

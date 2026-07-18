@@ -17,8 +17,6 @@ import { VirtualSourceFs } from "./virtual-source-fs.js";
 export interface ParserServiceOptions {
   socketPath: string;
   execute: (request: ParserAnalyzeRequest, signal: AbortSignal) => Promise<unknown>;
-  maxConnections?: number;
-  maxConcurrentRequests?: number;
   frameTimeoutMs?: number;
 }
 
@@ -40,7 +38,7 @@ export class ParserService {
     await mkdir(path.dirname(this.options.socketPath), { recursive: true });
     await rm(this.options.socketPath, { force: true });
     const server = net.createServer((socket) => this.handle(socket));
-    server.maxConnections = this.options.maxConnections ?? 2;
+    server.maxConnections = 1;
     this.#server = server;
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -68,8 +66,7 @@ export class ParserService {
   }
 
   private handle(socket: Socket): void {
-    const maxConnections = this.options.maxConnections ?? 2;
-    if (this.#sockets.size >= maxConnections) {
+    if (this.#sockets.size >= 1) {
       socket.destroy();
       return;
     }
@@ -107,7 +104,7 @@ export class ParserService {
           send({ type: "error", requestId: parsed.data.requestId, code: "PARSER_INVALID_REQUEST", message: "Parser sources are invalid" });
           continue;
         }
-        if (this.#active.size >= (this.options.maxConcurrentRequests ?? 1)) {
+        if (this.#active.size >= 1) {
           send({
             type: "error",
             requestId: parsed.data.requestId,

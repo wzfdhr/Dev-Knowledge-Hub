@@ -419,7 +419,6 @@ export function evaluateFrontendKnowledge(cases, observations) {
     else failures.push({ caseId: item.id, kind: "expected-search-result-missing" });
     if (rank >= 0) reciprocalRanks += 1 / (rank + 1);
     for (const result of results.slice(0, 5)) {
-      if (!item.expected.searchEntityIds.includes(result.entityId)) continue;
       const resultCitations = result.citations ?? [];
       if (!resultCitations.length) citationsSeen += 1;
       for (const citation of resultCitations) {

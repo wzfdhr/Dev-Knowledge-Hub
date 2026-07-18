@@ -202,7 +202,7 @@ describe("frontend knowledge evaluation protocol", () => {
       factEdgeRecall: 1,
       recallAt5: 1,
       mrr: 0.5,
-      citationValidity: 1,
+      citationValidity: 0.5,
       falsePositiveEmptyRate: 0,
       impactPrecision: 1,
       impactRecall: 1,
@@ -251,6 +251,7 @@ describe("frontend knowledge evaluation protocol", () => {
       searchResults: [{ entityId: "component:dashboard", citations: [] }]
     }]);
     expect(wrongEntity.metrics.citationValidity).toBe(0);
+    expect(wrongEntity.denominators.citations).toBe(1);
     expect(omitted.metrics.citationValidity).toBe(0);
     expect(omitted.denominators.citations).toBe(1);
   });

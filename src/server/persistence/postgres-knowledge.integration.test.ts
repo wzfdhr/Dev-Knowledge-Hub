@@ -2272,6 +2272,22 @@ integration("PostgreSQL cited knowledge integration", () => {
         },
         value: { other: true }
       });
+      await expect(store.createReleaseDraft(
+        setup!.workspace.id, repository!.id, first.build.id, "frontend-v2-cross-project-retention", {
+          releaseArtifactFamily: "frontend-v2",
+          packageArtifactId: saved.manifest.id,
+          packageStageRunId: first.run.id,
+          artifactIds: [internalArtifactId, otherArtifact.manifest.id],
+          frontendIrSchemaVersion: 2,
+          frontendGraphSchemaVersion: 2,
+          analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST
+        }
+      )).rejects.toThrow("same release scope");
+      const crossProjectRetentionRelease = await pool.query(
+        "SELECT 1 FROM releases WHERE repository_id = $1 AND version = 'frontend-v2-cross-project-retention'",
+        [repository!.id]
+      );
+      expect(crossProjectRetentionRelease.rows).toEqual([]);
       const crossProjectRunId = await insertRawRun({
         attempt: 4, status: "succeeded", artifactId: otherArtifact.manifest.id
       });

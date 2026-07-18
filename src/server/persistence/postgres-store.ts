@@ -4083,12 +4083,23 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       const row = rows[0];
       if (!row) throw new Error("Only a ready build can create a release draft");
       if (provenance) {
-        await client.query(
+        const retained = await client.query<{ artifact_id: string }>(
           `INSERT INTO release_artifacts (release_id, artifact_id)
-           SELECT $1, artifact_id
-           FROM unnest($2::uuid[]) AS artifact_id`,
-          [row.id, provenance.artifactIds]
+           SELECT $1, artifact.id
+           FROM unnest($2::uuid[]) AS requested(artifact_id)
+           JOIN knowledge_artifacts artifact ON artifact.id = requested.artifact_id
+           JOIN repositories repository
+             ON repository.id = $3
+             AND repository.workspace_id = $4
+             AND repository.project_id = artifact.project_id
+           WHERE artifact.workspace_id = $4
+             AND artifact.snapshot_id = $5
+           RETURNING artifact_id`,
+          [row.id, provenance.artifactIds, repositoryId, workspaceId, row.snapshot_id]
         );
+        if (retained.rows.length !== provenance.artifactIds.length) {
+          throw new Error("Frontend v2 release artifacts must share the same release scope");
+        }
       }
       await client.query("COMMIT");
       return releaseRecord(row);

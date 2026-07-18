@@ -15,7 +15,7 @@ const artifactRow = {
 };
 
 describe("PostgresAppStore pipeline persistence", () => {
-  test("rolls back a frontend release when retaining an internal artifact fails", async () => {
+  test("rolls back a frontend release when an internal artifact is outside its scope", async () => {
     const releaseRow = {
       id: "release-1", workspace_id: "workspace-1", repository_id: "repository-1",
       build_job_id: "build-1", snapshot_id: "snapshot-1", version: "frontend-v2.0.0",
@@ -26,7 +26,7 @@ describe("PostgresAppStore pipeline persistence", () => {
     };
     const query = vi.fn(async (sql: string) => {
       if (sql.includes("INSERT INTO releases")) return { rows: [releaseRow] };
-      if (sql.includes("INSERT INTO release_artifacts")) throw new Error("artifact disappeared");
+      if (sql.includes("INSERT INTO release_artifacts")) return { rows: [] };
       return { rows: [] };
     });
     const client = { query, release: vi.fn() };
@@ -39,7 +39,9 @@ describe("PostgresAppStore pipeline persistence", () => {
         frontendIrSchemaVersion: 2, frontendGraphSchemaVersion: 2,
         analyzerManifestDigest: "a".repeat(64)
       }
-    )).rejects.toThrow("artifact disappeared");
+    )).rejects.toThrow("same release scope");
+    expect(String(query.mock.calls[2]![0])).toContain("JOIN repositories");
+    expect(String(query.mock.calls[2]![0])).toContain("artifact.snapshot_id = $5");
     expect(query.mock.calls.map(([sql]) => sql)).toEqual([
       "BEGIN", expect.stringContaining("INSERT INTO releases"),
       expect.stringContaining("INSERT INTO release_artifacts"), "ROLLBACK"

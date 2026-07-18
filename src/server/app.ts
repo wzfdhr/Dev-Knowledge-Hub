@@ -61,6 +61,12 @@ import {
   PipelineComparisonUnavailableError
 } from "./knowledge/pipeline/build-comparison.js";
 import { loadPublishedKnowledgeGraph } from "./knowledge/pipeline/graph-query.js";
+import {
+  FRONTEND_KNOWLEDGE_MODES,
+  effectiveFrontendKnowledgeMode,
+  validateProjectFrontendMode,
+  type FrontendKnowledgeMode
+} from "./knowledge/frontend/rollout-mode.js";
 import { exportKnowledgeGraph } from "./knowledge/pipeline/viz.js";
 import { legacyBuildStatus } from "./knowledge/pipeline/contracts.js";
 import {
@@ -185,11 +191,20 @@ const PROJECT_ACTIVITY_METADATA_KEYS = new Set([
   "status",
   "unchanged"
 ]);
+const FRONTEND_ROLLOUT_ACTIVITY_METADATA_KEYS = new Set([
+  "projectId", "fromMode", "toMode", "reason"
+]);
 
-function projectActivityMetadata(metadata: Record<string, unknown> | undefined): Record<string, string | number | boolean | null> {
+function projectActivityMetadata(
+  action: string,
+  metadata: Record<string, unknown> | undefined
+): Record<string, string | number | boolean | null> {
   if (!metadata) return {};
+  const allowedKeys = action === "frontend_rollout.changed"
+    ? FRONTEND_ROLLOUT_ACTIVITY_METADATA_KEYS
+    : PROJECT_ACTIVITY_METADATA_KEYS;
   return Object.fromEntries(Object.entries(metadata).flatMap(([key, value]) =>
-    PROJECT_ACTIVITY_METADATA_KEYS.has(key) && (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null)
+    allowedKeys.has(key) && (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null)
       ? [[key, value]]
       : []
   ));
@@ -216,6 +231,8 @@ export interface ServerOptions {
   sessionStore?: SessionStore;
   legacySessionReadUntil?: Date;
   qualityArtifactReader?: { getJson(manifest: ArtifactManifest): Promise<unknown> };
+  knowledgeKernelMode?: FrontendKnowledgeMode;
+  frontendKnowledgeMode?: FrontendKnowledgeMode;
 }
 
 async function loadQualityAssessment(input: {
@@ -393,6 +410,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
   const sessionStore = options.sessionStore ?? new MemorySessionStore();
+  const knowledgeKernelMode = options.knowledgeKernelMode ?? "legacy";
+  const frontendKnowledgeMode = options.frontendKnowledgeMode ?? "legacy";
   const stageSseConnections = new Map<string, number>();
   registerHttpSecurity(server, options.rateLimits ?? DEFAULT_RATE_LIMITS);
   server.addContentTypeParser(
@@ -946,6 +965,69 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return reply.code(201).send({ project: projectDto(project) });
   });
 
+  const frontendRolloutParamsSchema = z.object({ projectId: z.uuid() });
+  const frontendRolloutBodySchema = z.object({
+    mode: z.enum(FRONTEND_KNOWLEDGE_MODES),
+    reason: z.string().trim().min(1).max(500)
+  });
+  const frontendRolloutDto = (
+    rollout: Awaited<ReturnType<AppStore["getProjectFrontendRollout"]>>
+  ) => ({
+    kernelMode: knowledgeKernelMode,
+    systemMode: frontendKnowledgeMode,
+    projectMode: rollout?.mode ?? null,
+    effectiveMode: effectiveFrontendKnowledgeMode({
+      kernelMode: knowledgeKernelMode,
+      systemMode: frontendKnowledgeMode,
+      ...(rollout ? { projectMode: rollout.mode } : {})
+    }),
+    reason: rollout?.reason ?? null,
+    updatedBy: rollout?.updatedBy ?? null,
+    updatedAt: rollout?.updatedAt ?? null
+  });
+
+  server.get("/api/projects/:projectId/frontend-rollout", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = frontendRolloutParamsSchema.safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project");
+    await requireProjectRole("reader", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    return frontendRolloutDto(await options.store.getProjectFrontendRollout(
+      admin.workspaceId, params.data.projectId
+    ));
+  });
+
+  server.put("/api/projects/:projectId/frontend-rollout", { preHandler: requireAdministrator }, async (request, reply) => {
+    const params = frontendRolloutParamsSchema.safeParse(request.params);
+    const body = frontendRolloutBodySchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return sendError(reply, 400, "INVALID_REQUEST", "Invalid frontend rollout configuration");
+    }
+    try {
+      validateProjectFrontendMode({
+        kernelMode: knowledgeKernelMode,
+        systemMode: frontendKnowledgeMode,
+        projectMode: body.data.mode
+      });
+    } catch {
+      return sendError(reply, 409, "FRONTEND_MODE_NOT_ALLOWED", "Frontend mode exceeds the configured system cap");
+    }
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const access = await options.store.projectAccess(admin.workspaceId, params.data.projectId, admin.id);
+    if (!access || access.project.archivedAt !== null) {
+      return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    }
+    const rollout = await options.store.setProjectFrontendRollout({
+      workspaceId: admin.workspaceId,
+      projectId: params.data.projectId,
+      mode: body.data.mode,
+      reason: body.data.reason,
+      actorId: admin.id
+    });
+    if (!rollout) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    return frontendRolloutDto(rollout);
+  });
+
   server.get("/api/projects/:projectId/summary", { preHandler: requireAdmin }, async (request, reply) => {
     const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
     if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project");
@@ -1017,7 +1099,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         action: event.action,
         resourceType: event.resourceType,
         resourceId: event.resourceId ?? null,
-        metadata: projectActivityMetadata(event.metadata),
+        metadata: projectActivityMetadata(event.action, event.metadata),
         createdAt: event.createdAt
       })),
       members: members.map(memberDto),

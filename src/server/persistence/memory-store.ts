@@ -32,6 +32,7 @@ import type {
   CreateRemediationInput,
   EncryptedCredentialRecord,
   FeedbackRebuildInput,
+  FrontendReleaseDraftProvenance,
   FinishGitSynchronizationInput,
   GitSynchronizationClaim,
   GitSynchronizationLease,
@@ -60,6 +61,7 @@ import type {
   ProjectMemberRecord,
   ProjectRole,
   ProjectRecord,
+  ProjectFrontendRolloutRecord,
   RemediationBuildInput,
   RemediationEventRecord,
   RemediationRecord,
@@ -111,6 +113,8 @@ export class MemoryAppStore implements AppStore {
   readonly adminMfaRecoveryCodes: Array<AdminMfaRecoveryCodeRecord & { workspaceId: string; userId: string }> = [];
   private readonly projects: ProjectRecord[] = [];
   private readonly projectMembers: Array<ProjectMemberRecord & { userId: string }> = [];
+  private readonly projectFrontendRollouts = new Map<string, ProjectFrontendRolloutRecord>();
+  private readonly projectFrontendRolloutWrites = new Map<string, Promise<void>>();
   private readonly repositories: RepositoryRecord[] = [];
   private readonly gitSynchronizationSchedules = new Map<string, {
     nextAttemptAt: Date;
@@ -428,6 +432,70 @@ export class MemoryAppStore implements AppStore {
       resourceId: project.id
     });
     return project;
+  }
+
+  async getProjectFrontendRollout(
+    workspaceId: string,
+    projectId: string
+  ): Promise<ProjectFrontendRolloutRecord | null> {
+    const rollout = this.projectFrontendRollouts.get(projectId);
+    return rollout?.workspaceId === workspaceId ? structuredClone(rollout) : null;
+  }
+
+  async setProjectFrontendRollout(input: {
+    workspaceId: string;
+    projectId: string;
+    mode: ProjectFrontendRolloutRecord["mode"];
+    reason: string;
+    actorId: string;
+  }): Promise<ProjectFrontendRolloutRecord | null> {
+    const project = this.projects.find((candidate) =>
+      candidate.id === input.projectId && candidate.workspaceId === input.workspaceId
+    );
+    const actor = this.members.find((candidate) =>
+      candidate.id === input.actorId && candidate.workspaceId === input.workspaceId
+        && candidate.role === "admin" && candidate.disabledAt === null
+    );
+    if (!project || !actor) return null;
+    const previousWrite = this.projectFrontendRolloutWrites.get(project.id) ?? Promise.resolve();
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const queuedWrite = previousWrite.catch(() => undefined).then(() => writeGate);
+    this.projectFrontendRolloutWrites.set(project.id, queuedWrite);
+    await previousWrite.catch(() => undefined);
+    try {
+      const previous = this.projectFrontendRollouts.get(project.id);
+      const now = new Date();
+      const rollout: ProjectFrontendRolloutRecord = {
+        projectId: project.id,
+        workspaceId: input.workspaceId,
+        mode: input.mode,
+        reason: input.reason,
+        updatedBy: input.actorId,
+        createdAt: previous?.createdAt ?? now,
+        updatedAt: now
+      };
+      await this.recordAudit({
+        workspaceId: input.workspaceId,
+        actorId: input.actorId,
+        action: "frontend_rollout.changed",
+        resourceType: "project",
+        resourceId: project.id,
+        metadata: {
+          projectId: project.id,
+          fromMode: previous?.mode ?? "legacy",
+          toMode: rollout.mode,
+          reason: rollout.reason
+        }
+      });
+      this.projectFrontendRollouts.set(project.id, rollout);
+      return structuredClone(rollout);
+    } finally {
+      releaseWrite();
+      if (this.projectFrontendRolloutWrites.get(project.id) === queuedWrite) {
+        this.projectFrontendRolloutWrites.delete(project.id);
+      }
+    }
   }
 
   async listAccessibleProjects(
@@ -2164,7 +2232,8 @@ export class MemoryAppStore implements AppStore {
     workspaceId: string,
     repositoryId: string,
     buildId: string,
-    version: string
+    version: string,
+    provenance?: FrontendReleaseDraftProvenance
   ): Promise<ReleaseRecord> {
     const build = await this.getBuild(workspaceId, buildId);
     if (!build || build.repositoryId !== repositoryId || build.status !== "ready") {
@@ -2173,6 +2242,35 @@ export class MemoryAppStore implements AppStore {
     if (this.releases.some((release) =>
       release.repositoryId === repositoryId && release.version === version
     )) throw new Error("Release version already exists");
+    if (provenance) {
+      const repository = await this.getRepository(workspaceId, repositoryId);
+      if (new Set(provenance.artifactIds).size !== provenance.artifactIds.length
+        || provenance.artifactIds.some((id) => !this.knowledgeArtifacts.some((artifact) =>
+          artifact.id === id
+          && artifact.workspaceId === workspaceId
+          && artifact.projectId === repository?.projectId
+          && artifact.snapshotId === build.snapshotId
+        ))) {
+        throw new Error("Frontend v2 release must retain every packaged artifact");
+      }
+      const run = this.pipelineStageRuns.find((candidate) =>
+        candidate.id === provenance.packageStageRunId
+        && candidate.workspaceId === workspaceId
+        && candidate.projectId === repository?.projectId
+        && candidate.buildId === buildId
+        && candidate.snapshotId === build.snapshotId
+        && candidate.stage === "package"
+        && (candidate.status === "succeeded" || candidate.status === "reused")
+        && candidate.outputManifestIds.includes(provenance.packageArtifactId)
+      );
+      const artifact = await this.findArtifactById(provenance.packageArtifactId);
+      if (!run || !artifact || artifact.workspaceId !== workspaceId
+        || artifact.projectId !== repository?.projectId || artifact.snapshotId !== build.snapshotId
+        || artifact.stage !== "package" || artifact.kind !== "frontend-pipeline-package"
+        || artifact.schemaVersion !== 2) {
+        throw new Error("Frontend v2 release must reference its terminal package stage output");
+      }
+    }
     const release: ReleaseRecord = {
       id: randomUUID(),
       workspaceId,
@@ -2180,8 +2278,13 @@ export class MemoryAppStore implements AppStore {
       buildId,
       snapshotId: build.snapshotId,
       version,
-      kernelMode: "legacy",
-      packageArtifactId: null,
+      kernelMode: provenance ? "pipeline" : "legacy",
+      packageArtifactId: provenance?.packageArtifactId ?? null,
+      releaseArtifactFamily: provenance?.releaseArtifactFamily ?? "knowledge-v1",
+      packageStageRunId: provenance?.packageStageRunId ?? null,
+      frontendIrSchemaVersion: provenance?.frontendIrSchemaVersion ?? null,
+      frontendGraphSchemaVersion: provenance?.frontendGraphSchemaVersion ?? null,
+      analyzerManifestDigest: provenance?.analyzerManifestDigest ?? null,
       createdAt: new Date(),
       publishedAt: null
     };

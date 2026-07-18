@@ -25,6 +25,7 @@ import {
 } from "../knowledge/retrieval-evaluation-v2";
 import { PgBossBuildJobQueue } from "../knowledge/job-queue";
 import { ArtifactStore } from "../knowledge/pipeline/artifact-store";
+import { BUILD_STAGES, type BuildStage } from "../knowledge/pipeline/contracts";
 import { createNormalizedSourcesStageExecutor, normalizedSourcesPipelineInputDigest } from "../knowledge/pipeline/convert-stage";
 import { createKnowledgeIrStageExecutor } from "../knowledge/pipeline/extract-stage";
 import { createKnowledgeGraphStageExecutor } from "../knowledge/pipeline/graph-stage";
@@ -32,11 +33,20 @@ import { createPipelineSearchIndexStageExecutor } from "../knowledge/pipeline/in
 import { createKnowledgePackageStageExecutor } from "../knowledge/pipeline/package-stage";
 import { createKnowledgeQualityStageExecutor } from "../knowledge/pipeline/quality-stage";
 import { createPipelineStageExecutor } from "../knowledge/pipeline/stage-executor";
-import { createB02StageInputPlanner } from "../knowledge/pipeline/stage-planner";
 import { createKnowledgeSynthesisStageExecutor } from "../knowledge/pipeline/synthesize-stage";
 import { createTableSchemasStageExecutor } from "../knowledge/pipeline/tables-stage";
 import { createKnowledgeValidationStageExecutor } from "../knowledge/pipeline/validate-stage";
 import { createKnowledgeVisualizationStageExecutor } from "../knowledge/pipeline/viz-stage";
+import {
+  ARTIFACT_KINDS,
+  EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+  createVerifiedFrontendReleaseDraft
+} from "../knowledge/frontend/compatibility";
+import {
+  createFrontendShadowStageExecutor,
+  createFrontendShadowStageInputPlanner,
+  createKnowledgeV1StoreView
+} from "../knowledge/frontend/shadow-stage";
 import { PipelineStageWorker, type PipelineStageJob, type PipelineStageJobQueue } from "../knowledge/pipeline/worker";
 import { hashMcpToken } from "../mcp/auth";
 import { PostgresSessionStore } from "../security/session-store";
@@ -52,6 +62,12 @@ let pool: Pool | null = null;
 let temporaryRoot: string | null = null;
 const retrievalFixtureRoots: string[] = [];
 const execute = promisify(execFile);
+
+function schemaScopedDatabaseUrl(connectionString: string, schema: string): string {
+  const url = new URL(connectionString);
+  url.searchParams.set("options", `-c search_path=${schema},public`);
+  return url.toString();
+}
 
 class RecordedPipelineQueue implements PipelineStageJobQueue {
   readonly sent: PipelineStageJob[] = [];
@@ -97,6 +113,81 @@ async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean):
 }
 
 integration("PostgreSQL cited knowledge integration", () => {
+  test(databaseUrl
+    ? "changes project frontend rollout and its audit event in one transaction"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("frontend-rollout@example.com", "hash");
+    const project = (await store.listProjects(setup!.workspace.id))[0]!;
+    const projectAdmin = await store.createTeamMember(
+      setup!.workspace.id,
+      { email: "frontend-project-admin@example.com", passwordHash: "hash", role: "member" },
+      setup!.admin.id
+    );
+    await store.addProjectMember(
+      setup!.workspace.id, project.id, projectAdmin!.id, "admin", setup!.admin.id
+    );
+    await expect(store.setProjectFrontendRollout({
+      workspaceId: setup!.workspace.id,
+      projectId: project.id,
+      mode: "shadow",
+      reason: "Project administrators cannot change workspace rollout",
+      actorId: projectAdmin!.id
+    })).resolves.toBeNull();
+
+    await expect(store.setProjectFrontendRollout({
+      workspaceId: setup!.workspace.id,
+      projectId: project.id,
+      mode: "shadow",
+      reason: "Validate frontend-v2 artifacts",
+      actorId: setup!.admin.id
+    })).resolves.toMatchObject({ mode: "shadow", updatedBy: setup!.admin.id });
+    const audit = await pool.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM audit_events
+       WHERE workspace_id = $1 AND action = 'frontend_rollout.changed'
+       ORDER BY created_at DESC LIMIT 1`,
+      [setup!.workspace.id]
+    );
+    expect(audit.rows[0]?.metadata).toMatchObject({
+      projectId: project.id,
+      fromMode: "legacy",
+      toMode: "shadow",
+      reason: "Validate frontend-v2 artifacts"
+    });
+
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION reject_frontend_rollout_audit() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.action = 'frontend_rollout.changed' THEN
+          RAISE EXCEPTION 'frontend rollout audit unavailable';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+      CREATE TRIGGER reject_frontend_rollout_audit
+      BEFORE INSERT ON audit_events
+      FOR EACH ROW EXECUTE FUNCTION reject_frontend_rollout_audit();
+    `);
+    try {
+      await expect(store.setProjectFrontendRollout({
+        workspaceId: setup!.workspace.id,
+        projectId: project.id,
+        mode: "legacy",
+        reason: "This transaction must roll back",
+        actorId: setup!.admin.id
+      })).rejects.toThrow("frontend rollout audit unavailable");
+      await expect(store.getProjectFrontendRollout(setup!.workspace.id, project.id))
+        .resolves.toMatchObject({ mode: "shadow", reason: "Validate frontend-v2 artifacts" });
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS reject_frontend_rollout_audit ON audit_events");
+      await pool.query("DROP FUNCTION IF EXISTS reject_frontend_rollout_audit()");
+    }
+  });
+
   test(databaseUrl
     ? "enforces the versioned retrieval quality gate through the PostgreSQL search implementation"
     : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
@@ -346,6 +437,114 @@ integration("PostgreSQL cited knowledge integration", () => {
     );
     expect(extension.rows).toHaveLength(1);
   }, 30_000);
+
+  test(databaseUrl
+    ? "upgrades published legacy and pipeline-package v1 releases from migration 0030 without changing them"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    const schema = `frontend_upgrade_${randomUUID().replaceAll("-", "")}`;
+    const migrationRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-frontend-upgrade-"));
+    await pool.query(`CREATE SCHEMA ${schema}`);
+    const scopedPool = new Pool({ connectionString: schemaScopedDatabaseUrl(databaseUrl, schema) });
+    try {
+      const names = (await readdir(path.resolve("drizzle")))
+        .filter((name) => name.endsWith(".sql") && Number(name.slice(0, 4)) <= 30)
+        .sort();
+      for (const name of names) await cp(path.resolve("drizzle", name), path.join(migrationRoot, name));
+      await runMigrations(scopedPool, migrationRoot);
+
+      const store = new PostgresAppStore(scopedPool);
+      const setup = await store.createInitialSetup("frontend-upgrade@example.com", "hash");
+      const repository = await store.createRepository(
+        setup!.workspace.id, { kind: "upload", name: "Upgrade source" }
+      );
+      const snapshotId = randomUUID();
+      await store.createSnapshot({
+        snapshot: {
+          id: snapshotId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+          commitSha: "a".repeat(40), ref: "upload", remoteUrl: null,
+          commitTimestamp: new Date("2026-07-17T00:00:00.000Z"), storagePath: "/tmp/frontend-upgrade"
+        },
+        files: []
+      });
+      const createPublishedBuild = async () => {
+        const { build } = await store.createBuild({
+          workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId,
+          snapshotPath: "/tmp/frontend-upgrade", commitSha: "a".repeat(40)
+        });
+        await scopedPool.query("UPDATE build_jobs SET status = 'published' WHERE id = $1", [build.id]);
+        return build;
+      };
+      const legacyBuild = await createPublishedBuild();
+      const pipelineBuild = await createPublishedBuild();
+      const legacyReleaseId = randomUUID();
+      const pipelineReleaseId = randomUUID();
+      const packageArtifactId = randomUUID();
+      await scopedPool.query(
+        `INSERT INTO knowledge_artifacts
+           (id, workspace_id, project_id, snapshot_id, build_job_id, stage, kind, schema_version,
+            input_digest, content_digest, storage_key, source_refs, producer)
+         VALUES ($1, $2, $3, $4, $5, 'package', 'pipeline-package', 1,
+           $6, $7, $8, '[]'::jsonb, 'deterministic')`,
+        [
+          packageArtifactId, setup!.workspace.id, repository!.projectId, snapshotId, pipelineBuild.id,
+          "b".repeat(64), "c".repeat(64), `${repository!.projectId}/${snapshotId}/package/${"c".repeat(64)}.json`
+        ]
+      );
+      await scopedPool.query(
+        `INSERT INTO releases
+           (id, workspace_id, repository_id, build_job_id, snapshot_id, version, kernel_mode,
+            package_artifact_id, published_at)
+         VALUES
+           ($1, $3, $4, $5, $6, 'legacy-before-0031', 'legacy', NULL, now()),
+           ($2, $3, $4, $7, $6, 'pipeline-v1-before-0031', 'pipeline', $8, now())`,
+        [
+          legacyReleaseId, pipelineReleaseId, setup!.workspace.id, repository!.id,
+          legacyBuild.id, snapshotId, pipelineBuild.id, packageArtifactId
+        ]
+      );
+      await scopedPool.query(
+        `INSERT INTO release_channels (workspace_id, repository_id, release_id, name)
+         VALUES ($1, $2, $3, 'current')`,
+        [setup!.workspace.id, repository!.id, pipelineReleaseId]
+      );
+
+      const migrationName = "0031_frontend_contracts_rollout.sql";
+      await cp(path.resolve("drizzle", migrationName), path.join(migrationRoot, migrationName));
+      await expect(runMigrations(scopedPool, migrationRoot)).resolves.toEqual([migrationName]);
+      const releases = await scopedPool.query<{
+        id: string; kernel_mode: string; package_artifact_id: string | null;
+        release_artifact_family: string; package_stage_run_id: string | null;
+      }>(
+        `SELECT id, kernel_mode, package_artifact_id, release_artifact_family, package_stage_run_id
+         FROM releases ORDER BY version`
+      );
+      expect(releases.rows).toEqual([
+        {
+          id: legacyReleaseId, kernel_mode: "legacy", package_artifact_id: null,
+          release_artifact_family: "knowledge-v1", package_stage_run_id: null
+        },
+        {
+          id: pipelineReleaseId, kernel_mode: "pipeline", package_artifact_id: packageArtifactId,
+          release_artifact_family: "knowledge-v1", package_stage_run_id: null
+        }
+      ]);
+      await expect(store.currentRelease(setup!.workspace.id, repository!.id)).resolves.toMatchObject({
+        id: pipelineReleaseId,
+        kernelMode: "pipeline",
+        packageArtifactId,
+        releaseArtifactFamily: "knowledge-v1"
+      });
+      await expect(store.rollbackReleaseToLegacy(
+        setup!.workspace.id, legacyReleaseId, setup!.admin.id
+      )).resolves.toMatchObject({ release: { id: legacyReleaseId }, previousReleaseId: pipelineReleaseId });
+    } finally {
+      await scopedPool.end();
+      await pool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
+      await rm(migrationRoot, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   test(databaseUrl
     ? "validates legacy remediation identities before applying the unique migration"
@@ -598,7 +797,7 @@ integration("PostgreSQL cited knowledge integration", () => {
     await expect(pool.query(
       "UPDATE releases SET kernel_mode = 'pipeline', package_artifact_id = $1 WHERE id = $2",
       [packageArtifact.id, release.id]
-    )).rejects.toThrow("Release pipeline provenance is immutable");
+    )).rejects.toThrow(/Release .* provenance is immutable/);
     await expect(pool.query("DELETE FROM knowledge_artifacts WHERE id = $1", [artifact.id]))
       .rejects.toThrow("Cannot delete artifacts from a published build");
   }, 30_000);
@@ -853,24 +1052,26 @@ integration("PostgreSQL cited knowledge integration", () => {
       const artifactStore = new ArtifactStore(artifactRoot, store);
       await artifactStore.initialize();
       const queue = new RecordedPipelineQueue();
+      const knowledgeV1Store = createKnowledgeV1StoreView(store);
+      const legacyExecutor = createPipelineStageExecutor({
+        convert: createNormalizedSourcesStageExecutor({ store: knowledgeV1Store, artifactStore }),
+        extract: createKnowledgeIrStageExecutor({ store: knowledgeV1Store, artifactStore }),
+        tables: createTableSchemasStageExecutor({ store: knowledgeV1Store, artifactStore }),
+        graph: createKnowledgeGraphStageExecutor({ store: knowledgeV1Store, artifactStore }),
+        synthesize: createKnowledgeSynthesisStageExecutor({ store: knowledgeV1Store, artifactStore }),
+        index: createPipelineSearchIndexStageExecutor({ store: knowledgeV1Store, artifactStore }),
+        lint: createKnowledgeQualityStageExecutor({ store: knowledgeV1Store, artifactStore }),
+        viz: createKnowledgeVisualizationStageExecutor({ store: knowledgeV1Store, artifactStore }),
+        validate: createKnowledgeValidationStageExecutor({ store: knowledgeV1Store, artifactStore }),
+        package: createKnowledgePackageStageExecutor({ store: knowledgeV1Store, artifactStore })
+      });
       const worker = new PipelineStageWorker(
         store,
         queue,
-        createPipelineStageExecutor({
-          convert: createNormalizedSourcesStageExecutor({ store, artifactStore }),
-          extract: createKnowledgeIrStageExecutor({ store, artifactStore }),
-          tables: createTableSchemasStageExecutor({ store, artifactStore }),
-          graph: createKnowledgeGraphStageExecutor({ store, artifactStore }),
-          synthesize: createKnowledgeSynthesisStageExecutor({ store, artifactStore }),
-          index: createPipelineSearchIndexStageExecutor({ store, artifactStore }),
-          lint: createKnowledgeQualityStageExecutor({ store, artifactStore }),
-          viz: createKnowledgeVisualizationStageExecutor({ store, artifactStore }),
-          validate: createKnowledgeValidationStageExecutor({ store, artifactStore }),
-          package: createKnowledgePackageStageExecutor({ store, artifactStore })
-        }),
+        createFrontendShadowStageExecutor({ store, artifactStore, legacy: legacyExecutor }),
         ["convert", "extract", "tables", "graph", "synthesize", "index", "lint", "viz", "validate", "package"],
         5_000,
-        createB02StageInputPlanner(store)
+        createFrontendShadowStageInputPlanner(store)
       );
       const files = await store.listSnapshotFiles(setup!.workspace.id, snapshot.id);
       const runBuild = async () => {
@@ -911,6 +1112,16 @@ integration("PostgreSQL cited knowledge integration", () => {
           { stage: "validate", status: "succeeded", errorDetail: null },
           { stage: "package", status: "succeeded", errorDetail: null }
         ]);
+      for (const run of firstRuns) {
+        const manifests = await Promise.all(run.outputManifestIds.map((id) => store.findArtifactById(id)));
+        expect(manifests).toHaveLength(run.stage === "convert" ? 1 : 2);
+        for (const family of ["knowledge-v1", "frontend-v2"] as const) {
+          const expected = ARTIFACT_KINDS[run.stage][family];
+          expect(manifests).toEqual(expect.arrayContaining([
+            expect.objectContaining({ kind: expected.kind, schemaVersion: expected.schemaVersion })
+          ]));
+        }
+      }
 
       await store.transitionBuild(firstBuild.id, "queued", "ready");
       const release = await store.createReleaseDraft(setup!.workspace.id, repository!.id, firstBuild.id, "1.0.0");
@@ -924,6 +1135,21 @@ integration("PostgreSQL cited knowledge integration", () => {
           ["validate", "reused"], ["package", "reused"]
         ]);
       await store.transitionBuild(reusedBuild.id, "queued", "ready");
+      const reusedPackageRun = (await store.listPipelineStageRuns(
+        setup!.workspace.id, project.id, reusedBuild.id
+      )).find((run) => run.stage === "package")!;
+      const reusedPackageArtifact = (await Promise.all(reusedPackageRun.outputManifestIds.map((id) =>
+        store.findArtifactById(id)
+      ))).find((manifest) => manifest?.kind === "frontend-pipeline-package")!;
+      await expect(createVerifiedFrontendReleaseDraft({
+        store, artifactReader: artifactStore, workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id, buildId: reusedBuild.id, version: "frontend-v2-reused",
+        packageStageRunId: reusedPackageRun.id, packageArtifactId: reusedPackageArtifact.id
+      })).resolves.toMatchObject({
+        releaseArtifactFamily: "frontend-v2",
+        buildId: reusedBuild.id,
+        packageArtifactId: reusedPackageArtifact.id
+      });
       const firstConvert = (await store.listPipelineStageRuns(setup!.workspace.id, project.id, firstBuild.id))
         .find((run) => run.stage === "convert")!;
       const firstConvertArtifact = await store.findArtifactById(firstConvert.outputManifestIds[0]!);
@@ -1756,6 +1982,382 @@ integration("PostgreSQL cited knowledge integration", () => {
       expect(workspaceAdmin.json()).toMatchObject({ release: { id: legacy.id }, previousReleaseId: current.id });
     } finally {
       await app.close();
+    }
+  }, 30_000);
+
+  test(databaseUrl
+    ? "enforces reusable frontend v2 release provenance and physical package integrity"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const artifactRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-frontend-v2-artifacts-"));
+    try {
+      const store = new PostgresAppStore(pool);
+      const setup = await store.createInitialSetup("frontend-v2-release@example.com", "hash");
+      const repository = await store.createRepository(
+        setup!.workspace.id, { kind: "upload", name: "Frontend v2 source" }
+      );
+      const snapshotId = randomUUID();
+      await store.createSnapshot({
+        snapshot: {
+          id: snapshotId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+          commitSha: "f".repeat(40), ref: "upload", remoteUrl: null,
+          commitTimestamp: new Date("2026-07-18T00:00:00.000Z"), storagePath: "/tmp/frontend-v2"
+        },
+        files: []
+      });
+      const artifactStore = new ArtifactStore(artifactRoot, store);
+      await artifactStore.initialize();
+
+      const reusableArtifacts: { value?: Record<BuildStage, string[]> } = {};
+      const createReadyBuildAndRun = async (artifactId?: string) => {
+        const { build } = await store.createBuild({
+          workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId,
+          snapshotPath: "/tmp/frontend-v2", commitSha: "f".repeat(40)
+        });
+        const run = await store.createStageRun({
+          workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId,
+          buildId: build.id, stage: "package", attempt: 1, inputDigest: "9".repeat(64)
+        });
+        await store.claimStageRun(run.id, build.id, repository!.projectId);
+        if (artifactId) {
+          if (!reusableArtifacts.value) throw new Error("Reusable package artifacts are not initialized");
+          for (const stage of BUILD_STAGES.filter((candidate) => candidate !== "package")) {
+            const reusedRun = await store.createStageRun({
+              workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId,
+              buildId: build.id, stage, attempt: 1,
+              inputDigest: createHash("sha256").update(`reused:${build.id}:${stage}`).digest("hex")
+            });
+            await store.claimStageRun(reusedRun.id, build.id, repository!.projectId);
+            await store.completeStageRunAndCreateNext({
+              workspaceId: setup!.workspace.id, projectId: repository!.projectId,
+              stageRunId: reusedRun.id, status: "reused",
+              outputManifestIds: reusableArtifacts.value[stage]
+            });
+          }
+          await store.completeStageRunAndCreateNext({
+            workspaceId: setup!.workspace.id, projectId: repository!.projectId,
+            stageRunId: run.id, status: "reused",
+            outputManifestIds: [...reusableArtifacts.value.package, artifactId]
+          });
+        }
+        await store.transitionBuild(build.id, "queued", "ready");
+        return { build, run };
+      };
+
+      const first = await createReadyBuildAndRun();
+      const packagedArtifacts = Object.fromEntries(await Promise.all(BUILD_STAGES.map(async (stage) => {
+        const families = stage === "package"
+          ? ["knowledge-v1"] as const
+          : ["knowledge-v1", "frontend-v2"] as const;
+        const contracts = [...new Map(families.map((family) => {
+          const expected = ARTIFACT_KINDS[stage][family];
+          return [`${expected.kind}@${expected.schemaVersion}`, expected] as const;
+        })).values()];
+        const manifests = await Promise.all(contracts.map(async (expected, index) => (await artifactStore.putJson({
+          manifest: {
+            id: randomUUID(), workspaceId: setup!.workspace.id, projectId: repository!.projectId,
+            snapshotId, buildId: first.build.id, stage, kind: expected.kind,
+            schemaVersion: expected.schemaVersion,
+            inputDigest: createHash("sha256").update(`${stage}:${index}`).digest("hex"),
+            contentDigest: "0".repeat(64), storageKey: "pending", sourceRefs: [],
+            producer: "deterministic", createdAt: new Date().toISOString()
+          },
+          value: { schemaVersion: expected.schemaVersion, stage, kind: expected.kind }
+        })).manifest));
+        if (stage !== "package") {
+          const stageRun = await store.createStageRun({
+            workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId,
+            buildId: first.build.id, stage, attempt: 1,
+            inputDigest: createHash("sha256").update(`run:${stage}`).digest("hex")
+          });
+          await store.claimStageRun(stageRun.id, first.build.id, repository!.projectId);
+          await store.completeStageRunAndCreateNext({
+            workspaceId: setup!.workspace.id, projectId: repository!.projectId,
+            stageRunId: stageRun.id, status: "succeeded",
+            outputManifestIds: manifests.map((manifest) => manifest.id)
+          });
+        }
+        return [stage, manifests.map((manifest) => manifest.id)] as const;
+      }))) as Record<BuildStage, string[]>;
+      const saved = await artifactStore.putJson({
+        manifest: {
+          id: randomUUID(), workspaceId: setup!.workspace.id, projectId: repository!.projectId,
+          snapshotId, buildId: first.build.id, stage: "package", kind: "frontend-pipeline-package",
+          schemaVersion: 2, inputDigest: "9".repeat(64), contentDigest: "0".repeat(64), storageKey: "pending",
+          sourceRefs: [], producer: "deterministic", createdAt: new Date().toISOString()
+        },
+        value: {
+          schemaVersion: 2, family: "frontend-v2", stage: "package", snapshotId,
+          analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+          upstreamManifestIds: packagedArtifacts.validate,
+          sourceArtifactId: packagedArtifacts.package[0]!,
+          irSchemaVersion: 2, graphSchemaVersion: 2,
+          artifacts: packagedArtifacts
+        }
+      });
+      await store.completeStageRunAndCreateNext({
+        workspaceId: setup!.workspace.id, projectId: repository!.projectId,
+        stageRunId: first.run.id, status: "succeeded",
+        outputManifestIds: [...packagedArtifacts.package, saved.manifest.id]
+      });
+      reusableArtifacts.value = packagedArtifacts;
+
+      const internalArtifactId = packagedArtifacts.extract[0]!;
+      const internalManifest = await store.findArtifactById(internalArtifactId);
+      expect(internalManifest).not.toBeNull();
+      const internalPath = path.join(artifactStore.root, internalManifest!.storageKey);
+      const originalInternalContent = await readFile(internalPath);
+      await rm(internalPath);
+      await expect(createVerifiedFrontendReleaseDraft({
+        store, artifactReader: artifactStore, workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id, buildId: first.build.id, version: "frontend-v2-missing-internal",
+        packageStageRunId: first.run.id, packageArtifactId: saved.manifest.id
+      })).rejects.toThrow("Artifact content is unavailable");
+      await writeFile(internalPath, originalInternalContent);
+      await writeFile(internalPath, "{\"corrupted\":true}\n", "utf8");
+      await expect(createVerifiedFrontendReleaseDraft({
+        store, artifactReader: artifactStore, workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id, buildId: first.build.id, version: "frontend-v2-corrupt-internal",
+        packageStageRunId: first.run.id, packageArtifactId: saved.manifest.id
+      })).rejects.toThrow("Artifact content digest mismatch");
+      await writeFile(internalPath, originalInternalContent);
+
+      const firstRelease = await createVerifiedFrontendReleaseDraft({
+        store, artifactReader: artifactStore, workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id, buildId: first.build.id, version: "frontend-v2.0.0",
+        packageStageRunId: first.run.id, packageArtifactId: saved.manifest.id
+      });
+      expect(firstRelease).toMatchObject({
+        releaseArtifactFamily: "frontend-v2",
+        packageStageRunId: first.run.id,
+        analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST
+      });
+      const retainedArtifacts = await pool.query<{ artifact_id: string }>(
+        "SELECT artifact_id FROM release_artifacts WHERE release_id = $1 ORDER BY artifact_id",
+        [firstRelease.id]
+      );
+      expect(retainedArtifacts.rows.map((row) => row.artifact_id)).toEqual(
+        Object.values(packagedArtifacts).flat().sort()
+      );
+      await expect(pool.query("DELETE FROM knowledge_artifacts WHERE id = $1", [internalArtifactId]))
+        .rejects.toThrow();
+
+      const insertRawRun = async (input: {
+        attempt: number; status: string; artifactId: string;
+        projectId?: string; snapshotId?: string; buildId?: string;
+      }) => {
+        const result = await pool!.query<{ id: string }>(
+          `INSERT INTO build_stage_runs
+             (workspace_id, project_id, snapshot_id, build_job_id, stage, attempt, status,
+              input_digest, output_manifest_ids, finished_at)
+           VALUES ($1, $2, $3, $4, 'package', $5, $6, $7, ARRAY[$8::uuid],
+             CASE WHEN $6 IN ('succeeded', 'reused') THEN now() ELSE NULL END)
+           RETURNING id`,
+          [
+            setup!.workspace.id, input.projectId ?? repository!.projectId,
+            input.snapshotId ?? snapshotId, input.buildId ?? first.build.id,
+            input.attempt, input.status, String(input.attempt).repeat(64).slice(0, 64), input.artifactId
+          ]
+        );
+        return result.rows[0]!.id;
+      };
+      const expectInvalidRelease = async (input: {
+        version: string; runId: string; artifactId: string;
+        buildId?: string; snapshotId?: string;
+      }) => expect(pool!.query(
+        `INSERT INTO releases
+           (workspace_id, repository_id, build_job_id, snapshot_id, version, kernel_mode,
+            package_artifact_id, release_artifact_family, package_stage_run_id,
+            frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest)
+         VALUES ($1, $2, $3, $4, $5, 'pipeline', $6, 'frontend-v2', $7, 2, 2, $8)`,
+        [
+          setup!.workspace.id, repository!.id, input.buildId ?? first.build.id,
+          input.snapshotId ?? snapshotId, input.version, input.artifactId, input.runId,
+          EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST
+        ]
+      )).rejects.toThrow();
+
+      await expect(pool.query(
+        `INSERT INTO releases
+           (workspace_id, repository_id, build_job_id, snapshot_id, version, kernel_mode,
+            package_artifact_id, release_artifact_family)
+         VALUES ($1, $2, $3, $4, 'frontend-v2-partial', 'pipeline', $5, 'frontend-v2')`,
+        [setup!.workspace.id, repository!.id, first.build.id, snapshotId, saved.manifest.id]
+      )).rejects.toThrow();
+      const queuedRunId = await insertRawRun({
+        attempt: 2, status: "queued", artifactId: saved.manifest.id
+      });
+      await expectInvalidRelease({
+        version: "frontend-v2-queued", runId: queuedRunId, artifactId: saved.manifest.id
+      });
+      for (const [attempt, status] of [[6, "running"], [7, "failed"], [8, "cancelled"]] as const) {
+        const invalidStatusRunId = await insertRawRun({ attempt, status, artifactId: saved.manifest.id });
+        await expectInvalidRelease({
+          version: `frontend-v2-${status}`, runId: invalidStatusRunId, artifactId: saved.manifest.id
+        });
+      }
+      const legacyPackage = await artifactStore.putJson({
+        manifest: {
+          ...saved.manifest,
+          id: randomUUID(), kind: "pipeline-package", schemaVersion: 1,
+          inputDigest: "8".repeat(64), contentDigest: "0".repeat(64), storageKey: "pending"
+        },
+        value: { schemaVersion: 1, kind: "legacy-package" }
+      });
+      const legacyPackageRunId = await insertRawRun({
+        attempt: 3, status: "succeeded", artifactId: legacyPackage.manifest.id
+      });
+      await expectInvalidRelease({
+        version: "frontend-v2-v1-package", runId: legacyPackageRunId,
+        artifactId: legacyPackage.manifest.id
+      });
+
+      const otherSameProjectSnapshotId = randomUUID();
+      await store.createSnapshot({
+        snapshot: {
+          id: otherSameProjectSnapshotId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+          commitSha: "d".repeat(40), ref: "upload", remoteUrl: null,
+          commitTimestamp: new Date("2026-07-18T00:00:00.000Z"), storagePath: "/tmp/frontend-v2-snapshot"
+        },
+        files: []
+      });
+      const { build: otherSameProjectBuild } = await store.createBuild({
+        workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId: otherSameProjectSnapshotId,
+        snapshotPath: "/tmp/frontend-v2-snapshot", commitSha: "d".repeat(40)
+      });
+      const crossSnapshotArtifact = await artifactStore.putJson({
+        manifest: {
+          ...saved.manifest,
+          id: randomUUID(), snapshotId: otherSameProjectSnapshotId, buildId: otherSameProjectBuild.id,
+          inputDigest: "6".repeat(64), contentDigest: "0".repeat(64), storageKey: "pending"
+        },
+        value: { otherSnapshot: true }
+      });
+      const crossSnapshotRunId = await insertRawRun({
+        attempt: 5, status: "succeeded", artifactId: crossSnapshotArtifact.manifest.id
+      });
+      await expectInvalidRelease({
+        version: "frontend-v2-cross-snapshot", runId: crossSnapshotRunId,
+        artifactId: crossSnapshotArtifact.manifest.id
+      });
+
+      const otherProject = await store.createProject(
+        setup!.workspace.id, { name: "Other frontend project", slug: "other-frontend-project" }, setup!.admin.id
+      );
+      const otherRepository = await store.createRepository(
+        setup!.workspace.id, { kind: "upload", name: "Other frontend source" }, otherProject!.id
+      );
+      const otherSnapshotId = randomUUID();
+      await store.createSnapshot({
+        snapshot: {
+          id: otherSnapshotId, workspaceId: setup!.workspace.id, repositoryId: otherRepository!.id,
+          commitSha: "e".repeat(40), ref: "upload", remoteUrl: null,
+          commitTimestamp: new Date("2026-07-18T00:00:00.000Z"), storagePath: "/tmp/frontend-v2-other"
+        },
+        files: []
+      });
+      const { build: otherBuild } = await store.createBuild({
+        workspaceId: setup!.workspace.id, repositoryId: otherRepository!.id, snapshotId: otherSnapshotId,
+        snapshotPath: "/tmp/frontend-v2-other", commitSha: "e".repeat(40)
+      });
+      await store.transitionBuild(otherBuild.id, "queued", "ready");
+      const otherArtifact = await artifactStore.putJson({
+        manifest: {
+          ...saved.manifest,
+          id: randomUUID(), projectId: otherProject!.id, snapshotId: otherSnapshotId,
+          buildId: otherBuild.id, inputDigest: "7".repeat(64), contentDigest: "0".repeat(64), storageKey: "pending"
+        },
+        value: { other: true }
+      });
+      await expect(store.createReleaseDraft(
+        setup!.workspace.id, repository!.id, first.build.id, "frontend-v2-cross-project-retention", {
+          releaseArtifactFamily: "frontend-v2",
+          packageArtifactId: saved.manifest.id,
+          packageStageRunId: first.run.id,
+          artifactIds: [internalArtifactId, otherArtifact.manifest.id],
+          frontendIrSchemaVersion: 2,
+          frontendGraphSchemaVersion: 2,
+          analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST
+        }
+      )).rejects.toThrow("same release scope");
+      const crossProjectRetentionRelease = await pool.query(
+        "SELECT 1 FROM releases WHERE repository_id = $1 AND version = 'frontend-v2-cross-project-retention'",
+        [repository!.id]
+      );
+      expect(crossProjectRetentionRelease.rows).toEqual([]);
+      const crossProjectRunId = await insertRawRun({
+        attempt: 4, status: "succeeded", artifactId: otherArtifact.manifest.id
+      });
+      await expectInvalidRelease({
+        version: "frontend-v2-cross-project", runId: crossProjectRunId,
+        artifactId: otherArtifact.manifest.id
+      });
+      const forgedRunId = await insertRawRun({
+        attempt: 1, status: "succeeded", artifactId: otherArtifact.manifest.id,
+        projectId: repository!.projectId, snapshotId: otherSnapshotId, buildId: otherBuild.id
+      });
+      await expectInvalidRelease({
+        version: "frontend-v2-forged-build", runId: forgedRunId,
+        artifactId: otherArtifact.manifest.id, buildId: otherBuild.id, snapshotId: otherSnapshotId
+      });
+
+      for (const update of [
+        ["workspace_id", randomUUID()], ["repository_id", randomUUID()],
+        ["build_job_id", randomUUID()], ["snapshot_id", randomUUID()],
+        ["kernel_mode", "legacy"], ["package_artifact_id", null],
+        ["release_artifact_family", "knowledge-v1"], ["package_stage_run_id", null],
+        ["frontend_ir_schema_version", 3], ["frontend_graph_schema_version", 3],
+        ["analyzer_manifest_digest", "b".repeat(64)]
+      ] as const) {
+        await expect(pool.query(
+          `UPDATE releases SET ${update[0]} = $1 WHERE id = $2`,
+          [update[1], firstRelease.id]
+        )).rejects.toThrow("Release frontend provenance is immutable");
+      }
+
+      const reused = await createReadyBuildAndRun(saved.manifest.id);
+      const reusedRelease = await createVerifiedFrontendReleaseDraft({
+        store, artifactReader: artifactStore, workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id, buildId: reused.build.id, version: "frontend-v2-reused",
+        packageStageRunId: reused.run.id, packageArtifactId: saved.manifest.id
+      });
+      expect(reusedRelease.buildId).toBe(reused.build.id);
+      const reusedRetainedArtifacts = await pool.query<{ artifact_id: string }>(
+        "SELECT artifact_id FROM release_artifacts WHERE release_id = $1 ORDER BY artifact_id",
+        [reusedRelease.id]
+      );
+      expect(reusedRetainedArtifacts.rows.map((row) => row.artifact_id)).toEqual(
+        Object.values(packagedArtifacts).flat().sort()
+      );
+      await expect(pool.query(
+        "UPDATE releases SET repository_id = $1 WHERE id = $2",
+        [randomUUID(), reusedRelease.id]
+      )).rejects.toThrow("Release frontend provenance is immutable");
+      await expect(pool.query("DELETE FROM build_stage_runs WHERE id = $1", [reused.run.id]))
+        .rejects.toThrow();
+      await expect(pool.query("DELETE FROM knowledge_artifacts WHERE id = $1", [saved.manifest.id]))
+        .rejects.toThrow();
+      await pool.query("DELETE FROM releases WHERE id = $1", [firstRelease.id]);
+      await expect(pool.query("DELETE FROM knowledge_artifacts WHERE id = $1", [internalArtifactId]))
+        .rejects.toThrow();
+
+      await rm(path.join(artifactStore.root, saved.manifest.storageKey));
+      const missing = await createReadyBuildAndRun(saved.manifest.id);
+      await expect(createVerifiedFrontendReleaseDraft({
+        store, artifactReader: artifactStore, workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id, buildId: missing.build.id, version: "frontend-v2-missing",
+        packageStageRunId: missing.run.id, packageArtifactId: saved.manifest.id
+      })).rejects.toThrow("Artifact content is unavailable");
+      const missingRelease = await pool.query(
+        "SELECT 1 FROM releases WHERE repository_id = $1 AND version = 'frontend-v2-missing'",
+        [repository!.id]
+      );
+      expect(missingRelease.rows).toEqual([]);
+    } finally {
+      await rm(artifactRoot, { recursive: true, force: true });
     }
   }, 30_000);
 });

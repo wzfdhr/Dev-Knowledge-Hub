@@ -26,6 +26,7 @@ import type {
   CreateSnapshotInput,
   FeedbackRebuildInput,
   FinishGitSynchronizationInput,
+  FrontendReleaseDraftProvenance,
   GitSynchronizationClaim,
   GitSynchronizationLease,
   ImportReportRecord,
@@ -52,6 +53,7 @@ import type {
   RepositoryConnectionInput,
   RepositoryRecord,
   ProjectRecord,
+  ProjectFrontendRolloutRecord,
   ProjectAccess,
   ProjectMemberRecord,
   ProjectRole,
@@ -266,6 +268,11 @@ interface ReleaseRow extends QueryResultRow {
   version: string;
   kernel_mode?: "legacy" | "pipeline";
   package_artifact_id?: string | null;
+  release_artifact_family?: "knowledge-v1" | "frontend-v2";
+  package_stage_run_id?: string | null;
+  frontend_ir_schema_version?: number | null;
+  frontend_graph_schema_version?: number | null;
+  analyzer_manifest_digest?: string | null;
   created_at: Date;
   published_at: Date | null;
   status?: BuildStatus;
@@ -323,6 +330,16 @@ interface ProjectRow extends QueryResultRow {
   slug: string;
   archived_at: Date | null;
   created_at: Date;
+}
+
+interface ProjectFrontendRolloutRow extends QueryResultRow {
+  project_id: string;
+  workspace_id: string;
+  mode: ProjectFrontendRolloutRecord["mode"];
+  reason: string;
+  updated_by: string;
+  created_at: Date;
+  updated_at: Date;
 }
 
 interface TeamMemberRow extends QueryResultRow {
@@ -564,6 +581,11 @@ function releaseRecord(row: ReleaseRow): ReleaseRecord {
     version: row.version,
     kernelMode: row.kernel_mode ?? "legacy",
     packageArtifactId: row.package_artifact_id ?? null,
+    releaseArtifactFamily: row.release_artifact_family ?? "knowledge-v1",
+    packageStageRunId: row.package_stage_run_id ?? null,
+    frontendIrSchemaVersion: row.frontend_ir_schema_version ?? null,
+    frontendGraphSchemaVersion: row.frontend_graph_schema_version ?? null,
+    analyzerManifestDigest: row.analyzer_manifest_digest ?? null,
     createdAt: row.created_at,
     publishedAt: row.published_at
   };
@@ -628,6 +650,20 @@ function projectRecord(row: ProjectRow): ProjectRecord {
     slug: row.slug,
     archivedAt: row.archived_at,
     createdAt: row.created_at
+  };
+}
+
+function projectFrontendRolloutRecord(
+  row: ProjectFrontendRolloutRow
+): ProjectFrontendRolloutRecord {
+  return {
+    projectId: row.project_id,
+    workspaceId: row.workspace_id,
+    mode: row.mode,
+    reason: row.reason,
+    updatedBy: row.updated_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
   };
 }
 
@@ -1696,6 +1732,77 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     });
   }
 
+  async getProjectFrontendRollout(
+    workspaceId: string,
+    projectId: string
+  ): Promise<ProjectFrontendRolloutRecord | null> {
+    const { rows } = await this.pool.query<ProjectFrontendRolloutRow>(
+      `SELECT project_id, workspace_id, mode, reason, updated_by, created_at, updated_at
+       FROM project_frontend_rollouts
+       WHERE workspace_id = $1 AND project_id = $2`,
+      [workspaceId, projectId]
+    );
+    return rows[0] ? projectFrontendRolloutRecord(rows[0]) : null;
+  }
+
+  async setProjectFrontendRollout(input: {
+    workspaceId: string;
+    projectId: string;
+    mode: ProjectFrontendRolloutRecord["mode"];
+    reason: string;
+    actorId: string;
+  }): Promise<ProjectFrontendRolloutRecord | null> {
+    return this.transaction(async (client) => {
+      const project = await client.query<{ id: string }>(
+        `SELECT projects.id
+         FROM projects
+         JOIN workspace_members ON workspace_members.workspace_id = projects.workspace_id
+           AND workspace_members.user_id = $3
+         JOIN admin_users ON admin_users.workspace_id = workspace_members.workspace_id
+           AND admin_users.id = workspace_members.user_id
+         WHERE projects.workspace_id = $1 AND projects.id = $2
+           AND workspace_members.role = 'admin' AND admin_users.disabled_at IS NULL
+         FOR UPDATE OF projects`,
+        [input.workspaceId, input.projectId, input.actorId]
+      );
+      if (!project.rows[0]) return null;
+      const previous = await client.query<ProjectFrontendRolloutRow>(
+        `SELECT project_id, workspace_id, mode, reason, updated_by, created_at, updated_at
+         FROM project_frontend_rollouts
+         WHERE workspace_id = $1 AND project_id = $2
+         FOR UPDATE`,
+        [input.workspaceId, input.projectId]
+      );
+      const { rows } = await client.query<ProjectFrontendRolloutRow>(
+        `INSERT INTO project_frontend_rollouts
+         (project_id, workspace_id, mode, reason, updated_by)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (project_id) DO UPDATE SET
+           mode = EXCLUDED.mode,
+           reason = EXCLUDED.reason,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = now()
+         RETURNING project_id, workspace_id, mode, reason, updated_by, created_at, updated_at`,
+        [input.projectId, input.workspaceId, input.mode, input.reason, input.actorId]
+      );
+      const rollout = projectFrontendRolloutRecord(rows[0]!);
+      await this.insertAudit(client, {
+        workspaceId: input.workspaceId,
+        actorId: input.actorId,
+        action: "frontend_rollout.changed",
+        resourceType: "project",
+        resourceId: input.projectId,
+        metadata: {
+          projectId: input.projectId,
+          fromMode: previous.rows[0]?.mode ?? "legacy",
+          toMode: rollout.mode,
+          reason: rollout.reason
+        }
+      });
+      return rollout;
+    });
+  }
+
   async listAccessibleProjects(
     workspaceId: string,
     userId: string,
@@ -1776,6 +1883,11 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            'id', r.id, 'workspace_id', r.workspace_id, 'repository_id', r.repository_id,
            'build_job_id', r.build_job_id, 'snapshot_id', r.snapshot_id, 'version', r.version,
            'kernel_mode', r.kernel_mode, 'package_artifact_id', r.package_artifact_id,
+           'release_artifact_family', r.release_artifact_family,
+           'package_stage_run_id', r.package_stage_run_id,
+           'frontend_ir_schema_version', r.frontend_ir_schema_version,
+           'frontend_graph_schema_version', r.frontend_graph_schema_version,
+           'analyzer_manifest_digest', r.analyzer_manifest_digest,
            'created_at', r.created_at, 'published_at', r.published_at
          ) AS value
          FROM release_channels channel JOIN releases r ON r.id = channel.release_id
@@ -1839,6 +1951,13 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           buildId: String(release.build_job_id), snapshotId: String(release.snapshot_id), version: String(release.version),
           kernelMode: release.kernel_mode === "pipeline" ? "pipeline" : "legacy",
           packageArtifactId: release.package_artifact_id ? String(release.package_artifact_id) : null,
+          releaseArtifactFamily: release.release_artifact_family === "frontend-v2" ? "frontend-v2" : "knowledge-v1",
+          packageStageRunId: release.package_stage_run_id ? String(release.package_stage_run_id) : null,
+          frontendIrSchemaVersion: release.frontend_ir_schema_version === null || release.frontend_ir_schema_version === undefined
+            ? null : Number(release.frontend_ir_schema_version),
+          frontendGraphSchemaVersion: release.frontend_graph_schema_version === null || release.frontend_graph_schema_version === undefined
+            ? null : Number(release.frontend_graph_schema_version),
+          analyzerManifestDigest: release.analyzer_manifest_digest ? String(release.analyzer_manifest_digest) : null,
           createdAt: date(release.created_at), publishedAt: release.published_at ? date(release.published_at) : null
         } : null,
         latestBuild: build ? {
@@ -3931,19 +4050,65 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     workspaceId: string,
     repositoryId: string,
     buildId: string,
-    version: string
+    version: string,
+    provenance?: FrontendReleaseDraftProvenance
   ): Promise<ReleaseRecord> {
-    const { rows } = await this.pool.query<ReleaseRow>(
-      `INSERT INTO releases (workspace_id, repository_id, build_job_id, snapshot_id, version)
-       SELECT $1, $2, b.id, b.snapshot_id, $4
-       FROM build_jobs b
-       WHERE b.id = $3 AND b.workspace_id = $1 AND b.repository_id = $2 AND b.status = 'ready'
-       RETURNING id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-                 kernel_mode, package_artifact_id, created_at, published_at`,
-      [workspaceId, repositoryId, buildId, version]
-    );
-    if (!rows[0]) throw new Error("Only a ready build can create a release draft");
-    return releaseRecord(rows[0]);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query<ReleaseRow>(
+        `INSERT INTO releases (
+           workspace_id, repository_id, build_job_id, snapshot_id, version, kernel_mode,
+           package_artifact_id, release_artifact_family, package_stage_run_id,
+           frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest
+         )
+         SELECT $1, $2, b.id, b.snapshot_id, $4, $5, $6, $7, $8, $9, $10, $11
+         FROM build_jobs b
+         WHERE b.id = $3 AND b.workspace_id = $1 AND b.repository_id = $2 AND b.status = 'ready'
+         RETURNING id, workspace_id, repository_id, build_job_id, snapshot_id, version,
+                   kernel_mode, package_artifact_id, release_artifact_family, package_stage_run_id,
+                   frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest,
+                   created_at, published_at`,
+        [
+          workspaceId, repositoryId, buildId, version,
+          provenance ? "pipeline" : "legacy",
+          provenance?.packageArtifactId ?? null,
+          provenance?.releaseArtifactFamily ?? "knowledge-v1",
+          provenance?.packageStageRunId ?? null,
+          provenance?.frontendIrSchemaVersion ?? null,
+          provenance?.frontendGraphSchemaVersion ?? null,
+          provenance?.analyzerManifestDigest ?? null
+        ]
+      );
+      const row = rows[0];
+      if (!row) throw new Error("Only a ready build can create a release draft");
+      if (provenance) {
+        const retained = await client.query<{ artifact_id: string }>(
+          `INSERT INTO release_artifacts (release_id, artifact_id)
+           SELECT $1, artifact.id
+           FROM unnest($2::uuid[]) AS requested(artifact_id)
+           JOIN knowledge_artifacts artifact ON artifact.id = requested.artifact_id
+           JOIN repositories repository
+             ON repository.id = $3
+             AND repository.workspace_id = $4
+             AND repository.project_id = artifact.project_id
+           WHERE artifact.workspace_id = $4
+             AND artifact.snapshot_id = $5
+           RETURNING artifact_id`,
+          [row.id, provenance.artifactIds, repositoryId, workspaceId, row.snapshot_id]
+        );
+        if (retained.rows.length !== provenance.artifactIds.length) {
+          throw new Error("Frontend v2 release artifacts must share the same release scope");
+        }
+      }
+      await client.query("COMMIT");
+      return releaseRecord(row);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async publishRelease(
@@ -3956,7 +4121,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       await client.query("BEGIN");
       const selected = await client.query<ReleaseRow>(
         `SELECT r.id, r.workspace_id, r.repository_id, r.build_job_id, r.snapshot_id,
-                r.version, r.kernel_mode, r.package_artifact_id, r.created_at, r.published_at, b.status
+                r.version, r.kernel_mode, r.package_artifact_id, r.release_artifact_family,
+                r.package_stage_run_id, r.frontend_ir_schema_version, r.frontend_graph_schema_version,
+                r.analyzer_manifest_digest, r.created_at, r.published_at, b.status
          FROM releases r JOIN build_jobs b ON b.id = r.build_job_id
          WHERE r.workspace_id = $1 AND r.id = $2 FOR UPDATE`,
         [workspaceId, releaseId]
@@ -3975,7 +4142,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         `UPDATE releases SET published_at = COALESCE(published_at, now()), updated_at = now()
          WHERE id = $1
          RETURNING id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-                   kernel_mode, package_artifact_id, created_at, published_at`,
+                   kernel_mode, package_artifact_id, release_artifact_family, package_stage_run_id,
+                   frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest,
+                   created_at, published_at`,
         [release.id]
       );
       const publishedBuild = await client.query<{ id: string; workspace_id: string; status: BuildStatus }>(
@@ -4004,7 +4173,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return this.transaction(async (client) => {
       const selected = await client.query<ReleaseRow & { project_id: string }>(
         `SELECT r.id, r.workspace_id, r.repository_id, r.build_job_id, r.snapshot_id,
-                r.version, r.kernel_mode, r.package_artifact_id, r.created_at, r.published_at,
+                r.version, r.kernel_mode, r.package_artifact_id, r.release_artifact_family,
+                r.package_stage_run_id, r.frontend_ir_schema_version, r.frontend_graph_schema_version,
+                r.analyzer_manifest_digest, r.created_at, r.published_at,
                 repository.project_id
          FROM releases r
          JOIN repositories repository ON repository.id = r.repository_id
@@ -4052,7 +4223,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   ): Promise<ReleaseRecord | null> {
     const { rows } = await this.pool.query<ReleaseRow>(
       `SELECT r.id, r.workspace_id, r.repository_id, r.build_job_id, r.snapshot_id,
-              r.version, r.kernel_mode, r.package_artifact_id, r.created_at, r.published_at
+              r.version, r.kernel_mode, r.package_artifact_id, r.release_artifact_family,
+              r.package_stage_run_id, r.frontend_ir_schema_version, r.frontend_graph_schema_version,
+              r.analyzer_manifest_digest, r.created_at, r.published_at
        FROM release_channels c JOIN releases r ON r.id = c.release_id
        WHERE c.workspace_id = $1 AND c.repository_id = $2 AND c.name = $3`,
       [workspaceId, repositoryId, channel]
@@ -4063,7 +4236,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   async getRelease(workspaceId: string, releaseId: string): Promise<ReleaseRecord | null> {
     const { rows } = await this.pool.query<ReleaseRow>(
       `SELECT id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-              kernel_mode, package_artifact_id, created_at, published_at
+              kernel_mode, package_artifact_id, release_artifact_family, package_stage_run_id,
+              frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest,
+              created_at, published_at
        FROM releases WHERE workspace_id = $1 AND id = $2 LIMIT 1`,
       [workspaceId, releaseId]
     );
@@ -4078,7 +4253,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     const { limit, offset } = normalizePagination(pagination);
     const { rows } = await this.pool.query<ReleaseRow>(
       `SELECT id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-              kernel_mode, package_artifact_id, created_at, published_at
+              kernel_mode, package_artifact_id, release_artifact_family, package_stage_run_id,
+              frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest,
+              created_at, published_at
        FROM releases WHERE workspace_id = $1 AND repository_id = $2
        ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`,
       [workspaceId, repositoryId, limit, offset]

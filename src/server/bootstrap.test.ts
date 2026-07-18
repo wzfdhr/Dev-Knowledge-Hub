@@ -10,7 +10,8 @@ function dependencies(): BootstrapDependencies {
   const store = {
     durable: true,
     deleteExpiredImportReports: vi.fn(async () => 0),
-    claimDueGitSynchronizations: vi.fn(async () => [])
+    claimDueGitSynchronizations: vi.fn(async () => []),
+    getProjectFrontendRollout: vi.fn(async () => null)
   };
   const queue = { durable: true };
   const qualityWorker = {
@@ -28,6 +29,7 @@ function dependencies(): BootstrapDependencies {
     createBuildQueue: vi.fn(() => queue as never),
     createBuildService: vi.fn(() => buildService as never),
     createArtifactStore: vi.fn(() => ({ initialize: vi.fn(async () => {}) })),
+    createParserClient: vi.fn(() => ({ analyze: vi.fn(async () => ({ outputs: [] })) })),
     createQualityPipelineWorker: vi.fn(() => qualityWorker),
     buildServer: vi.fn(() => server as never),
     setInterval: vi.fn(() => ({})),
@@ -55,7 +57,8 @@ describe("production bootstrap", () => {
       DEVKH_MASTER_KEY: masterKey,
       DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars",
       DATA_DIR: "/var/lib/devkh",
-      DEVKH_KNOWLEDGE_KERNEL_MODE: "shadow"
+      DEVKH_KNOWLEDGE_KERNEL_MODE: "shadow",
+      DEVKH_FRONTEND_KNOWLEDGE_MODE: "shadow"
     }, deps);
 
     const database = vi.mocked(deps.createDatabase).mock.results[0].value;
@@ -68,8 +71,13 @@ describe("production bootstrap", () => {
     expect(deps.createStore).toHaveBeenCalledWith(database.pool);
     expect(deps.createBuildQueue).toHaveBeenCalledWith("postgres://localhost/devkh");
     expect(deps.createQualityPipelineWorker).toHaveBeenCalledWith(
-      "postgres://localhost/devkh", store, artifactStore, expect.any(Function)
+      "postgres://localhost/devkh", store, artifactStore, expect.any(Function), expect.any(Function), expect.anything()
     );
+    expect(deps.createParserClient).toHaveBeenCalledWith("/run/devkh-parser/parser.sock");
+    const frontendModeForProject = vi.mocked(deps.createQualityPipelineWorker).mock.calls[0]![4]!;
+    await expect(frontendModeForProject("workspace-1", "project-1")).resolves.toBe("legacy");
+    vi.mocked(store.getProjectFrontendRollout).mockResolvedValueOnce({ mode: "shadow" } as never);
+    await expect(frontendModeForProject("workspace-1", "project-1")).resolves.toBe("shadow");
     expect(qualityWorker.start).toHaveBeenCalledOnce();
     expect(deps.createBuildService).toHaveBeenCalledWith(
       store, queue, expect.any(Function), expect.any(Function), expect.any(Function)
@@ -84,6 +92,8 @@ describe("production bootstrap", () => {
       sessionSecret: "production-session-secret-at-least-32-chars",
       dataDir: "/var/lib/devkh",
       nodeEnv: "production",
+      knowledgeKernelMode: "shadow",
+      frontendKnowledgeMode: "shadow",
       clientDir: path.resolve("dist/client"),
       sessionStore: expect.anything()
     }));

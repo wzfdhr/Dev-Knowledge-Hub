@@ -27,7 +27,8 @@ export const VERIFY_STEPS = Object.freeze([
 export const CONTAINER_STEPS = Object.freeze([
   { name: "container-build", command: "docker", args: ["build", "--target", "runtime", "-t", "devkh:ci", repositoryRoot] },
   { name: "compose-config", command: "docker", args: [...compose, "config", "--quiet"] },
-  { name: "compose-up", command: "docker", args: [...compose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "postgres", "app"] },
+  { name: "compose-up", command: "docker", args: [...compose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "postgres", "parser", "app"] },
+  { name: "parser-isolation", command: "node", args: [resolve(repositoryRoot, "scripts/security/verify-parser-container.mjs")] },
   {
     name: "application-health",
     command: "docker",
@@ -51,9 +52,9 @@ async function invalidateRecoveryEvidence(root, errorClass) {
   if (!root) return;
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true, mode: 0o700 });
-  await writeFile(join(root, "recovery-cleanup-failed.json"), `${JSON.stringify({
+  await writeFile(join(root, "recovery-verification-failed.json"), `${JSON.stringify({
     schemaVersion: 1,
-    operation: "restore-drill",
+    operation: errorClass === "container_verification_failed" ? "container-verification" : "restore-drill",
     result: "failed",
     errorClass,
     retentionPath: root,
@@ -146,7 +147,7 @@ export async function runReleaseSteps(steps, options = {}) {
       const exitCode = Number.isInteger(error?.exitCode) ? error.exitCode : 1;
       throw Object.assign(
         new Error(`${step.name} failed with exit code ${exitCode}: ${commandText(step)}`),
-        { cause: error, exitCode }
+        { cause: error, exitCode, stepName: step.name }
       );
     }
     logger.log(`[release] PASS ${step.name}`);
@@ -169,6 +170,9 @@ export async function runContainerVerification(options = {}) {
 
   if (failure) {
     logger.error("[release] container verification failed; retaining the isolated Compose state for diagnosis");
+    if (failure.stepName !== "recovery-drill") {
+      await invalidateEvidence(env.RECOVERY_EVIDENCE_DIR, "container_verification_failed");
+    }
     throw failure;
   }
 

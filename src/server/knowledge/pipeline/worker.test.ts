@@ -262,6 +262,21 @@ describe("PipelineStageWorker", () => {
     expect(queue.sent).toHaveLength(1);
   });
 
+  test("preserves an allowlisted parser runtime failure code", async () => {
+    const store = new FakePipelineStore();
+    const queue = new FakeQueue();
+    const worker = new PipelineStageWorker(store, queue, async () => {
+      throw Object.assign(new Error("Parser service is unavailable"), { code: "PARSER_RUNTIME_UNAVAILABLE" });
+    }, ["extract"]);
+    await worker.schedule(job);
+
+    await worker.process(queue.sent[0]!);
+
+    expect(store.runs).toEqual([
+      expect.objectContaining({ status: "failed", errorCode: "PARSER_RUNTIME_UNAVAILABLE" })
+    ]);
+  });
+
   test("preserves a failed retryable attempt before queueing its next attempt", async () => {
     const store = new FakePipelineStore();
     const queue = new FakeQueue();

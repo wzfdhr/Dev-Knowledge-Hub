@@ -10,10 +10,23 @@ const requireValue = (condition, message) => { if (!condition) failures.push(mes
 requireValue((dockerfile.match(/^FROM node:22\.13-bookworm-slim/gm) ?? []).length >= 3, "Node 22.13 multi-stage image");
 requireValue(dockerfile.includes("USER node"), "non-root runtime user");
 requireValue(dockerfile.includes("HEALTHCHECK"), "image health check");
+requireValue(!dockerfile.includes("ENV DEVKH_GIT_ASKPASS_PATH"), "no app-only environment in parser image");
 requireValue(compose.services?.postgres?.image === "postgres:16-bookworm", "PostgreSQL 16 image");
 requireValue(compose.services?.postgres?.healthcheck, "PostgreSQL health check");
 requireValue(compose.services?.app?.depends_on?.postgres?.condition === "service_healthy", "healthy database dependency");
 requireValue(compose.services?.app?.read_only === true, "read-only app filesystem");
+const parser = compose.services?.parser;
+requireValue(parser?.network_mode === "none", "parser has no network");
+requireValue(parser?.read_only === true, "read-only parser filesystem");
+requireValue(parser?.user === "node", "non-root parser user");
+requireValue(parser?.cap_drop?.includes("ALL"), "parser drops all capabilities");
+requireValue(parser?.security_opt?.includes("no-new-privileges:true"), "parser prevents privilege escalation");
+requireValue(parser?.pids_limit === 64, "parser PID limit");
+requireValue(parser?.mem_limit === "512m", "parser memory limit");
+requireValue(parser?.cpus === 1, "parser CPU limit");
+requireValue(parser?.healthcheck?.test?.join(" ")?.includes("isSocket"), "parser socket health check");
+requireValue(Object.keys(parser?.environment ?? {}).sort().join(",") === "DEVKH_PARSER_SOCKET_PATH,NODE_ENV", "parser environment allowlist");
+requireValue((parser?.volumes ?? []).join(",") === "parser_runtime:/run/devkh-parser", "parser volume allowlist");
 requireValue(dockerfile.includes("/var/lib/devkh/artifacts"), "artifact runtime directory");
 requireValue(
   compose.services?.app?.volumes?.includes("artifact_data:/var/lib/devkh/artifacts"),
@@ -26,7 +39,7 @@ requireValue(compose.services?.postgres?.volumes?.includes("./docker/postgres/in
 requireValue(compose.services?.e2e?.build?.target === "e2e", "Compose e2e test target");
 requireValue(
   Object.keys(compose.volumes ?? {}).sort().join(",")
-    === "artifact_data,caddy_config,caddy_data,postgres_data,repository_mirrors,snapshot_data,uploaded_sources",
+    === "artifact_data,caddy_config,caddy_data,parser_runtime,postgres_data,repository_mirrors,snapshot_data,uploaded_sources",
   "persistent volumes"
 );
 

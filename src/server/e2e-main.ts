@@ -6,6 +6,24 @@ import { fileURLToPath } from "node:url";
 
 import { buildServer } from "./app.js";
 import { BuildService, type BuildJobQueue } from "./knowledge/build-service.js";
+import { ParserClient } from "./knowledge/frontend/runtime/parser-client.js";
+import {
+  createFrontendShadowStageExecutor,
+  createFrontendShadowStageInputPlanner,
+  createKnowledgeV1StoreView
+} from "./knowledge/frontend/shadow-stage.js";
+import { ArtifactStore } from "./knowledge/pipeline/artifact-store.js";
+import {
+  createNormalizedSourcesStageExecutor,
+  normalizedSourcesPipelineInputDigest
+} from "./knowledge/pipeline/convert-stage.js";
+import { createKnowledgeIrStageExecutor } from "./knowledge/pipeline/extract-stage.js";
+import { createPipelineStageExecutor } from "./knowledge/pipeline/stage-executor.js";
+import {
+  PipelineStageWorker,
+  type PipelineStageJob,
+  type PipelineStageJobQueue
+} from "./knowledge/pipeline/worker.js";
 import { MemoryAppStore } from "./persistence/memory-store.js";
 
 const execute = promisify(execFile);
@@ -22,6 +40,13 @@ class ImmediateQueue implements BuildJobQueue {
   async stop() { this.handler = null; }
 }
 
+class ManualPipelineQueue implements PipelineStageJobQueue {
+  readonly sent: PipelineStageJob[] = [];
+  async send(job: PipelineStageJob) { this.sent.push(job); }
+  async start() {}
+  async stop() {}
+}
+
 await rm(fixturePath, { recursive: true, force: true });
 await mkdir(fixturePath, { recursive: true });
 await cp(fixtureSource, fixturePath, { recursive: true });
@@ -30,6 +55,10 @@ await execute("git", ["add", "."], { cwd: fixturePath });
 await execute("git", ["-c", "user.name=DevKH Tests", "-c", "user.email=tests@devkh.local", "commit", "-m", "fixture"], { cwd: fixturePath });
 
 const store = new MemoryAppStore();
+const frontendArtifactRoot = "/tmp/devkh-e2e-frontend-artifacts";
+await rm(frontendArtifactRoot, { recursive: true, force: true });
+const frontendArtifactStore = new ArtifactStore(frontendArtifactRoot, store);
+await frontendArtifactStore.initialize();
 const queue = new ImmediateQueue();
 const buildService = new BuildService(store, queue);
 await buildService.start();
@@ -102,35 +131,57 @@ app.post("/__test__/graph", async (_request, reply) => {
   return { created: true };
 });
 
-app.post("/__test__/shadow-failure", async (_request, reply) => {
+app.post("/__test__/parser-unavailable-shadow", async (_request, reply) => {
   const workspace = await store.defaultWorkspace();
   const repository = workspace ? await store.currentRepository(workspace.id) : null;
   const release = workspace && repository ? await store.currentRelease(workspace.id, repository.id) : null;
   if (!workspace || !repository || !release) return reply.code(409).send({ error: "Publish a release first" });
   const build = await store.getBuild(workspace.id, release.buildId);
   if (!build) return reply.code(409).send({ error: "Release build is unavailable" });
-  const run = await store.createStageRun({
+  const unavailableSocket = "/tmp/devkh-e2e-parser-unavailable.sock";
+  await rm(unavailableSocket, { force: true });
+  const snapshot = await store.findSnapshotById(workspace.id, build.snapshotId);
+  if (!snapshot) return reply.code(409).send({ error: "Release snapshot is unavailable" });
+  const files = await store.listSnapshotFiles(workspace.id, snapshot.id);
+  const pipelineQueue = new ManualPipelineQueue();
+  const knowledgeV1Store = createKnowledgeV1StoreView(store);
+  const legacy = createPipelineStageExecutor({
+    convert: createNormalizedSourcesStageExecutor({ store: knowledgeV1Store, artifactStore: frontendArtifactStore }),
+    extract: createKnowledgeIrStageExecutor({ store: knowledgeV1Store, artifactStore: frontendArtifactStore })
+  });
+  const worker = new PipelineStageWorker(
+    store,
+    pipelineQueue,
+    createFrontendShadowStageExecutor({
+      store,
+      artifactStore: frontendArtifactStore,
+      legacy,
+      frontendParser: new ParserClient({ socketPath: unavailableSocket, connectTimeoutMs: 50 })
+    }),
+    ["convert", "extract"],
+    5_000,
+    createFrontendShadowStageInputPlanner(store)
+  );
+  await worker.schedule({
     workspaceId: workspace.id,
     projectId: repository.projectId,
-    snapshotId: build.snapshotId,
+    snapshotId: snapshot.id,
     buildId: build.id,
-    stage: "convert",
-    attempt: 1,
-    inputDigest: "f".repeat(64)
+    inputDigest: normalizedSourcesPipelineInputDigest(snapshot, files, build.purpose)
   });
-  const running = await store.transitionStageRun(
-    workspace.id, repository.projectId, run.id, "queued", "running"
-  );
-  if (!running) return reply.code(409).send({ error: "Shadow stage could not start" });
-  const failed = await store.transitionStageRun(
-    workspace.id,
-    repository.projectId,
-    run.id,
-    "running",
-    "failed",
-    { errorCode: "PIPELINE_STAGE_FAILED", errorDetail: "shadow conversion failed" }
-  );
-  return { stage: failed };
+  for (let index = 0; index < pipelineQueue.sent.length; index += 1) {
+    await worker.process(pipelineQueue.sent[index]!);
+  }
+  const stages = await store.listPipelineStageRuns(workspace.id, repository.projectId, build.id);
+  const failed = stages.find((stage) => stage.stage === "extract" && stage.status === "failed");
+  if (failed?.errorCode !== "PARSER_RUNTIME_UNAVAILABLE") {
+    return reply.code(500).send({ error: "Production shadow parser failure was not persisted" });
+  }
+  return {
+    stage: failed,
+    releaseIdBefore: release.id,
+    releaseIdAfter: (await store.currentRelease(workspace.id, repository.id))?.id ?? null
+  };
 });
 
 app.addHook("onClose", async () => buildService.stop());

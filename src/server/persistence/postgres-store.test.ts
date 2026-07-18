@@ -15,6 +15,40 @@ const artifactRow = {
 };
 
 describe("PostgresAppStore pipeline persistence", () => {
+  test("rolls back a frontend release when an internal artifact is outside its scope", async () => {
+    const releaseRow = {
+      id: "release-1", workspace_id: "workspace-1", repository_id: "repository-1",
+      build_job_id: "build-1", snapshot_id: "snapshot-1", version: "frontend-v2.0.0",
+      kernel_mode: "pipeline", package_artifact_id: "package-1",
+      release_artifact_family: "frontend-v2", package_stage_run_id: "package-run-1",
+      frontend_ir_schema_version: 2, frontend_graph_schema_version: 2,
+      analyzer_manifest_digest: "a".repeat(64), created_at: new Date(), published_at: null
+    };
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("INSERT INTO releases")) return { rows: [releaseRow] };
+      if (sql.includes("INSERT INTO release_artifacts")) return { rows: [] };
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+
+    await expect(store.createReleaseDraft(
+      "workspace-1", "repository-1", "build-1", "frontend-v2.0.0", {
+        releaseArtifactFamily: "frontend-v2", packageArtifactId: "package-1",
+        packageStageRunId: "package-run-1", artifactIds: ["internal-1"],
+        frontendIrSchemaVersion: 2, frontendGraphSchemaVersion: 2,
+        analyzerManifestDigest: "a".repeat(64)
+      }
+    )).rejects.toThrow("same release scope");
+    expect(String(query.mock.calls[2]![0])).toContain("JOIN repositories");
+    expect(String(query.mock.calls[2]![0])).toContain("artifact.snapshot_id = $5");
+    expect(query.mock.calls.map(([sql]) => sql)).toEqual([
+      "BEGIN", expect.stringContaining("INSERT INTO releases"),
+      expect.stringContaining("INSERT INTO release_artifacts"), "ROLLBACK"
+    ]);
+    expect(client.release).toHaveBeenCalledOnce();
+  });
+
   test("writes and reads an immutable project-scoped graph transactionally", async () => {
     const sourceRef = { snapshotId: "snapshot-1", path: "src/main.ts", startLine: 1, endLine: 1, blobHash: "a".repeat(64) };
     const node = {

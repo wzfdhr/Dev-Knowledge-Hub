@@ -94,16 +94,42 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   await page.setViewportSize({ width: 1440, height: 1024 });
   await page.goto(`/projects/${projectId}/versions`);
 
-  const shadowFailure = await request.post("/__test__/shadow-failure");
+  const releaseBeforeShadow = await page.evaluate(async (activeProjectId) => {
+    const response = await fetch("/api/releases/current", {
+      headers: { "x-devkh-project": activeProjectId }
+    });
+    return (await response.json()).release.id as string;
+  }, projectId);
+
+  const shadowFailure = await request.post("/__test__/parser-unavailable-shadow");
   expect(shadowFailure.ok()).toBeTruthy();
+  const shadowFailureBody = await shadowFailure.json();
+  expect(shadowFailureBody.releaseIdBefore).toBe(releaseBeforeShadow);
+  expect(shadowFailureBody.releaseIdAfter).toBe(releaseBeforeShadow);
   await page.reload();
   const shadowPanel = page.getByRole("region", { name: "影子验证状态" });
   await expect(shadowPanel).toContainText("影子验证发现问题");
-  await expect(shadowPanel).toContainText("PIPELINE_STAGE_FAILED");
+  await expect(shadowPanel).toContainText("PARSER_RUNTIME_UNAVAILABLE");
   await expect(shadowPanel).toContainText("正式版本保持不变");
   await expect(page.getByText("1.0.0").first()).toBeVisible();
   await expect(page.getByText("构建失败", { exact: true })).toHaveCount(0);
   await page.screenshot({ path: "test-results/shadow-failure-1440x1024.png", fullPage: true });
+
+  const releaseAfterShadow = await page.evaluate(async (activeProjectId) => {
+    const response = await fetch("/api/releases/current", {
+      headers: { "x-devkh-project": activeProjectId }
+    });
+    return (await response.json()).release.id as string;
+  }, projectId);
+  expect(releaseAfterShadow).toBe(releaseBeforeShadow);
+  await page.goto(`/projects/${projectId}/knowledge`);
+  await expect(page.getByRole("heading", { name: "知识库", level: 1 })).toBeVisible();
+  await expect(page.getByText("版本 1.0.0", { exact: true })).toBeVisible();
+  const retainedKnowledgePage = page.locator(".page-tree button").first();
+  await expect(retainedKnowledgePage).toBeVisible();
+  const retainedKnowledgeTitle = await retainedKnowledgePage.innerText();
+  await retainedKnowledgePage.click();
+  await expect(page.locator(".knowledge-document")).toContainText(retainedKnowledgeTitle);
 
   await page.goto(`/projects/${projectId}/codex`);
   await expect(page.getByRole("heading", { name: "Codex 接入" })).toBeVisible();

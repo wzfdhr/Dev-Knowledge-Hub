@@ -158,6 +158,17 @@ export const trustScoreSchema = z.object({
   reasons: z.array(z.string().min(1)).max(20)
 });
 
+export const releaseArtifactFamilySchema = z.enum(["knowledge-v1", "frontend-v2"]);
+export const frontendReleaseProvenanceSchema = z.object({
+  releaseArtifactFamily: z.literal("frontend-v2"),
+  packageArtifactId: z.string().min(1),
+  packageStageRunId: z.string().min(1),
+  artifactIds: z.array(z.string().min(1)).min(1),
+  frontendIrSchemaVersion: z.literal(2),
+  frontendGraphSchemaVersion: z.literal(2),
+  analyzerManifestDigest: digestSchema
+}).strict();
+
 export type BuildStage = z.infer<typeof buildStageSchema>;
 export type StageStatus = z.infer<typeof stageStatusSchema>;
 export type LegacyBuildStatus = z.infer<typeof legacyBuildStatusSchema>;
@@ -172,3 +183,15 @@ export type GraphNode = z.infer<typeof graphNodeSchema>;
 export type GraphEdge = z.infer<typeof graphEdgeSchema>;
 export type LintIssue = z.infer<typeof lintIssueSchema>;
 export type TrustScore = z.infer<typeof trustScoreSchema>;
+export type ReleaseArtifactFamily = z.infer<typeof releaseArtifactFamilySchema>;
+export type FrontendReleaseProvenance = z.infer<typeof frontendReleaseProvenanceSchema>;
+
+export type {
+  FrontendAnalyzerProvenance,
+  FrontendAnalyzerManifestEntry,
+  FrontendEdge,
+  FrontendEntity,
+  FrontendEntityIdentity,
+  FrontendFacetPatch,
+  FrontendIR
+} from "./frontend-ir.js";

@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "policy": "Changes require a separate technical review and committed fixture evidence.",
+  "currentRepository": {
+    "fixture": "repository-root",
+    "react": "19.2.7",
+    "reactDom": "19.2.7",
+    "vite": "8.1.4",
+    "typescript": "6.0.3"
+  },
+  "compatibilityFixtures": [
+    {
+      "fixture": "react-vite",
+      "react": "18.3.1",
+      "reactDom": "18.3.1",
+      "vite": "5.4.21",
+      "typescript": "5.4.5"
+    },
+    {
+      "fixture": "react-vite-held-out",
+      "react": "18.3.1",
+      "reactDom": "18.3.1",
+      "vite": "5.4.21",
+      "typescript": "5.4.5"
+    }
+  ],
+  "supportedRanges": {
+    "react": ["18.3.x", "19.2.x"],
+    "vite": ["5.4.x", "8.1.x"],
+    "typescript": ["5.4.x", "6.0.x"]
+  },
+  "parsers": {
+    "typescript": "6.0.3",
+    "html": { "status": "pending-dependency-approval", "package": "parse5" },
+    "css": { "status": "pending-dependency-approval", "package": "postcss" },
+    "sass": { "status": "pending-dependency-approval", "package": "postcss-scss" },
+    "less": { "status": "pending-dependency-approval", "package": "postcss-less" }
+  },
+  "performanceBaseline": {
+    "runner": "github-actions-ubuntu-24.04-x64",
+    "cpu": "4-vcpu-x64",
+    "logicalCores": 4,
+    "memoryMiB": 16384,
+    "node": "22.13.0",
+    "dataset": "frontend-v1-core",
+    "datasetDigestAlgorithm": "sha256",
+    "datasetDigest": "8b775c5ef674d22ef85504f11db2f479d74a7c9a63730abe326520bd27ceac8a"
+  }
+}

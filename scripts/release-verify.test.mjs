@@ -21,7 +21,7 @@ describe("release verification orchestrator", () => {
       "typecheck", "lint", "unit", "postgres-integration", "build", "acceptance", "knowledge-quality", "e2e"
     ]);
     expect(CONTAINER_STEPS.map((step) => step.name)).toEqual([
-      "container-build", "compose-config", "compose-up", "application-health", "recovery-drill"
+      "container-build", "compose-config", "compose-up", "parser-isolation", "application-health", "recovery-drill"
     ]);
     expect(CONTAINER_STEPS.find((step) => step.name === "compose-up")?.args).toContain("--wait");
     const repositoryRoot = process.cwd();
@@ -81,23 +81,41 @@ describe("release verification orchestrator", () => {
       }
     });
 
+    const invalidateEvidence = vi.fn(async () => undefined);
     await expect(runContainerVerification({
-      env: { DEVKH_CONTAINER_SMOKE: "true", COMPOSE_PROJECT_NAME: "devkh-ci" },
+      env: {
+        DEVKH_CONTAINER_SMOKE: "true",
+        COMPOSE_PROJECT_NAME: "devkh-ci",
+        RECOVERY_EVIDENCE_DIR: "/tmp/evidence"
+      },
       execute,
+      invalidateEvidence,
       logger: { error: vi.fn(), log: vi.fn() }
     })).rejects.toThrow("recovery-drill failed with exit code 65");
 
     expect(execute).toHaveBeenCalledWith(expect.objectContaining({ name: "recovery-drill" }));
     expect(execute).not.toHaveBeenCalledWith(expect.objectContaining({ name: "compose-cleanup" }));
+    expect(invalidateEvidence).not.toHaveBeenCalled();
   });
 
   test("retains the outer Compose state when an earlier container step fails", async () => {
     const execute = vi.fn(async (step) => {
       if (step.name === "application-health") throw Object.assign(new Error("health failed"), { exitCode: 1 });
     });
-    await expect(runContainerVerification({ env: { DEVKH_CONTAINER_SMOKE: "true", COMPOSE_PROJECT_NAME: "devkh-ci" }, execute, logger: { error: vi.fn(), log: vi.fn() } }))
+    const invalidateEvidence = vi.fn(async () => undefined);
+    await expect(runContainerVerification({
+      env: {
+        DEVKH_CONTAINER_SMOKE: "true",
+        COMPOSE_PROJECT_NAME: "devkh-ci",
+        RECOVERY_EVIDENCE_DIR: "/tmp/evidence"
+      },
+      execute,
+      invalidateEvidence,
+      logger: { error: vi.fn(), log: vi.fn() }
+    }))
       .rejects.toThrow("application-health failed with exit code 1");
     expect(execute).not.toHaveBeenCalledWith(expect.objectContaining({ name: "compose-cleanup" }));
+    expect(invalidateEvidence).toHaveBeenCalledWith("/tmp/evidence", "container_verification_failed");
   });
 
   test("cleans up the isolated Compose state after successful container verification", async () => {

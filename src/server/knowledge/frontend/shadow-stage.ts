@@ -1,0 +1,391 @@
+import { randomUUID } from "node:crypto";
+
+import { z } from "zod";
+
+import type { BuildRecord } from "../build-service.js";
+import { type ArtifactStore } from "../pipeline/artifact-store.js";
+import { BUILD_STAGES, type ArtifactManifest, type BuildStage } from "../pipeline/contracts.js";
+import { knowledgeIrPipelineInputDigest } from "../pipeline/extract-stage.js";
+import { knowledgeGraphPipelineInputDigest } from "../pipeline/graph-stage.js";
+import { pipelineSearchIndexInputDigest } from "../pipeline/index-stage.js";
+import { pipelineInputDigest } from "../pipeline/input-digest.js";
+import { knowledgePackagePipelineInputDigest } from "../pipeline/package-stage.js";
+import { pipelineKnowledgeQualityInputDigest } from "../pipeline/quality-stage.js";
+import { knowledgeSynthesisPipelineInputDigest } from "../pipeline/synthesize-stage.js";
+import { tableSchemasPipelineInputDigest } from "../pipeline/tables-stage.js";
+import { knowledgeValidationPipelineInputDigest } from "../pipeline/validate-stage.js";
+import { knowledgeVisualizationPipelineInputDigest } from "../pipeline/viz-stage.js";
+import { createB02StageInputPlanner } from "../pipeline/stage-planner.js";
+import type { PipelineStageExecutor, PipelineStageInputPlanner } from "../pipeline/worker.js";
+import type {
+  PipelineArtifactStore,
+  PipelineStageRunRecord,
+  SourceSnapshotRecord
+} from "../../persistence/store.js";
+import {
+  ARTIFACT_KINDS,
+  EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+  FRONTEND_V2_GRAPH_SCHEMA_VERSION,
+  FRONTEND_V2_IR_SCHEMA_VERSION,
+  assertFrontendArtifactFamily
+} from "./compatibility.js";
+import type { FrontendKnowledgeMode } from "./rollout-mode.js";
+import type { ParserAnalyzeRequest } from "./runtime/parser-protocol.js";
+
+const SHADOW_FAMILIES = ["knowledge-v1", "frontend-v2"] as const;
+const UPSTREAM_STAGES: Record<Exclude<BuildStage, "convert">, readonly BuildStage[]> = {
+  extract: ["convert"],
+  tables: ["convert"],
+  graph: ["extract", "tables"],
+  synthesize: ["graph"],
+  index: ["synthesize"],
+  lint: ["extract", "tables", "synthesize", "index"],
+  viz: ["graph"],
+  validate: ["synthesize", "index", "lint", "viz"],
+  package: ["validate"]
+};
+
+type ShadowStore = PipelineArtifactStore & {
+  getBuild(workspaceId: string, buildId: string): Promise<BuildRecord | null>;
+  findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null>;
+  listPipelineStageRuns(workspaceId: string, projectId: string, buildId: string): Promise<PipelineStageRunRecord[]>;
+};
+
+export interface FrontendParserClient {
+  analyze(input: Omit<ParserAnalyzeRequest, "type" | "requestId">, signal?: AbortSignal): Promise<unknown>;
+}
+
+const parserNormalizedSourcesSchema = z.object({
+  schemaVersion: z.literal(1),
+  snapshotId: z.string().min(1),
+  sources: z.array(z.object({
+    path: z.string().min(1),
+    content: z.string(),
+    blobHash: z.string().regex(/^[a-f0-9]{64}$/i)
+  }))
+});
+
+const parserRuntimeResultSchema = z.object({
+  schemaVersion: z.literal(1),
+  snapshotId: z.string().min(1),
+  outputs: z.array(z.unknown())
+});
+
+function completedRun(runs: readonly PipelineStageRunRecord[], stage: BuildStage): PipelineStageRunRecord {
+  const run = runs.findLast((candidate) => candidate.stage === stage
+    && (candidate.status === "succeeded" || candidate.status === "reused"));
+  if (!run) throw new Error(`Frontend shadow stage requires a completed ${stage} run`);
+  return run;
+}
+
+async function manifestsForRun(store: ShadowStore, run: PipelineStageRunRecord): Promise<ArtifactManifest[]> {
+  const manifests = await Promise.all(run.outputManifestIds.map((id) => store.findArtifactById(id)));
+  if (manifests.some((manifest) => !manifest)) {
+    throw new Error(`Frontend shadow ${run.stage} output manifest is unavailable`);
+  }
+  return manifests as ArtifactManifest[];
+}
+
+async function assertFamilyOutputs(
+  store: ShadowStore,
+  run: PipelineStageRunRecord,
+  artifactStore?: ArtifactStore
+): Promise<ArtifactManifest[]> {
+  const manifests = await manifestsForRun(store, run);
+  assertFrontendArtifactFamily(run.stage, SHADOW_FAMILIES, manifests);
+  for (const manifest of manifests) {
+    if (manifest.workspaceId !== run.workspaceId || manifest.projectId !== run.projectId
+      || manifest.snapshotId !== run.snapshotId || manifest.stage !== run.stage) {
+      throw new Error(`Frontend shadow ${run.stage} output crosses its persisted scope`);
+    }
+    if (artifactStore) await artifactStore.getJson(manifest);
+  }
+  return manifests;
+}
+
+async function upstreamManifestIds(
+  store: ShadowStore,
+  run: PipelineStageRunRecord,
+  stage: Exclude<BuildStage, "convert">,
+  artifactStore?: ArtifactStore
+): Promise<string[]> {
+  const runs = await store.listPipelineStageRuns(run.workspaceId, run.projectId, run.buildId);
+  const manifests = await Promise.all(UPSTREAM_STAGES[stage].map(async (upstreamStage) =>
+    assertFamilyOutputs(store, completedRun(runs, upstreamStage), artifactStore)
+  ));
+  return manifests.flat().map((manifest) => manifest.id).sort();
+}
+
+function purposeDigest(build: BuildRecord) {
+  return {
+    kind: build.purpose.kind,
+    feedbackIds: build.purpose.feedbackIds,
+    remediationIds: build.purpose.remediationContext?.map((context) => context.remediationId) ?? []
+  };
+}
+
+export function frontendShadowInputDigest(input: {
+  stage: Exclude<BuildStage, "convert">;
+  snapshotId: string;
+  build: BuildRecord;
+  upstreamManifestIds: readonly string[];
+}): string {
+  return pipelineInputDigest({
+    stage: input.stage,
+    snapshotId: input.snapshotId,
+    upstreamManifestIds: input.upstreamManifestIds,
+    parserConfigVersion: [
+      "frontend-shadow-v2",
+      ...SHADOW_FAMILIES,
+      `ir-${FRONTEND_V2_IR_SCHEMA_VERSION}`,
+      `graph-${FRONTEND_V2_GRAPH_SCHEMA_VERSION}`,
+      EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST
+    ].join(":"),
+    purpose: purposeDigest(input.build)
+  });
+}
+
+async function legacyInputDigest(
+  store: ShadowStore,
+  run: PipelineStageRunRecord,
+  build: BuildRecord,
+  snapshot: SourceSnapshotRecord
+): Promise<string> {
+  const runs = await store.listPipelineStageRuns(run.workspaceId, run.projectId, run.buildId);
+  const ids = async (stage: BuildStage) => (await manifestsForRun(store, completedRun(runs, stage)))
+    .filter((manifest) => {
+      const expected = ARTIFACT_KINDS[stage]["knowledge-v1"];
+      return manifest.kind === expected.kind && manifest.schemaVersion === expected.schemaVersion;
+    }).map((manifest) => manifest.id);
+  switch (run.stage) {
+    case "extract": return knowledgeIrPipelineInputDigest(snapshot, build.purpose, await ids("convert"));
+    case "tables": return tableSchemasPipelineInputDigest(snapshot, build.purpose, await ids("convert"));
+    case "graph": return knowledgeGraphPipelineInputDigest(snapshot, build.purpose, [...await ids("extract"), ...await ids("tables")]);
+    case "synthesize": return knowledgeSynthesisPipelineInputDigest(snapshot, build.purpose, await ids("graph"), build.allowLlm === true);
+    case "index": return pipelineSearchIndexInputDigest(snapshot, build.purpose, await ids("synthesize"));
+    case "lint": return pipelineKnowledgeQualityInputDigest(snapshot, build.purpose, [
+      ...await ids("extract"), ...await ids("tables"), ...await ids("synthesize"), ...await ids("index")
+    ]);
+    case "viz": return knowledgeVisualizationPipelineInputDigest(snapshot, build.purpose, await ids("graph"));
+    case "validate": return knowledgeValidationPipelineInputDigest(snapshot, build.purpose, [
+      ...await ids("synthesize"), ...await ids("index"), ...await ids("lint"), ...await ids("viz")
+    ]);
+    case "package": return knowledgePackagePipelineInputDigest(snapshot, build.purpose, await ids("validate"));
+    case "convert": throw new Error("Convert is shared by both artifact families");
+  }
+}
+
+export function createKnowledgeV1StoreView<T extends ShadowStore>(store: T): T {
+  return new Proxy(store, {
+    get(target, property, receiver) {
+      if (property === "listPipelineStageRuns") {
+        return async (workspaceId: string, projectId: string, buildId: string) => {
+          const runs = await target.listPipelineStageRuns(workspaceId, projectId, buildId);
+          return Promise.all(runs.map(async (run) => {
+            const manifests = await manifestsForRun(target, run);
+            const expected = ARTIFACT_KINDS[run.stage]["knowledge-v1"];
+            return {
+              ...run,
+              outputManifestIds: manifests.filter((manifest) =>
+                manifest.kind === expected.kind && manifest.schemaVersion === expected.schemaVersion
+              ).map((manifest) => manifest.id)
+            };
+          }));
+        };
+      }
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    }
+  });
+}
+
+async function packageArtifacts(
+  store: ShadowStore,
+  run: PipelineStageRunRecord,
+  legacyPackage: ArtifactManifest
+): Promise<Record<string, string[]>> {
+  const runs = await store.listPipelineStageRuns(run.workspaceId, run.projectId, run.buildId);
+  const entries = await Promise.all(BUILD_STAGES.map(async (stage) => {
+    const manifests = stage === "package"
+      ? [legacyPackage]
+      : await assertFamilyOutputs(store, completedRun(runs, stage));
+    return [stage, manifests.map((manifest) => manifest.id).sort()] as const;
+  }));
+  return Object.fromEntries(entries);
+}
+
+export function createFrontendShadowStageExecutor(input: {
+  store: ShadowStore;
+  artifactStore: ArtifactStore;
+  legacy: PipelineStageExecutor;
+  frontendParser?: FrontendParserClient;
+  actorId?: string;
+}): PipelineStageExecutor {
+  return async (run) => {
+    if (run.stage === "convert") return input.legacy(run);
+    const [build, snapshot] = await Promise.all([
+      input.store.getBuild(run.workspaceId, run.buildId),
+      input.store.findSnapshotById(run.workspaceId, run.snapshotId)
+    ]);
+    if (!build || !snapshot) throw new Error("Frontend shadow stage build or snapshot is unavailable");
+    const persistedLegacyDigest = await legacyInputDigest(input.store, run, build, snapshot);
+    if (run.inputDigest === persistedLegacyDigest) return input.legacy(run);
+    const upstreamIds = await upstreamManifestIds(input.store, run, run.stage, input.artifactStore);
+    const shadowDigest = frontendShadowInputDigest({
+      stage: run.stage, snapshotId: snapshot.id, build, upstreamManifestIds: upstreamIds
+    });
+    if (run.inputDigest !== shadowDigest) throw new Error("Frontend shadow stage input digest does not match enabled families");
+
+    if (run.stage === "extract" && input.frontendParser) {
+      const normalized = (await Promise.all(upstreamIds.map(async (artifactId) => {
+        const manifest = await input.store.findArtifactById(artifactId);
+        if (!manifest || manifest.kind !== "normalized-sources" || manifest.schemaVersion !== 1) {
+          throw new Error("Frontend parser normalized source artifact is unavailable");
+        }
+        return parserNormalizedSourcesSchema.parse(await input.artifactStore.getJson(manifest));
+      }))).flatMap((artifact) => artifact.sources);
+      const parserResult = parserRuntimeResultSchema.parse(await input.frontendParser.analyze({
+        snapshotId: run.snapshotId,
+        analyzerIds: [],
+        sources: normalized.map((source) => ({
+          path: source.path,
+          contentBase64: Buffer.from(source.content, "utf8").toString("base64"),
+          blobHash: source.blobHash
+        }))
+      }));
+      if (parserResult.snapshotId !== run.snapshotId) {
+        throw new Error("Frontend parser result crosses snapshots");
+      }
+    }
+
+    const legacyResult = await input.legacy({
+      ...run,
+      inputDigest: persistedLegacyDigest
+    });
+    if (legacyResult.outputManifestIds?.length !== 1) {
+      throw new Error(`Frontend shadow ${run.stage} requires exactly one knowledge-v1 output`);
+    }
+    const legacyManifest = await input.store.findArtifactById(legacyResult.outputManifestIds[0]!);
+    const expectedLegacy = ARTIFACT_KINDS[run.stage]["knowledge-v1"];
+    if (!legacyManifest || legacyManifest.kind !== expectedLegacy.kind
+      || legacyManifest.schemaVersion !== expectedLegacy.schemaVersion) {
+      throw new Error(`Frontend shadow ${run.stage} knowledge-v1 output is invalid`);
+    }
+    const expected = ARTIFACT_KINDS[run.stage]["frontend-v2"];
+    const baseValue = {
+      schemaVersion: 2 as const,
+      family: "frontend-v2" as const,
+      stage: run.stage,
+      snapshotId: run.snapshotId,
+      analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+      upstreamManifestIds: upstreamIds,
+      sourceArtifactId: legacyManifest.id
+    };
+    const value = run.stage === "extract"
+      ? {
+          schemaVersion: 2,
+          snapshotId: run.snapshotId,
+          analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+          analyzerManifest: [],
+          entities: [],
+          edges: []
+        }
+      : run.stage === "graph"
+        ? {
+            schemaVersion: 2,
+            snapshotId: run.snapshotId,
+            analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+            nodes: [],
+            edges: []
+          }
+        : run.stage === "package"
+        ? {
+            ...baseValue,
+            irSchemaVersion: FRONTEND_V2_IR_SCHEMA_VERSION,
+            graphSchemaVersion: FRONTEND_V2_GRAPH_SCHEMA_VERSION,
+            artifacts: await packageArtifacts(input.store, run, legacyManifest)
+          }
+        : baseValue;
+    const companion = await input.artifactStore.putJson({
+      manifest: {
+        id: randomUUID(), workspaceId: run.workspaceId, projectId: run.projectId,
+        snapshotId: run.snapshotId, buildId: run.buildId, stage: run.stage,
+        kind: expected.kind, schemaVersion: expected.schemaVersion, inputDigest: run.inputDigest,
+        contentDigest: "0".repeat(64), storageKey: "pending", sourceRefs: legacyManifest.sourceRefs,
+        producer: "deterministic", createdAt: new Date().toISOString()
+      },
+      value,
+      actorId: input.actorId
+    });
+    return {
+      outputManifestIds: [legacyManifest.id, companion.manifest.id],
+      reused: legacyResult.reused === true && companion.reused
+    };
+  };
+}
+
+export function createFrontendShadowStageInputPlanner(store: ShadowStore): PipelineStageInputPlanner {
+  return {
+    async nextInputDigest({ currentRun, build, nextStage, outputManifestIds }) {
+      if (nextStage === "convert") throw new Error("Convert cannot follow another pipeline stage");
+      const snapshot = await store.findSnapshotById(currentRun.workspaceId, currentRun.snapshotId);
+      if (!snapshot) throw new Error("Frontend shadow stage snapshot is unavailable");
+      const runs = await store.listPipelineStageRuns(currentRun.workspaceId, currentRun.projectId, currentRun.buildId);
+      const current: PipelineStageRunRecord = {
+        ...currentRun,
+        status: "succeeded",
+        outputManifestIds: [...outputManifestIds]
+      };
+      const visibleRuns = [...runs.filter((run) => run.id !== currentRun.id), current];
+      const ids = (await Promise.all(UPSTREAM_STAGES[nextStage].map(async (stage) => {
+        const completed = stage === current.stage ? current : completedRun(visibleRuns, stage);
+        return (await assertFamilyOutputs(store, completed)).map((manifest) => manifest.id);
+      }))).flat().sort();
+      return frontendShadowInputDigest({ stage: nextStage, snapshotId: snapshot.id, build, upstreamManifestIds: ids });
+    }
+  };
+}
+
+export function createFrontendModeStageInputPlanner(
+  store: ShadowStore,
+  modeForProject: (workspaceId: string, projectId: string) => Promise<FrontendKnowledgeMode>
+): PipelineStageInputPlanner {
+  const legacy = createB02StageInputPlanner(store);
+  const shadow = createFrontendShadowStageInputPlanner(store);
+  return {
+    async nextInputDigest(input) {
+      if (input.currentRun.stage === "convert") {
+        const mode = await modeForProject(input.currentRun.workspaceId, input.currentRun.projectId);
+        return mode === "legacy"
+          ? legacy.nextInputDigest(input)
+          : shadow.nextInputDigest(input);
+      }
+      const manifests = await Promise.all(input.outputManifestIds.map((id) => store.findArtifactById(id)));
+      if (manifests.some((manifest) => !manifest)) {
+        throw new Error(`Frontend ${input.currentRun.stage} output manifest is unavailable`);
+      }
+      const expectedFrontend = ARTIFACT_KINDS[input.currentRun.stage]["frontend-v2"];
+      const continuesFrontendV2 = manifests.some((manifest) => manifest?.kind === expectedFrontend.kind
+        && manifest.schemaVersion === expectedFrontend.schemaVersion);
+      if (continuesFrontendV2) {
+        await assertFamilyOutputs(store, {
+          ...input.currentRun,
+          status: "succeeded",
+          outputManifestIds: [...input.outputManifestIds]
+        });
+      } else {
+        const expectedLegacy = ARTIFACT_KINDS[input.currentRun.stage]["knowledge-v1"];
+        if (manifests.length !== 1 || manifests[0]?.kind !== expectedLegacy.kind
+          || manifests[0].schemaVersion !== expectedLegacy.schemaVersion
+          || manifests[0].workspaceId !== input.currentRun.workspaceId
+          || manifests[0].projectId !== input.currentRun.projectId
+          || manifests[0].snapshotId !== input.currentRun.snapshotId) {
+          throw new Error(`Frontend ${input.currentRun.stage} output family is invalid`);
+        }
+      }
+      return continuesFrontendV2
+        ? shadow.nextInputDigest(input)
+        : legacy.nextInputDigest(input);
+    }
+  };
+}

@@ -17,8 +17,14 @@ import type {
 import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
 import type { ImpactMindmap } from "../knowledge/pipeline/mindmap.js";
 import type { AGENT_FEEDBACK_STATUSES } from "../../shared/contracts.js";
-import type { LintIssue, SourceRef, TrustScore } from "../../shared/api-contracts.js";
+import type {
+  FrontendReleaseProvenance,
+  LintIssue,
+  SourceRef,
+  TrustScore
+} from "../../shared/api-contracts.js";
 import type { RemediationState } from "../knowledge/remediation.js";
+import type { FrontendKnowledgeMode } from "../knowledge/frontend/rollout-mode.js";
 
 export interface WorkspaceRecord {
   id: string;
@@ -215,6 +221,16 @@ export interface ProjectRecord {
   slug: string;
   archivedAt: Date | null;
   createdAt: Date;
+}
+
+export interface ProjectFrontendRolloutRecord {
+  projectId: string;
+  workspaceId: string;
+  mode: FrontendKnowledgeMode;
+  reason: string;
+  updatedBy: string;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export type ProjectRole = TeamRole;
@@ -563,9 +579,16 @@ export interface ReleaseRecord {
   version: string;
   kernelMode: "legacy" | "pipeline";
   packageArtifactId: string | null;
+  releaseArtifactFamily: "knowledge-v1" | "frontend-v2";
+  packageStageRunId: string | null;
+  frontendIrSchemaVersion: number | null;
+  frontendGraphSchemaVersion: number | null;
+  analyzerManifestDigest: string | null;
   createdAt: Date;
   publishedAt: Date | null;
 }
+
+export type FrontendReleaseDraftProvenance = FrontendReleaseProvenance;
 
 export interface ReleaseRollbackResult {
   release: ReleaseRecord;
@@ -675,7 +698,8 @@ export interface KnowledgeStore {
     workspaceId: string,
     repositoryId: string,
     buildId: string,
-    version: string
+    version: string,
+    provenance?: FrontendReleaseDraftProvenance
   ): Promise<ReleaseRecord>;
   publishRelease(workspaceId: string, releaseId: string, channel?: string): Promise<ReleaseRecord>;
   rollbackReleaseToLegacy(
@@ -756,6 +780,17 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
     input: { name: string; slug: string },
     actorId: string
   ): Promise<ProjectRecord | null>;
+  getProjectFrontendRollout(
+    workspaceId: string,
+    projectId: string
+  ): Promise<ProjectFrontendRolloutRecord | null>;
+  setProjectFrontendRollout(input: {
+    workspaceId: string;
+    projectId: string;
+    mode: FrontendKnowledgeMode;
+    reason: string;
+    actorId: string;
+  }): Promise<ProjectFrontendRolloutRecord | null>;
   listAccessibleProjects(
     workspaceId: string,
     userId: string,

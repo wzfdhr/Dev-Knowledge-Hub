@@ -45,10 +45,12 @@ import {
   createFrontendShadowStageExecutor,
   createKnowledgeV1StoreView
 } from "./knowledge/frontend/shadow-stage.js";
+import type { FrontendParserClient } from "./knowledge/frontend/shadow-stage.js";
 import {
   effectiveFrontendKnowledgeMode,
   type FrontendKnowledgeMode
 } from "./knowledge/frontend/rollout-mode.js";
+import { ParserClient } from "./knowledge/frontend/runtime/parser-client.js";
 
 const IMPORT_REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 const GIT_SYNC_CLAIM_LIMIT = 10;
@@ -86,6 +88,7 @@ export interface BootstrapDependencies {
     schedulePostBuild: (build: BuildRecord, stage?: PersistedInitialPipelineStage) => Promise<void>
   ) => BuildService;
   createArtifactStore: (directory: string, persistence: PipelineArtifactStore) => ArtifactStoreInitializer;
+  createParserClient: (socketPath: string) => FrontendParserClient;
   createQualityPipelineWorker: (
     connectionString: string,
     store: AppStore,
@@ -94,7 +97,8 @@ export interface BootstrapDependencies {
     frontendModeForProject: (
       workspaceId: string,
       projectId: string
-    ) => Promise<FrontendKnowledgeMode>
+    ) => Promise<FrontendKnowledgeMode>,
+    frontendParser: FrontendParserClient
   ) => QualityPipelineWorker;
   buildServer: typeof buildServer;
   setInterval?: (callback: () => void, delay: number) => unknown;
@@ -110,8 +114,9 @@ const defaultDependencies: BootstrapDependencies = {
   createBuildService: (store, queue, enhancerForWorkspace, initialPipelineStage, schedulePostBuild) =>
     new BuildService(store, queue, { enhancerForWorkspace, initialPipelineStage, schedulePostBuild }),
   createArtifactStore: (directory, persistence) => new ArtifactStore(directory, persistence),
+  createParserClient: (socketPath) => new ParserClient({ socketPath }),
   createQualityPipelineWorker: (
-    connectionString, store, artifactStore, enhancerForWorkspace, frontendModeForProject
+    connectionString, store, artifactStore, enhancerForWorkspace, frontendModeForProject, frontendParser
   ) => {
     const pipelineStore = store as AppStore & PipelineArtifactStore;
     const pipelineArtifacts = artifactStore as ArtifactStore;
@@ -134,7 +139,7 @@ const defaultDependencies: BootstrapDependencies = {
       pipelineStore,
       new PgBossPipelineStageJobQueue(connectionString),
       createFrontendShadowStageExecutor({
-        store: pipelineStore, artifactStore: pipelineArtifacts, legacy: legacyExecutor
+        store: pipelineStore, artifactStore: pipelineArtifacts, legacy: legacyExecutor, frontendParser
       }),
       ["convert", "extract", "tables", "graph", "synthesize", "index", "lint", "viz", "validate", "package"],
       5_000,
@@ -191,7 +196,8 @@ export async function bootstrapServer(
   // the sole source for published knowledge even when the future active mode is set.
   const qualityWorker = env.knowledgeKernelMode === "shadow"
     ? dependencies.createQualityPipelineWorker(
-      env.databaseUrl, store, artifactStore, enhancerForWorkspace, frontendModeForProject
+      env.databaseUrl, store, artifactStore, enhancerForWorkspace, frontendModeForProject,
+      dependencies.createParserClient(env.parserSocketPath)
     )
     : undefined;
   const initialPipelineStage = qualityWorker

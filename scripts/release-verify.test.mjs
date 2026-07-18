@@ -21,7 +21,7 @@ describe("release verification orchestrator", () => {
       "typecheck", "lint", "unit", "postgres-integration", "build", "acceptance", "knowledge-quality", "e2e"
     ]);
     expect(CONTAINER_STEPS.map((step) => step.name)).toEqual([
-      "container-build", "compose-config", "compose-up", "application-health", "recovery-drill"
+      "container-build", "compose-config", "compose-up", "parser-isolation", "application-health", "recovery-drill"
     ]);
     expect(CONTAINER_STEPS.find((step) => step.name === "compose-up")?.args).toContain("--wait");
     const repositoryRoot = process.cwd();

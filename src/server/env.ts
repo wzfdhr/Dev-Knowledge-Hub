@@ -33,7 +33,8 @@ const sharedEnvSchema = z.object({
   PUBLIC_BASE_URL: publicBaseUrlSchema.optional(),
   DEVKH_LEGACY_SESSION_READ_UNTIL: legacySessionReadUntilSchema.optional(),
   DEVKH_KNOWLEDGE_KERNEL_MODE: knowledgeKernelModeSchema.default("legacy"),
-  DEVKH_FRONTEND_KNOWLEDGE_MODE: frontendKnowledgeModeSchema.default("legacy")
+  DEVKH_FRONTEND_KNOWLEDGE_MODE: frontendKnowledgeModeSchema.default("legacy"),
+  DEVKH_PARSER_SOCKET_PATH: z.string().startsWith("/").default("/run/devkh-parser/parser.sock")
 });
 
 const productionEnvSchema = sharedEnvSchema.extend({
@@ -56,6 +57,7 @@ export interface AppEnv {
   legacySessionReadUntil?: Date;
   knowledgeKernelMode: z.infer<typeof knowledgeKernelModeSchema>;
   frontendKnowledgeMode: z.infer<typeof frontendKnowledgeModeSchema>;
+  parserSocketPath: string;
 }
 
 export function loadEnv({
@@ -82,7 +84,8 @@ export function loadEnv({
       publicBaseUrl: parsed.PUBLIC_BASE_URL,
       legacySessionReadUntil: parsed.DEVKH_LEGACY_SESSION_READ_UNTIL,
       knowledgeKernelMode: parsed.DEVKH_KNOWLEDGE_KERNEL_MODE,
-      frontendKnowledgeMode: parsed.DEVKH_FRONTEND_KNOWLEDGE_MODE
+      frontendKnowledgeMode: parsed.DEVKH_FRONTEND_KNOWLEDGE_MODE,
+      parserSocketPath: parsed.DEVKH_PARSER_SOCKET_PATH
     };
   }
 
@@ -102,6 +105,7 @@ export function loadEnv({
     publicBaseUrl: parsed.PUBLIC_BASE_URL,
     legacySessionReadUntil: parsed.DEVKH_LEGACY_SESSION_READ_UNTIL,
     knowledgeKernelMode: parsed.DEVKH_KNOWLEDGE_KERNEL_MODE,
-    frontendKnowledgeMode: parsed.DEVKH_FRONTEND_KNOWLEDGE_MODE
+    frontendKnowledgeMode: parsed.DEVKH_FRONTEND_KNOWLEDGE_MODE,
+    parserSocketPath: parsed.DEVKH_PARSER_SOCKET_PATH
   };
 }

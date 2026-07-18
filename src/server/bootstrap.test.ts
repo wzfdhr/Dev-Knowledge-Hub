@@ -29,6 +29,7 @@ function dependencies(): BootstrapDependencies {
     createBuildQueue: vi.fn(() => queue as never),
     createBuildService: vi.fn(() => buildService as never),
     createArtifactStore: vi.fn(() => ({ initialize: vi.fn(async () => {}) })),
+    createParserClient: vi.fn(() => ({ analyze: vi.fn(async () => ({ outputs: [] })) })),
     createQualityPipelineWorker: vi.fn(() => qualityWorker),
     buildServer: vi.fn(() => server as never),
     setInterval: vi.fn(() => ({})),
@@ -70,8 +71,9 @@ describe("production bootstrap", () => {
     expect(deps.createStore).toHaveBeenCalledWith(database.pool);
     expect(deps.createBuildQueue).toHaveBeenCalledWith("postgres://localhost/devkh");
     expect(deps.createQualityPipelineWorker).toHaveBeenCalledWith(
-      "postgres://localhost/devkh", store, artifactStore, expect.any(Function), expect.any(Function)
+      "postgres://localhost/devkh", store, artifactStore, expect.any(Function), expect.any(Function), expect.anything()
     );
+    expect(deps.createParserClient).toHaveBeenCalledWith("/run/devkh-parser/parser.sock");
     const frontendModeForProject = vi.mocked(deps.createQualityPipelineWorker).mock.calls[0]![4]!;
     await expect(frontendModeForProject("workspace-1", "project-1")).resolves.toBe("legacy");
     vi.mocked(store.getProjectFrontendRollout).mockResolvedValueOnce({ mode: "shadow" } as never);

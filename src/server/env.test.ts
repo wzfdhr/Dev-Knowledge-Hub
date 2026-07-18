@@ -12,8 +12,16 @@ describe("loadEnv", () => {
       port: 3000,
       dataDir: "./data",
       knowledgeKernelMode: "legacy",
-      frontendKnowledgeMode: "legacy"
+      frontendKnowledgeMode: "legacy",
+      parserSocketPath: "/run/devkh-parser/parser.sock"
     });
+  });
+
+  test("loads an explicit parser runtime socket path", () => {
+    expect(loadEnv({
+      mode: "development",
+      env: { DEVKH_PARSER_SOCKET_PATH: "/tmp/devkh-parser/parser.sock" }
+    }).parserSocketPath).toBe("/tmp/devkh-parser/parser.sock");
   });
 
   test("enforces the frontend mode below the global knowledge kernel cap", () => {

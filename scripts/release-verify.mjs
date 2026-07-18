@@ -27,7 +27,8 @@ export const VERIFY_STEPS = Object.freeze([
 export const CONTAINER_STEPS = Object.freeze([
   { name: "container-build", command: "docker", args: ["build", "--target", "runtime", "-t", "devkh:ci", repositoryRoot] },
   { name: "compose-config", command: "docker", args: [...compose, "config", "--quiet"] },
-  { name: "compose-up", command: "docker", args: [...compose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "postgres", "app"] },
+  { name: "compose-up", command: "docker", args: [...compose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "postgres", "parser", "app"] },
+  { name: "parser-isolation", command: "node", args: [resolve(repositoryRoot, "scripts/security/verify-parser-container.mjs")] },
   {
     name: "application-health",
     command: "docker",

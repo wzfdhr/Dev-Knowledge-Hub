@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { ArtifactStore } from "./artifact-store";
 import { createNormalizedSourcesStageExecutor, normalizedSourcesPipelineInputDigest } from "./convert-stage";
@@ -107,10 +107,16 @@ describe("B02 shadow pipeline", () => {
       validate: createKnowledgeValidationStageExecutor({ store: knowledgeV1Store, artifactStore }),
       package: createKnowledgePackageStageExecutor({ store: knowledgeV1Store, artifactStore })
     });
+    const parserAnalyze = vi.fn(async () => ({
+      schemaVersion: 1, snapshotId: snapshot.id, analyzerIds: [], sourcePaths: [sourcePath], outputs: []
+    }));
     const worker = new PipelineStageWorker(
       store,
       queue,
-      createFrontendShadowStageExecutor({ store, artifactStore, legacy: legacyExecutor }),
+      createFrontendShadowStageExecutor({
+        store, artifactStore, legacy: legacyExecutor,
+        frontendParser: { analyze: parserAnalyze }
+      }),
       ["convert", "extract", "tables", "graph", "synthesize", "index", "lint", "viz", "validate", "package"],
       5_000,
       createFrontendShadowStageInputPlanner(store)
@@ -126,6 +132,10 @@ describe("B02 shadow pipeline", () => {
     }
 
     const runs = await store.listPipelineStageRuns(workspaceId, project.id, build.id);
+    expect(parserAnalyze).toHaveBeenCalledWith(expect.objectContaining({
+      snapshotId: snapshot.id,
+      sources: [expect.objectContaining({ path: sourcePath, blobHash: hash(source) })]
+    }));
     expect(runs.find((run) => run.stage === "extract")?.errorDetail).toBeNull();
     expect(runs.map((run) => [run.stage, run.status])).toEqual([
       ["convert", "succeeded"], ["extract", "succeeded"], ["tables", "succeeded"], ["graph", "succeeded"],

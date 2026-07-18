@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import { z } from "zod";
+
 import type { BuildRecord } from "../build-service.js";
 import { type ArtifactStore } from "../pipeline/artifact-store.js";
 import { BUILD_STAGES, type ArtifactManifest, type BuildStage } from "../pipeline/contracts.js";
@@ -28,6 +30,7 @@ import {
   assertFrontendArtifactFamily
 } from "./compatibility.js";
 import type { FrontendKnowledgeMode } from "./rollout-mode.js";
+import type { ParserAnalyzeRequest } from "./runtime/parser-protocol.js";
 
 const SHADOW_FAMILIES = ["knowledge-v1", "frontend-v2"] as const;
 const UPSTREAM_STAGES: Record<Exclude<BuildStage, "convert">, readonly BuildStage[]> = {
@@ -47,6 +50,26 @@ type ShadowStore = PipelineArtifactStore & {
   findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null>;
   listPipelineStageRuns(workspaceId: string, projectId: string, buildId: string): Promise<PipelineStageRunRecord[]>;
 };
+
+export interface FrontendParserClient {
+  analyze(input: Omit<ParserAnalyzeRequest, "type" | "requestId">, signal?: AbortSignal): Promise<unknown>;
+}
+
+const parserNormalizedSourcesSchema = z.object({
+  schemaVersion: z.literal(1),
+  snapshotId: z.string().min(1),
+  sources: z.array(z.object({
+    path: z.string().min(1),
+    content: z.string(),
+    blobHash: z.string().regex(/^[a-f0-9]{64}$/i)
+  }))
+});
+
+const parserRuntimeResultSchema = z.object({
+  schemaVersion: z.literal(1),
+  snapshotId: z.string().min(1),
+  outputs: z.array(z.unknown())
+});
 
 function completedRun(runs: readonly PipelineStageRunRecord[], stage: BuildStage): PipelineStageRunRecord {
   const run = runs.findLast((candidate) => candidate.stage === stage
@@ -195,6 +218,7 @@ export function createFrontendShadowStageExecutor(input: {
   store: ShadowStore;
   artifactStore: ArtifactStore;
   legacy: PipelineStageExecutor;
+  frontendParser?: FrontendParserClient;
   actorId?: string;
 }): PipelineStageExecutor {
   return async (run) => {
@@ -211,6 +235,28 @@ export function createFrontendShadowStageExecutor(input: {
       stage: run.stage, snapshotId: snapshot.id, build, upstreamManifestIds: upstreamIds
     });
     if (run.inputDigest !== shadowDigest) throw new Error("Frontend shadow stage input digest does not match enabled families");
+
+    if (run.stage === "extract" && input.frontendParser) {
+      const normalized = (await Promise.all(upstreamIds.map(async (artifactId) => {
+        const manifest = await input.store.findArtifactById(artifactId);
+        if (!manifest || manifest.kind !== "normalized-sources" || manifest.schemaVersion !== 1) {
+          throw new Error("Frontend parser normalized source artifact is unavailable");
+        }
+        return parserNormalizedSourcesSchema.parse(await input.artifactStore.getJson(manifest));
+      }))).flatMap((artifact) => artifact.sources);
+      const parserResult = parserRuntimeResultSchema.parse(await input.frontendParser.analyze({
+        snapshotId: run.snapshotId,
+        analyzerIds: [],
+        sources: normalized.map((source) => ({
+          path: source.path,
+          contentBase64: Buffer.from(source.content, "utf8").toString("base64"),
+          blobHash: source.blobHash
+        }))
+      }));
+      if (parserResult.snapshotId !== run.snapshotId) {
+        throw new Error("Frontend parser result crosses snapshots");
+      }
+    }
 
     const legacyResult = await input.legacy({
       ...run,

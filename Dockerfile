@@ -33,7 +33,8 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates git \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /var/lib/devkh/snapshots /var/lib/devkh/repos /var/lib/devkh/uploads /var/lib/devkh/artifacts \
-  && chown -R node:node /app /var/lib/devkh
+  && mkdir -p /run/devkh-parser \
+  && chown -R node:node /app /var/lib/devkh /run/devkh-parser
 
 COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist

@@ -56,3 +56,9 @@ Before F04 can be accepted, perform desktop and mobile browser acceptance and
 complete a new 24-hour project-role observation from the `2026-07-18T04:26:54Z`
 restart without a terminal shadow-stage failure. `active` remains forbidden until
 F05 receives separate authorization.
+
+The production monitor intentionally remains failed during this observation:
+`MAX_SHADOW_PIPELINE_FAILURES_24H=0` still counts the two pre-fix `synthesize`
+failures at `2026-07-18T03:57Z` and `2026-07-18T03:59Z`. The post-fix build has
+no failed stages. The threshold and historical records were left intact, so the
+monitor will become green only after those failures age beyond its 24-hour window.

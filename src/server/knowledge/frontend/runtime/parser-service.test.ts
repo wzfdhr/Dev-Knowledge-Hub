@@ -164,17 +164,22 @@ describe("ParserService", () => {
     const service = new ParserService({
       socketPath: socket,
       execute,
-      frameTimeoutMs: 25
+      frameTimeoutMs: 1_000
     });
     await service.start();
     const first = new ParserClient({ socketPath: socket, requestTimeoutMs: 500 }).analyze(request());
     await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
-    await expect(new ParserClient({ socketPath: socket, requestTimeoutMs: 100 }).analyze(request()))
-      .rejects.toMatchObject({ code: "PARSER_RUNTIME_UNAVAILABLE" });
+    const startedAt = performance.now();
+    const second = net.createConnection(socket);
+    second.on("error", () => undefined);
+    second.once("connect", () => second.write(Buffer.from([0, 0])));
+    await new Promise<void>((resolve) => second.once("close", resolve));
+    const rejectedAfterMs = performance.now() - startedAt;
     expect(execute).toHaveBeenCalledTimes(1);
     release();
     await expect(first).resolves.toEqual({ outputs: [] });
     await service.stop();
+    expect(rejectedAfterMs).toBeLessThan(500);
   });
 
   test("closes an incomplete frame after the bounded read deadline", async () => {

@@ -15,6 +15,13 @@
       "reactDom": "18.3.1",
       "vite": "5.4.21",
       "typescript": "5.4.5"
+    },
+    {
+      "fixture": "react-vite-held-out",
+      "react": "18.3.1",
+      "reactDom": "18.3.1",
+      "vite": "5.4.21",
+      "typescript": "5.4.5"
     }
   ],
   "supportedRanges": {
@@ -36,6 +43,7 @@
     "memoryMiB": 16384,
     "node": "22.13.0",
     "dataset": "frontend-v1-core",
-    "datasetDigestAlgorithm": "sha256"
+    "datasetDigestAlgorithm": "sha256",
+    "datasetDigest": "a38aa9db65c8998eb0df2f7234359c5f1c19b9c4909f9728cb07fd91c4c9bd5d"
   }
 }

@@ -10,7 +10,9 @@ import {
   parseFrontendEvaluationDatasets,
   type FrontendEvaluationInput,
   validateFrontendEvaluationSuite,
+  validateFrontendCompatibilityFixtures,
   validateFrontendFixtureReferences,
+  validateFrontendPerformanceBaseline,
   validateFrontendVersionManifestAgainstPackage
 } from "../../../../scripts/evaluate-frontend-knowledge.mjs";
 
@@ -33,9 +35,11 @@ function positiveCase(id = "react-component-1") {
       factEdgeIds: ["renders:app:dashboard"],
       searchEntityIds: ["component:dashboard"],
       impactEntityIds: ["component:dashboard"],
-      citations: [{ path: "src/app.tsx", startLine: 8, endLine: 14 }]
+      citations: [{ entityId: "component:dashboard", path: "src/app.tsx", startLine: 8, endLine: 14 }]
     },
-    forbiddenEntityIds: []
+    forbiddenEntityIds: [],
+    forbiddenFactEdgeIds: [],
+    forbiddenCitations: []
   };
 }
 
@@ -67,7 +71,7 @@ describe("frontend knowledge evaluation protocol", () => {
     ])).toThrow("negative access cases must expect no results");
   });
 
-  test("rejects train and held-out scenario reuse", () => {
+  test("rejects train and held-out scenario or answer fingerprint reuse", () => {
     const heldOut = {
       ...positiveCase("held-out-case"),
       scenarioKey: positiveCase().scenarioKey,
@@ -77,6 +81,12 @@ describe("frontend knowledge evaluation protocol", () => {
       { name: "train", split: "train", content: dataset([positiveCase()]) },
       { name: "held-out", split: "held-out", content: dataset([heldOut]) }
     ])).toThrow("scenarioKey appears in both train and held-out");
+
+    const renamed = { ...heldOut, scenarioKey: "renamed-held-out-scenario" };
+    expect(() => parseFrontendEvaluationDatasets([
+      { name: "train", split: "train", content: dataset([positiveCase()]) },
+      { name: "held-out", split: "held-out", content: dataset([renamed]) }
+    ])).toThrow("answer fingerprint appears in both train and held-out");
   });
 
   test("creates a stable digest for the committed dataset contents", () => {
@@ -97,23 +107,23 @@ describe("frontend knowledge evaluation protocol", () => {
     await expect(validateFrontendFixtureReferences([valid], path.join(root, "fixtures/frontend"))).resolves.toBeUndefined();
     await expect(validateFrontendFixtureReferences([{
       ...valid,
-      expected: { ...valid.expected, citations: [{ path: "../secret", startLine: 1, endLine: 1 }] }
+      expected: { ...valid.expected, citations: [{ entityId: "component:dashboard", path: "../secret", startLine: 1, endLine: 1 }] }
     }], path.join(root, "fixtures/frontend"))).rejects.toThrow("escapes fixture root");
     await expect(validateFrontendFixtureReferences([{
       ...valid,
-      expected: { ...valid.expected, citations: [{ path: "src/app.tsx", startLine: 1, endLine: 999 }] }
+      expected: { ...valid.expected, citations: [{ entityId: "component:dashboard", path: "src/app.tsx", startLine: 1, endLine: 999 }] }
     }], path.join(root, "fixtures/frontend"))).rejects.toThrow("outside fixture line range");
   });
 
   test("ships the approved per-capability distribution and locked version manifest", async () => {
-    const datasetFiles: Array<[string, FrontendEvaluationInput["split"], string]> = [
-      ["react-core-train", "train", "evaluation/frontend/train/react-core.jsonl"],
-      ["security-train", "train", "evaluation/frontend/train/security-negative.jsonl"],
-      ["react-core-held-out", "held-out", "evaluation/frontend/held-out/react-core.jsonl"],
-      ["security-held-out", "held-out", "evaluation/frontend/held-out/security-negative.jsonl"]
+    const datasetFiles: Array<[FrontendEvaluationInput["split"], string]> = [
+      ["train", "evaluation/frontend/train/react-core.jsonl"],
+      ["train", "evaluation/frontend/train/security-negative.jsonl"],
+      ["held-out", "evaluation/frontend/held-out/react-core.jsonl"],
+      ["held-out", "evaluation/frontend/held-out/security-negative.jsonl"]
     ];
-    const inputs = await Promise.all(datasetFiles.map(async ([name, split, filename]) => ({
-      name,
+    const inputs = await Promise.all(datasetFiles.map(async ([split, filename]) => ({
+      name: filename,
       split,
       content: await readFile(path.join(root, filename), "utf8")
     })));
@@ -140,6 +150,10 @@ describe("frontend knowledge evaluation protocol", () => {
         "node_modules/react": { ...packageLock.packages["node_modules/react"], version: "20.0.0" }
       }
     })).toThrow("currentRepository.react");
+    await expect(validateFrontendCompatibilityFixtures(versions, path.join(root, "fixtures/frontend"))).resolves.toBeUndefined();
+    const datasetDigest = digestFrontendEvaluationDatasets(inputs);
+    expect(() => validateFrontendPerformanceBaseline(versions, datasetDigest)).not.toThrow();
+    expect(() => validateFrontendPerformanceBaseline(versions, "0".repeat(64))).toThrow("changed without approval");
   });
 
   test("calculates entity, edge, retrieval, citation, and impact metrics", () => {
@@ -173,7 +187,7 @@ describe("frontend knowledge evaluation protocol", () => {
     expect(() => assertFrontendEvaluationReport(report, cases)).not.toThrow();
   });
 
-  test("fails leakage and inconsistent metric denominators", () => {
+  test("fails leakage through entities, edges, impact, search, or citations", () => {
     const negative = {
       ...positiveCase("private-result"),
       access: "unauthorized",
@@ -181,24 +195,54 @@ describe("frontend knowledge evaluation protocol", () => {
       expected: {
         entityIds: [], factEdgeIds: [], searchEntityIds: [], impactEntityIds: [], citations: []
       },
-      forbiddenEntityIds: ["component:private-dashboard"]
+      forbiddenEntityIds: ["component:private-dashboard"],
+      forbiddenFactEdgeIds: ["renders:private-dashboard"],
+      forbiddenCitations: [{ entityId: "component:private-dashboard", path: "src/private.tsx", startLine: 1, endLine: 2 }]
     };
     const cases = parseFrontendEvaluationDatasets([
       { name: "negative", split: "train", content: dataset([negative]) }
     ]);
     const report = evaluateFrontendKnowledge(cases, [{
       caseId: "private-result",
-      entityIds: [],
-      factEdgeIds: [],
-      searchResults: [{ entityId: "component:private-dashboard", citations: [] }],
-      impactEntityIds: []
+      entityIds: ["component:private-dashboard"],
+      factEdgeIds: ["renders:private-dashboard"],
+      searchResults: [{ entityId: "component:private-dashboard", citations: [{ path: "src/private.tsx", startLine: 1, endLine: 2 }] }],
+      impactEntityIds: ["component:private-dashboard"]
     }]);
 
     expect(report.metrics.unauthorizedOrUnpublishedLeakage).toBe(1);
     expect(() => assertFrontendEvaluationReport(report, cases)).toThrow("forbidden result leakage");
+  });
+
+  test("binds citation validity to the result entity and counts omitted citations", () => {
+    const cases = parseFrontendEvaluationDatasets([
+      { name: "positive", split: "train", content: dataset([positiveCase()]) }
+    ]);
+    const wrongEntity = evaluateFrontendKnowledge(cases, [{
+      caseId: "react-component-1", entityIds: [], factEdgeIds: [], impactEntityIds: [],
+      searchResults: [{ entityId: "component:wrong", citations: [{ path: "src/app.tsx", startLine: 8, endLine: 14 }] }]
+    }]);
+    const omitted = evaluateFrontendKnowledge(cases, [{
+      caseId: "react-component-1", entityIds: [], factEdgeIds: [], impactEntityIds: [],
+      searchResults: [{ entityId: "component:dashboard", citations: [] }]
+    }]);
+    expect(wrongEntity.metrics.citationValidity).toBe(0);
+    expect(omitted.metrics.citationValidity).toBe(0);
+    expect(omitted.denominators.citations).toBe(1);
+  });
+
+  test("fails inconsistent raw metric counts and derived metrics", () => {
+    const cases = parseFrontendEvaluationDatasets([
+      { name: "positive", split: "train", content: dataset([positiveCase()]) }
+    ]);
+    const report = evaluateFrontendKnowledge(cases, []);
     expect(() => assertFrontendEvaluationReport({
       ...report,
-      denominators: { ...report.denominators, totalCases: 99 }
+      denominators: { ...report.denominators, entityExpected: 99 }
     }, cases)).toThrow("metric denominators do not match");
+    expect(() => assertFrontendEvaluationReport({
+      ...report,
+      metrics: { ...report.metrics, entityMicroF1: 1 }
+    }, cases)).toThrow("derived metrics do not match");
   });
 });

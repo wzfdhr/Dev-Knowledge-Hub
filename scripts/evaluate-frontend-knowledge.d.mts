@@ -10,6 +10,10 @@ export interface FrontendCitation {
   endLine: number;
 }
 
+export interface FrontendExpectedCitation extends FrontendCitation {
+  entityId: string;
+}
+
 export interface FrontendEvaluationCase {
   id: string;
   scenarioKey: string;
@@ -22,9 +26,11 @@ export interface FrontendEvaluationCase {
     factEdgeIds: string[];
     searchEntityIds: string[];
     impactEntityIds: string[];
-    citations: FrontendCitation[];
+    citations: FrontendExpectedCitation[];
   };
   forbiddenEntityIds: string[];
+  forbiddenFactEdgeIds: string[];
+  forbiddenCitations: FrontendExpectedCitation[];
 }
 
 export interface FrontendEvaluationObservation {
@@ -40,6 +46,7 @@ export interface FrontendEvaluationReport {
   caseIds: string[];
   denominators: Record<string, number>;
   metrics: Record<string, number>;
+  rawCounts: Record<string, unknown>;
   failures: Array<{ caseId: string; kind: string }>;
 }
 
@@ -70,6 +77,8 @@ export function validateFrontendVersionManifestAgainstPackage(
   packageJson: unknown,
   packageLock: unknown
 ): void;
+export function validateFrontendCompatibilityFixtures(versionManifest: unknown, fixturesRoot: string): Promise<void>;
+export function validateFrontendPerformanceBaseline(versionManifest: unknown, datasetDigest: string): void;
 export function evaluateFrontendKnowledge(
   cases: FrontendEvaluationCase[],
   observations: FrontendEvaluationObservation[]

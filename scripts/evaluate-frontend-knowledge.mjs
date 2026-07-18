@@ -58,12 +58,13 @@ function citations(value, id) {
   if (!Array.isArray(value)) throw new Error(`Frontend evaluation case ${id} has invalid citations`);
   return value.map((item) => {
     const citation = object(item, `Frontend evaluation case ${id} has invalid citation`);
+    const entityId = nonEmptyString(citation.entityId, "citation entityId", id);
     const citationPath = nonEmptyString(citation.path, "citation path", id);
     if (!Number.isInteger(citation.startLine) || citation.startLine < 1
       || !Number.isInteger(citation.endLine) || citation.endLine < citation.startLine) {
       throw new Error(`Frontend evaluation case ${id} has invalid citation lines`);
     }
-    return { path: citationPath, startLine: citation.startLine, endLine: citation.endLine };
+    return { entityId, path: citationPath, startLine: citation.startLine, endLine: citation.endLine };
   });
 }
 
@@ -88,6 +89,8 @@ function parseCase(value, declaredSplit, line, datasetName) {
     citations: citations(expected.citations, id)
   };
   const forbiddenEntityIds = stringArray(item.forbiddenEntityIds, "forbiddenEntityIds", id);
+  const forbiddenFactEdgeIds = stringArray(item.forbiddenFactEdgeIds, "forbiddenFactEdgeIds", id);
+  const forbiddenCitations = citations(item.forbiddenCitations, id);
   const negative = access !== "authorized-published";
   const expectedValues = [
     ...parsedExpected.entityIds,
@@ -96,14 +99,17 @@ function parseCase(value, declaredSplit, line, datasetName) {
     ...parsedExpected.impactEntityIds,
     ...parsedExpected.citations
   ];
-  if (negative && (expectedValues.length || !forbiddenEntityIds.length)) {
-    throw new Error(`Frontend evaluation case ${id} negative access cases must expect no results and declare forbiddenEntityIds`);
+  if (negative && (expectedValues.length || !forbiddenEntityIds.length || !forbiddenFactEdgeIds.length || !forbiddenCitations.length)) {
+    throw new Error(`Frontend evaluation case ${id} negative access cases must expect no results and declare forbidden evidence`);
   }
   if (!negative && (!parsedExpected.entityIds.length || !parsedExpected.searchEntityIds.length)) {
     throw new Error(`Frontend evaluation case ${id} requires expected entities and search results`);
   }
   if (!negative && !parsedExpected.citations.length) {
     throw new Error(`Frontend evaluation case ${id} requires at least one citation`);
+  }
+  if (!negative && parsedExpected.citations.some((citation) => !parsedExpected.searchEntityIds.includes(citation.entityId))) {
+    throw new Error(`Frontend evaluation case ${id} citations must bind to expected search entities`);
   }
   return {
     id,
@@ -117,8 +123,31 @@ function parseCase(value, declaredSplit, line, datasetName) {
     fixture: nonEmptyString(item.fixture, "fixture", id),
     matchBy: item.matchBy,
     expected: parsedExpected,
-    forbiddenEntityIds
+    forbiddenEntityIds,
+    forbiddenFactEdgeIds,
+    forbiddenCitations
   };
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function answerFingerprint(item) {
+  return createHash("sha256").update(stableJson({
+    capability: item.capability,
+    fixture: item.fixture,
+    query: item.query.replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US"),
+    expected: item.expected,
+    forbiddenEntityIds: item.forbiddenEntityIds,
+    forbiddenFactEdgeIds: item.forbiddenFactEdgeIds,
+    forbiddenCitations: item.forbiddenCitations
+  })).digest("hex");
 }
 
 export function parseFrontendEvaluationDatasets(inputs) {
@@ -126,6 +155,7 @@ export function parseFrontendEvaluationDatasets(inputs) {
   const cases = [];
   const ids = new Set();
   const scenarioSplits = new Map();
+  const fingerprintSplits = new Map();
   for (const input of inputs) {
     if (!input || typeof input !== "object" || !SPLITS.has(input.split)) {
       throw new Error("Frontend evaluation dataset has invalid metadata");
@@ -147,6 +177,12 @@ export function parseFrontendEvaluationDatasets(inputs) {
         throw new Error(`Frontend evaluation scenarioKey appears in both train and held-out: ${item.scenarioKey}`);
       }
       scenarioSplits.set(item.scenarioKey, item.split);
+      const fingerprint = answerFingerprint(item);
+      const previousFingerprintSplit = fingerprintSplits.get(fingerprint);
+      if (previousFingerprintSplit && previousFingerprintSplit !== item.split) {
+        throw new Error(`Frontend evaluation answer fingerprint appears in both train and held-out: ${item.id}`);
+      }
+      fingerprintSplits.set(fingerprint, item.split);
       cases.push(item);
     }
   }
@@ -160,7 +196,7 @@ export async function validateFrontendFixtureReferences(cases, fixturesRoot) {
     if (fixtureRoot !== root && !fixtureRoot.startsWith(`${root}${path.sep}`)) {
       throw new Error(`Frontend evaluation case ${item.id} fixture escapes fixture root`);
     }
-    for (const citation of item.expected.citations) {
+    for (const citation of [...item.expected.citations, ...item.forbiddenCitations]) {
       const filename = path.resolve(fixtureRoot, citation.path);
       if (!filename.startsWith(`${fixtureRoot}${path.sep}`)) {
         throw new Error(`Frontend evaluation case ${item.id} citation escapes fixture root`);
@@ -220,6 +256,42 @@ export function validateFrontendVersionManifestAgainstPackage(versionManifest, p
   }
 }
 
+export async function validateFrontendCompatibilityFixtures(versionManifest, fixturesRoot) {
+  const manifest = validateVersions(versionManifest);
+  for (const fixture of manifest.compatibilityFixtures) {
+    const filename = path.join(fixturesRoot, fixture.fixture, "package.json");
+    const packageJson = JSON.parse(await readFile(filename, "utf8"));
+    const actual = {
+      react: packageJson.dependencies?.react,
+      reactDom: packageJson.dependencies?.["react-dom"],
+      vite: packageJson.devDependencies?.vite,
+      typescript: packageJson.devDependencies?.typescript
+    };
+    for (const field of Object.keys(actual)) {
+      if (actual[field] !== fixture[field]) {
+        throw new Error(`Frontend compatibility fixture ${fixture.fixture}.${field} does not match package.json`);
+      }
+    }
+  }
+}
+
+export function validateFrontendPerformanceBaseline(versionManifest, datasetDigest) {
+  const performance = validateVersions(versionManifest).performanceBaseline;
+  const expected = {
+    runner: "github-actions-ubuntu-24.04-x64",
+    cpu: "4-vcpu-x64",
+    logicalCores: 4,
+    memoryMiB: 16384,
+    node: "22.13.0",
+    dataset: "frontend-v1-core",
+    datasetDigestAlgorithm: "sha256",
+    datasetDigest
+  };
+  if (stableJson(performance) !== stableJson(expected)) {
+    throw new Error("Frontend performance baseline or dataset digest changed without approval");
+  }
+}
+
 export function validateFrontendEvaluationSuite(cases, versionManifest) {
   if (!Array.isArray(cases) || !cases.length) throw new Error("Frontend evaluation suite must not be empty");
   const capabilities = FRONTEND_CAPABILITIES.map((capability) => {
@@ -273,8 +345,8 @@ function f1(metric) {
   return p + r ? (2 * p * r) / (p + r) : 0;
 }
 
-function citationMatches(expected, actual) {
-  return expected.some((citation) => citation.path === actual.path
+function citationMatches(expected, entityId, actual) {
+  return expected.some((citation) => citation.entityId === entityId && citation.path === actual.path
     && citation.startLine === actual.startLine
     && citation.endLine === actual.endLine);
 }
@@ -316,11 +388,17 @@ export function evaluateFrontendKnowledge(cases, observations) {
       capabilityEntities.get(item.capability)[key] += entityMetric[key];
     }
     const results = observation.searchResults ?? [];
-    const forbidden = new Set(item.forbiddenEntityIds);
-    leakage += results.filter((result) => forbidden.has(result.entityId)).length;
     if (item.access !== "authorized-published") {
       negativeCases += 1;
-      if (results.length) falsePositiveEmpty += 1;
+      const returnedAnything = (observation.entityIds?.length ?? 0) > 0
+        || (observation.factEdgeIds?.length ?? 0) > 0
+        || (observation.impactEntityIds?.length ?? 0) > 0
+        || results.length > 0
+        || results.some((result) => (result.citations?.length ?? 0) > 0);
+      if (returnedAnything) {
+        falsePositiveEmpty += 1;
+        leakage += 1;
+      }
       continue;
     }
     searchCases += 1;
@@ -329,9 +407,12 @@ export function evaluateFrontendKnowledge(cases, observations) {
     else failures.push({ caseId: item.id, kind: "expected-search-result-missing" });
     if (rank >= 0) reciprocalRanks += 1 / (rank + 1);
     for (const result of results.slice(0, 5)) {
-      for (const citation of result.citations ?? []) {
+      if (!item.expected.searchEntityIds.includes(result.entityId)) continue;
+      const resultCitations = result.citations ?? [];
+      if (!resultCitations.length) citationsSeen += 1;
+      for (const citation of resultCitations) {
         citationsSeen += 1;
-        if (citationMatches(item.expected.citations, citation)) validCitations += 1;
+        if (citationMatches(item.expected.citations, result.entityId, citation)) validCitations += 1;
         else failures.push({ caseId: item.id, kind: "invalid-citation" });
       }
     }
@@ -339,6 +420,15 @@ export function evaluateFrontendKnowledge(cases, observations) {
 
   const activeCapabilityMetrics = [...capabilityEntities.values()].filter((metric) => metric.expected || metric.actual);
   const positiveCases = cases.length - negativeCases;
+  const rawCounts = {
+    entity,
+    edge,
+    impact,
+    capabilityEntities: Object.fromEntries(capabilityEntities),
+    search: { cases: searchCases, recalled, reciprocalRanks },
+    citations: { checked: citationsSeen, valid: validCitations },
+    negative: { cases: negativeCases, falsePositive: falsePositiveEmpty, leakageCases: leakage }
+  };
   return {
     protocolVersion: 1,
     caseIds: cases.map((item) => item.id),
@@ -370,8 +460,13 @@ export function evaluateFrontendKnowledge(cases, observations) {
       impactRecall: recall(impact),
       unauthorizedOrUnpublishedLeakage: leakage
     },
+    rawCounts,
     failures
   };
+}
+
+function close(left, right) {
+  return Number.isFinite(left) && Number.isFinite(right) && Math.abs(left - right) < 1e-12;
 }
 
 export function assertFrontendEvaluationReport(report, cases) {
@@ -380,12 +475,45 @@ export function assertFrontendEvaluationReport(report, cases) {
     totalCases: cases.length,
     positiveCases,
     negativeCases: cases.length - positiveCases,
-    capabilities: new Set(cases.map((item) => item.capability)).size
+    capabilities: new Set(cases.map((item) => item.capability)).size,
+    entityExpected: cases.reduce((sum, item) => sum + item.expected.entityIds.length, 0),
+    edgeExpected: cases.reduce((sum, item) => sum + item.expected.factEdgeIds.length, 0),
+    searchCases: positiveCases,
+    impactExpected: cases.reduce((sum, item) => sum + item.expected.impactEntityIds.length, 0)
   };
   if (Object.entries(expectedDenominators).some(([key, value]) => report.denominators?.[key] !== value)
     || report.caseIds?.length !== cases.length
     || new Set(report.caseIds ?? []).size !== cases.length) {
     throw new Error("Frontend evaluation metric denominators do not match the dataset");
+  }
+  const raw = report.rawCounts;
+  if (!raw
+    || report.denominators.entityExpected !== raw.entity.expected
+    || report.denominators.entityPredicted !== raw.entity.actual
+    || report.denominators.edgeExpected !== raw.edge.expected
+    || report.denominators.edgePredicted !== raw.edge.actual
+    || report.denominators.searchCases !== raw.search.cases
+    || report.denominators.citations !== raw.citations.checked
+    || report.denominators.impactExpected !== raw.impact.expected
+    || report.denominators.impactPredicted !== raw.impact.actual) {
+    throw new Error("Frontend evaluation metric denominators do not match raw counts");
+  }
+  const capabilityMetrics = Object.values(raw.capabilityEntities).filter((metric) => metric.expected || metric.actual);
+  const derived = {
+    entityMicroF1: f1(raw.entity),
+    entityMacroF1: capabilityMetrics.length ? capabilityMetrics.reduce((sum, metric) => sum + f1(metric), 0) / capabilityMetrics.length : 0,
+    factEdgePrecision: precision(raw.edge),
+    factEdgeRecall: recall(raw.edge),
+    recallAt5: raw.search.cases ? raw.search.recalled / raw.search.cases : 0,
+    mrr: raw.search.cases ? raw.search.reciprocalRanks / raw.search.cases : 0,
+    citationValidity: raw.citations.checked ? raw.citations.valid / raw.citations.checked : 0,
+    falsePositiveEmptyRate: raw.negative.cases ? raw.negative.falsePositive / raw.negative.cases : 0,
+    impactPrecision: precision(raw.impact),
+    impactRecall: recall(raw.impact),
+    unauthorizedOrUnpublishedLeakage: raw.negative.leakageCases
+  };
+  if (Object.entries(derived).some(([key, value]) => !close(report.metrics[key], value))) {
+    throw new Error("Frontend evaluation derived metrics do not match raw counts");
   }
   if (report.metrics.unauthorizedOrUnpublishedLeakage > 0) {
     throw new Error("Frontend evaluation found forbidden result leakage");
@@ -411,6 +539,8 @@ export async function main() {
   const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
   const packageLock = JSON.parse(await readFile(path.join(root, "package-lock.json"), "utf8"));
   validateFrontendVersionManifestAgainstPackage(versions, packageJson, packageLock);
+  await validateFrontendCompatibilityFixtures(versions, path.join(root, "fixtures/frontend"));
+  validateFrontendPerformanceBaseline(versions, datasetDigest);
   const suite = validateFrontendEvaluationSuite(cases, versions);
   const report = evaluateFrontendKnowledge(cases, []);
   const output = {

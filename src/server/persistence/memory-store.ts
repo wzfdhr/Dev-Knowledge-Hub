@@ -1944,6 +1944,18 @@ export class MemoryAppStore implements AppStore {
       }
       return structuredClone(existing);
     }
+    const contentAddressed = this.knowledgeArtifacts.find((candidate) => candidate.storageKey === manifest.storageKey);
+    if (contentAddressed) {
+      if (contentAddressed.workspaceId !== manifest.workspaceId
+        || contentAddressed.projectId !== manifest.projectId
+        || contentAddressed.snapshotId !== manifest.snapshotId
+        || contentAddressed.stage !== manifest.stage
+        || contentAddressed.kind !== manifest.kind
+        || contentAddressed.contentDigest !== manifest.contentDigest) {
+        throw new Error("Artifact cache collision");
+      }
+      return structuredClone(contentAddressed);
+    }
     this.knowledgeArtifacts.push(structuredClone(manifest));
     await this.recordAudit({
       workspaceId: manifest.workspaceId,

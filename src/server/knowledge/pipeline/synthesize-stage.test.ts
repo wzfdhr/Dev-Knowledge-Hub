@@ -100,6 +100,16 @@ describe("knowledge synthesis pipeline stage", () => {
     expect(enhancer.enhance).toHaveBeenCalled();
     const artifact = await store.findArtifactById(first.outputManifestIds![0]!);
     const value = await artifactStore.getJson(artifact!) as { output: { pages: Array<{ slug: string }> } };
+    const changedInput = await artifactStore.putJson({
+      manifest: {
+        ...artifact!,
+        id: randomUUID(),
+        inputDigest: hash("changed-upstream-manifest")
+      },
+      value
+    });
+
+    expect(changedInput).toEqual({ manifest: artifact, reused: true });
     expect(value.output.pages).toEqual(expect.arrayContaining([
       expect.objectContaining({ slug: "architecture-overview" })
     ]));

@@ -544,6 +544,11 @@ integration("PostgreSQL cited knowledge integration", () => {
     )).resolves.toMatchObject({ id: artifact.id });
     await expect(store.createArtifactWithAudit({ ...artifact, id: randomUUID() }, setup!.admin.id))
       .resolves.toMatchObject({ id: artifact.id });
+    await expect(store.createArtifactWithAudit({
+      ...artifact,
+      id: randomUUID(),
+      inputDigest: "e".repeat(64)
+    }, setup!.admin.id)).resolves.toMatchObject({ id: artifact.id });
 
     const searchDocument = {
       documentKey: "overview:0", kind: "page" as const, title: "Overview", content: "Pipeline overview",

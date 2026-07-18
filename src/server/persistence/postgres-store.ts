@@ -1070,7 +1070,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            ON snapshot.id = build.snapshot_id AND snapshot.workspace_id = build.workspace_id
          WHERE build.workspace_id = $2 AND build.id = $5 AND repository.project_id = $3
            AND snapshot.id = $4 AND snapshot.repository_id = build.repository_id
-         ON CONFLICT (project_id, snapshot_id, stage, kind, input_digest) DO NOTHING
+         ON CONFLICT DO NOTHING
          RETURNING id, workspace_id, project_id, snapshot_id, build_job_id, stage, kind, schema_version,
                    input_digest, content_digest, storage_key, source_refs, producer, created_at`,
         [
@@ -1086,10 +1086,22 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
          WHERE workspace_id = $1 AND project_id = $2 AND snapshot_id = $3
            AND stage = $4 AND kind = $5 AND input_digest = $6`,
         [manifest.workspaceId, manifest.projectId, manifest.snapshotId, manifest.stage, manifest.kind, manifest.inputDigest]
+      )).rows[0] ?? (await client.query<ArtifactRow>(
+        `SELECT id, workspace_id, project_id, snapshot_id, build_job_id, stage, kind, schema_version,
+                input_digest, content_digest, storage_key, source_refs, producer, created_at
+         FROM knowledge_artifacts
+         WHERE storage_key = $1`,
+        [manifest.storageKey]
       )).rows[0];
       if (!artifact) throw new Error("Artifact does not match the project build and snapshot");
       const persisted = artifactManifest(artifact);
-      if (persisted.contentDigest !== manifest.contentDigest || persisted.storageKey !== manifest.storageKey) {
+      if (persisted.workspaceId !== manifest.workspaceId
+        || persisted.projectId !== manifest.projectId
+        || persisted.snapshotId !== manifest.snapshotId
+        || persisted.stage !== manifest.stage
+        || persisted.kind !== manifest.kind
+        || persisted.contentDigest !== manifest.contentDigest
+        || persisted.storageKey !== manifest.storageKey) {
         throw new Error("Artifact cache collision");
       }
       if (inserted.rows[0]) {

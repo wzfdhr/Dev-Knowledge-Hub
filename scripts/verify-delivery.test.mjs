@@ -104,6 +104,12 @@ describe("delivery database isolation", () => {
     );
   });
 
+  test("keeps nested local worktrees out of Vitest discovery", async () => {
+    const config = await readFile("vitest.config.ts", "utf8");
+
+    expect(config).toContain('"**/.worktrees/**"');
+  });
+
   test("preserves the retrieval evaluation report outside Playwright's disposable result directory", async () => {
     const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
     const upload = ci.jobs.verify.steps.find((step) =>

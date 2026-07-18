@@ -78,6 +78,18 @@ describe("project frontend rollout routes", () => {
         })
       })
     ]));
+    const activity = await app.inject({
+      method: "GET", url: `/api/projects/${projectId}/activity`, headers: { cookie }
+    });
+    expect(activity.json().activity).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "frontend_rollout.changed",
+        metadata: expect.objectContaining({
+          projectId, fromMode: "legacy", toMode: "shadow",
+          reason: "Validate the frontend-v2 shadow artifacts"
+        })
+      })
+    ]));
   });
 
   test("rejects a project mode above the configured system cap", async () => {

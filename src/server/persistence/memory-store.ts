@@ -114,6 +114,7 @@ export class MemoryAppStore implements AppStore {
   private readonly projects: ProjectRecord[] = [];
   private readonly projectMembers: Array<ProjectMemberRecord & { userId: string }> = [];
   private readonly projectFrontendRollouts = new Map<string, ProjectFrontendRolloutRecord>();
+  private readonly projectFrontendRolloutWrites = new Map<string, Promise<void>>();
   private readonly repositories: RepositoryRecord[] = [];
   private readonly gitSynchronizationSchedules = new Map<string, {
     nextAttemptAt: Date;
@@ -456,19 +457,24 @@ export class MemoryAppStore implements AppStore {
         && candidate.role === "admin" && candidate.disabledAt === null
     );
     if (!project || !actor) return null;
-    const previous = this.projectFrontendRollouts.get(project.id);
-    const now = new Date();
-    const rollout: ProjectFrontendRolloutRecord = {
-      projectId: project.id,
-      workspaceId: input.workspaceId,
-      mode: input.mode,
-      reason: input.reason,
-      updatedBy: input.actorId,
-      createdAt: previous?.createdAt ?? now,
-      updatedAt: now
-    };
-    this.projectFrontendRollouts.set(project.id, rollout);
+    const previousWrite = this.projectFrontendRolloutWrites.get(project.id) ?? Promise.resolve();
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const queuedWrite = previousWrite.catch(() => undefined).then(() => writeGate);
+    this.projectFrontendRolloutWrites.set(project.id, queuedWrite);
+    await previousWrite.catch(() => undefined);
     try {
+      const previous = this.projectFrontendRollouts.get(project.id);
+      const now = new Date();
+      const rollout: ProjectFrontendRolloutRecord = {
+        projectId: project.id,
+        workspaceId: input.workspaceId,
+        mode: input.mode,
+        reason: input.reason,
+        updatedBy: input.actorId,
+        createdAt: previous?.createdAt ?? now,
+        updatedAt: now
+      };
       await this.recordAudit({
         workspaceId: input.workspaceId,
         actorId: input.actorId,
@@ -482,12 +488,14 @@ export class MemoryAppStore implements AppStore {
           reason: rollout.reason
         }
       });
-    } catch (error) {
-      if (previous) this.projectFrontendRollouts.set(project.id, previous);
-      else this.projectFrontendRollouts.delete(project.id);
-      throw error;
+      this.projectFrontendRollouts.set(project.id, rollout);
+      return structuredClone(rollout);
+    } finally {
+      releaseWrite();
+      if (this.projectFrontendRolloutWrites.get(project.id) === queuedWrite) {
+        this.projectFrontendRolloutWrites.delete(project.id);
+      }
     }
-    return structuredClone(rollout);
   }
 
   async listAccessibleProjects(

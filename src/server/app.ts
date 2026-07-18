@@ -191,11 +191,20 @@ const PROJECT_ACTIVITY_METADATA_KEYS = new Set([
   "status",
   "unchanged"
 ]);
+const FRONTEND_ROLLOUT_ACTIVITY_METADATA_KEYS = new Set([
+  "projectId", "fromMode", "toMode", "reason"
+]);
 
-function projectActivityMetadata(metadata: Record<string, unknown> | undefined): Record<string, string | number | boolean | null> {
+function projectActivityMetadata(
+  action: string,
+  metadata: Record<string, unknown> | undefined
+): Record<string, string | number | boolean | null> {
   if (!metadata) return {};
+  const allowedKeys = action === "frontend_rollout.changed"
+    ? FRONTEND_ROLLOUT_ACTIVITY_METADATA_KEYS
+    : PROJECT_ACTIVITY_METADATA_KEYS;
   return Object.fromEntries(Object.entries(metadata).flatMap(([key, value]) =>
-    PROJECT_ACTIVITY_METADATA_KEYS.has(key) && (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null)
+    allowedKeys.has(key) && (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null)
       ? [[key, value]]
       : []
   ));
@@ -1090,7 +1099,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         action: event.action,
         resourceType: event.resourceType,
         resourceId: event.resourceId ?? null,
-        metadata: projectActivityMetadata(event.metadata),
+        metadata: projectActivityMetadata(event.action, event.metadata),
         createdAt: event.createdAt
       })),
       members: members.map(memberDto),

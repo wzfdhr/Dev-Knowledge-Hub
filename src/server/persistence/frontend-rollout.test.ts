@@ -41,4 +41,31 @@ describe("frontend rollout persistence", () => {
     })).rejects.toThrow("audit unavailable");
     await expect(store.getProjectFrontendRollout(setup!.workspace.id, project.id)).resolves.toBeNull();
   });
+
+  test("does not let a delayed failed write overwrite a later successful write", async () => {
+    const store = new MemoryAppStore();
+    const setup = await store.createInitialSetup("admin@example.com", "hash");
+    const project = (await store.listProjects(setup!.workspace.id))[0]!;
+    let rejectFirst!: (error: Error) => void;
+    const firstAudit = new Promise<void>((_resolve, reject) => { rejectFirst = reject; });
+    const originalRecordAudit = store.recordAudit.bind(store);
+    vi.spyOn(store, "recordAudit")
+      .mockImplementationOnce(() => firstAudit)
+      .mockImplementation((event) => originalRecordAudit(event));
+
+    const failed = store.setProjectFrontendRollout({
+      workspaceId: setup!.workspace.id, projectId: project.id, mode: "legacy",
+      reason: "A delayed failed audit", actorId: setup!.admin.id
+    });
+    const succeeded = store.setProjectFrontendRollout({
+      workspaceId: setup!.workspace.id, projectId: project.id, mode: "shadow",
+      reason: "The later successful write", actorId: setup!.admin.id
+    });
+    rejectFirst(new Error("audit unavailable"));
+
+    await expect(failed).rejects.toThrow("audit unavailable");
+    await expect(succeeded).resolves.toMatchObject({ mode: "shadow" });
+    await expect(store.getProjectFrontendRollout(setup!.workspace.id, project.id))
+      .resolves.toMatchObject({ mode: "shadow", reason: "The later successful write" });
+  });
 });

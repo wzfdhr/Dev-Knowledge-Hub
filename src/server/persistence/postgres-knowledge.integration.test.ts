@@ -122,6 +122,21 @@ integration("PostgreSQL cited knowledge integration", () => {
     const store = new PostgresAppStore(pool);
     const setup = await store.createInitialSetup("frontend-rollout@example.com", "hash");
     const project = (await store.listProjects(setup!.workspace.id))[0]!;
+    const projectAdmin = await store.createTeamMember(
+      setup!.workspace.id,
+      { email: "frontend-project-admin@example.com", passwordHash: "hash", role: "member" },
+      setup!.admin.id
+    );
+    await store.addProjectMember(
+      setup!.workspace.id, project.id, projectAdmin!.id, "admin", setup!.admin.id
+    );
+    await expect(store.setProjectFrontendRollout({
+      workspaceId: setup!.workspace.id,
+      projectId: project.id,
+      mode: "shadow",
+      reason: "Project administrators cannot change workspace rollout",
+      actorId: projectAdmin!.id
+    })).resolves.toBeNull();
 
     await expect(store.setProjectFrontendRollout({
       workspaceId: setup!.workspace.id,

@@ -146,14 +146,15 @@ export const frontendIrSchema = z.object({
   }
   const manifestSet = new Set(manifestKeys);
   for (const item of [...value.entities, ...value.edges]) {
+    const provenanceBlobs = new Set<string>();
     for (const provenance of item.provenance) {
       if (!manifestSet.has(stableJson(provenance))) {
         context.addIssue({ code: "custom", message: "Frontend provenance is missing from analyzer manifest" });
       }
-      const blobs = new Set(provenance.sourceBlobHashes);
-      if (item.sourceRefs.some((reference) => !blobs.has(reference.blobHash))) {
-        context.addIssue({ code: "custom", message: "Frontend source reference is missing from provenance blobs" });
-      }
+      for (const blobHash of provenance.sourceBlobHashes) provenanceBlobs.add(blobHash);
+    }
+    if (item.sourceRefs.some((reference) => !provenanceBlobs.has(reference.blobHash))) {
+      context.addIssue({ code: "custom", message: "Frontend source reference is missing from provenance blobs" });
     }
     if ("facets" in item && Object.keys(item.facets).some((namespace) =>
       !item.provenance.some((provenance) => provenance.analyzerId === namespace))) {

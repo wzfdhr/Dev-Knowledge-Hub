@@ -26,7 +26,7 @@ export interface FrontendAnalyzerRegistration {
   id: string;
   version: string;
   role: "core" | "framework";
-  facetSchema: z.ZodType;
+  facetSchema: z.ZodType<Record<string, unknown>>;
 }
 
 export interface FrontendMergeIssue {
@@ -211,8 +211,16 @@ export class AnalyzerRegistry {
     const edges = new Map<string, FrontendEdge>();
     const ordered = [...outputs].sort((a, b) => stableJson(outputManifest(a)).localeCompare(stableJson(outputManifest(b))));
     for (const output of ordered.filter((item) => this.#registrations.get(item.analyzerId)?.role === "core")) {
+      const registration = this.#registrations.get(output.analyzerId)!;
       for (const raw of output.entities) {
-        const entity = normalizeEntity(frontendEntitySchema.parse(raw));
+        const parsed = frontendEntitySchema.parse(raw);
+        const ownFacet = parsed.facets[output.analyzerId];
+        const entity = normalizeEntity({
+          ...parsed,
+          facets: ownFacet === undefined
+            ? {}
+            : { [output.analyzerId]: registration.facetSchema.parse(ownFacet) }
+        });
         const previous = entities.get(entity.id);
         if (!previous) entities.set(entity.id, entity);
         else if (canonicalEntity(previous) !== canonicalEntity(entity)) {
@@ -249,8 +257,12 @@ export class AnalyzerRegistry {
     }
     for (const output of ordered.filter((item) => this.#registrations.get(item.analyzerId)?.role === "framework")) {
       if (output.facetPatches.length === 0) continue;
+      const registration = this.#registrations.get(output.analyzerId)!;
       const provenance = outputProvenance(output);
-      const patches = [...output.facetPatches].sort((a, b) => `${a.entityId}:${stableJson(a.facet)}`.localeCompare(`${b.entityId}:${stableJson(b.facet)}`));
+      const patches = output.facetPatches.map((raw) => {
+        const patch = frontendFacetPatchSchema.parse(raw);
+        return { ...patch, facet: registration.facetSchema.parse(patch.facet) };
+      }).sort((a, b) => `${a.entityId}:${stableJson(a.facet)}`.localeCompare(`${b.entityId}:${stableJson(b.facet)}`));
       for (const patch of patches) this.#applyFacetPatch(entities, output, provenance, patch, issues);
     }
     if (issues.length > 0) {

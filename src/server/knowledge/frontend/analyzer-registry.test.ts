@@ -12,7 +12,9 @@ import { AnalyzerRegistry } from "./analyzer-registry.js";
 
 const digest = "a".repeat(64);
 const secondDigest = "b".repeat(64);
-const ref = (startLine: number) => ({ snapshotId: "snapshot-1", path: "src/app.tsx", startLine, endLine: startLine, blobHash: digest });
+const ref = (startLine: number, blobHash = digest) => ({
+  snapshotId: "snapshot-1", path: "src/app.tsx", startLine, endLine: startLine, blobHash
+});
 
 function provenance(analyzerId: string) {
   return [{ analyzerId, analyzerVersion: "1.0.0", parserConfigDigest: digest, sourceBlobHashes: [digest] }];
@@ -89,6 +91,27 @@ describe("frontend analyzer registry", () => {
     expect(merged.ir.entities[0]?.facets).toEqual({ react: { hookCount: 2 } });
     expect(merged.ir.entities[0]?.sourceRefs.map((item) => item.startLine)).toEqual([1, 3]);
     expect(value.mergeOutputs([core, react])).toEqual(merged);
+  });
+
+  test("keeps independently owned analyzer evidence and only merges schema-parsed facets", () => {
+    const value = registry();
+    const core = output("core-typescript", { entities: [component("core-typescript", 3)] });
+    const react = output("react", {
+      sourceBlobHashes: [secondDigest],
+      facetPatches: [{
+        entityId: component().id,
+        facet: { hookCount: 2, undeclared: true },
+        sourceRefs: [ref(4, secondDigest)]
+      }]
+    });
+
+    const merged = value.mergeOutputs([core, react]);
+    expect(merged.valid).toBe(true);
+    if (!merged.valid) throw new Error("Expected valid merge");
+    expect(merged.ir.entities[0]?.facets).toEqual({ react: { hookCount: 2 } });
+    expect(merged.ir.entities[0]?.sourceRefs.map((item) => item.blobHash)).toEqual([digest, secondDigest]);
+    expect(merged.ir.entities[0]?.provenance.flatMap((item) => item.sourceBlobHashes).sort())
+      .toEqual([digest, secondDigest].sort());
   });
 
   test("includes empty analyzers in the manifest and supports a valid empty IR", () => {

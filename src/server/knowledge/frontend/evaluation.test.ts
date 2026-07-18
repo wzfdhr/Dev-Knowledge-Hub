@@ -7,6 +7,7 @@ import {
   assertFrontendEvaluationReport,
   digestFrontendEvaluationDatasets,
   evaluateFrontendKnowledge,
+  evaluateFrontendKnowledgeBySplit,
   parseFrontendEvaluationDatasets,
   type FrontendEvaluationInput,
   validateFrontendEvaluationSuite,
@@ -86,7 +87,30 @@ describe("frontend knowledge evaluation protocol", () => {
     expect(() => parseFrontendEvaluationDatasets([
       { name: "train", split: "train", content: dataset([positiveCase()]) },
       { name: "held-out", split: "held-out", content: dataset([renamed]) }
-    ])).toThrow("answer fingerprint appears in both train and held-out");
+    ])).toThrow("fixture appears in both train and held-out");
+  });
+
+  test("reports train and held-out independently", () => {
+    const train = positiveCase("train-case");
+    const heldOut = {
+      ...positiveCase("held-out-case"), split: "held-out", fixture: "react-vite-held-out",
+      scenarioKey: "held-out-independent", query: "find independent analytics component",
+      expected: {
+        ...positiveCase().expected,
+        entityIds: ["component:analytics"],
+        searchEntityIds: ["component:analytics"],
+        impactEntityIds: ["component:analytics"],
+        citations: [{ entityId: "component:analytics", path: "src/features/analytics/analytics-page.tsx", startLine: 8, endLine: 14 }]
+      }
+    };
+    const cases = parseFrontendEvaluationDatasets([
+      { name: "train", split: "train", content: dataset([train]) },
+      { name: "held-out", split: "held-out", content: dataset([heldOut]) }
+    ]);
+    const reports = evaluateFrontendKnowledgeBySplit(cases, []);
+    expect(reports.train.denominators.totalCases).toBe(1);
+    expect(reports.heldOut.denominators.totalCases).toBe(1);
+    expect(reports.all.denominators.totalCases).toBe(2);
   });
 
   test("creates a stable digest for the committed dataset contents", () => {

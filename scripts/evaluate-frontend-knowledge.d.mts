@@ -83,4 +83,8 @@ export function evaluateFrontendKnowledge(
   cases: FrontendEvaluationCase[],
   observations: FrontendEvaluationObservation[]
 ): FrontendEvaluationReport;
+export function evaluateFrontendKnowledgeBySplit(
+  cases: FrontendEvaluationCase[],
+  observations: FrontendEvaluationObservation[]
+): { train: FrontendEvaluationReport; heldOut: FrontendEvaluationReport; all: FrontendEvaluationReport };
 export function assertFrontendEvaluationReport(report: FrontendEvaluationReport, cases: FrontendEvaluationCase[]): void;

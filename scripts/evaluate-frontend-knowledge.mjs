@@ -156,6 +156,7 @@ export function parseFrontendEvaluationDatasets(inputs) {
   const ids = new Set();
   const scenarioSplits = new Map();
   const fingerprintSplits = new Map();
+  const fixtureSplits = new Map();
   for (const input of inputs) {
     if (!input || typeof input !== "object" || !SPLITS.has(input.split)) {
       throw new Error("Frontend evaluation dataset has invalid metadata");
@@ -177,6 +178,11 @@ export function parseFrontendEvaluationDatasets(inputs) {
         throw new Error(`Frontend evaluation scenarioKey appears in both train and held-out: ${item.scenarioKey}`);
       }
       scenarioSplits.set(item.scenarioKey, item.split);
+      const previousFixtureSplit = fixtureSplits.get(item.fixture);
+      if (previousFixtureSplit && previousFixtureSplit !== item.split) {
+        throw new Error(`Frontend evaluation fixture appears in both train and held-out: ${item.fixture}`);
+      }
+      fixtureSplits.set(item.fixture, item.split);
       const fingerprint = answerFingerprint(item);
       const previousFingerprintSplit = fingerprintSplits.get(fingerprint);
       if (previousFingerprintSplit && previousFingerprintSplit !== item.split) {
@@ -310,6 +316,12 @@ export function validateFrontendEvaluationSuite(cases, versionManifest) {
   const negativeRate = negative / cases.length;
   if (chineseRate < 0.4) throw new Error(`Frontend evaluation Chinese coverage ${chineseRate.toFixed(4)} is below 0.40`);
   if (negativeRate < 0.15) throw new Error(`Frontend evaluation negative coverage ${negativeRate.toFixed(4)} is below 0.15`);
+  for (const split of SPLITS) {
+    const access = new Set(cases.filter((item) => item.split === split).map((item) => item.access));
+    if (!access.has("unauthorized") || !access.has("unpublished")) {
+      throw new Error(`Frontend evaluation ${split} must cover unauthorized and unpublished access`);
+    }
+  }
   return {
     total: cases.length,
     chineseRate,
@@ -465,6 +477,19 @@ export function evaluateFrontendKnowledge(cases, observations) {
   };
 }
 
+export function evaluateFrontendKnowledgeBySplit(cases, observations) {
+  const evaluateSplit = (split) => {
+    const splitCases = cases.filter((item) => item.split === split);
+    const caseIds = new Set(splitCases.map((item) => item.id));
+    return evaluateFrontendKnowledge(splitCases, observations.filter((item) => caseIds.has(item.caseId)));
+  };
+  return {
+    train: evaluateSplit("train"),
+    heldOut: evaluateSplit("held-out"),
+    all: evaluateFrontendKnowledge(cases, observations)
+  };
+}
+
 function close(left, right) {
   return Number.isFinite(left) && Number.isFinite(right) && Math.abs(left - right) < 1e-12;
 }
@@ -542,15 +567,17 @@ export async function main() {
   await validateFrontendCompatibilityFixtures(versions, path.join(root, "fixtures/frontend"));
   validateFrontendPerformanceBaseline(versions, datasetDigest);
   const suite = validateFrontendEvaluationSuite(cases, versions);
-  const report = evaluateFrontendKnowledge(cases, []);
+  const splitReports = evaluateFrontendKnowledgeBySplit(cases, []);
   const output = {
     dataset: "frontend-v1-core",
     datasetDigest,
     status: "protocol-baseline-no-analyzer",
     qualityGateEnforced: false,
+    qualityGateReport: "heldOut",
     generatedFromCommittedFixtures: true,
     suite,
-    report
+    splitReports,
+    report: splitReports.all
   };
   const outputPath = path.join(root, "artifacts/frontend-knowledge-evaluation.json");
   await mkdir(path.dirname(outputPath), { recursive: true });

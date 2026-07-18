@@ -164,6 +164,7 @@ describe("ParserService", () => {
     const service = new ParserService({
       socketPath: socket,
       execute,
+      maxConnections: 3,
       maxConcurrentRequests: 1,
       frameTimeoutMs: 25
     });
@@ -177,6 +178,27 @@ describe("ParserService", () => {
     await new Promise<void>((resolve) => partial.once("connect", resolve));
     partial.write(Buffer.from([0, 0]));
     await new Promise<void>((resolve) => partial.once("close", resolve));
+    release();
+    await expect(first).resolves.toEqual({ outputs: [] });
+    await service.stop();
+  });
+
+  test("defaults to a single worker and two bounded socket decoders", async () => {
+    const socket = await socketPath();
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const execute = vi.fn(async () => {
+      await blocked;
+      return { outputs: [] };
+    });
+    const service = new ParserService({ socketPath: socket, execute });
+    await service.start();
+    const first = new ParserClient({ socketPath: socket, requestTimeoutMs: 500 }).analyze(request());
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+    await expect(new ParserClient({ socketPath: socket, requestTimeoutMs: 100 }).analyze(request()))
+      .rejects.toMatchObject({ code: "PARSER_RUNTIME_UNAVAILABLE" });
+    const third = net.createConnection(socket);
+    await new Promise<void>((resolve) => third.once("close", resolve));
     release();
     await expect(first).resolves.toEqual({ outputs: [] });
     await service.stop();

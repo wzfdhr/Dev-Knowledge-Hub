@@ -83,8 +83,11 @@ export class AnalyzerWorkerHost {
         finish({ error: new ParserRuntimeError("PARSER_WORKER_CRASH", "Parser worker crashed") });
       });
       worker.once("exit", (code) => {
-        if (!settled && !terminating && code !== 0) {
-          finish({ error: new ParserRuntimeError("PARSER_WORKER_CRASH", "Parser worker exited unexpectedly") });
+        if (!settled && !terminating) {
+          finish({ error: new ParserRuntimeError(
+            "PARSER_WORKER_CRASH",
+            code === 0 ? "Parser worker exited without a result" : "Parser worker exited unexpectedly"
+          ) });
         }
       });
       signal?.addEventListener("abort", cancel, { once: true });

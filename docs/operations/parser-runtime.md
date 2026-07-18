@@ -11,6 +11,8 @@ or executable configuration.
 - The only persistent mount is `parser_runtime:/run/devkh-parser`.
 - `/tmp` is a bounded `noexec,nosuid` tmpfs.
 - CPU, memory, PID, worker heap, stack, request, output, and wall-clock limits are enforced.
+- A parser container accepts at most two sockets and one active worker; incomplete request frames are
+  closed after five seconds so the 64 MiB protocol frame limit stays within the 512 MiB container budget.
 - Every source path is a relative POSIX virtual path and every byte payload must match its SHA-256 hash.
 - The socket is recreated on service start with mode `0600`.
 

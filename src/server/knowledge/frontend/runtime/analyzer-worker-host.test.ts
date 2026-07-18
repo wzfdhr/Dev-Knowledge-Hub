@@ -54,6 +54,13 @@ describe("AnalyzerWorkerHost", () => {
     await expect(oversized.run()).rejects.toMatchObject({ code: "PARSER_OUTPUT_LIMIT" });
   });
 
+  test("immediately rejects a worker that exits cleanly without a result", async () => {
+    const host = new AnalyzerWorkerHost({
+      workerFactory: evalWorker("process.exit(0)"), timeoutMs: 1_000, maxOutputBytes: 1_024
+    });
+    await expect(host.run()).rejects.toMatchObject({ code: "PARSER_WORKER_CRASH" });
+  });
+
   test("rejects unframed worker values instead of cloning them into the result contract", async () => {
     const host = new AnalyzerWorkerHost({
       workerFactory: evalWorker("require('node:worker_threads').parentPort.postMessage({ outputs: [] })"),

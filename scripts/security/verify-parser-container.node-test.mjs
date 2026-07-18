@@ -40,5 +40,6 @@ test("rejects weak tmpfs and unexpected socket mount modes", () => {
   const inspect = validInspect();
   inspect.HostConfig.Tmpfs["/tmp"] = "rw,size=67108864";
   inspect.Mounts[0].RW = false;
-  assert.throws(() => verifyParserContainer(inspect), /bounded noexec tmpfs.*writable parser socket volume only/);
+  inspect.HostConfig.Tmpfs["/extra"] = "rw,size=1048576";
+  assert.throws(() => verifyParserContainer(inspect), /single bounded writable noexec tmpfs.*writable parser socket volume only/);
 });

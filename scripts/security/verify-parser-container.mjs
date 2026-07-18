@@ -15,10 +15,12 @@ export function verifyParserContainer(inspect) {
   requireValue(inspect.HostConfig?.NanoCpus === 1_000_000_000, "CPU limit");
   const tmpfs = inspect.HostConfig?.Tmpfs?.["/tmp"] ?? "";
   requireValue(
-    tmpfs.split(",").includes("noexec")
+    Object.keys(inspect.HostConfig?.Tmpfs ?? {}).length === 1
+      && tmpfs.split(",").includes("rw")
+      && tmpfs.split(",").includes("noexec")
       && tmpfs.split(",").includes("nosuid")
       && /(?:^|,)size=(?:64m|67108864)(?:,|$)/.test(tmpfs),
-    "bounded noexec tmpfs"
+    "single bounded writable noexec tmpfs"
   );
   const mounts = inspect.Mounts ?? [];
   requireValue(

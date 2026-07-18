@@ -77,7 +77,8 @@ export class LengthPrefixedJsonDecoder {
       if (length > this.maxFrameBytes) throw new Error("Parser frame byte limit exceeded");
       if (this.#buffer.byteLength < 4 + length) break;
       const payload = this.#buffer.subarray(4, 4 + length);
-      this.#buffer = this.#buffer.subarray(4 + length);
+      const remainder = this.#buffer.subarray(4 + length);
+      this.#buffer = remainder.byteLength === 0 ? Buffer.alloc(0) : Buffer.from(remainder);
       values.push(JSON.parse(payload.toString("utf8")) as unknown);
     }
     return values;

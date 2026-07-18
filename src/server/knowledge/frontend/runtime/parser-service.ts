@@ -40,7 +40,7 @@ export class ParserService {
     await mkdir(path.dirname(this.options.socketPath), { recursive: true });
     await rm(this.options.socketPath, { force: true });
     const server = net.createServer((socket) => this.handle(socket));
-    server.maxConnections = this.options.maxConnections ?? 16;
+    server.maxConnections = this.options.maxConnections ?? 2;
     this.#server = server;
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
@@ -68,7 +68,7 @@ export class ParserService {
   }
 
   private handle(socket: Socket): void {
-    const maxConnections = this.options.maxConnections ?? 16;
+    const maxConnections = this.options.maxConnections ?? 2;
     if (this.#sockets.size >= maxConnections) {
       socket.destroy();
       return;
@@ -107,7 +107,7 @@ export class ParserService {
           send({ type: "error", requestId: parsed.data.requestId, code: "PARSER_INVALID_REQUEST", message: "Parser sources are invalid" });
           continue;
         }
-        if (this.#active.size >= (this.options.maxConcurrentRequests ?? 4)) {
+        if (this.#active.size >= (this.options.maxConcurrentRequests ?? 1)) {
           send({
             type: "error",
             requestId: parsed.data.requestId,

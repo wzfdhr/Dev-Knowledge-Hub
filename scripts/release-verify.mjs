@@ -54,7 +54,7 @@ async function invalidateRecoveryEvidence(root, errorClass) {
   await mkdir(root, { recursive: true, mode: 0o700 });
   await writeFile(join(root, "recovery-verification-failed.json"), `${JSON.stringify({
     schemaVersion: 1,
-    operation: "restore-drill",
+    operation: errorClass === "container_verification_failed" ? "container-verification" : "restore-drill",
     result: "failed",
     errorClass,
     retentionPath: root,
@@ -147,7 +147,7 @@ export async function runReleaseSteps(steps, options = {}) {
       const exitCode = Number.isInteger(error?.exitCode) ? error.exitCode : 1;
       throw Object.assign(
         new Error(`${step.name} failed with exit code ${exitCode}: ${commandText(step)}`),
-        { cause: error, exitCode }
+        { cause: error, exitCode, stepName: step.name }
       );
     }
     logger.log(`[release] PASS ${step.name}`);
@@ -170,7 +170,9 @@ export async function runContainerVerification(options = {}) {
 
   if (failure) {
     logger.error("[release] container verification failed; retaining the isolated Compose state for diagnosis");
-    await invalidateEvidence(env.RECOVERY_EVIDENCE_DIR, "container_verification_failed");
+    if (failure.stepName !== "recovery-drill") {
+      await invalidateEvidence(env.RECOVERY_EVIDENCE_DIR, "container_verification_failed");
+    }
     throw failure;
   }
 

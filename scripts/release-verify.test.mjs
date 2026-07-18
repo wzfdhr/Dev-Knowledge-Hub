@@ -81,14 +81,21 @@ describe("release verification orchestrator", () => {
       }
     });
 
+    const invalidateEvidence = vi.fn(async () => undefined);
     await expect(runContainerVerification({
-      env: { DEVKH_CONTAINER_SMOKE: "true", COMPOSE_PROJECT_NAME: "devkh-ci" },
+      env: {
+        DEVKH_CONTAINER_SMOKE: "true",
+        COMPOSE_PROJECT_NAME: "devkh-ci",
+        RECOVERY_EVIDENCE_DIR: "/tmp/evidence"
+      },
       execute,
+      invalidateEvidence,
       logger: { error: vi.fn(), log: vi.fn() }
     })).rejects.toThrow("recovery-drill failed with exit code 65");
 
     expect(execute).toHaveBeenCalledWith(expect.objectContaining({ name: "recovery-drill" }));
     expect(execute).not.toHaveBeenCalledWith(expect.objectContaining({ name: "compose-cleanup" }));
+    expect(invalidateEvidence).not.toHaveBeenCalled();
   });
 
   test("retains the outer Compose state when an earlier container step fails", async () => {

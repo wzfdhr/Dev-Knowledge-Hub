@@ -29,6 +29,15 @@ describe("VirtualSourceFs", () => {
       .toThrow("blob hash");
   });
 
+  test.each(["!!!!", "YQ", "YQ=", "YQ===", "YQ==\n"])(
+    "rejects non-canonical base64 content %j",
+    (contentBase64) => expect(() => new VirtualSourceFs([{
+      path: "src/app.ts",
+      contentBase64,
+      blobHash: createHash("sha256").update("").digest("hex")
+    }])).toThrow("canonical base64")
+  );
+
   test("enforces file count, per-file bytes, and total bytes before analysis", () => {
     expect(() => new VirtualSourceFs(
       [source("a.ts", "a"), source("b.ts", "b")],

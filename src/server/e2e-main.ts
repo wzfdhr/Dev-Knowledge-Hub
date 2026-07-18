@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { buildServer } from "./app.js";
 import { BuildService, type BuildJobQueue } from "./knowledge/build-service.js";
+import { ParserClient } from "./knowledge/frontend/runtime/parser-client.js";
 import { MemoryAppStore } from "./persistence/memory-store.js";
 
 const execute = promisify(execFile);
@@ -102,19 +103,36 @@ app.post("/__test__/graph", async (_request, reply) => {
   return { created: true };
 });
 
-app.post("/__test__/shadow-failure", async (_request, reply) => {
+app.post("/__test__/parser-unavailable-shadow", async (_request, reply) => {
   const workspace = await store.defaultWorkspace();
   const repository = workspace ? await store.currentRepository(workspace.id) : null;
   const release = workspace && repository ? await store.currentRelease(workspace.id, repository.id) : null;
   if (!workspace || !repository || !release) return reply.code(409).send({ error: "Publish a release first" });
   const build = await store.getBuild(workspace.id, release.buildId);
   if (!build) return reply.code(409).send({ error: "Release build is unavailable" });
+  const unavailableSocket = "/tmp/devkh-e2e-parser-unavailable.sock";
+  await rm(unavailableSocket, { force: true });
+  let parserError: { code: string; message: string } | undefined;
+  try {
+    await new ParserClient({ socketPath: unavailableSocket, connectTimeoutMs: 50 }).analyze({
+      snapshotId: build.snapshotId,
+      analyzerIds: [],
+      sources: []
+    });
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && "message" in error) {
+      parserError = { code: String(error.code), message: String(error.message) };
+    }
+  }
+  if (parserError?.code !== "PARSER_RUNTIME_UNAVAILABLE") {
+    return reply.code(500).send({ error: "Parser unavailability could not be reproduced" });
+  }
   const run = await store.createStageRun({
     workspaceId: workspace.id,
     projectId: repository.projectId,
     snapshotId: build.snapshotId,
     buildId: build.id,
-    stage: "convert",
+    stage: "extract",
     attempt: 1,
     inputDigest: "f".repeat(64)
   });
@@ -128,7 +146,7 @@ app.post("/__test__/shadow-failure", async (_request, reply) => {
     run.id,
     "running",
     "failed",
-    { errorCode: "PIPELINE_STAGE_FAILED", errorDetail: "shadow conversion failed" }
+    { errorCode: parserError.code, errorDetail: parserError.message }
   );
   return { stage: failed };
 });

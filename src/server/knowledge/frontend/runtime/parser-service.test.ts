@@ -58,6 +58,18 @@ describe("ParserService", () => {
     await expect(client.analyze(request())).rejects.toMatchObject({ code: "PARSER_RUNTIME_UNAVAILABLE" });
   });
 
+  test("returns an invalid-request error correlated to a malformed request", async () => {
+    const socket = await socketPath();
+    const execute = vi.fn(async () => ({ outputs: [] }));
+    const service = new ParserService({ socketPath: socket, execute });
+    await service.start();
+    const malformed = { ...request(), analyzerIds: ["INVALID ANALYZER"] };
+    await expect(new ParserClient({ socketPath: socket, requestTimeoutMs: 100 }).analyze(malformed))
+      .rejects.toMatchObject({ code: "PARSER_INVALID_REQUEST" });
+    expect(execute).not.toHaveBeenCalled();
+    await service.stop();
+  });
+
   test("propagates cancellation to the active parser execution", async () => {
     const socket = await socketPath();
     let executionSignal: AbortSignal | undefined;

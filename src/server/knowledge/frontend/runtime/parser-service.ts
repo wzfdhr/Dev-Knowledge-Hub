@@ -8,6 +8,7 @@ import {
   encodeParserFrame,
   parserAnalyzeRequestSchema,
   parserCancelRequestSchema,
+  parserRequestIdSchema,
   type ParserAnalyzeRequest,
   type ParserRuntimeErrorCode,
   type ParserServiceResponse
@@ -94,7 +95,14 @@ export class ParserService {
         }
         const parsed = parserAnalyzeRequestSchema.safeParse(frame);
         if (!parsed.success || acceptedRequestId || this.#active.has(parsed.data?.requestId ?? "")) {
-          const requestId = parsed.success ? parsed.data.requestId : "00000000-0000-4000-8000-000000000000";
+          const candidateId = frame && typeof frame === "object"
+            ? parserRequestIdSchema.safeParse((frame as { requestId?: unknown }).requestId)
+            : { success: false as const };
+          const requestId = parsed.success
+            ? parsed.data.requestId
+            : candidateId.success
+              ? candidateId.data
+              : "00000000-0000-4000-8000-000000000000";
           send({ type: "error", requestId, code: "PARSER_INVALID_REQUEST", message: "Parser request is invalid" });
           continue;
         }

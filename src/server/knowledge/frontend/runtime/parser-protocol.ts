@@ -22,9 +22,11 @@ const virtualSourceSchema = z.object({
   blobHash: z.string().regex(/^[a-f0-9]{64}$/i)
 });
 
+export const parserRequestIdSchema = z.uuid();
+
 export const parserAnalyzeRequestSchema = z.object({
   type: z.literal("analyze"),
-  requestId: z.uuid(),
+  requestId: parserRequestIdSchema,
   snapshotId: z.string().min(1).max(200),
   analyzerIds: z.array(z.string().regex(/^[a-z0-9][a-z0-9._-]{0,119}$/)).max(100),
   sources: z.array(virtualSourceSchema)
@@ -40,14 +42,14 @@ export interface ParserAnalyzeRequest {
 
 export const parserCancelRequestSchema = z.object({
   type: z.literal("cancel"),
-  requestId: z.uuid()
+  requestId: parserRequestIdSchema
 });
 
 export const parserServiceResponseSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("result"), requestId: z.uuid(), result: z.unknown() }),
+  z.object({ type: z.literal("result"), requestId: parserRequestIdSchema, result: z.unknown() }),
   z.object({
     type: z.literal("error"),
-    requestId: z.uuid(),
+    requestId: parserRequestIdSchema,
     code: parserRuntimeErrorCodeSchema,
     message: z.string().min(1).max(1_000)
   })

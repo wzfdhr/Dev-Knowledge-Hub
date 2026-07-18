@@ -30,6 +30,17 @@ function safeVirtualPath(value: string): string {
   return normalized;
 }
 
+function decodeCanonicalBase64(value: string): Buffer {
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+    throw new Error("Virtual source content must use canonical base64");
+  }
+  const bytes = Buffer.from(value, "base64");
+  if (bytes.toString("base64") !== value) {
+    throw new Error("Virtual source content must use canonical base64");
+  }
+  return bytes;
+}
+
 export class VirtualSourceFs {
   readonly #sources = new Map<string, Buffer>();
 
@@ -42,7 +53,7 @@ export class VirtualSourceFs {
     for (const source of sources) {
       const sourcePath = safeVirtualPath(source.path);
       if (this.#sources.has(sourcePath)) throw new Error("Virtual source contains duplicate path");
-      const bytes = Buffer.from(source.contentBase64, "base64");
+      const bytes = decodeCanonicalBase64(source.contentBase64);
       if (bytes.byteLength > limits.maxFileBytes) throw new Error("Virtual source exceeds file byte limit");
       totalBytes += bytes.byteLength;
       if (totalBytes > limits.maxTotalBytes) throw new Error("Virtual sources exceed total byte limit");

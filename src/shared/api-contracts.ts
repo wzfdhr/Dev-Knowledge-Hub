@@ -163,6 +163,7 @@ export const frontendReleaseProvenanceSchema = z.object({
   releaseArtifactFamily: z.literal("frontend-v2"),
   packageArtifactId: z.string().min(1),
   packageStageRunId: z.string().min(1),
+  artifactIds: z.array(z.string().min(1)).min(1),
   frontendIrSchemaVersion: z.literal(2),
   frontendGraphSchemaVersion: z.literal(2),
   analyzerManifestDigest: digestSchema

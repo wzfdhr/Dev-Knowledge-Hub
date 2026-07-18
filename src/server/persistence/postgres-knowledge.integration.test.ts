@@ -2011,6 +2011,7 @@ integration("PostgreSQL cited knowledge integration", () => {
       const artifactStore = new ArtifactStore(artifactRoot, store);
       await artifactStore.initialize();
 
+      const reusableArtifacts: { value?: Record<BuildStage, string[]> } = {};
       const createReadyBuildAndRun = async (artifactId?: string) => {
         const { build } = await store.createBuild({
           workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId,
@@ -2022,9 +2023,24 @@ integration("PostgreSQL cited knowledge integration", () => {
         });
         await store.claimStageRun(run.id, build.id, repository!.projectId);
         if (artifactId) {
+          if (!reusableArtifacts.value) throw new Error("Reusable package artifacts are not initialized");
+          for (const stage of BUILD_STAGES.filter((candidate) => candidate !== "package")) {
+            const reusedRun = await store.createStageRun({
+              workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId,
+              buildId: build.id, stage, attempt: 1,
+              inputDigest: createHash("sha256").update(`reused:${build.id}:${stage}`).digest("hex")
+            });
+            await store.claimStageRun(reusedRun.id, build.id, repository!.projectId);
+            await store.completeStageRunAndCreateNext({
+              workspaceId: setup!.workspace.id, projectId: repository!.projectId,
+              stageRunId: reusedRun.id, status: "reused",
+              outputManifestIds: reusableArtifacts.value[stage]
+            });
+          }
           await store.completeStageRunAndCreateNext({
             workspaceId: setup!.workspace.id, projectId: repository!.projectId,
-            stageRunId: run.id, status: "reused", outputManifestIds: [artifactId]
+            stageRunId: run.id, status: "reused",
+            outputManifestIds: [...reusableArtifacts.value.package, artifactId]
           });
         }
         await store.transitionBuild(build.id, "queued", "ready");
@@ -2087,6 +2103,28 @@ integration("PostgreSQL cited knowledge integration", () => {
         stageRunId: first.run.id, status: "succeeded",
         outputManifestIds: [...packagedArtifacts.package, saved.manifest.id]
       });
+      reusableArtifacts.value = packagedArtifacts;
+
+      const internalArtifactId = packagedArtifacts.extract[0]!;
+      const internalManifest = await store.findArtifactById(internalArtifactId);
+      expect(internalManifest).not.toBeNull();
+      const internalPath = path.join(artifactStore.root, internalManifest!.storageKey);
+      const originalInternalContent = await readFile(internalPath);
+      await rm(internalPath);
+      await expect(createVerifiedFrontendReleaseDraft({
+        store, artifactReader: artifactStore, workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id, buildId: first.build.id, version: "frontend-v2-missing-internal",
+        packageStageRunId: first.run.id, packageArtifactId: saved.manifest.id
+      })).rejects.toThrow("Artifact content is unavailable");
+      await writeFile(internalPath, originalInternalContent);
+      await writeFile(internalPath, "{\"corrupted\":true}\n", "utf8");
+      await expect(createVerifiedFrontendReleaseDraft({
+        store, artifactReader: artifactStore, workspaceId: setup!.workspace.id,
+        repositoryId: repository!.id, buildId: first.build.id, version: "frontend-v2-corrupt-internal",
+        packageStageRunId: first.run.id, packageArtifactId: saved.manifest.id
+      })).rejects.toThrow("Artifact content digest mismatch");
+      await writeFile(internalPath, originalInternalContent);
+
       const firstRelease = await createVerifiedFrontendReleaseDraft({
         store, artifactReader: artifactStore, workspaceId: setup!.workspace.id,
         repositoryId: repository!.id, buildId: first.build.id, version: "frontend-v2.0.0",
@@ -2097,6 +2135,15 @@ integration("PostgreSQL cited knowledge integration", () => {
         packageStageRunId: first.run.id,
         analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST
       });
+      const retainedArtifacts = await pool.query<{ artifact_id: string }>(
+        "SELECT artifact_id FROM release_artifacts WHERE release_id = $1 ORDER BY artifact_id",
+        [firstRelease.id]
+      );
+      expect(retainedArtifacts.rows.map((row) => row.artifact_id)).toEqual(
+        Object.values(packagedArtifacts).flat().sort()
+      );
+      await expect(pool.query("DELETE FROM knowledge_artifacts WHERE id = $1", [internalArtifactId]))
+        .rejects.toThrow();
 
       const insertRawRun = async (input: {
         attempt: number; status: string; artifactId: string;
@@ -2262,6 +2309,13 @@ integration("PostgreSQL cited knowledge integration", () => {
         packageStageRunId: reused.run.id, packageArtifactId: saved.manifest.id
       });
       expect(reusedRelease.buildId).toBe(reused.build.id);
+      const reusedRetainedArtifacts = await pool.query<{ artifact_id: string }>(
+        "SELECT artifact_id FROM release_artifacts WHERE release_id = $1 ORDER BY artifact_id",
+        [reusedRelease.id]
+      );
+      expect(reusedRetainedArtifacts.rows.map((row) => row.artifact_id)).toEqual(
+        Object.values(packagedArtifacts).flat().sort()
+      );
       await expect(pool.query(
         "UPDATE releases SET repository_id = $1 WHERE id = $2",
         [randomUUID(), reusedRelease.id]
@@ -2269,6 +2323,9 @@ integration("PostgreSQL cited knowledge integration", () => {
       await expect(pool.query("DELETE FROM build_stage_runs WHERE id = $1", [reused.run.id]))
         .rejects.toThrow();
       await expect(pool.query("DELETE FROM knowledge_artifacts WHERE id = $1", [saved.manifest.id]))
+        .rejects.toThrow();
+      await pool.query("DELETE FROM releases WHERE id = $1", [firstRelease.id]);
+      await expect(pool.query("DELETE FROM knowledge_artifacts WHERE id = $1", [internalArtifactId]))
         .rejects.toThrow();
 
       await rm(path.join(artifactStore.root, saved.manifest.storageKey));

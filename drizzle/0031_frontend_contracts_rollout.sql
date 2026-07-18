@@ -39,6 +39,15 @@ ALTER TABLE releases
     )
   );
 
+CREATE TABLE release_artifacts (
+  release_id uuid NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+  artifact_id uuid NOT NULL REFERENCES knowledge_artifacts(id) ON DELETE RESTRICT,
+  PRIMARY KEY (release_id, artifact_id)
+);
+
+CREATE INDEX release_artifacts_artifact_idx
+  ON release_artifacts (artifact_id, release_id);
+
 ALTER TABLE knowledge_graph_nodes DROP CONSTRAINT knowledge_graph_nodes_kind_check;
 ALTER TABLE knowledge_graph_nodes ADD CONSTRAINT knowledge_graph_nodes_kind_check CHECK (
   kind IN ('module', 'symbol', 'document', 'table', 'column', 'command',

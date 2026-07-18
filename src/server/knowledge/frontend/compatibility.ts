@@ -162,6 +162,7 @@ export async function createVerifiedFrontendReleaseDraft(input: {
   for (const [stage, ids] of artifactEntries) {
     const stageRun = runs.findLast((candidate) => candidate.stage === stage
       && ["succeeded", "reused"].includes(candidate.status)
+      && candidate.snapshotId === build.snapshotId
       && ids.every((id) => candidate.outputManifestIds.includes(id)));
     if (!stageRun) throw new Error(`Frontend v2 package ${stage} artifacts are not completed build outputs`);
     const manifests = await Promise.all(ids.map(async (id) => {
@@ -184,6 +185,7 @@ export async function createVerifiedFrontendReleaseDraft(input: {
     releaseArtifactFamily: "frontend-v2",
     packageArtifactId: manifest.id,
     packageStageRunId: run.id,
+    artifactIds: [...artifactIds].sort(),
     frontendIrSchemaVersion: FRONTEND_V2_IR_SCHEMA_VERSION,
     frontendGraphSchemaVersion: FRONTEND_V2_GRAPH_SCHEMA_VERSION,
     analyzerManifestDigest: value.analyzerManifestDigest

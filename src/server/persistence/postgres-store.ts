@@ -4053,32 +4053,51 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     version: string,
     provenance?: FrontendReleaseDraftProvenance
   ): Promise<ReleaseRecord> {
-    const { rows } = await this.pool.query<ReleaseRow>(
-      `INSERT INTO releases (
-         workspace_id, repository_id, build_job_id, snapshot_id, version, kernel_mode,
-         package_artifact_id, release_artifact_family, package_stage_run_id,
-         frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest
-       )
-       SELECT $1, $2, b.id, b.snapshot_id, $4, $5, $6, $7, $8, $9, $10, $11
-       FROM build_jobs b
-       WHERE b.id = $3 AND b.workspace_id = $1 AND b.repository_id = $2 AND b.status = 'ready'
-       RETURNING id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-                 kernel_mode, package_artifact_id, release_artifact_family, package_stage_run_id,
-                 frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest,
-                 created_at, published_at`,
-      [
-        workspaceId, repositoryId, buildId, version,
-        provenance ? "pipeline" : "legacy",
-        provenance?.packageArtifactId ?? null,
-        provenance?.releaseArtifactFamily ?? "knowledge-v1",
-        provenance?.packageStageRunId ?? null,
-        provenance?.frontendIrSchemaVersion ?? null,
-        provenance?.frontendGraphSchemaVersion ?? null,
-        provenance?.analyzerManifestDigest ?? null
-      ]
-    );
-    if (!rows[0]) throw new Error("Only a ready build can create a release draft");
-    return releaseRecord(rows[0]);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query<ReleaseRow>(
+        `INSERT INTO releases (
+           workspace_id, repository_id, build_job_id, snapshot_id, version, kernel_mode,
+           package_artifact_id, release_artifact_family, package_stage_run_id,
+           frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest
+         )
+         SELECT $1, $2, b.id, b.snapshot_id, $4, $5, $6, $7, $8, $9, $10, $11
+         FROM build_jobs b
+         WHERE b.id = $3 AND b.workspace_id = $1 AND b.repository_id = $2 AND b.status = 'ready'
+         RETURNING id, workspace_id, repository_id, build_job_id, snapshot_id, version,
+                   kernel_mode, package_artifact_id, release_artifact_family, package_stage_run_id,
+                   frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest,
+                   created_at, published_at`,
+        [
+          workspaceId, repositoryId, buildId, version,
+          provenance ? "pipeline" : "legacy",
+          provenance?.packageArtifactId ?? null,
+          provenance?.releaseArtifactFamily ?? "knowledge-v1",
+          provenance?.packageStageRunId ?? null,
+          provenance?.frontendIrSchemaVersion ?? null,
+          provenance?.frontendGraphSchemaVersion ?? null,
+          provenance?.analyzerManifestDigest ?? null
+        ]
+      );
+      const row = rows[0];
+      if (!row) throw new Error("Only a ready build can create a release draft");
+      if (provenance) {
+        await client.query(
+          `INSERT INTO release_artifacts (release_id, artifact_id)
+           SELECT $1, artifact_id
+           FROM unnest($2::uuid[]) AS artifact_id`,
+          [row.id, provenance.artifactIds]
+        );
+      }
+      await client.query("COMMIT");
+      return releaseRecord(row);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async publishRelease(

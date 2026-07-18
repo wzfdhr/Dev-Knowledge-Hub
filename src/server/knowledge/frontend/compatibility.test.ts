@@ -145,6 +145,22 @@ describe("frontend v2 compatibility contracts", () => {
       1 + Object.values(fixture.artifacts).flat().length
     );
     expect(fixture.createReleaseDraft).toHaveBeenCalledOnce();
+    expect(fixture.createReleaseDraft).toHaveBeenCalledWith(
+      fixture.releaseInput.workspaceId,
+      fixture.releaseInput.repositoryId,
+      fixture.releaseInput.buildId,
+      fixture.releaseInput.version,
+      expect.objectContaining({
+        artifactIds: Object.values(fixture.artifacts).flat().sort()
+      })
+    );
+  });
+
+  test("rejects completed stage outputs from another snapshot", async () => {
+    const fixture = releaseFixture();
+    fixture.runs.find((run) => run.stage === "extract")!.snapshotId = "other-snapshot";
+    await expect(createVerifiedFrontendReleaseDraft(fixture.releaseInput))
+      .rejects.toThrow("not completed build outputs");
   });
 
   test("rejects cross-project, missing, and unreadable internal package artifacts", async () => {
@@ -172,6 +188,8 @@ describe("frontend v2 compatibility contracts", () => {
     const sql = await readFile(path.join(root, "drizzle/0031_frontend_contracts_rollout.sql"), "utf8");
     for (const fragment of [
       "project_frontend_rollouts",
+      "release_artifacts",
+      "release_artifacts_artifact_idx",
       "release_artifact_family",
       "package_stage_run_id",
       "frontend_ir_schema_version",
@@ -179,6 +197,8 @@ describe("frontend v2 compatibility contracts", () => {
       "analyzer_manifest_digest",
       "DEFAULT 'knowledge-v1'",
       "ON DELETE RESTRICT",
+      "REFERENCES releases(id) ON DELETE CASCADE",
+      "REFERENCES knowledge_artifacts(id) ON DELETE RESTRICT",
       "output_manifest_ids",
       "frontend-pipeline-package",
       "artifact.schema_version = 2",
@@ -196,6 +216,7 @@ describe("frontend v2 compatibility contracts", () => {
     const schema = await readFile(path.join(root, "src/db/schema.ts"), "utf8");
     for (const fragment of [
       "projectFrontendRollouts",
+      "releaseArtifacts",
       'releaseArtifactFamily: text("release_artifact_family").notNull().default("knowledge-v1")',
       'packageStageRunId: uuid("package_stage_run_id")',
       'frontendIrSchemaVersion: integer("frontend_ir_schema_version")',

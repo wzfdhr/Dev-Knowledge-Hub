@@ -8,6 +8,7 @@ import {
   jsonb,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -511,6 +512,14 @@ export const releases = pgTable("releases", {
       AND ${table.frontendGraphSchemaVersion} = 2
       AND ${table.analyzerManifestDigest} ~ '^[0-9a-f]{64}$')
   `)
+]);
+
+export const releaseArtifacts = pgTable("release_artifacts", {
+  releaseId: uuid("release_id").notNull().references(() => releases.id, { onDelete: "cascade" }),
+  artifactId: uuid("artifact_id").notNull().references(() => knowledgeArtifacts.id, { onDelete: "restrict" })
+}, (table) => [
+  primaryKey({ columns: [table.releaseId, table.artifactId] }),
+  index("release_artifacts_artifact_idx").on(table.artifactId, table.releaseId)
 ]);
 
 export const buildEvents = pgTable("build_events", {

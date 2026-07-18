@@ -1,6 +1,11 @@
 import { describe, expect, test } from "vitest";
 
-import { assertAnalyzerOutputStructure } from "./analyzer-worker";
+import {
+  assertAnalyzerOutputStructure,
+  MAX_ANALYZER_OUTPUT_BYTES,
+  MAX_ANALYZER_OUTPUT_DEPTH,
+  MAX_ANALYZER_OUTPUT_NODES
+} from "./analyzer-worker";
 
 describe("analyzer worker structural limits", () => {
   test("accepts bounded analyzer output", () => {
@@ -26,5 +31,29 @@ describe("analyzer worker structural limits", () => {
     cyclic.self = cyclic;
     expect(() => assertAnalyzerOutputStructure(cyclic, { maxNodes: 100, maxDepth: 10 }))
       .toThrow("cycle");
+  });
+
+  test("locks the production output limits and their exact structural boundaries", () => {
+    expect(MAX_ANALYZER_OUTPUT_BYTES).toBe(16 * 1024 * 1024);
+    expect(MAX_ANALYZER_OUTPUT_NODES).toBe(100_000);
+    expect(MAX_ANALYZER_OUTPUT_DEPTH).toBe(256);
+
+    expect(() => assertAnalyzerOutputStructure(
+      Array.from({ length: MAX_ANALYZER_OUTPUT_NODES - 1 }, () => null),
+      { maxNodes: MAX_ANALYZER_OUTPUT_NODES, maxDepth: MAX_ANALYZER_OUTPUT_DEPTH }
+    )).not.toThrow();
+    expect(() => assertAnalyzerOutputStructure(
+      Array.from({ length: MAX_ANALYZER_OUTPUT_NODES }, () => null),
+      { maxNodes: MAX_ANALYZER_OUTPUT_NODES, maxDepth: MAX_ANALYZER_OUTPUT_DEPTH }
+    )).toThrow("node limit");
+
+    let withinDepth: Record<string, unknown> = {};
+    for (let depth = 0; depth < MAX_ANALYZER_OUTPUT_DEPTH; depth += 1) withinDepth = { child: withinDepth };
+    expect(() => assertAnalyzerOutputStructure(withinDepth, {
+      maxNodes: MAX_ANALYZER_OUTPUT_NODES, maxDepth: MAX_ANALYZER_OUTPUT_DEPTH
+    })).not.toThrow();
+    expect(() => assertAnalyzerOutputStructure({ child: withinDepth }, {
+      maxNodes: MAX_ANALYZER_OUTPUT_NODES, maxDepth: MAX_ANALYZER_OUTPUT_DEPTH
+    })).toThrow("depth limit");
   });
 });

@@ -2243,6 +2243,10 @@ export class MemoryAppStore implements AppStore {
       release.repositoryId === repositoryId && release.version === version
     )) throw new Error("Release version already exists");
     if (provenance) {
+      if (new Set(provenance.artifactIds).size !== provenance.artifactIds.length
+        || provenance.artifactIds.some((id) => !this.knowledgeArtifacts.some((artifact) => artifact.id === id))) {
+        throw new Error("Frontend v2 release must retain every packaged artifact");
+      }
       const repository = await this.getRepository(workspaceId, repositoryId);
       const run = this.pipelineStageRuns.find((candidate) =>
         candidate.id === provenance.packageStageRunId

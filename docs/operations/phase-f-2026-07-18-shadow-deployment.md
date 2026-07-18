@@ -33,11 +33,26 @@ included in the same production image.
    - the running app reports `shadow` mode; and
    - the production SPA serves `index-lhSdNtuU.js`, which contains the graph UI.
 
-## Follow-up
+## Post-fix deployment
 
-The corrected application restart occurred at `2026-07-18T03:07:04Z`. The F04
-24-hour observation therefore starts from that restart. Before F04 can be
-accepted, run a representative authorized shadow build through all ten stages,
-perform desktop and mobile browser acceptance, and complete the project-role
-observation without a terminal shadow-stage failure. `active` remains forbidden
-until F05 receives separate authorization.
+PR #11 was merged through the trusted merge workflow at `2f11bab`; its fresh
+`verify` and `container-smoke` jobs both passed. The server was then synchronized
+from that exact `main` commit. The first Compose rebuild retained the old app
+container, so the app alone was deliberately recreated with both Compose files.
+The resulting container started at `2026-07-18T04:26:54Z` and is healthy in
+`shadow` mode. The server-local Nginx HTTPS route returned the public health
+payload with `200`.
+
+An authorized, temporary project-admin session then used the public application
+API, a CSRF-protected session, and the existing default-project snapshot to
+create build `19f860a1-e5c9-4536-a073-fa923527f61c`. All ten pipeline stages
+(`convert` through `package`) completed as `reused`, including `graph` and the
+previously failing `synthesize` stage. The legacy build became `ready`; no
+release was created. The temporary account's sessions and memberships were
+removed and the account was disabled; its audit history is intentionally
+retained.
+
+Before F04 can be accepted, perform desktop and mobile browser acceptance and
+complete a new 24-hour project-role observation from the `2026-07-18T04:26:54Z`
+restart without a terminal shadow-stage failure. `active` remains forbidden until
+F05 receives separate authorization.

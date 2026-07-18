@@ -172,3 +172,10 @@ export type GraphNode = z.infer<typeof graphNodeSchema>;
 export type GraphEdge = z.infer<typeof graphEdgeSchema>;
 export type LintIssue = z.infer<typeof lintIssueSchema>;
 export type TrustScore = z.infer<typeof trustScoreSchema>;
+
+export type {
+  FrontendAnalyzerProvenance,
+  FrontendEdge,
+  FrontendEntity,
+  FrontendIR
+} from "./frontend-ir.js";

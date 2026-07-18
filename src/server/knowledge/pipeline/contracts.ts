@@ -21,9 +21,19 @@ import {
   type TrustScore
 } from "../../../shared/api-contracts.js";
 import { BUILD_STAGES } from "../../../shared/contracts.js";
+import {
+  frontendAnalyzerProvenanceSchema,
+  frontendEdgeSchema,
+  frontendEntitySchema,
+  frontendIrSchema,
+  type FrontendAnalyzerProvenance,
+  type FrontendEdge,
+  type FrontendEntity,
+  type FrontendIR
+} from "../../../shared/frontend-ir.js";
 
-export { BUILD_STAGES, artifactManifestSchema, buildStageSchema, graphEdgeSchema, graphNodeSchema, knowledgeIrSchema, lintIssueSchema, stageRunSchema, tableSchemaSchema, trustScoreSchema };
-export type { ArtifactManifest, BuildStage, GraphEdge, GraphNode, KnowledgeIR, LegacyBuildStatus, LintIssue, StageRun, StageStatus, TableSchema, TrustScore };
+export { BUILD_STAGES, artifactManifestSchema, buildStageSchema, frontendAnalyzerProvenanceSchema, frontendEdgeSchema, frontendEntitySchema, frontendIrSchema, graphEdgeSchema, graphNodeSchema, knowledgeIrSchema, lintIssueSchema, stageRunSchema, tableSchemaSchema, trustScoreSchema };
+export type { ArtifactManifest, BuildStage, FrontendAnalyzerProvenance, FrontendEdge, FrontendEntity, FrontendIR, GraphEdge, GraphNode, KnowledgeIR, LegacyBuildStatus, LintIssue, StageRun, StageStatus, TableSchema, TrustScore };
 
 const stageTransitions: Readonly<Record<StageStatus, readonly StageStatus[]>> = {
   queued: ["running", "cancelled", "reused", "skipped"],

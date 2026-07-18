@@ -10,7 +10,6 @@ import { createNormalizedSourcesStageExecutor, normalizedSourcesPipelineInputDig
 import { createKnowledgeIrStageExecutor } from "./extract-stage";
 import { createKnowledgeGraphStageExecutor } from "./graph-stage";
 import { createPipelineStageExecutor } from "./stage-executor";
-import { createB02StageInputPlanner } from "./stage-planner";
 import { createKnowledgeSynthesisStageExecutor } from "./synthesize-stage";
 import { createPipelineSearchIndexStageExecutor } from "./index-stage";
 import { createKnowledgeQualityStageExecutor } from "./quality-stage";
@@ -22,6 +21,15 @@ import { PipelineStageWorker, type PipelineStageJob, type PipelineStageJobQueue 
 import type { ArtifactManifest } from "./contracts";
 import { MemoryAppStore } from "../../persistence/memory-store";
 import type { PipelineArtifactStore } from "../../persistence/store";
+import {
+  createFrontendShadowStageExecutor,
+  createFrontendShadowStageInputPlanner,
+  createKnowledgeV1StoreView
+} from "../frontend/shadow-stage";
+import {
+  ARTIFACT_KINDS,
+  createVerifiedFrontendReleaseDraft
+} from "../frontend/compatibility";
 
 const directories: string[] = [];
 
@@ -54,7 +62,7 @@ afterEach(async () => {
 });
 
 describe("B02 shadow pipeline", () => {
-  test("persists all deterministic stages and a project-scoped graph", async () => {
+  test("persists, reuses, and verifies both artifact families without changing v1 graph behavior", async () => {
     const snapshotRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-b02-snapshot-"));
     const artifactRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-b02-artifacts-"));
     directories.push(snapshotRoot, artifactRoot);
@@ -86,24 +94,26 @@ describe("B02 shadow pipeline", () => {
     const artifactStore = new ArtifactStore(artifactRoot, store);
     await artifactStore.initialize();
     const queue = new FakeQueue();
+    const knowledgeV1Store = createKnowledgeV1StoreView(store);
+    const legacyExecutor = createPipelineStageExecutor({
+      convert: createNormalizedSourcesStageExecutor({ store: knowledgeV1Store, artifactStore }),
+      extract: createKnowledgeIrStageExecutor({ store: knowledgeV1Store, artifactStore }),
+      tables: createTableSchemasStageExecutor({ store: knowledgeV1Store, artifactStore }),
+      graph: createKnowledgeGraphStageExecutor({ store: knowledgeV1Store, artifactStore }),
+      synthesize: createKnowledgeSynthesisStageExecutor({ store: knowledgeV1Store, artifactStore }),
+      index: createPipelineSearchIndexStageExecutor({ store: knowledgeV1Store, artifactStore }),
+      lint: createKnowledgeQualityStageExecutor({ store: knowledgeV1Store, artifactStore }),
+      viz: createKnowledgeVisualizationStageExecutor({ store: knowledgeV1Store, artifactStore }),
+      validate: createKnowledgeValidationStageExecutor({ store: knowledgeV1Store, artifactStore }),
+      package: createKnowledgePackageStageExecutor({ store: knowledgeV1Store, artifactStore })
+    });
     const worker = new PipelineStageWorker(
       store,
       queue,
-      createPipelineStageExecutor({
-        convert: createNormalizedSourcesStageExecutor({ store, artifactStore }),
-        extract: createKnowledgeIrStageExecutor({ store, artifactStore }),
-        tables: createTableSchemasStageExecutor({ store, artifactStore }),
-        graph: createKnowledgeGraphStageExecutor({ store, artifactStore }),
-        synthesize: createKnowledgeSynthesisStageExecutor({ store, artifactStore }),
-        index: createPipelineSearchIndexStageExecutor({ store, artifactStore }),
-        lint: createKnowledgeQualityStageExecutor({ store, artifactStore }),
-        viz: createKnowledgeVisualizationStageExecutor({ store, artifactStore }),
-        validate: createKnowledgeValidationStageExecutor({ store, artifactStore }),
-        package: createKnowledgePackageStageExecutor({ store, artifactStore })
-      }),
+      createFrontendShadowStageExecutor({ store, artifactStore, legacy: legacyExecutor }),
       ["convert", "extract", "tables", "graph", "synthesize", "index", "lint", "viz", "validate", "package"],
       5_000,
-      createB02StageInputPlanner(store)
+      createFrontendShadowStageInputPlanner(store)
     );
     const files = await store.listSnapshotFiles(workspaceId, snapshot.id);
     await worker.schedule({
@@ -122,6 +132,18 @@ describe("B02 shadow pipeline", () => {
       ["synthesize", "succeeded"], ["index", "succeeded"], ["lint", "succeeded"], ["viz", "succeeded"],
       ["validate", "succeeded"], ["package", "succeeded"]
     ]);
+    for (const run of runs) {
+      const manifests = await Promise.all(run.outputManifestIds.map((id) => store.findArtifactById(id)));
+      expect(manifests).not.toContain(null);
+      const expectedCount = run.stage === "convert" ? 1 : 2;
+      expect(manifests).toHaveLength(expectedCount);
+      for (const family of ["knowledge-v1", "frontend-v2"] as const) {
+        const expected = ARTIFACT_KINDS[run.stage][family];
+        expect(manifests).toEqual(expect.arrayContaining([
+          expect.objectContaining({ kind: expected.kind, schemaVersion: expected.schemaVersion })
+        ]));
+      }
+    }
     await expect(store.getKnowledgeGraph(workspaceId, project.id, build.id)).resolves.toMatchObject({
       nodes: expect.arrayContaining([expect.objectContaining({
         kind: "module", name: "app.ts", qualifiedName: sourcePath
@@ -151,6 +173,42 @@ describe("B02 shadow pipeline", () => {
         ["synthesize", "reused"], ["index", "reused"], ["lint", "reused"], ["viz", "reused"],
         ["validate", "reused"], ["package", "reused"]
       ]);
+    const reusedRuns = await store.listPipelineStageRuns(workspaceId, project.id, reusedBuild.id);
+    const packageRun = reusedRuns.find((run) => run.stage === "package")!;
+    const packageArtifact = (await Promise.all(packageRun.outputManifestIds.map((id) =>
+      store.findArtifactById(id)
+    ))).find((manifest) => manifest?.kind === "frontend-pipeline-package")!;
+    await store.transitionBuild(reusedBuild.id, "queued", "ready");
+    const release = await createVerifiedFrontendReleaseDraft({
+      store,
+      artifactReader: artifactStore,
+      workspaceId,
+      repositoryId: repository!.id,
+      buildId: reusedBuild.id,
+      version: "frontend-v2.0.0",
+      packageStageRunId: packageRun.id,
+      packageArtifactId: packageArtifact.id
+    });
+    expect(release).toMatchObject({
+      releaseArtifactFamily: "frontend-v2",
+      packageStageRunId: packageRun.id,
+      packageArtifactId: packageArtifact.id,
+      frontendIrSchemaVersion: 2,
+      frontendGraphSchemaVersion: 2
+    });
+
+    await rm(path.join(artifactStore.root, packageArtifact.storageKey));
+    await expect(createVerifiedFrontendReleaseDraft({
+      store,
+      artifactReader: artifactStore,
+      workspaceId,
+      repositoryId: repository!.id,
+      buildId: reusedBuild.id,
+      version: "frontend-v2-missing",
+      packageStageRunId: packageRun.id,
+      packageArtifactId: packageArtifact.id
+    })).rejects.toThrow("Artifact content is unavailable");
+    expect(await store.listReleases(workspaceId, repository!.id)).toHaveLength(1);
     const reusedArtifactBytes = await directorySize(artifactRoot);
     expect(reusedArtifactBytes - initialArtifactBytes).toBeLessThanOrEqual(Math.ceil(initialArtifactBytes * 0.05));
   });

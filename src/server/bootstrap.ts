@@ -33,7 +33,6 @@ import { createKnowledgeIrStageExecutor } from "./knowledge/pipeline/extract-sta
 import { createTableSchemasStageExecutor } from "./knowledge/pipeline/tables-stage.js";
 import { createKnowledgeGraphStageExecutor } from "./knowledge/pipeline/graph-stage.js";
 import { createPipelineStageExecutor } from "./knowledge/pipeline/stage-executor.js";
-import { createB02StageInputPlanner } from "./knowledge/pipeline/stage-planner.js";
 import { createKnowledgeSynthesisStageExecutor } from "./knowledge/pipeline/synthesize-stage.js";
 import { createPipelineSearchIndexStageExecutor } from "./knowledge/pipeline/index-stage.js";
 import { createKnowledgeQualityStageExecutor } from "./knowledge/pipeline/quality-stage.js";
@@ -41,6 +40,11 @@ import { createKnowledgeVisualizationStageExecutor } from "./knowledge/pipeline/
 import { createKnowledgeValidationStageExecutor } from "./knowledge/pipeline/validate-stage.js";
 import { createKnowledgePackageStageExecutor } from "./knowledge/pipeline/package-stage.js";
 import { PgBossPipelineStageJobQueue } from "./knowledge/job-queue.js";
+import {
+  createFrontendShadowStageExecutor,
+  createFrontendShadowStageInputPlanner,
+  createKnowledgeV1StoreView
+} from "./knowledge/frontend/shadow-stage.js";
 
 const IMPORT_REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 const GIT_SYNC_CLAIM_LIMIT = 10;
@@ -101,26 +105,30 @@ const defaultDependencies: BootstrapDependencies = {
   createQualityPipelineWorker: (connectionString, store, artifactStore, enhancerForWorkspace) => {
     const pipelineStore = store as AppStore & PipelineArtifactStore;
     const pipelineArtifacts = artifactStore as ArtifactStore;
+    const knowledgeV1Store = createKnowledgeV1StoreView(pipelineStore);
+    const legacyExecutor = createPipelineStageExecutor({
+      convert: createNormalizedSourcesStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
+      extract: createKnowledgeIrStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
+      tables: createTableSchemasStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
+      graph: createKnowledgeGraphStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
+      synthesize: createKnowledgeSynthesisStageExecutor({
+        store: knowledgeV1Store, artifactStore: pipelineArtifacts, enhancerForWorkspace
+      }),
+      index: createPipelineSearchIndexStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
+      lint: createKnowledgeQualityStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
+      viz: createKnowledgeVisualizationStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
+      validate: createKnowledgeValidationStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
+      package: createKnowledgePackageStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts })
+    });
     return new PipelineStageWorker(
       pipelineStore,
       new PgBossPipelineStageJobQueue(connectionString),
-      createPipelineStageExecutor({
-        convert: createNormalizedSourcesStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        extract: createKnowledgeIrStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        tables: createTableSchemasStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        graph: createKnowledgeGraphStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        synthesize: createKnowledgeSynthesisStageExecutor({
-          store: pipelineStore, artifactStore: pipelineArtifacts, enhancerForWorkspace
-        }),
-        index: createPipelineSearchIndexStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        lint: createKnowledgeQualityStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        viz: createKnowledgeVisualizationStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        validate: createKnowledgeValidationStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        package: createKnowledgePackageStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts })
+      createFrontendShadowStageExecutor({
+        store: pipelineStore, artifactStore: pipelineArtifacts, legacy: legacyExecutor
       }),
       ["convert", "extract", "tables", "graph", "synthesize", "index", "lint", "viz", "validate", "package"],
       5_000,
-      createB02StageInputPlanner(pipelineStore)
+      createFrontendShadowStageInputPlanner(pipelineStore)
     );
   },
   buildServer

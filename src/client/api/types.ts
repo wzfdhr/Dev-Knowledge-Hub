@@ -207,6 +207,11 @@ export interface Release {
   commitSha?: string | null;
   kernelMode?: "legacy" | "pipeline";
   packageArtifactId?: string | null;
+  releaseArtifactFamily?: "knowledge-v1" | "frontend-v2";
+  packageStageRunId?: string | null;
+  frontendIrSchemaVersion?: number | null;
+  frontendGraphSchemaVersion?: number | null;
+  analyzerManifestDigest?: string | null;
 }
 export interface RepositoryStatus {
   repository: Repository | null;

@@ -67,6 +67,11 @@ describe("core mutation audit atomicity", () => {
       version: "1.0.0",
       kernelMode: "legacy",
       packageArtifactId: null,
+      releaseArtifactFamily: "knowledge-v1",
+      packageStageRunId: null,
+      frontendIrSchemaVersion: null,
+      frontendGraphSchemaVersion: null,
+      analyzerManifestDigest: null,
       createdAt: new Date("2026-07-11T00:00:00.000Z"),
       publishedAt: new Date("2026-07-11T00:01:00.000Z")
     });

@@ -1,6 +1,7 @@
 import {
   boolean,
   bigserial,
+  check,
   foreignKey,
   index,
   integer,
@@ -78,6 +79,27 @@ export const projects = pgTable("projects", {
   uniqueIndex("projects_workspace_slug_idx").on(table.workspaceId, table.slug),
   uniqueIndex("projects_id_workspace_idx").on(table.id, table.workspaceId),
   index("projects_workspace_active_idx").on(table.workspaceId, table.archivedAt)
+]);
+
+export const projectFrontendRollouts = pgTable("project_frontend_rollouts", {
+  projectId: uuid("project_id").primaryKey(),
+  workspaceId: uuid("workspace_id").notNull(),
+  mode: text("mode").$type<"legacy" | "shadow" | "active">().notNull().default("legacy"),
+  reason: text("reason").notNull(),
+  updatedBy: uuid("updated_by").notNull(),
+  ...timestamps
+}, (table) => [
+  index("project_frontend_rollouts_workspace_mode_idx").on(table.workspaceId, table.mode, table.projectId),
+  foreignKey({
+    columns: [table.projectId, table.workspaceId],
+    foreignColumns: [projects.id, projects.workspaceId],
+    name: "project_frontend_rollouts_project_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.updatedBy, table.workspaceId],
+    foreignColumns: [adminUsers.id, adminUsers.workspaceId],
+    name: "project_frontend_rollouts_actor_workspace_fk"
+  }).onDelete("restrict")
 ]);
 
 export const repositories = pgTable("repositories", {
@@ -278,6 +300,86 @@ export const buildJobs = pgTable("build_jobs", {
   })
 ]);
 
+export const buildStageRuns = pgTable("build_stage_runs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  projectId: uuid("project_id").notNull(),
+  snapshotId: uuid("snapshot_id").notNull(),
+  buildJobId: uuid("build_job_id").notNull(),
+  stage: text("stage").notNull(),
+  attempt: integer("attempt").notNull(),
+  status: text("status").notNull().default("queued"),
+  inputDigest: text("input_digest").notNull(),
+  outputManifestIds: uuid("output_manifest_ids").array().notNull().default(sql`ARRAY[]::uuid[]`),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  errorCode: text("error_code"),
+  errorDetail: text("error_detail"),
+  ...timestamps
+}, (table) => [
+  uniqueIndex("build_stage_runs_build_stage_attempt_idx").on(table.buildJobId, table.stage, table.attempt),
+  index("build_stage_runs_claim_idx").on(table.workspaceId, table.projectId, table.status, table.createdAt, table.id),
+  index("build_stage_runs_build_idx").on(table.workspaceId, table.buildJobId, table.stage, table.attempt),
+  foreignKey({
+    columns: [table.projectId, table.workspaceId],
+    foreignColumns: [projects.id, projects.workspaceId],
+    name: "build_stage_runs_project_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.snapshotId, table.workspaceId],
+    foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId],
+    name: "build_stage_runs_snapshot_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.buildJobId, table.workspaceId],
+    foreignColumns: [buildJobs.id, buildJobs.workspaceId],
+    name: "build_stage_runs_build_workspace_fk"
+  }).onDelete("cascade")
+]);
+
+export const knowledgeArtifacts = pgTable("knowledge_artifacts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  projectId: uuid("project_id").notNull(),
+  snapshotId: uuid("snapshot_id").notNull(),
+  buildJobId: uuid("build_job_id").notNull(),
+  stage: text("stage").notNull(),
+  kind: text("kind").notNull(),
+  schemaVersion: integer("schema_version").notNull(),
+  inputDigest: text("input_digest").notNull(),
+  contentDigest: text("content_digest").notNull(),
+  storageKey: text("storage_key").notNull(),
+  sourceRefs: jsonb("source_refs").$type<SourceRef[]>().notNull().default([]),
+  producer: text("producer").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+}, (table) => [
+  uniqueIndex("knowledge_artifacts_cache_unique_idx").on(
+    table.projectId, table.snapshotId, table.stage, table.kind, table.inputDigest
+  ),
+  uniqueIndex("knowledge_artifacts_storage_key_idx").on(table.storageKey),
+  index("knowledge_artifacts_build_idx").on(
+    table.workspaceId, table.projectId, table.buildJobId, table.stage, table.createdAt
+  ),
+  index("knowledge_artifacts_cache_idx").on(
+    table.workspaceId, table.projectId, table.snapshotId, table.stage, table.kind, table.inputDigest
+  ),
+  foreignKey({
+    columns: [table.projectId, table.workspaceId],
+    foreignColumns: [projects.id, projects.workspaceId],
+    name: "knowledge_artifacts_project_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.snapshotId, table.workspaceId],
+    foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId],
+    name: "knowledge_artifacts_snapshot_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.buildJobId, table.workspaceId],
+    foreignColumns: [buildJobs.id, buildJobs.workspaceId],
+    name: "knowledge_artifacts_build_workspace_fk"
+  }).onDelete("restrict")
+]);
+
 export const knowledgePages = pgTable("knowledge_pages", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
@@ -368,7 +470,12 @@ export const releases = pgTable("releases", {
   snapshotId: uuid("snapshot_id").notNull(),
   version: text("version").notNull(),
   kernelMode: text("kernel_mode").notNull().default("legacy"),
-  packageArtifactId: uuid("package_artifact_id"),
+  packageArtifactId: uuid("package_artifact_id").references(() => knowledgeArtifacts.id, { onDelete: "restrict" }),
+  releaseArtifactFamily: text("release_artifact_family").notNull().default("knowledge-v1"),
+  packageStageRunId: uuid("package_stage_run_id").references(() => buildStageRuns.id, { onDelete: "restrict" }),
+  frontendIrSchemaVersion: integer("frontend_ir_schema_version"),
+  frontendGraphSchemaVersion: integer("frontend_graph_schema_version"),
+  analyzerManifestDigest: text("analyzer_manifest_digest"),
   publishedAt: timestamp("published_at", { withTimezone: true }),
   ...timestamps
 }, (table) => [
@@ -388,7 +495,22 @@ export const releases = pgTable("releases", {
     columns: [table.snapshotId, table.workspaceId],
     foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId],
     name: "releases_snapshot_workspace_fk"
-  }).onDelete("restrict")
+  }).onDelete("restrict"),
+  check("releases_artifact_family_check", sql`${table.releaseArtifactFamily} IN ('knowledge-v1', 'frontend-v2')`),
+  check("releases_frontend_provenance_shape_check", sql`
+    (${table.releaseArtifactFamily} = 'knowledge-v1'
+      AND ${table.packageStageRunId} IS NULL
+      AND ${table.frontendIrSchemaVersion} IS NULL
+      AND ${table.frontendGraphSchemaVersion} IS NULL
+      AND ${table.analyzerManifestDigest} IS NULL)
+    OR
+    (${table.releaseArtifactFamily} = 'frontend-v2'
+      AND ${table.packageStageRunId} IS NOT NULL
+      AND ${table.packageArtifactId} IS NOT NULL
+      AND ${table.frontendIrSchemaVersion} = 2
+      AND ${table.frontendGraphSchemaVersion} = 2
+      AND ${table.analyzerManifestDigest} ~ '^[0-9a-f]{64}$')
+  `)
 ]);
 
 export const buildEvents = pgTable("build_events", {

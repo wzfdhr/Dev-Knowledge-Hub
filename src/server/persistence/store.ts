@@ -17,7 +17,12 @@ import type {
 import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
 import type { ImpactMindmap } from "../knowledge/pipeline/mindmap.js";
 import type { AGENT_FEEDBACK_STATUSES } from "../../shared/contracts.js";
-import type { LintIssue, SourceRef, TrustScore } from "../../shared/api-contracts.js";
+import type {
+  FrontendReleaseProvenance,
+  LintIssue,
+  SourceRef,
+  TrustScore
+} from "../../shared/api-contracts.js";
 import type { RemediationState } from "../knowledge/remediation.js";
 
 export interface WorkspaceRecord {
@@ -563,9 +568,16 @@ export interface ReleaseRecord {
   version: string;
   kernelMode: "legacy" | "pipeline";
   packageArtifactId: string | null;
+  releaseArtifactFamily: "knowledge-v1" | "frontend-v2";
+  packageStageRunId: string | null;
+  frontendIrSchemaVersion: number | null;
+  frontendGraphSchemaVersion: number | null;
+  analyzerManifestDigest: string | null;
   createdAt: Date;
   publishedAt: Date | null;
 }
+
+export type FrontendReleaseDraftProvenance = FrontendReleaseProvenance;
 
 export interface ReleaseRollbackResult {
   release: ReleaseRecord;
@@ -675,7 +687,8 @@ export interface KnowledgeStore {
     workspaceId: string,
     repositoryId: string,
     buildId: string,
-    version: string
+    version: string,
+    provenance?: FrontendReleaseDraftProvenance
   ): Promise<ReleaseRecord>;
   publishRelease(workspaceId: string, releaseId: string, channel?: string): Promise<ReleaseRecord>;
   rollbackReleaseToLegacy(

@@ -113,6 +113,66 @@ async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean):
 
 integration("PostgreSQL cited knowledge integration", () => {
   test(databaseUrl
+    ? "changes project frontend rollout and its audit event in one transaction"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("frontend-rollout@example.com", "hash");
+    const project = (await store.listProjects(setup!.workspace.id))[0]!;
+
+    await expect(store.setProjectFrontendRollout({
+      workspaceId: setup!.workspace.id,
+      projectId: project.id,
+      mode: "shadow",
+      reason: "Validate frontend-v2 artifacts",
+      actorId: setup!.admin.id
+    })).resolves.toMatchObject({ mode: "shadow", updatedBy: setup!.admin.id });
+    const audit = await pool.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM audit_events
+       WHERE workspace_id = $1 AND action = 'frontend_rollout.changed'
+       ORDER BY created_at DESC LIMIT 1`,
+      [setup!.workspace.id]
+    );
+    expect(audit.rows[0]?.metadata).toMatchObject({
+      projectId: project.id,
+      fromMode: "legacy",
+      toMode: "shadow",
+      reason: "Validate frontend-v2 artifacts"
+    });
+
+    await pool.query(`
+      CREATE OR REPLACE FUNCTION reject_frontend_rollout_audit() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.action = 'frontend_rollout.changed' THEN
+          RAISE EXCEPTION 'frontend rollout audit unavailable';
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+      CREATE TRIGGER reject_frontend_rollout_audit
+      BEFORE INSERT ON audit_events
+      FOR EACH ROW EXECUTE FUNCTION reject_frontend_rollout_audit();
+    `);
+    try {
+      await expect(store.setProjectFrontendRollout({
+        workspaceId: setup!.workspace.id,
+        projectId: project.id,
+        mode: "legacy",
+        reason: "This transaction must roll back",
+        actorId: setup!.admin.id
+      })).rejects.toThrow("frontend rollout audit unavailable");
+      await expect(store.getProjectFrontendRollout(setup!.workspace.id, project.id))
+        .resolves.toMatchObject({ mode: "shadow", reason: "Validate frontend-v2 artifacts" });
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS reject_frontend_rollout_audit ON audit_events");
+      await pool.query("DROP FUNCTION IF EXISTS reject_frontend_rollout_audit()");
+    }
+  });
+
+  test(databaseUrl
     ? "enforces the versioned retrieval quality gate through the PostgreSQL search implementation"
     : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
     if (!databaseUrl) return;

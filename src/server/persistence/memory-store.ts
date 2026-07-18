@@ -61,6 +61,7 @@ import type {
   ProjectMemberRecord,
   ProjectRole,
   ProjectRecord,
+  ProjectFrontendRolloutRecord,
   RemediationBuildInput,
   RemediationEventRecord,
   RemediationRecord,
@@ -112,6 +113,7 @@ export class MemoryAppStore implements AppStore {
   readonly adminMfaRecoveryCodes: Array<AdminMfaRecoveryCodeRecord & { workspaceId: string; userId: string }> = [];
   private readonly projects: ProjectRecord[] = [];
   private readonly projectMembers: Array<ProjectMemberRecord & { userId: string }> = [];
+  private readonly projectFrontendRollouts = new Map<string, ProjectFrontendRolloutRecord>();
   private readonly repositories: RepositoryRecord[] = [];
   private readonly gitSynchronizationSchedules = new Map<string, {
     nextAttemptAt: Date;
@@ -429,6 +431,63 @@ export class MemoryAppStore implements AppStore {
       resourceId: project.id
     });
     return project;
+  }
+
+  async getProjectFrontendRollout(
+    workspaceId: string,
+    projectId: string
+  ): Promise<ProjectFrontendRolloutRecord | null> {
+    const rollout = this.projectFrontendRollouts.get(projectId);
+    return rollout?.workspaceId === workspaceId ? structuredClone(rollout) : null;
+  }
+
+  async setProjectFrontendRollout(input: {
+    workspaceId: string;
+    projectId: string;
+    mode: ProjectFrontendRolloutRecord["mode"];
+    reason: string;
+    actorId: string;
+  }): Promise<ProjectFrontendRolloutRecord | null> {
+    const project = this.projects.find((candidate) =>
+      candidate.id === input.projectId && candidate.workspaceId === input.workspaceId
+    );
+    const actor = this.members.find((candidate) =>
+      candidate.id === input.actorId && candidate.workspaceId === input.workspaceId
+        && candidate.role === "admin" && candidate.disabledAt === null
+    );
+    if (!project || !actor) return null;
+    const previous = this.projectFrontendRollouts.get(project.id);
+    const now = new Date();
+    const rollout: ProjectFrontendRolloutRecord = {
+      projectId: project.id,
+      workspaceId: input.workspaceId,
+      mode: input.mode,
+      reason: input.reason,
+      updatedBy: input.actorId,
+      createdAt: previous?.createdAt ?? now,
+      updatedAt: now
+    };
+    this.projectFrontendRollouts.set(project.id, rollout);
+    try {
+      await this.recordAudit({
+        workspaceId: input.workspaceId,
+        actorId: input.actorId,
+        action: "frontend_rollout.changed",
+        resourceType: "project",
+        resourceId: project.id,
+        metadata: {
+          projectId: project.id,
+          fromMode: previous?.mode ?? "legacy",
+          toMode: rollout.mode,
+          reason: rollout.reason
+        }
+      });
+    } catch (error) {
+      if (previous) this.projectFrontendRollouts.set(project.id, previous);
+      else this.projectFrontendRollouts.delete(project.id);
+      throw error;
+    }
+    return structuredClone(rollout);
   }
 
   async listAccessibleProjects(

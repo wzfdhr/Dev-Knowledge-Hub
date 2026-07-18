@@ -13,6 +13,7 @@ import { knowledgeSynthesisPipelineInputDigest } from "../pipeline/synthesize-st
 import { tableSchemasPipelineInputDigest } from "../pipeline/tables-stage.js";
 import { knowledgeValidationPipelineInputDigest } from "../pipeline/validate-stage.js";
 import { knowledgeVisualizationPipelineInputDigest } from "../pipeline/viz-stage.js";
+import { createB02StageInputPlanner } from "../pipeline/stage-planner.js";
 import type { PipelineStageExecutor, PipelineStageInputPlanner } from "../pipeline/worker.js";
 import type {
   PipelineArtifactStore,
@@ -26,6 +27,7 @@ import {
   FRONTEND_V2_IR_SCHEMA_VERSION,
   assertFrontendArtifactFamily
 } from "./compatibility.js";
+import type { FrontendKnowledgeMode } from "./rollout-mode.js";
 
 const SHADOW_FAMILIES = ["knowledge-v1", "frontend-v2"] as const;
 const UPSTREAM_STAGES: Record<Exclude<BuildStage, "convert">, readonly BuildStage[]> = {
@@ -202,6 +204,8 @@ export function createFrontendShadowStageExecutor(input: {
       input.store.findSnapshotById(run.workspaceId, run.snapshotId)
     ]);
     if (!build || !snapshot) throw new Error("Frontend shadow stage build or snapshot is unavailable");
+    const persistedLegacyDigest = await legacyInputDigest(input.store, run, build, snapshot);
+    if (run.inputDigest === persistedLegacyDigest) return input.legacy(run);
     const upstreamIds = await upstreamManifestIds(input.store, run, run.stage, input.artifactStore);
     const shadowDigest = frontendShadowInputDigest({
       stage: run.stage, snapshotId: snapshot.id, build, upstreamManifestIds: upstreamIds
@@ -210,7 +214,7 @@ export function createFrontendShadowStageExecutor(input: {
 
     const legacyResult = await input.legacy({
       ...run,
-      inputDigest: await legacyInputDigest(input.store, run, build, snapshot)
+      inputDigest: persistedLegacyDigest
     });
     if (legacyResult.outputManifestIds?.length !== 1) {
       throw new Error(`Frontend shadow ${run.stage} requires exactly one knowledge-v1 output`);
@@ -292,6 +296,50 @@ export function createFrontendShadowStageInputPlanner(store: ShadowStore): Pipel
         return (await assertFamilyOutputs(store, completed)).map((manifest) => manifest.id);
       }))).flat().sort();
       return frontendShadowInputDigest({ stage: nextStage, snapshotId: snapshot.id, build, upstreamManifestIds: ids });
+    }
+  };
+}
+
+export function createFrontendModeStageInputPlanner(
+  store: ShadowStore,
+  modeForProject: (workspaceId: string, projectId: string) => Promise<FrontendKnowledgeMode>
+): PipelineStageInputPlanner {
+  const legacy = createB02StageInputPlanner(store);
+  const shadow = createFrontendShadowStageInputPlanner(store);
+  return {
+    async nextInputDigest(input) {
+      if (input.currentRun.stage === "convert") {
+        const mode = await modeForProject(input.currentRun.workspaceId, input.currentRun.projectId);
+        return mode === "legacy"
+          ? legacy.nextInputDigest(input)
+          : shadow.nextInputDigest(input);
+      }
+      const manifests = await Promise.all(input.outputManifestIds.map((id) => store.findArtifactById(id)));
+      if (manifests.some((manifest) => !manifest)) {
+        throw new Error(`Frontend ${input.currentRun.stage} output manifest is unavailable`);
+      }
+      const expectedFrontend = ARTIFACT_KINDS[input.currentRun.stage]["frontend-v2"];
+      const continuesFrontendV2 = manifests.some((manifest) => manifest?.kind === expectedFrontend.kind
+        && manifest.schemaVersion === expectedFrontend.schemaVersion);
+      if (continuesFrontendV2) {
+        await assertFamilyOutputs(store, {
+          ...input.currentRun,
+          status: "succeeded",
+          outputManifestIds: [...input.outputManifestIds]
+        });
+      } else {
+        const expectedLegacy = ARTIFACT_KINDS[input.currentRun.stage]["knowledge-v1"];
+        if (manifests.length !== 1 || manifests[0]?.kind !== expectedLegacy.kind
+          || manifests[0].schemaVersion !== expectedLegacy.schemaVersion
+          || manifests[0].workspaceId !== input.currentRun.workspaceId
+          || manifests[0].projectId !== input.currentRun.projectId
+          || manifests[0].snapshotId !== input.currentRun.snapshotId) {
+          throw new Error(`Frontend ${input.currentRun.stage} output family is invalid`);
+        }
+      }
+      return continuesFrontendV2
+        ? shadow.nextInputDigest(input)
+        : legacy.nextInputDigest(input);
     }
   };
 }

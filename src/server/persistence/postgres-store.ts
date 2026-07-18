@@ -53,6 +53,7 @@ import type {
   RepositoryConnectionInput,
   RepositoryRecord,
   ProjectRecord,
+  ProjectFrontendRolloutRecord,
   ProjectAccess,
   ProjectMemberRecord,
   ProjectRole,
@@ -329,6 +330,16 @@ interface ProjectRow extends QueryResultRow {
   slug: string;
   archived_at: Date | null;
   created_at: Date;
+}
+
+interface ProjectFrontendRolloutRow extends QueryResultRow {
+  project_id: string;
+  workspace_id: string;
+  mode: ProjectFrontendRolloutRecord["mode"];
+  reason: string;
+  updated_by: string;
+  created_at: Date;
+  updated_at: Date;
 }
 
 interface TeamMemberRow extends QueryResultRow {
@@ -639,6 +650,20 @@ function projectRecord(row: ProjectRow): ProjectRecord {
     slug: row.slug,
     archivedAt: row.archived_at,
     createdAt: row.created_at
+  };
+}
+
+function projectFrontendRolloutRecord(
+  row: ProjectFrontendRolloutRow
+): ProjectFrontendRolloutRecord {
+  return {
+    projectId: row.project_id,
+    workspaceId: row.workspace_id,
+    mode: row.mode,
+    reason: row.reason,
+    updatedBy: row.updated_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
   };
 }
 
@@ -1704,6 +1729,77 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         resourceId: project.id
       });
       return project;
+    });
+  }
+
+  async getProjectFrontendRollout(
+    workspaceId: string,
+    projectId: string
+  ): Promise<ProjectFrontendRolloutRecord | null> {
+    const { rows } = await this.pool.query<ProjectFrontendRolloutRow>(
+      `SELECT project_id, workspace_id, mode, reason, updated_by, created_at, updated_at
+       FROM project_frontend_rollouts
+       WHERE workspace_id = $1 AND project_id = $2`,
+      [workspaceId, projectId]
+    );
+    return rows[0] ? projectFrontendRolloutRecord(rows[0]) : null;
+  }
+
+  async setProjectFrontendRollout(input: {
+    workspaceId: string;
+    projectId: string;
+    mode: ProjectFrontendRolloutRecord["mode"];
+    reason: string;
+    actorId: string;
+  }): Promise<ProjectFrontendRolloutRecord | null> {
+    return this.transaction(async (client) => {
+      const project = await client.query<{ id: string }>(
+        `SELECT projects.id
+         FROM projects
+         JOIN workspace_members ON workspace_members.workspace_id = projects.workspace_id
+           AND workspace_members.user_id = $3
+         JOIN admin_users ON admin_users.workspace_id = workspace_members.workspace_id
+           AND admin_users.id = workspace_members.user_id
+         WHERE projects.workspace_id = $1 AND projects.id = $2
+           AND workspace_members.role = 'admin' AND admin_users.disabled_at IS NULL
+         FOR UPDATE OF projects`,
+        [input.workspaceId, input.projectId, input.actorId]
+      );
+      if (!project.rows[0]) return null;
+      const previous = await client.query<ProjectFrontendRolloutRow>(
+        `SELECT project_id, workspace_id, mode, reason, updated_by, created_at, updated_at
+         FROM project_frontend_rollouts
+         WHERE workspace_id = $1 AND project_id = $2
+         FOR UPDATE`,
+        [input.workspaceId, input.projectId]
+      );
+      const { rows } = await client.query<ProjectFrontendRolloutRow>(
+        `INSERT INTO project_frontend_rollouts
+         (project_id, workspace_id, mode, reason, updated_by)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (project_id) DO UPDATE SET
+           mode = EXCLUDED.mode,
+           reason = EXCLUDED.reason,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = now()
+         RETURNING project_id, workspace_id, mode, reason, updated_by, created_at, updated_at`,
+        [input.projectId, input.workspaceId, input.mode, input.reason, input.actorId]
+      );
+      const rollout = projectFrontendRolloutRecord(rows[0]!);
+      await this.insertAudit(client, {
+        workspaceId: input.workspaceId,
+        actorId: input.actorId,
+        action: "frontend_rollout.changed",
+        resourceType: "project",
+        resourceId: input.projectId,
+        metadata: {
+          projectId: input.projectId,
+          fromMode: previous.rows[0]?.mode ?? "legacy",
+          toMode: rollout.mode,
+          reason: rollout.reason
+        }
+      });
+      return rollout;
     });
   }
 

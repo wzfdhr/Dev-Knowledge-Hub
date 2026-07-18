@@ -41,10 +41,14 @@ import { createKnowledgeValidationStageExecutor } from "./knowledge/pipeline/val
 import { createKnowledgePackageStageExecutor } from "./knowledge/pipeline/package-stage.js";
 import { PgBossPipelineStageJobQueue } from "./knowledge/job-queue.js";
 import {
+  createFrontendModeStageInputPlanner,
   createFrontendShadowStageExecutor,
-  createFrontendShadowStageInputPlanner,
   createKnowledgeV1StoreView
 } from "./knowledge/frontend/shadow-stage.js";
+import {
+  effectiveFrontendKnowledgeMode,
+  type FrontendKnowledgeMode
+} from "./knowledge/frontend/rollout-mode.js";
 
 const IMPORT_REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 const GIT_SYNC_CLAIM_LIMIT = 10;
@@ -86,7 +90,11 @@ export interface BootstrapDependencies {
     connectionString: string,
     store: AppStore,
     artifactStore: ArtifactStoreInitializer,
-    enhancerForWorkspace?: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>
+    enhancerForWorkspace: ((workspaceId: string) => Promise<KnowledgeEnhancer | undefined>) | undefined,
+    frontendModeForProject: (
+      workspaceId: string,
+      projectId: string
+    ) => Promise<FrontendKnowledgeMode>
   ) => QualityPipelineWorker;
   buildServer: typeof buildServer;
   setInterval?: (callback: () => void, delay: number) => unknown;
@@ -102,7 +110,9 @@ const defaultDependencies: BootstrapDependencies = {
   createBuildService: (store, queue, enhancerForWorkspace, initialPipelineStage, schedulePostBuild) =>
     new BuildService(store, queue, { enhancerForWorkspace, initialPipelineStage, schedulePostBuild }),
   createArtifactStore: (directory, persistence) => new ArtifactStore(directory, persistence),
-  createQualityPipelineWorker: (connectionString, store, artifactStore, enhancerForWorkspace) => {
+  createQualityPipelineWorker: (
+    connectionString, store, artifactStore, enhancerForWorkspace, frontendModeForProject
+  ) => {
     const pipelineStore = store as AppStore & PipelineArtifactStore;
     const pipelineArtifacts = artifactStore as ArtifactStore;
     const knowledgeV1Store = createKnowledgeV1StoreView(pipelineStore);
@@ -128,7 +138,7 @@ const defaultDependencies: BootstrapDependencies = {
       }),
       ["convert", "extract", "tables", "graph", "synthesize", "index", "lint", "viz", "validate", "package"],
       5_000,
-      createFrontendShadowStageInputPlanner(pipelineStore)
+      createFrontendModeStageInputPlanner(pipelineStore, frontendModeForProject)
     );
   },
   buildServer
@@ -166,10 +176,23 @@ export async function bootstrapServer(
       ? anthropicEnhancer({ apiKey, model: config.model })
       : openAiCompatibleEnhancer({ apiKey, model: config.model });
   };
+  const frontendModeForProject = async (
+    workspaceId: string,
+    projectId: string
+  ): Promise<FrontendKnowledgeMode> => {
+    const rollout = await store.getProjectFrontendRollout(workspaceId, projectId);
+    return effectiveFrontendKnowledgeMode({
+      kernelMode: env.knowledgeKernelMode,
+      systemMode: env.frontendKnowledgeMode,
+      ...(rollout ? { projectMode: rollout.mode } : {})
+    });
+  };
   // Before F05 the staged pipeline only runs as a shadow build. Legacy remains
   // the sole source for published knowledge even when the future active mode is set.
   const qualityWorker = env.knowledgeKernelMode === "shadow"
-    ? dependencies.createQualityPipelineWorker(env.databaseUrl, store, artifactStore, enhancerForWorkspace)
+    ? dependencies.createQualityPipelineWorker(
+      env.databaseUrl, store, artifactStore, enhancerForWorkspace, frontendModeForProject
+    )
     : undefined;
   const initialPipelineStage = qualityWorker
     ? (build: BuildRecord, files: readonly SnapshotFileMetadata[]): InitialPipelineStage => ({
@@ -212,7 +235,9 @@ export async function bootstrapServer(
     ...(env.legacySessionReadUntil ? { legacySessionReadUntil: env.legacySessionReadUntil } : {}),
     ...(mode === "production" ? { clientDir: path.resolve("dist/client") } : {}),
     sessionStore: new PostgresSessionStore(database.pool),
-    qualityArtifactReader: artifactStore as ArtifactStore
+    qualityArtifactReader: artifactStore as ArtifactStore,
+    knowledgeKernelMode: env.knowledgeKernelMode,
+    frontendKnowledgeMode: env.frontendKnowledgeMode
   });
   const reportBackgroundError = dependencies.reportBackgroundError
     ?? ((operation: string, error: unknown) => server.log.error({ err: error }, operation));

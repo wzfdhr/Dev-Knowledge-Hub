@@ -175,7 +175,9 @@ export type TrustScore = z.infer<typeof trustScoreSchema>;
 
 export type {
   FrontendAnalyzerProvenance,
+  FrontendAnalyzerManifestEntry,
   FrontendEdge,
   FrontendEntity,
+  FrontendEntityIdentity,
   FrontendIR
 } from "./frontend-ir.js";

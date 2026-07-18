@@ -1,13 +1,28 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 
-import type { FrontendEdge, FrontendEntity } from "../../../shared/frontend-ir.js";
+import type {
+  FrontendEdge,
+  FrontendEntity,
+  FrontendEntityIdentity
+} from "../../../shared/frontend-ir.js";
+import type { SourceRef } from "../../../shared/api-contracts.js";
+
+export interface FrontendFacetPatch {
+  entityId: string;
+  facet: Record<string, unknown>;
+  sourceRefs: SourceRef[];
+}
 
 export interface FrontendAnalyzerOutput {
+  snapshotId: string;
   analyzerId: string;
   analyzerVersion: string;
+  parserConfigDigest: string;
+  sourceBlobHashes: string[];
   entities: FrontendEntity[];
   edges: FrontendEdge[];
+  facetPatches: FrontendFacetPatch[];
 }
 
 export interface FrontendAnalyzer<Input = unknown> {
@@ -24,24 +39,41 @@ export function normalizeFrontendCanonicalPath(value: string): string {
   return canonicalPath;
 }
 
+export function namedFrontendIdentity(semanticKey: string): FrontendEntityIdentity {
+  if (!semanticKey.trim()) throw new Error("Named frontend identity requires semanticKey");
+  return { type: "named", semanticKey };
+}
+
+export function anonymousFrontendIdentity(enclosingSemanticKey: string, astOrdinal: number): FrontendEntityIdentity {
+  if (!enclosingSemanticKey.trim() || !Number.isInteger(astOrdinal) || astOrdinal < 0) {
+    throw new Error("Anonymous frontend identity requires enclosing semantic key and stable AST ordinal");
+  }
+  return { type: "anonymous", enclosingSemanticKey, astOrdinal };
+}
+
+function identityKey(identity: FrontendEntityIdentity): string {
+  return identity.type === "named"
+    ? identity.semanticKey
+    : `${identity.enclosingSemanticKey}\0anonymous-ast-${identity.astOrdinal}`;
+}
+
 export function createFrontendEntityId(input: {
-  kind: string;
+  kind: FrontendEntity["kind"];
   packageKey: string;
   canonicalPath: string;
-  semanticKey: string;
+  identity: FrontendEntityIdentity;
 }): string {
   const canonicalPath = normalizeFrontendCanonicalPath(input.canonicalPath);
-  const parts = ["frontend-ir-v2", input.kind, input.packageKey, canonicalPath, input.semanticKey];
+  const parts = ["frontend-ir-v2", input.kind, input.packageKey, canonicalPath, identityKey(input.identity)];
   if (parts.some((part) => !part.trim())) throw new Error("Frontend entity identity fields must not be empty");
   return createHash("sha256").update(parts.join("\0"), "utf8").digest("hex");
 }
 
-export function createFrontendEdgeId(input: {
-  kind: string;
-  fromEntityId: string;
-  toEntityId: string;
-}): string {
+export function createFrontendEdgeId(input: Pick<
+  FrontendEdge,
+  "kind" | "fromEntityId" | "toEntityId" | "canonicalEvidenceKey"
+>): string {
   return createHash("sha256")
-    .update(["frontend-graph-v2", input.kind, input.fromEntityId, input.toEntityId].join("\0"), "utf8")
+    .update([input.kind, input.fromEntityId, input.toEntityId, input.canonicalEvidenceKey].join("\0"), "utf8")
     .digest("hex");
 }

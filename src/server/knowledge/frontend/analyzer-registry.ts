@@ -3,28 +3,42 @@ import { createHash } from "node:crypto";
 import type { z } from "zod";
 
 import {
+  frontendAnalyzerManifestEntrySchema,
+  frontendAnalyzerProvenanceSchema,
   frontendEdgeSchema,
   frontendEntitySchema,
   frontendIrSchema,
+  type FrontendAnalyzerManifestEntry,
   type FrontendAnalyzerProvenance,
   type FrontendEdge,
   type FrontendEntity,
   type FrontendIR
 } from "../../../shared/frontend-ir.js";
-import { createFrontendEdgeId, createFrontendEntityId, normalizeFrontendCanonicalPath, type FrontendAnalyzerOutput } from "./analyzer.js";
+import {
+  createFrontendEdgeId,
+  createFrontendEntityId,
+  normalizeFrontendCanonicalPath,
+  type FrontendAnalyzerOutput,
+  type FrontendFacetPatch
+} from "./analyzer.js";
 
 export interface FrontendAnalyzerRegistration {
   id: string;
   version: string;
+  role: "core" | "framework";
   facetSchema: z.ZodType;
 }
 
 export interface FrontendMergeIssue {
-  rule: "FRONTEND_CANONICAL_CONFLICT" | "FRONTEND_EDGE_CONFLICT";
+  rule: "FRONTEND_CANONICAL_CONFLICT" | "FRONTEND_EDGE_CONFLICT" | "FRONTEND_FACET_CONFLICT" | "FRONTEND_FACET_TARGET_MISSING";
   severity: "error";
   targetId: string;
   message: string;
 }
+
+export type FrontendMergeResult =
+  | { valid: true; ir: FrontendIR; lintIssues: [] }
+  | { valid: false; ir: null; lintIssues: FrontendMergeIssue[] };
 
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
@@ -44,15 +58,14 @@ function canonicalValue(value: unknown): unknown {
   return value;
 }
 
-function referenceKey(value: FrontendEntity["sourceRefs"][number]): string {
+type SourceRefs = FrontendEntity["sourceRefs"];
+
+function referenceKey(value: SourceRefs[number]): string {
   return stableJson(value);
 }
 
-function mergeReferences(
-  left: { sourceRefs: FrontendEntity["sourceRefs"] },
-  right: { sourceRefs: FrontendEntity["sourceRefs"] }
-): FrontendEntity["sourceRefs"] {
-  return [...new Map([...left.sourceRefs, ...right.sourceRefs].map((item) => [referenceKey(item), item])).values()]
+function mergeReferences(left: SourceRefs, right: SourceRefs): SourceRefs {
+  return [...new Map([...left, ...right].map((item) => [referenceKey(item), item])).values()]
     .sort((a, b) => referenceKey(a).localeCompare(referenceKey(b)));
 }
 
@@ -61,11 +74,49 @@ function mergeProvenance(left: FrontendAnalyzerProvenance[], right: FrontendAnal
     .sort((a, b) => stableJson(a).localeCompare(stableJson(b)));
 }
 
+function canonicalEntity(value: FrontendEntity): string {
+  return stableJson({
+    kind: value.kind,
+    name: value.name,
+    qualifiedName: value.qualifiedName,
+    packageKey: value.packageKey,
+    canonicalPath: value.canonicalPath,
+    identity: value.identity,
+    completeness: value.completeness,
+    attributes: value.attributes
+  });
+}
+
+function canonicalEdge(value: FrontendEdge): string {
+  return stableJson({
+    kind: value.kind,
+    fromEntityId: value.fromEntityId,
+    toEntityId: value.toEntityId,
+    canonicalEvidenceKey: value.canonicalEvidenceKey,
+    evidenceClass: value.evidenceClass,
+    confidence: value.confidence,
+    candidateReason: value.evidenceClass === "candidate" ? value.candidateReason : undefined
+  });
+}
+
+function outputManifest(output: FrontendAnalyzerOutput): FrontendAnalyzerManifestEntry {
+  return frontendAnalyzerManifestEntrySchema.parse({
+    analyzerId: output.analyzerId,
+    analyzerVersion: output.analyzerVersion,
+    parserConfigDigest: output.parserConfigDigest,
+    sourceBlobHashes: [...new Set(output.sourceBlobHashes)].sort()
+  });
+}
+
+function outputProvenance(output: FrontendAnalyzerOutput): FrontendAnalyzerProvenance {
+  return frontendAnalyzerProvenanceSchema.parse(outputManifest(output));
+}
+
 function normalizeEntity(value: FrontendEntity): FrontendEntity {
   return {
     ...value,
     facets: canonicalValue(value.facets) as FrontendEntity["facets"],
-    sourceRefs: mergeReferences({ sourceRefs: [] }, value),
+    sourceRefs: mergeReferences([], value.sourceRefs),
     provenance: mergeProvenance([], value.provenance)
   } as FrontendEntity;
 }
@@ -73,32 +124,9 @@ function normalizeEntity(value: FrontendEntity): FrontendEntity {
 function normalizeEdge(value: FrontendEdge): FrontendEdge {
   return {
     ...value,
-    sourceRefs: mergeReferences({ sourceRefs: [] }, value),
+    sourceRefs: mergeReferences([], value.sourceRefs),
     provenance: mergeProvenance([], value.provenance)
   } as FrontendEdge;
-}
-
-function canonicalEntity(value: FrontendEntity): string {
-  return stableJson({
-    kind: value.kind,
-    completeness: value.completeness,
-    packageKey: value.packageKey,
-    canonicalPath: value.canonicalPath,
-    semanticKey: value.semanticKey,
-    attributes: value.attributes
-  });
-}
-
-function canonicalEdge(value: FrontendEdge): string {
-  const candidate = value.evidence === "candidate" ? { reason: value.reason } : {};
-  return stableJson({
-    kind: value.kind,
-    fromEntityId: value.fromEntityId,
-    toEntityId: value.toEntityId,
-    evidence: value.evidence,
-    confidence: value.confidence,
-    ...candidate
-  });
 }
 
 export class AnalyzerRegistry {
@@ -114,6 +142,14 @@ export class AnalyzerRegistry {
     if (!registration || registration.version !== output.analyzerVersion) {
       throw new Error(`Frontend analyzer is not registered at requested version: ${output.analyzerId}@${output.analyzerVersion}`);
     }
+    const expectedProvenance = output.entities.length > 0 || output.edges.length > 0 || output.facetPatches.length > 0
+      ? outputProvenance(output) : null;
+    if (registration.role === "framework" && (output.entities.length > 0 || output.edges.length > 0)) {
+      throw new Error(`Framework analyzer ${output.analyzerId} cannot create canonical entities or edges`);
+    }
+    if (registration.role === "core" && output.facetPatches.length > 0) {
+      throw new Error(`Core analyzer ${output.analyzerId} cannot submit framework facet patches`);
+    }
     if (new Set(output.entities.map((entity) => entity.id)).size !== output.entities.length) {
       throw new Error(`Frontend analyzer ${output.analyzerId} returned duplicate entity ids`);
     }
@@ -128,12 +164,8 @@ export class AnalyzerRegistry {
       if (entity.id !== createFrontendEntityId(entity)) {
         throw new Error(`Frontend entity ${entity.id} does not match its stable identity fields`);
       }
-      if (!entity.provenance.length || entity.provenance.some((item) => item.analyzerId !== output.analyzerId
-        || item.analyzerVersion !== output.analyzerVersion)) {
+      if (entity.provenance.length !== 1 || stableJson(entity.provenance[0]) !== stableJson(expectedProvenance)) {
         throw new Error(`Frontend entity ${entity.id} contains foreign analyzer provenance`);
-      }
-      if (!entity.provenance.some((item) => item.analyzerId === output.analyzerId && item.analyzerVersion === output.analyzerVersion)) {
-        throw new Error(`Frontend entity ${entity.id} is missing analyzer provenance`);
       }
       const namespaces = Object.keys(entity.facets);
       if (namespaces.some((namespace) => namespace !== output.analyzerId)) {
@@ -144,67 +176,104 @@ export class AnalyzerRegistry {
     for (const raw of output.edges) {
       const edge = frontendEdgeSchema.parse(raw);
       if (edge.id !== createFrontendEdgeId(edge)) throw new Error(`Frontend edge ${edge.id} does not match its stable identity fields`);
-      if (edge.provenance.some((item) => item.analyzerId !== output.analyzerId || item.analyzerVersion !== output.analyzerVersion)) {
+      if (edge.provenance.length !== 1 || stableJson(edge.provenance[0]) !== stableJson(expectedProvenance)) {
         throw new Error(`Frontend edge ${edge.id} contains foreign analyzer provenance`);
+      }
+    }
+    for (const patch of output.facetPatches) {
+      registration.facetSchema.parse(patch.facet);
+      if (patch.sourceRefs.some((reference) => reference.snapshotId !== output.snapshotId)) {
+        throw new Error(`Frontend facet patch ${patch.entityId} crosses snapshots`);
       }
     }
   }
 
-  mergeOutputs(outputs: FrontendAnalyzerOutput[]): { ir: FrontendIR; lintIssues: FrontendMergeIssue[]; valid: boolean } {
+  mergeOutputs(outputs: FrontendAnalyzerOutput[]): FrontendMergeResult {
+    if (outputs.length === 0) throw new Error("Frontend analyzer output list must not be empty");
     for (const output of outputs) this.validateOutput(output);
+    const snapshotIds = new Set(outputs.map((output) => output.snapshotId));
+    if (snapshotIds.size !== 1) throw new Error("Frontend analyzer outputs must belong to exactly one snapshot");
     const issues: FrontendMergeIssue[] = [];
     const entities = new Map<string, FrontendEntity>();
     const edges = new Map<string, FrontendEdge>();
-    const ordered = [...outputs].sort((a, b) => stableJson(a).localeCompare(stableJson(b)));
-    for (const output of ordered) {
-      for (const entity of output.entities) {
-        const normalizedEntity = normalizeEntity(frontendEntitySchema.parse(entity));
-        const previous = entities.get(normalizedEntity.id);
-        if (!previous) {
-          entities.set(normalizedEntity.id, normalizedEntity);
-          continue;
+    const ordered = [...outputs].sort((a, b) => stableJson(outputManifest(a)).localeCompare(stableJson(outputManifest(b))));
+    for (const output of ordered.filter((item) => this.#registrations.get(item.analyzerId)?.role === "core")) {
+      for (const raw of output.entities) {
+        const entity = normalizeEntity(frontendEntitySchema.parse(raw));
+        const previous = entities.get(entity.id);
+        if (!previous) entities.set(entity.id, entity);
+        else if (canonicalEntity(previous) !== canonicalEntity(entity)) {
+          issues.push({ rule: "FRONTEND_CANONICAL_CONFLICT", severity: "error", targetId: entity.id, message: "Core analyzers disagree on canonical entity fields" });
+        } else {
+          entities.set(entity.id, {
+            ...previous,
+            facets: canonicalValue({ ...previous.facets, ...entity.facets }) as FrontendEntity["facets"],
+            sourceRefs: mergeReferences(previous.sourceRefs, entity.sourceRefs),
+            provenance: mergeProvenance(previous.provenance, entity.provenance)
+          } as FrontendEntity);
         }
-        if (canonicalEntity(previous) !== canonicalEntity(normalizedEntity)) {
-          issues.push({ rule: "FRONTEND_CANONICAL_CONFLICT", severity: "error", targetId: normalizedEntity.id, message: "Analyzers disagree on canonical entity fields" });
-          continue;
-        }
-        entities.set(normalizedEntity.id, {
-          ...previous,
-          facets: canonicalValue({ ...previous.facets, ...normalizedEntity.facets }) as FrontendEntity["facets"],
-          sourceRefs: mergeReferences(previous, normalizedEntity),
-          provenance: mergeProvenance(previous.provenance, normalizedEntity.provenance)
-        } as FrontendEntity);
       }
-      for (const edge of output.edges) {
-        const normalizedEdge = normalizeEdge(frontendEdgeSchema.parse(edge));
-        const previous = edges.get(normalizedEdge.id);
-        if (!previous) {
-          edges.set(normalizedEdge.id, normalizedEdge);
-          continue;
+      for (const raw of output.edges) {
+        const edge = normalizeEdge(frontendEdgeSchema.parse(raw));
+        const previous = edges.get(edge.id);
+        if (!previous) edges.set(edge.id, edge);
+        else if (canonicalEdge(previous) !== canonicalEdge(edge)) {
+          issues.push({ rule: "FRONTEND_EDGE_CONFLICT", severity: "error", targetId: edge.id, message: "Core analyzers disagree on canonical edge fields" });
+        } else {
+          edges.set(edge.id, {
+            ...previous,
+            sourceRefs: mergeReferences(previous.sourceRefs, edge.sourceRefs),
+            provenance: mergeProvenance(previous.provenance, edge.provenance)
+          } as FrontendEdge);
         }
-        if (canonicalEdge(previous) !== canonicalEdge(normalizedEdge)) {
-          issues.push({ rule: "FRONTEND_EDGE_CONFLICT", severity: "error", targetId: normalizedEdge.id, message: "Analyzers disagree on canonical edge fields" });
-          continue;
-        }
-        edges.set(normalizedEdge.id, {
-          ...previous,
-          sourceRefs: mergeReferences(previous, normalizedEdge),
-          provenance: mergeProvenance(previous.provenance, normalizedEdge.provenance)
-        } as FrontendEdge);
       }
     }
-    const analyzerManifest = [...new Map(ordered.flatMap((output) => [...output.entities, ...output.edges])
-      .flatMap((item) => item.provenance).map((item) => [stableJson(item), item])).values()]
-      .sort((a, b) => stableJson(a).localeCompare(stableJson(b)));
-    const snapshotIds = new Set([...entities.values()].flatMap((entity) => entity.sourceRefs.map((reference) => reference.snapshotId)));
-    if (snapshotIds.size !== 1) throw new Error("Frontend analyzer outputs must belong to exactly one snapshot");
+    for (const output of ordered.filter((item) => this.#registrations.get(item.analyzerId)?.role === "framework")) {
+      if (output.facetPatches.length === 0) continue;
+      const provenance = outputProvenance(output);
+      const patches = [...output.facetPatches].sort((a, b) => `${a.entityId}:${stableJson(a.facet)}`.localeCompare(`${b.entityId}:${stableJson(b.facet)}`));
+      for (const patch of patches) this.#applyFacetPatch(entities, output, provenance, patch, issues);
+    }
+    if (issues.length > 0) {
+      return { valid: false, ir: null, lintIssues: issues.sort((a, b) => `${a.rule}:${a.targetId}`.localeCompare(`${b.rule}:${b.targetId}`)) };
+    }
+    const analyzerManifest = [...new Map(ordered.map((output) => {
+      const manifest = outputManifest(output);
+      return [stableJson(manifest), manifest];
+    })).values()];
     const ir = frontendIrSchema.parse({
       schemaVersion: 2,
       snapshotId: [...snapshotIds][0],
       analyzerManifestDigest: createHash("sha256").update(stableJson(analyzerManifest)).digest("hex"),
+      analyzerManifest,
       entities: [...entities.values()].sort((a, b) => a.id.localeCompare(b.id)),
       edges: [...edges.values()].sort((a, b) => a.id.localeCompare(b.id))
     });
-    return { ir, lintIssues: issues.sort((a, b) => `${a.rule}:${a.targetId}`.localeCompare(`${b.rule}:${b.targetId}`)), valid: issues.length === 0 };
+    return { valid: true, ir, lintIssues: [] };
+  }
+
+  #applyFacetPatch(
+    entities: Map<string, FrontendEntity>,
+    output: FrontendAnalyzerOutput,
+    provenance: FrontendAnalyzerProvenance,
+    patch: FrontendFacetPatch,
+    issues: FrontendMergeIssue[]
+  ): void {
+    const entity = entities.get(patch.entityId);
+    if (!entity) {
+      issues.push({ rule: "FRONTEND_FACET_TARGET_MISSING", severity: "error", targetId: patch.entityId, message: "Framework facet target does not exist" });
+      return;
+    }
+    const previous = entity.facets[output.analyzerId];
+    if (previous !== undefined && stableJson(previous) !== stableJson(patch.facet)) {
+      issues.push({ rule: "FRONTEND_FACET_CONFLICT", severity: "error", targetId: patch.entityId, message: "Framework analyzer returned conflicting facet values" });
+      return;
+    }
+    entities.set(entity.id, {
+      ...entity,
+      facets: canonicalValue({ ...entity.facets, [output.analyzerId]: patch.facet }) as FrontendEntity["facets"],
+      sourceRefs: mergeReferences(entity.sourceRefs, patch.sourceRefs),
+      provenance: mergeProvenance(entity.provenance, [provenance])
+    } as FrontendEntity);
   }
 }

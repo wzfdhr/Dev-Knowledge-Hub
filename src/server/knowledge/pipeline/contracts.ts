@@ -23,17 +23,21 @@ import {
 import { BUILD_STAGES } from "../../../shared/contracts.js";
 import {
   frontendAnalyzerProvenanceSchema,
+  frontendAnalyzerManifestEntrySchema,
   frontendEdgeSchema,
+  frontendEntityIdentitySchema,
   frontendEntitySchema,
   frontendIrSchema,
   type FrontendAnalyzerProvenance,
+  type FrontendAnalyzerManifestEntry,
   type FrontendEdge,
   type FrontendEntity,
+  type FrontendEntityIdentity,
   type FrontendIR
 } from "../../../shared/frontend-ir.js";
 
-export { BUILD_STAGES, artifactManifestSchema, buildStageSchema, frontendAnalyzerProvenanceSchema, frontendEdgeSchema, frontendEntitySchema, frontendIrSchema, graphEdgeSchema, graphNodeSchema, knowledgeIrSchema, lintIssueSchema, stageRunSchema, tableSchemaSchema, trustScoreSchema };
-export type { ArtifactManifest, BuildStage, FrontendAnalyzerProvenance, FrontendEdge, FrontendEntity, FrontendIR, GraphEdge, GraphNode, KnowledgeIR, LegacyBuildStatus, LintIssue, StageRun, StageStatus, TableSchema, TrustScore };
+export { BUILD_STAGES, artifactManifestSchema, buildStageSchema, frontendAnalyzerManifestEntrySchema, frontendAnalyzerProvenanceSchema, frontendEdgeSchema, frontendEntityIdentitySchema, frontendEntitySchema, frontendIrSchema, graphEdgeSchema, graphNodeSchema, knowledgeIrSchema, lintIssueSchema, stageRunSchema, tableSchemaSchema, trustScoreSchema };
+export type { ArtifactManifest, BuildStage, FrontendAnalyzerManifestEntry, FrontendAnalyzerProvenance, FrontendEdge, FrontendEntity, FrontendEntityIdentity, FrontendIR, GraphEdge, GraphNode, KnowledgeIR, LegacyBuildStatus, LintIssue, StageRun, StageStatus, TableSchema, TrustScore };
 
 const stageTransitions: Readonly<Record<StageStatus, readonly StageStatus[]>> = {
   queued: ["running", "cancelled", "reused", "skipped"],

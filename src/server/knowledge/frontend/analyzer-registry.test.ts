@@ -1,86 +1,117 @@
 import { z } from "zod";
 import { describe, expect, test } from "vitest";
 
-import { createFrontendEntityId } from "./analyzer.js";
+import {
+  anonymousFrontendIdentity,
+  createFrontendEdgeId,
+  createFrontendEntityId,
+  namedFrontendIdentity,
+  type FrontendAnalyzerOutput
+} from "./analyzer.js";
 import { AnalyzerRegistry } from "./analyzer-registry.js";
 
 const digest = "a".repeat(64);
-const ref = (startLine: number) => ({
-  snapshotId: "snapshot-1", path: "src/app.tsx", startLine, endLine: startLine, blobHash: digest
-});
+const secondDigest = "b".repeat(64);
+const ref = (startLine: number) => ({ snapshotId: "snapshot-1", path: "src/app.tsx", startLine, endLine: startLine, blobHash: digest });
 
-function component(name = "DashboardPage", startLine = 1) {
+function provenance(analyzerId: string) {
+  return [{ analyzerId, analyzerVersion: "1.0.0", parserConfigDigest: digest, sourceBlobHashes: [digest] }];
+}
+
+function component(analyzerId = "core-typescript", startLine = 1) {
+  const identity = namedFrontendIdentity("DashboardPage");
   return {
     schemaVersion: 2 as const,
-    id: createFrontendEntityId({ kind: "component", packageKey: "app", canonicalPath: "src/app.tsx", semanticKey: name }),
+    id: createFrontendEntityId({ kind: "component", packageKey: "app", canonicalPath: "src/app.tsx", identity }),
     kind: "component" as const,
+    name: "DashboardPage",
+    qualifiedName: "app.DashboardPage",
     completeness: "complete" as const,
     packageKey: "app",
     canonicalPath: "src/app.tsx",
-    semanticKey: name,
-    attributes: {
-      name: { status: "known" as const, value: name },
-      componentType: { status: "known" as const, value: "function" as const }
-    },
-    facets: { react: { hookCount: 2 } },
+    identity,
+    attributes: { componentType: { state: "known" as const, value: "function" as const } },
+    facets: {},
     sourceRefs: [ref(startLine)],
-    provenance: [{ analyzerId: "react", analyzerVersion: "1.0.0", configDigest: digest }]
+    provenance: provenance(analyzerId)
   };
 }
 
+function output(analyzerId: string, values: Partial<FrontendAnalyzerOutput> = {}): FrontendAnalyzerOutput {
+  return {
+    snapshotId: "snapshot-1", analyzerId, analyzerVersion: "1.0.0",
+    parserConfigDigest: digest, sourceBlobHashes: [digest], entities: [], edges: [], facetPatches: [], ...values
+  };
+}
+
+function registry() {
+  const value = new AnalyzerRegistry();
+  value.register({ id: "core-typescript", version: "1.0.0", role: "core", facetSchema: z.object({}).strict() });
+  value.register({ id: "core-html", version: "1.0.0", role: "core", facetSchema: z.object({}).strict() });
+  value.register({ id: "react", version: "1.0.0", role: "framework", facetSchema: z.object({ hookCount: z.number().int().nonnegative() }) });
+  value.register({ id: "router", version: "1.0.0", role: "framework", facetSchema: z.object({ routeCount: z.number().int() }) });
+  return value;
+}
+
 describe("frontend analyzer registry", () => {
-  test("creates stable semantic ids independent of source offsets", () => {
-    const input = { kind: "component", packageKey: "app", canonicalPath: "src/../src/app.tsx", semanticKey: "DashboardPage" };
-    expect(createFrontendEntityId(input)).toBe(createFrontendEntityId({ ...input, canonicalPath: "src/app.tsx" }));
-    expect(createFrontendEntityId(input)).not.toBe(createFrontendEntityId({ ...input, semanticKey: "SettingsPage" }));
+  test("creates stable named, anonymous, and evidence-specific ids", () => {
+    const named = { kind: "component" as const, packageKey: "app", canonicalPath: "src/../src/app.tsx", identity: namedFrontendIdentity("DashboardPage") };
+    expect(createFrontendEntityId(named)).toBe(createFrontendEntityId({ ...named, canonicalPath: "src/app.tsx" }));
+    expect(anonymousFrontendIdentity("DashboardPage", 2)).toEqual({ type: "anonymous", enclosingSemanticKey: "DashboardPage", astOrdinal: 2 });
+    expect(() => anonymousFrontendIdentity("DashboardPage", -1)).toThrow();
+    const fromEntityId = "c".repeat(64);
+    const toEntityId = "d".repeat(64);
+    expect(createFrontendEdgeId({ kind: "renders", fromEntityId, toEntityId, canonicalEvidenceKey: "jsx:1" }))
+      .not.toBe(createFrontendEdgeId({ kind: "renders", fromEntityId, toEntityId, canonicalEvidenceKey: "heuristic:1" }));
   });
 
-  test("validates only the analyzer-owned facet namespace", () => {
-    const registry = new AnalyzerRegistry();
-    registry.register({ id: "react", version: "1.0.0", facetSchema: z.object({ hookCount: z.number().int().nonnegative() }) });
-    expect(() => registry.validateOutput({ analyzerId: "react", analyzerVersion: "1.0.0", entities: [component()], edges: [] })).not.toThrow();
-    expect(() => registry.validateOutput({
-      analyzerId: "react", analyzerVersion: "1.0.0",
-      entities: [{ ...component(), facets: { react: { hookCount: "two" } } }], edges: []
-    })).toThrow();
-    expect(() => registry.validateOutput({
-      analyzerId: "react", analyzerVersion: "1.0.0",
-      entities: [{ ...component(), facets: { react: { hookCount: 2 }, foreign: {} } }], edges: []
-    })).toThrow("foreign facet namespace");
-    expect(() => registry.validateOutput({
-      analyzerId: "react", analyzerVersion: "1.0.0",
-      entities: [{ ...component(), id: "f".repeat(64) }], edges: []
-    })).toThrow("stable identity");
-    expect(() => registry.validateOutput({
-      analyzerId: "react", analyzerVersion: "1.0.0",
-      entities: [{ ...component(), provenance: [
-        ...component().provenance,
-        { analyzerId: "foreign", analyzerVersion: "1.0.0", configDigest: digest }
-      ] }], edges: []
-    })).toThrow("foreign analyzer provenance");
+  test("prevents framework analyzers from writing canonical entities and validates their facets", () => {
+    const value = registry();
+    expect(() => value.validateOutput(output("react", { entities: [component("react")] }))).toThrow("cannot create canonical");
+    expect(() => value.validateOutput(output("react", {
+      facetPatches: [{ entityId: component().id, facet: { hookCount: "two" }, sourceRefs: [ref(1)] }]
+    }))).toThrow();
   });
 
-  test("merges references deterministically and blocks canonical conflicts", () => {
-    const registry = new AnalyzerRegistry();
-    registry.register({ id: "react", version: "1.0.0", facetSchema: z.object({ hookCount: z.number() }) });
-    const first = { analyzerId: "react", analyzerVersion: "1.0.0", entities: [component("DashboardPage", 3)], edges: [] };
-    const second = { analyzerId: "react", analyzerVersion: "1.0.0", entities: [component("DashboardPage", 1)], edges: [] };
-    const merged = registry.mergeOutputs([first, second]);
+  test("merges framework facets and references deterministically", () => {
+    const value = registry();
+    const core = output("core-typescript", { entities: [component("core-typescript", 3)] });
+    const react = output("react", {
+      facetPatches: [{ entityId: component().id, facet: { hookCount: 2 }, sourceRefs: [ref(1)] }]
+    });
+    const merged = value.mergeOutputs([react, core]);
     expect(merged.valid).toBe(true);
+    if (!merged.valid) throw new Error("Expected valid merge");
+    expect(merged.ir.entities[0]?.facets).toEqual({ react: { hookCount: 2 } });
     expect(merged.ir.entities[0]?.sourceRefs.map((item) => item.startLine)).toEqual([1, 3]);
-    expect(registry.mergeOutputs([second, first])).toEqual(merged);
+    expect(value.mergeOutputs([core, react])).toEqual(merged);
+  });
 
-    const conflict = registry.mergeOutputs([first, {
-      ...second,
-      entities: [{
-        ...component("DashboardPage", 1),
-        attributes: {
-          ...component("DashboardPage", 1).attributes,
-          name: { status: "known" as const, value: "ConflictingName" }
-        }
-      }]
-    }]);
-    expect(conflict.valid).toBe(false);
-    expect(conflict.lintIssues).toContainEqual(expect.objectContaining({ rule: "FRONTEND_CANONICAL_CONFLICT", severity: "error" }));
+  test("includes empty analyzers in the manifest and supports a valid empty IR", () => {
+    const value = registry();
+    const emptyCore = output("core-typescript");
+    const emptyFramework = output("router", { parserConfigDigest: secondDigest, sourceBlobHashes: [] });
+    const merged = value.mergeOutputs([emptyFramework, emptyCore]);
+    expect(merged.valid).toBe(true);
+    if (!merged.valid) throw new Error("Expected valid merge");
+    expect(merged.ir.entities).toEqual([]);
+    expect(merged.ir.analyzerManifest.map((item) => item.analyzerId)).toEqual(["core-typescript", "router"]);
+  });
+
+  test("returns no usable IR for canonical or facet conflicts", () => {
+    const value = registry();
+    const first = output("core-typescript", { entities: [component("core-typescript")] });
+    const conflictingEntity = {
+      ...component("core-html"),
+      attributes: { componentType: { state: "known" as const, value: "class" as const } }
+    };
+    const canonicalConflict = value.mergeOutputs([first, output("core-html", { entities: [conflictingEntity] })]);
+    expect(canonicalConflict).toMatchObject({ valid: false, ir: null, lintIssues: [{ rule: "FRONTEND_CANONICAL_CONFLICT" }] });
+
+    const patch = (hookCount: number) => output("react", {
+      facetPatches: [{ entityId: component().id, facet: { hookCount }, sourceRefs: [ref(1)] }]
+    });
+    const facetConflict = value.mergeOutputs([first, patch(1), patch(2)]);
+    expect(facetConflict).toMatchObject({ valid: false, ir: null, lintIssues: [{ rule: "FRONTEND_FACET_CONFLICT" }] });
   });
 });

@@ -4,11 +4,12 @@ import { AnalyzerWorkerHost } from "./analyzer-worker-host.js";
 import { ParserService } from "./parser-service.js";
 
 const socketPath = process.env.DEVKH_PARSER_SOCKET_PATH ?? "/run/devkh-parser/parser.sock";
+const maxOutputBytes = 16 * 1024 * 1024;
 const service = new ParserService({
   socketPath,
   execute: (request, signal) => new AnalyzerWorkerHost({
     workerFactory: () => new Worker(new URL("./analyzer-worker.js", import.meta.url), {
-      workerData: request,
+      workerData: { request, maxOutputBytes },
       env: {},
       resourceLimits: {
         maxOldGenerationSizeMb: 256,
@@ -17,7 +18,7 @@ const service = new ParserService({
       }
     }),
     timeoutMs: 30_000,
-    maxOutputBytes: 16 * 1024 * 1024
+    maxOutputBytes
   }).run(signal)
 });
 

@@ -1,6 +1,11 @@
 import { describe, expect, test } from "vitest";
 
-import { LengthPrefixedJsonDecoder, encodeParserFrame } from "./parser-protocol";
+import {
+  DEFAULT_PARSER_FRAME_BYTES,
+  LengthPrefixedJsonDecoder,
+  encodeParserFrame,
+  parserServiceResponseSchema
+} from "./parser-protocol";
 
 describe("parser protocol framing", () => {
   test("decodes fragmented and coalesced length-prefixed JSON frames", () => {
@@ -21,5 +26,16 @@ describe("parser protocol framing", () => {
     const header = Buffer.alloc(4);
     header.writeUInt32BE(17);
     expect(() => decoder.push(header)).toThrow("frame byte limit");
+  });
+
+  test("fits the maximum virtual source payload after base64 expansion", () => {
+    expect(DEFAULT_PARSER_FRAME_BYTES).toBeGreaterThan(32 * 1024 * 1024 * 4 / 3 + 5 * 1024 * 1024);
+  });
+
+  test("rejects unknown service response types and error codes", () => {
+    expect(parserServiceResponseSchema.safeParse({ type: "other", requestId: crypto.randomUUID() }).success).toBe(false);
+    expect(parserServiceResponseSchema.safeParse({
+      type: "error", requestId: crypto.randomUUID(), code: "UNKNOWN", message: "bad"
+    }).success).toBe(false);
   });
 });

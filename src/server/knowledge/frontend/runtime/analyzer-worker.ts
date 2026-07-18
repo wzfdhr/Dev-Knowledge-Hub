@@ -16,5 +16,11 @@ export function analyzeWorkerRequest(raw: unknown) {
 }
 
 if (!isMainThread) {
-  parentPort?.postMessage(analyzeWorkerRequest(workerData));
+  const data = workerData as { request: unknown; maxOutputBytes: number };
+  const payload = Buffer.from(JSON.stringify(analyzeWorkerRequest(data.request)), "utf8");
+  if (payload.byteLength > data.maxOutputBytes) {
+    parentPort?.postMessage({ type: "error", code: "PARSER_OUTPUT_LIMIT" });
+  } else {
+    parentPort?.postMessage({ type: "result", payload });
+  }
 }

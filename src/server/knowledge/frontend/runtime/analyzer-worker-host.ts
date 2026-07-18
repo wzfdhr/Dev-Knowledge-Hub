@@ -1,12 +1,8 @@
 import type { Worker } from "node:worker_threads";
 
-export type ParserRuntimeErrorCode =
-  | "PARSER_RUNTIME_UNAVAILABLE"
-  | "PARSER_TIMEOUT"
-  | "PARSER_CANCELLED"
-  | "PARSER_WORKER_CRASH"
-  | "PARSER_OUTPUT_LIMIT"
-  | "PARSER_INVALID_REQUEST";
+import type { ParserRuntimeErrorCode } from "./parser-protocol.js";
+
+export type { ParserRuntimeErrorCode } from "./parser-protocol.js";
 
 export class ParserRuntimeError extends Error {
   readonly name = "ParserRuntimeError";
@@ -55,16 +51,29 @@ export class AnalyzerWorkerHost {
         terminate(new ParserRuntimeError("PARSER_TIMEOUT", "Parser worker exceeded its wall-clock limit"));
       }, this.options.timeoutMs);
       timer.unref?.();
-      worker.once("message", (value: unknown) => {
-        let byteLength: number;
-        try {
-          byteLength = Buffer.byteLength(JSON.stringify(value), "utf8");
-        } catch {
-          terminate(new ParserRuntimeError("PARSER_OUTPUT_LIMIT", "Parser worker returned invalid output"));
+      worker.once("message", (message: unknown) => {
+        if (!message || typeof message !== "object") {
+          terminate(new ParserRuntimeError("PARSER_WORKER_CRASH", "Parser worker returned an invalid response"));
           return;
         }
-        if (byteLength > this.options.maxOutputBytes) {
+        const response = message as { type?: unknown; payload?: unknown; code?: unknown };
+        if (response.type === "error" && response.code === "PARSER_OUTPUT_LIMIT") {
           terminate(new ParserRuntimeError("PARSER_OUTPUT_LIMIT", "Parser worker output exceeds byte limit"));
+          return;
+        }
+        if (response.type !== "result" || !(response.payload instanceof Uint8Array)) {
+          terminate(new ParserRuntimeError("PARSER_WORKER_CRASH", "Parser worker returned an invalid response"));
+          return;
+        }
+        if (response.payload.byteLength > this.options.maxOutputBytes) {
+          terminate(new ParserRuntimeError("PARSER_OUTPUT_LIMIT", "Parser worker output exceeds byte limit"));
+          return;
+        }
+        let value: unknown;
+        try {
+          value = JSON.parse(Buffer.from(response.payload).toString("utf8")) as unknown;
+        } catch {
+          terminate(new ParserRuntimeError("PARSER_WORKER_CRASH", "Parser worker returned an invalid response"));
           return;
         }
         terminating = true;

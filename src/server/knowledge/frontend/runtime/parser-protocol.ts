@@ -2,7 +2,19 @@ import { z } from "zod";
 
 import type { VirtualSourceInput } from "./virtual-source-fs.js";
 
-export const DEFAULT_PARSER_FRAME_BYTES = 40 * 1024 * 1024;
+// A 32 MiB virtual source set expands under base64 and carries path metadata.
+export const DEFAULT_PARSER_FRAME_BYTES = 64 * 1024 * 1024;
+
+export const parserRuntimeErrorCodeSchema = z.enum([
+  "PARSER_RUNTIME_UNAVAILABLE",
+  "PARSER_TIMEOUT",
+  "PARSER_CANCELLED",
+  "PARSER_WORKER_CRASH",
+  "PARSER_OUTPUT_LIMIT",
+  "PARSER_INVALID_REQUEST"
+]);
+
+export type ParserRuntimeErrorCode = z.infer<typeof parserRuntimeErrorCodeSchema>;
 
 const virtualSourceSchema = z.object({
   path: z.string().min(1).max(1_024),
@@ -31,9 +43,17 @@ export const parserCancelRequestSchema = z.object({
   requestId: z.uuid()
 });
 
-export type ParserServiceResponse =
-  | { type: "result"; requestId: string; result: unknown }
-  | { type: "error"; requestId: string; code: string; message: string };
+export const parserServiceResponseSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("result"), requestId: z.uuid(), result: z.unknown() }),
+  z.object({
+    type: z.literal("error"),
+    requestId: z.uuid(),
+    code: parserRuntimeErrorCodeSchema,
+    message: z.string().min(1).max(1_000)
+  })
+]);
+
+export type ParserServiceResponse = z.infer<typeof parserServiceResponseSchema>;
 
 export function encodeParserFrame(value: unknown, maxFrameBytes = DEFAULT_PARSER_FRAME_BYTES): Buffer {
   const payload = Buffer.from(JSON.stringify(value), "utf8");

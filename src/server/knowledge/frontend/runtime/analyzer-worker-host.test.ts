@@ -8,10 +8,15 @@ function evalWorker(source: string) {
   return () => new Worker(source, { eval: true });
 }
 
+function resultWorker(value: unknown) {
+  return evalWorker(`const { parentPort } = require('node:worker_threads');
+    parentPort.postMessage({ type: 'result', payload: new TextEncoder().encode(${JSON.stringify(JSON.stringify(value))}) });`);
+}
+
 describe("AnalyzerWorkerHost", () => {
   test("returns a bounded worker result", async () => {
     const host = new AnalyzerWorkerHost({
-      workerFactory: evalWorker("require('node:worker_threads').parentPort.postMessage({ outputs: [] })"),
+      workerFactory: resultWorker({ outputs: [] }),
       timeoutMs: 1_000,
       maxOutputBytes: 1_024
     });
@@ -42,11 +47,20 @@ describe("AnalyzerWorkerHost", () => {
     await expect(crashed.run()).rejects.toMatchObject({ code: "PARSER_WORKER_CRASH" });
 
     const oversized = new AnalyzerWorkerHost({
-      workerFactory: evalWorker("require('node:worker_threads').parentPort.postMessage({ value: 'x'.repeat(2048) })"),
+      workerFactory: evalWorker("require('node:worker_threads').parentPort.postMessage({ type: 'error', code: 'PARSER_OUTPUT_LIMIT' })"),
       timeoutMs: 1_000,
       maxOutputBytes: 1_024
     });
     await expect(oversized.run()).rejects.toMatchObject({ code: "PARSER_OUTPUT_LIMIT" });
+  });
+
+  test("rejects unframed worker values instead of cloning them into the result contract", async () => {
+    const host = new AnalyzerWorkerHost({
+      workerFactory: evalWorker("require('node:worker_threads').parentPort.postMessage({ outputs: [] })"),
+      timeoutMs: 1_000,
+      maxOutputBytes: 1_024
+    });
+    await expect(host.run()).rejects.toMatchObject({ code: "PARSER_WORKER_CRASH" });
   });
 
   test("uses a typed error contract", () => {

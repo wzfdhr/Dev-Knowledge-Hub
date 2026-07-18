@@ -75,6 +75,12 @@ services:
     pids_limit: 64
     mem_limit: 512m
     cpus: 1.0
+    healthcheck:
+      test: ["CMD", "node", "-e", "const fs=require('node:fs');process.exit(fs.statSync('/run/devkh-parser/parser.sock').isSocket()?0:1)"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 6
     stop_grace_period: 10s
 
   caddy:

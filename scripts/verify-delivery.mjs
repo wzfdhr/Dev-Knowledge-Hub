@@ -23,6 +23,7 @@ requireValue(parser?.security_opt?.includes("no-new-privileges:true"), "parser p
 requireValue(parser?.pids_limit === 64, "parser PID limit");
 requireValue(parser?.mem_limit === "512m", "parser memory limit");
 requireValue(parser?.cpus === 1, "parser CPU limit");
+requireValue(parser?.healthcheck?.test?.join(" ")?.includes("isSocket"), "parser socket health check");
 requireValue(Object.keys(parser?.environment ?? {}).sort().join(",") === "DEVKH_PARSER_SOCKET_PATH,NODE_ENV", "parser environment allowlist");
 requireValue((parser?.volumes ?? []).join(",") === "parser_runtime:/run/devkh-parser", "parser volume allowlist");
 requireValue(dockerfile.includes("/var/lib/devkh/artifacts"), "artifact runtime directory");

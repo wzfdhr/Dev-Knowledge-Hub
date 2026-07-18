@@ -52,7 +52,7 @@ async function invalidateRecoveryEvidence(root, errorClass) {
   if (!root) return;
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true, mode: 0o700 });
-  await writeFile(join(root, "recovery-cleanup-failed.json"), `${JSON.stringify({
+  await writeFile(join(root, "recovery-verification-failed.json"), `${JSON.stringify({
     schemaVersion: 1,
     operation: "restore-drill",
     result: "failed",
@@ -170,6 +170,7 @@ export async function runContainerVerification(options = {}) {
 
   if (failure) {
     logger.error("[release] container verification failed; retaining the isolated Compose state for diagnosis");
+    await invalidateEvidence(env.RECOVERY_EVIDENCE_DIR, "container_verification_failed");
     throw failure;
   }
 

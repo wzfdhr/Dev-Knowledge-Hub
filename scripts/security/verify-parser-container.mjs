@@ -13,11 +13,28 @@ export function verifyParserContainer(inspect) {
   requireValue(inspect.HostConfig?.PidsLimit === 64, "PID limit");
   requireValue(inspect.HostConfig?.Memory === 512 * 1024 * 1024, "memory limit");
   requireValue(inspect.HostConfig?.NanoCpus === 1_000_000_000, "CPU limit");
-  requireValue(Object.keys(inspect.HostConfig?.Tmpfs ?? {}).includes("/tmp"), "bounded tmpfs");
-  const destinations = (inspect.Mounts ?? []).map((mount) => mount.Destination).sort();
-  requireValue(destinations.join(",") === "/run/devkh-parser", "socket-only mount");
-  const environment = (inspect.Config?.Env ?? []).join("\n");
-  requireValue(!/DATABASE_URL|DEVKH_MASTER_KEY|DEVKH_SESSION_SECRET/.test(environment), "no production credentials");
+  const tmpfs = inspect.HostConfig?.Tmpfs?.["/tmp"] ?? "";
+  requireValue(
+    tmpfs.split(",").includes("noexec")
+      && tmpfs.split(",").includes("nosuid")
+      && /(?:^|,)size=(?:64m|67108864)(?:,|$)/.test(tmpfs),
+    "bounded noexec tmpfs"
+  );
+  const mounts = inspect.Mounts ?? [];
+  requireValue(
+    mounts.length === 1
+      && mounts[0]?.Destination === "/run/devkh-parser"
+      && mounts[0]?.Type === "volume"
+      && mounts[0]?.RW === true
+      && /(?:^|_)parser_runtime$/.test(mounts[0]?.Name ?? mounts[0]?.Source ?? ""),
+    "writable parser socket volume only"
+  );
+  const environment = inspect.Config?.Env ?? [];
+  const environmentNames = environment.map((entry) => entry.split("=", 1)[0]).sort();
+  requireValue(
+    environmentNames.join(",") === "DEVKH_PARSER_SOCKET_PATH,NODE_ENV,NODE_VERSION,PATH,YARN_VERSION",
+    "parser environment allowlist"
+  );
   if (failures.length) throw new Error(`Parser container isolation failed: ${failures.join(", ")}`);
 }
 

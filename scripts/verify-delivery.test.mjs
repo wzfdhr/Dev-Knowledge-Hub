@@ -51,6 +51,7 @@ describe("delivery database isolation", () => {
     expect(parser.pids_limit).toBe(64);
     expect(parser.mem_limit).toBe("512m");
     expect(parser.cpus).toBe(1);
+    expect(parser.healthcheck.test.join(" ")).toContain("isSocket");
     expect(Object.keys(parser.environment).sort()).toEqual(["DEVKH_PARSER_SOCKET_PATH", "NODE_ENV"]);
     expect(parser.volumes).toEqual(["parser_runtime:/run/devkh-parser"]);
     expect(JSON.stringify(parser)).not.toMatch(/DATABASE_URL|MASTER_KEY|SESSION_SECRET|snapshot_data|uploaded_sources|repository_mirrors|artifact_data/);

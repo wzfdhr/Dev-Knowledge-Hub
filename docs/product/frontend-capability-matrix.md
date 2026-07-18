@@ -88,3 +88,13 @@
 6. 未发布和未授权项目零泄漏。
 
 “基础识别”必须有 parser/config 证据和精确引用，不能依赖文本共现猜测。任何运行时无法确定的值都必须显示为 partial/unknown。
+
+## V1 Core 评测合同
+
+机器可执行的版本事实源为 `evaluation/frontend/versions.json`，用例分为不可混用的 `train` 与 `held-out` JSONL。FK01 只建立协议基线，不宣称 analyzer 已达到质量门槛；报告必须显示 `protocol-baseline-no-analyzer`，FK22 才启用生产质量阈值。
+
+V1 Core 的 15 个稳定 capability id 为：
+
+`typescript-javascript`、`jsx-tsx`、`html`、`css-modules`、`sass-less`、`workspace`、`tsconfig`、`react`、`react-router`、`zustand-context`、`fetch-axios`、`echarts`、`unit-component-testing`、`e2e-testing`、`vite`。
+
+每项至少包含 12 条 train 和 8 条 held-out；整体中文不少于 40%，无权限、未发布或无结果负例不少于 15%。评测输出实体 micro/macro F1、事实边 precision/recall、Recall@5、MRR、citation validity、空结果误命中、影响 precision/recall 和未授权/未发布泄漏数。版本范围、fixture 或 parser 版本变化必须单独复审。

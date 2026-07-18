@@ -91,6 +91,7 @@ describe("delivery database isolation", () => {
       .join("\n");
 
     expect(dockerfile).toContain("COPY --chown=node:node --chmod=755 scripts/git-askpass.sh");
+    expect(dockerfile).not.toContain("ENV DEVKH_GIT_ASKPASS_PATH");
     expect(dockerfile.match(/^FROM node:22\.13-bookworm-slim/gm)).toHaveLength(3);
     expect(deliveryCheck).toContain("node:22\\.13-bookworm-slim");
     expect(String(ci.jobs.verify.steps.find((step) => step.uses === "actions/setup-node@v4")

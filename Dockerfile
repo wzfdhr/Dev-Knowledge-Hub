@@ -26,7 +26,6 @@ RUN npm ci --omit=dev && npm cache clean --force
 FROM node:22.13-bookworm-slim AS runtime
 
 ENV NODE_ENV=production
-ENV DEVKH_GIT_ASKPASS_PATH=/app/scripts/git-askpass.sh
 WORKDIR /app
 
 RUN apt-get update \

@@ -10,6 +10,7 @@ const requireValue = (condition, message) => { if (!condition) failures.push(mes
 requireValue((dockerfile.match(/^FROM node:22\.13-bookworm-slim/gm) ?? []).length >= 3, "Node 22.13 multi-stage image");
 requireValue(dockerfile.includes("USER node"), "non-root runtime user");
 requireValue(dockerfile.includes("HEALTHCHECK"), "image health check");
+requireValue(!dockerfile.includes("ENV DEVKH_GIT_ASKPASS_PATH"), "no app-only environment in parser image");
 requireValue(compose.services?.postgres?.image === "postgres:16-bookworm", "PostgreSQL 16 image");
 requireValue(compose.services?.postgres?.healthcheck, "PostgreSQL health check");
 requireValue(compose.services?.app?.depends_on?.postgres?.condition === "service_healthy", "healthy database dependency");

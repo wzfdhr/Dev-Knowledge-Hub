@@ -179,5 +179,6 @@ export type {
   FrontendEdge,
   FrontendEntity,
   FrontendEntityIdentity,
+  FrontendFacetPatch,
   FrontendIR
 } from "./frontend-ir.js";

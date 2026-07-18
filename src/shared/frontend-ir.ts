@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { z } from "zod";
 
 import { sourceRefSchema } from "./api-contracts.js";
@@ -16,6 +18,15 @@ function knowledgeValue<T extends z.ZodType>(valueSchema: T) {
     z.object({ state: z.literal("known"), value: valueSchema }).strict(),
     z.object({ state: z.literal("unknown"), reason: unknownReasonSchema }).strict()
   ]);
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 export const frontendEntityIdentitySchema = z.discriminatedUnion("type", [
@@ -66,7 +77,12 @@ export const frontendEntitySchema = z.discriminatedUnion("kind", [
   z.object({ ...commonEntityFields, kind: z.literal("test_case"), attributes: z.object({ testKind: knowledgeValue(z.enum(["unit", "component", "integration", "e2e"])) }) }),
   z.object({ ...commonEntityFields, kind: z.literal("test_fixture"), attributes: z.object({ fixtureKind: knowledgeValue(z.string().min(1)) }) }),
   z.object({ ...commonEntityFields, kind: z.literal("tooling_config"), attributes: z.object({ tool: knowledgeValue(z.string().min(1)) }) })
-]);
+]).superRefine((value, context) => {
+  if (value.completeness === "complete"
+    && Object.values(value.attributes).some((attribute) => attribute.state === "unknown")) {
+    context.addIssue({ code: "custom", message: "complete frontend entity cannot contain unknown attributes" });
+  }
+});
 
 const commonEdgeFields = {
   schemaVersion: z.literal(2),
@@ -87,8 +103,18 @@ export const frontendAnalyzerManifestEntrySchema = z.object({
   analyzerId: z.string().min(1),
   analyzerVersion: z.string().min(1),
   parserConfigDigest: digestSchema,
-  sourceBlobHashes: z.array(digestSchema)
+  sourceBlobHashes: z.array(digestSchema).transform((items) => [...new Set(items)].sort())
 }).strict();
+
+export const frontendFacetPatchSchema = z.object({
+  entityId: digestSchema,
+  facet: z.record(z.string(), z.unknown()),
+  sourceRefs: z.array(sourceRefSchema).min(1)
+}).strict();
+
+export function frontendAnalyzerManifestDigest(manifest: readonly FrontendAnalyzerManifestEntry[]): string {
+  return createHash("sha256").update(stableJson(manifest), "utf8").digest("hex");
+}
 
 export const frontendIrSchema = z.object({
   schemaVersion: z.literal(2),
@@ -110,11 +136,36 @@ export const frontendIrSchema = z.object({
   if (value.edges.some((edge) => !entityIds.has(edge.fromEntityId) || !entityIds.has(edge.toEntityId))) {
     context.addIssue({ code: "custom", message: "Frontend IR edge has a missing endpoint" });
   }
+  const manifestKeys = value.analyzerManifest.map(stableJson);
+  if (new Set(manifestKeys).size !== manifestKeys.length
+    || manifestKeys.some((key, index) => index > 0 && manifestKeys[index - 1]! > key)) {
+    context.addIssue({ code: "custom", message: "Frontend analyzer manifest must be unique and sorted" });
+  }
+  if (frontendAnalyzerManifestDigest(value.analyzerManifest) !== value.analyzerManifestDigest) {
+    context.addIssue({ code: "custom", message: "Frontend analyzer manifest digest does not match" });
+  }
+  const manifestSet = new Set(manifestKeys);
+  for (const item of [...value.entities, ...value.edges]) {
+    for (const provenance of item.provenance) {
+      if (!manifestSet.has(stableJson(provenance))) {
+        context.addIssue({ code: "custom", message: "Frontend provenance is missing from analyzer manifest" });
+      }
+      const blobs = new Set(provenance.sourceBlobHashes);
+      if (item.sourceRefs.some((reference) => !blobs.has(reference.blobHash))) {
+        context.addIssue({ code: "custom", message: "Frontend source reference is missing from provenance blobs" });
+      }
+    }
+    if ("facets" in item && Object.keys(item.facets).some((namespace) =>
+      !item.provenance.some((provenance) => provenance.analyzerId === namespace))) {
+      context.addIssue({ code: "custom", message: "Frontend facet namespace is missing provenance" });
+    }
+  }
 });
 
 export type FrontendEntityIdentity = z.infer<typeof frontendEntityIdentitySchema>;
 export type FrontendAnalyzerProvenance = z.infer<typeof frontendAnalyzerProvenanceSchema>;
 export type FrontendAnalyzerManifestEntry = z.infer<typeof frontendAnalyzerManifestEntrySchema>;
+export type FrontendFacetPatch = z.infer<typeof frontendFacetPatchSchema>;
 export type FrontendEntity = z.infer<typeof frontendEntitySchema>;
 export type FrontendEdge = z.infer<typeof frontendEdgeSchema>;
 export type FrontendIR = z.infer<typeof frontendIrSchema>;

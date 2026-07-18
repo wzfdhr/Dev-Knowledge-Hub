@@ -46,7 +46,7 @@ function output(analyzerId: string, values: Partial<FrontendAnalyzerOutput> = {}
 
 function registry() {
   const value = new AnalyzerRegistry();
-  value.register({ id: "core-typescript", version: "1.0.0", role: "core", facetSchema: z.object({}).strict() });
+  value.register({ id: "core-typescript", version: "1.0.0", role: "core", facetSchema: z.object({ value: z.number().optional() }).strict() });
   value.register({ id: "core-html", version: "1.0.0", role: "core", facetSchema: z.object({}).strict() });
   value.register({ id: "react", version: "1.0.0", role: "framework", facetSchema: z.object({ hookCount: z.number().int().nonnegative() }) });
   value.register({ id: "router", version: "1.0.0", role: "framework", facetSchema: z.object({ routeCount: z.number().int() }) });
@@ -71,6 +71,10 @@ describe("frontend analyzer registry", () => {
     expect(() => value.validateOutput(output("react", {
       facetPatches: [{ entityId: component().id, facet: { hookCount: "two" }, sourceRefs: [ref(1)] }]
     }))).toThrow();
+    expect(() => value.validateOutput(output("react", {
+      sourceBlobHashes: [secondDigest],
+      facetPatches: [{ entityId: component().id, facet: { hookCount: 2 }, sourceRefs: [ref(1)] }]
+    }))).toThrow("absent from analyzer provenance");
   });
 
   test("merges framework facets and references deterministically", () => {
@@ -113,5 +117,12 @@ describe("frontend analyzer registry", () => {
     });
     const facetConflict = value.mergeOutputs([first, patch(1), patch(2)]);
     expect(facetConflict).toMatchObject({ valid: false, ir: null, lintIssues: [{ rule: "FRONTEND_FACET_CONFLICT" }] });
+
+    const coreFacet = (value: number) => output("core-typescript", {
+      entities: [{ ...component("core-typescript"), facets: { "core-typescript": { value } } }]
+    });
+    expect(value.mergeOutputs([coreFacet(1), coreFacet(2)])).toMatchObject({
+      valid: false, ir: null, lintIssues: [{ rule: "FRONTEND_FACET_CONFLICT" }]
+    });
   });
 });

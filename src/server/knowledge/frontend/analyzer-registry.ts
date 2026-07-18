@@ -1,25 +1,25 @@
-import { createHash } from "node:crypto";
-
 import type { z } from "zod";
 
 import {
   frontendAnalyzerManifestEntrySchema,
+  frontendAnalyzerManifestDigest,
   frontendAnalyzerProvenanceSchema,
   frontendEdgeSchema,
   frontendEntitySchema,
+  frontendFacetPatchSchema,
   frontendIrSchema,
   type FrontendAnalyzerManifestEntry,
   type FrontendAnalyzerProvenance,
   type FrontendEdge,
   type FrontendEntity,
+  type FrontendFacetPatch,
   type FrontendIR
 } from "../../../shared/frontend-ir.js";
 import {
   createFrontendEdgeId,
   createFrontendEntityId,
   normalizeFrontendCanonicalPath,
-  type FrontendAnalyzerOutput,
-  type FrontendFacetPatch
+  type FrontendAnalyzerOutput
 } from "./analyzer.js";
 
 export interface FrontendAnalyzerRegistration {
@@ -167,6 +167,10 @@ export class AnalyzerRegistry {
       if (entity.provenance.length !== 1 || stableJson(entity.provenance[0]) !== stableJson(expectedProvenance)) {
         throw new Error(`Frontend entity ${entity.id} contains foreign analyzer provenance`);
       }
+      const blobs = new Set(output.sourceBlobHashes);
+      if (entity.sourceRefs.some((reference) => !blobs.has(reference.blobHash))) {
+        throw new Error(`Frontend entity ${entity.id} references a blob absent from analyzer provenance`);
+      }
       const namespaces = Object.keys(entity.facets);
       if (namespaces.some((namespace) => namespace !== output.analyzerId)) {
         throw new Error(`Frontend entity ${entity.id} contains foreign facet namespace`);
@@ -179,11 +183,20 @@ export class AnalyzerRegistry {
       if (edge.provenance.length !== 1 || stableJson(edge.provenance[0]) !== stableJson(expectedProvenance)) {
         throw new Error(`Frontend edge ${edge.id} contains foreign analyzer provenance`);
       }
+      const blobs = new Set(output.sourceBlobHashes);
+      if (edge.sourceRefs.some((reference) => !blobs.has(reference.blobHash))) {
+        throw new Error(`Frontend edge ${edge.id} references a blob absent from analyzer provenance`);
+      }
     }
-    for (const patch of output.facetPatches) {
+    for (const raw of output.facetPatches) {
+      const patch = frontendFacetPatchSchema.parse(raw);
       registration.facetSchema.parse(patch.facet);
       if (patch.sourceRefs.some((reference) => reference.snapshotId !== output.snapshotId)) {
         throw new Error(`Frontend facet patch ${patch.entityId} crosses snapshots`);
+      }
+      const blobs = new Set(output.sourceBlobHashes);
+      if (patch.sourceRefs.some((reference) => !blobs.has(reference.blobHash))) {
+        throw new Error(`Frontend facet patch ${patch.entityId} references a blob absent from analyzer provenance`);
       }
     }
   }
@@ -205,6 +218,12 @@ export class AnalyzerRegistry {
         else if (canonicalEntity(previous) !== canonicalEntity(entity)) {
           issues.push({ rule: "FRONTEND_CANONICAL_CONFLICT", severity: "error", targetId: entity.id, message: "Core analyzers disagree on canonical entity fields" });
         } else {
+          for (const [namespace, facet] of Object.entries(entity.facets)) {
+            const existingFacet = previous.facets[namespace];
+            if (existingFacet !== undefined && stableJson(existingFacet) !== stableJson(facet)) {
+              issues.push({ rule: "FRONTEND_FACET_CONFLICT", severity: "error", targetId: entity.id, message: "Core analyzer returned conflicting facet values" });
+            }
+          }
           entities.set(entity.id, {
             ...previous,
             facets: canonicalValue({ ...previous.facets, ...entity.facets }) as FrontendEntity["facets"],
@@ -244,7 +263,7 @@ export class AnalyzerRegistry {
     const ir = frontendIrSchema.parse({
       schemaVersion: 2,
       snapshotId: [...snapshotIds][0],
-      analyzerManifestDigest: createHash("sha256").update(stableJson(analyzerManifest)).digest("hex"),
+      analyzerManifestDigest: frontendAnalyzerManifestDigest(analyzerManifest),
       analyzerManifest,
       entities: [...entities.values()].sort((a, b) => a.id.localeCompare(b.id)),
       edges: [...edges.values()].sort((a, b) => a.id.localeCompare(b.id))

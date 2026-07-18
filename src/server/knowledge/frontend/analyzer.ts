@@ -4,15 +4,9 @@ import path from "node:path";
 import type {
   FrontendEdge,
   FrontendEntity,
-  FrontendEntityIdentity
+  FrontendEntityIdentity,
+  FrontendFacetPatch
 } from "../../../shared/frontend-ir.js";
-import type { SourceRef } from "../../../shared/api-contracts.js";
-
-export interface FrontendFacetPatch {
-  entityId: string;
-  facet: Record<string, unknown>;
-  sourceRefs: SourceRef[];
-}
 
 export interface FrontendAnalyzerOutput {
   snapshotId: string;

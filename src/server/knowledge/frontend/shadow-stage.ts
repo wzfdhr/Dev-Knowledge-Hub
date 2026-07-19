@@ -32,6 +32,7 @@ import {
   FRONTEND_V2_IR_SCHEMA_VERSION,
   assertFrontendCandidateValid,
   assertFrontendArtifactFamily,
+  assertFrontendValidationProvenance,
   frontendGraphV2Schema,
   frontendValidationV2Schema
 } from "./compatibility.js";
@@ -539,10 +540,10 @@ export function createFrontendShadowStageExecutor(input: {
           await frontendUpstreamValue(input, upstreamIds, "validate")
         );
         assertFrontendCandidateValid(validation);
-        if (validation.snapshotId !== run.snapshotId
-          || validation.analyzerManifestDigest !== baseValue.analyzerManifestDigest) {
-          throw new Error("Frontend shadow package validation provenance does not match the candidate");
-        }
+        assertFrontendValidationProvenance(validation, {
+          snapshotId: run.snapshotId,
+          analyzerManifestDigest: baseValue.analyzerManifestDigest
+        });
         value = {
             ...baseValue,
             irSchemaVersion: FRONTEND_V2_IR_SCHEMA_VERSION,

@@ -95,4 +95,15 @@ describe("loadFrontendCandidatePreview", () => {
     await expect(loadFrontendCandidatePreview({ store: store as never, reader, workspaceId, projectId, buildId }))
       .rejects.toBeDefined();
   });
+
+  test.each([
+    ["snapshot", { snapshotId: "other-snapshot" }],
+    ["analyzer", { analyzerManifestDigest: "f".repeat(64) }]
+  ])("rejects validation %s provenance that differs from its package", async (_, mismatch) => {
+    const { store, reader, values } = fixture();
+    values.set("validation", { ...values.get("validation") as object, ...mismatch });
+
+    await expect(loadFrontendCandidatePreview({ store: store as never, reader, workspaceId, projectId, buildId }))
+      .rejects.toThrow("validation provenance");
+  });
 });

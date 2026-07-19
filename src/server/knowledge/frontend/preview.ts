@@ -4,6 +4,7 @@ import { sourceRefSchema, type ArtifactManifest } from "../../../shared/api-cont
 import type { AppStore, PipelineStageRunRecord } from "../../persistence/store.js";
 import {
   assertFrontendCandidateValid,
+  assertFrontendValidationProvenance,
   frontendGraphV2Schema,
   frontendPipelinePackageSchema,
   frontendValidationV2Schema
@@ -130,6 +131,16 @@ export async function loadFrontendCandidatePreview(input: {
     assertFrontendCandidateValid(validation);
   } catch {
     throw new FrontendPreviewUnavailableError("Frontend candidate validation failed");
+  }
+  try {
+    assertFrontendValidationProvenance(validation, {
+      snapshotId: build.snapshotId,
+      analyzerManifestDigest: packageValue.analyzerManifestDigest
+    });
+  } catch {
+    throw new FrontendPreviewUnavailableError(
+      "Frontend candidate validation provenance does not match its package"
+    );
   }
   return {
     build: { id: build.id, snapshotId: build.snapshotId, commitSha: build.commitSha, status: build.status },

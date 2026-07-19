@@ -109,6 +109,16 @@ export function assertFrontendCandidateValid(value: unknown): asserts value is {
   }
 }
 
+export function assertFrontendValidationProvenance(
+  validation: { snapshotId: string; analyzerManifestDigest: string },
+  expected: { snapshotId: string; analyzerManifestDigest: string }
+): void {
+  if (validation.snapshotId !== expected.snapshotId
+    || validation.analyzerManifestDigest !== expected.analyzerManifestDigest) {
+    throw new Error("Frontend validation provenance does not match the candidate package");
+  }
+}
+
 export const frontendPipelinePackageSchema = frontendPipelineEnvelopeSchema.extend({
   stage: z.literal("package"),
   irSchemaVersion: z.literal(FRONTEND_V2_IR_SCHEMA_VERSION),
@@ -222,9 +232,13 @@ export async function createVerifiedFrontendReleaseDraft(input: {
       } catch (error) {
         throw new Error("Frontend v2 release requires complete Graph reference evidence", { cause: error });
       }
-      if (parsed.data.snapshotId !== build.snapshotId
-        || parsed.data.analyzerManifestDigest !== value.analyzerManifestDigest) {
-        throw new Error("Frontend v2 validation provenance does not match its release package");
+      try {
+        assertFrontendValidationProvenance(parsed.data, {
+          snapshotId: build.snapshotId,
+          analyzerManifestDigest: value.analyzerManifestDigest
+        });
+      } catch (error) {
+        throw new Error("Frontend v2 validation provenance does not match its release package", { cause: error });
       }
     }
   }

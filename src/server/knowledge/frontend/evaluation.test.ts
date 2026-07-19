@@ -211,7 +211,7 @@ describe("frontend knowledge evaluation protocol", () => {
       factEdgeRecall: 1,
       recallAt5: 1,
       mrr: 0.5,
-      citationValidity: 0.5,
+      citationValidity: 1,
       falsePositiveEmptyRate: 0,
       impactPrecision: 1,
       impactRecall: 1,
@@ -301,21 +301,22 @@ describe("frontend knowledge evaluation protocol", () => {
     const graph = {
       snapshotId: "snapshot", analyzerManifestDigest: "2".repeat(64),
       nodes: [
-        { id: "page", kind: "component", name: "DashboardPage", canonicalPath: "src/app.tsx", sourceRefs: [ref], facets: {}, attributes: {} },
-        { id: "package", kind: "workspace_package", name: "frontend-evaluation-react-vite", canonicalPath: "package.json", sourceRefs: [ref], facets: {}, attributes: {} }
+        { id: "page", kind: "component", name: "DashboardPage", qualifiedName: "DashboardPage", canonicalPath: "src/app.tsx", identity: { type: "named", semanticKey: "component:DashboardPage" }, sourceRefs: [ref], facets: {}, attributes: {} },
+        { id: "package", kind: "workspace_package", name: "frontend-evaluation-react-vite", qualifiedName: "frontend-evaluation-react-vite", canonicalPath: "package.json", identity: { type: "named", semanticKey: "workspace_package:frontend-evaluation-react-vite" }, sourceRefs: [ref], facets: {}, attributes: {} }
       ],
       edges: []
     };
+    const documents = [{ documentKey: "components:0", kind: "page", title: "Components", content: "component: DashboardPage", citations: [ref], metadata: {} }];
     const item = positiveCase() as never;
     const deriveImpact = () => ({ affectedEntityIds: ["page"] });
-    const original = observeFrontendEvaluationCase(item, graph, deriveImpact);
+    const original = observeFrontendEvaluationCase(item, graph, documents, deriveImpact);
     const changedExpected = observeFrontendEvaluationCase({
       ...positiveCase(), capability: "vite", expected: { ...positiveCase().expected, entityIds: ["fabricated-answer"] }
-    } as never, graph, deriveImpact);
+    } as never, graph, documents, deriveImpact);
 
     expect(original).toEqual(changedExpected);
-    expect(original.entityIds).toEqual(["component:src/app.tsx:DashboardPage"]);
-    expect(observeFrontendEvaluationCase({ ...positiveCase(), fixture: "private-react-vite" } as never, graph, deriveImpact))
+    expect(original.entityIds).toEqual(["component:DashboardPage"]);
+    expect(observeFrontendEvaluationCase({ ...positiveCase(), access: "unauthorized" } as never, graph, documents, deriveImpact))
       .toMatchObject({ entityIds: [], searchResults: [] });
   });
 });

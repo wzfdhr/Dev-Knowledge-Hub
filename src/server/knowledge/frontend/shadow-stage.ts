@@ -41,6 +41,7 @@ import { buildFrontendGraph } from "./graph-builder.js";
 import { generateFrontendKnowledge } from "./knowledge-generator.js";
 import { assessFrontendKnowledgeQuality } from "./quality-assessment.js";
 import { frontendSourceReferenceIsValid, loadFrontendSourceDescriptors } from "./reference-validation.js";
+import { buildFrontendSearchDocuments } from "./search.js";
 
 const SHADOW_FAMILIES = ["knowledge-v1", "frontend-v2"] as const;
 const UPSTREAM_STAGES: Record<Exclude<BuildStage, "convert">, readonly BuildStage[]> = {
@@ -460,14 +461,7 @@ export function createFrontendShadowStageExecutor(input: {
           schemaVersion: 2,
           snapshotId: run.snapshotId,
           analyzerManifestDigest,
-          documents: knowledge.pages.flatMap((page) => page.chunks.map((chunk, position) => ({
-            documentKey: `${page.slug}:${position}`,
-            kind: "page",
-            title: page.title,
-            content: chunk.content,
-            citations: chunk.citations,
-            metadata: { pageId: page.id, pageSlug: page.slug, heading: chunk.heading, position }
-          })))
+          documents: buildFrontendSearchDocuments(knowledge.pages)
         };
         break;
       }

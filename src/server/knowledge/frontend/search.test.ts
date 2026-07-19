@@ -1,0 +1,53 @@
+import { describe, expect, test } from "vitest";
+
+import type { FrontendEdge, FrontendEntity } from "../../../shared/frontend-ir";
+import { searchFrontendKnowledge } from "./search";
+
+const ref = { snapshotId: "snapshot", path: "src/dashboard.tsx", startLine: 1, endLine: 20, blobHash: "a".repeat(64) };
+const provenance = [{ analyzerId: "react-core", analyzerVersion: "1.0.0", parserConfigDigest: "b".repeat(64), sourceBlobHashes: [ref.blobHash] }];
+const page: FrontendEntity = {
+  schemaVersion: 2, completeness: "complete", packageKey: "package", provenance,
+  id: "1".repeat(64), kind: "component" as const, name: "DashboardPage", qualifiedName: "DashboardPage",
+  canonicalPath: "src/dashboard.tsx", identity: { type: "named" as const, semanticKey: "component:DashboardPage" },
+  sourceRefs: [ref], facets: {}, attributes: { componentType: { state: "known" as const, value: "function" as const } }
+};
+const chart: FrontendEntity = {
+  ...page, id: "2".repeat(64), name: "DashboardChart", qualifiedName: "DashboardChart",
+  identity: { type: "named" as const, semanticKey: "component:DashboardChart" }, canonicalPath: "src/chart.tsx"
+};
+const edge: FrontendEdge = {
+  schemaVersion: 2, provenance,
+  id: "3".repeat(64), kind: "renders" as const, fromEntityId: page.id, toEntityId: chart.id,
+  evidenceClass: "fact" as const, confidence: 1 as const, sourceRefs: [ref], canonicalEvidenceKey: "dashboard-renders-chart"
+};
+const document = {
+  documentKey: "frontend-components:0", kind: "page" as const, title: "Components and Design",
+  content: "component: DashboardPage\ncomponent: DashboardChart", citations: [ref], metadata: {}
+};
+
+describe("frontend candidate knowledge search", () => {
+  test("ranks analyzer entities from real index documents and returns fact evidence", () => {
+    const results = searchFrontendKnowledge({
+      query: "Where does DashboardPage render its chart?", documents: [document],
+      graph: { nodes: [page, chart], edges: [edge] },
+      access: { canReadProject: true, visibility: "published", buildId: "build", currentReleaseBuildId: "build", viewerRole: "member" }
+    });
+
+    expect(results[0]).toMatchObject({ entityKey: "component:DashboardPage", factKeys: ["renders:component:DashboardPage->component:DashboardChart"] });
+    expect(results[0]?.citations).toEqual([ref]);
+  });
+
+  test("enforces project, release, and administrator shadow visibility", () => {
+    const input = { query: "DashboardPage", documents: [document], graph: { nodes: [page, chart], edges: [edge] } };
+    expect(searchFrontendKnowledge({ ...input, access: { canReadProject: false, visibility: "published", buildId: "build", currentReleaseBuildId: "build", viewerRole: "member" } })).toEqual([]);
+    expect(searchFrontendKnowledge({ ...input, access: { canReadProject: true, visibility: "published", buildId: "candidate", currentReleaseBuildId: "legacy", viewerRole: "admin" } })).toEqual([]);
+    expect(searchFrontendKnowledge({ ...input, access: { canReadProject: true, visibility: "shadow", buildId: "candidate", currentReleaseBuildId: null, viewerRole: "member" } })).toEqual([]);
+    expect(searchFrontendKnowledge({ ...input, access: { canReadProject: true, visibility: "shadow", buildId: "candidate", currentReleaseBuildId: null, viewerRole: "admin" } })).toHaveLength(1);
+  });
+
+  test("returns no results for an unrelated or empty query", () => {
+    const access = { canReadProject: true, visibility: "published" as const, buildId: "build", currentReleaseBuildId: "build", viewerRole: "member" as const };
+    expect(searchFrontendKnowledge({ query: "", documents: [document], graph: { nodes: [page, chart], edges: [edge] }, access })).toEqual([]);
+    expect(searchFrontendKnowledge({ query: "COBOL payroll batch", documents: [document], graph: { nodes: [page, chart], edges: [edge] }, access })).toEqual([]);
+  });
+});

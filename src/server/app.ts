@@ -74,6 +74,8 @@ import {
 import { compareFrontendKnowledge } from "./knowledge/frontend/comparison.js";
 import { deriveFrontendChangeImpact } from "./knowledge/frontend/change-impact.js";
 import { loadFrontendSourceDescriptors } from "./knowledge/frontend/reference-validation.js";
+import { frontendCandidateRunStatus } from "./knowledge/frontend/preview-status.js";
+import { searchFrontendKnowledge } from "./knowledge/frontend/search.js";
 import { exportKnowledgeGraph } from "./knowledge/pipeline/viz.js";
 import { legacyBuildStatus } from "./knowledge/pipeline/contracts.js";
 import {
@@ -1175,14 +1177,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       return { status: "build_failed", preview: null, build: { id: build.id, status: build.status } };
     }
     const runs = await options.store.listPipelineStageRuns(admin.workspaceId, project.id, build.id);
-    const failedRun = runs.findLast((run) => run.status === "failed" || run.status === "cancelled");
-    if (failedRun) {
+    const candidateStatus = frontendCandidateRunStatus(runs);
+    if (candidateStatus.status === "candidate_failed") {
       return {
         status: "candidate_failed", preview: null, build: { id: build.id, status: build.status },
-        failedStage: { stage: failedRun.stage, errorCode: failedRun.errorCode }
+        failedStage: candidateStatus.failedStage
       };
     }
-    if (!runs.some((run) => run.stage === "package" && ["succeeded", "reused"].includes(run.status))) {
+    if (candidateStatus.status === "candidate_pending") {
       return { status: "candidate_pending", preview: null, build: { id: build.id, status: build.status } };
     }
     try {
@@ -1316,6 +1318,49 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       commitSha: snapshot.commitSha, blobHash: sourceFile.contentHash,
       content: lines.slice(query.data.startLine - 1, query.data.endLine).join("\n")
     };
+  });
+
+  server.get("/api/projects/:projectId/frontend-preview/search", { preHandler: requireAdministrator }, async (request, reply) => {
+    if (!options.qualityArtifactReader) {
+      return sendError(reply, 503, "FRONTEND_PREVIEW_UNAVAILABLE", "Frontend preview artifacts are unavailable");
+    }
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    const query = z.object({ q: z.string().trim().min(1).max(500) }).safeParse(request.query);
+    if (!params.success || !query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid frontend preview search");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const project = (await options.store.listProjects(admin.workspaceId))
+      .find((candidate) => candidate.id === params.data.projectId && candidate.archivedAt === null);
+    if (!project) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    const repository = await options.store.currentRepository(admin.workspaceId, project.id);
+    const build = repository
+      ? (await options.store.listBuilds(admin.workspaceId, repository.id, { limit: 1, offset: 0 }))[0]
+      : null;
+    if (!build) return { results: [] };
+    try {
+      const preview = await loadFrontendCandidatePreview({
+        store: options.store,
+        reader: options.qualityArtifactReader,
+        workspaceId: admin.workspaceId,
+        projectId: project.id,
+        buildId: build.id
+      });
+      return {
+        results: searchFrontendKnowledge({
+          query: query.data.q,
+          documents: preview.search,
+          graph: { nodes: preview.graph.nodes, edges: preview.graph.edges },
+          access: {
+            canReadProject: true, visibility: "shadow", viewerRole: "admin",
+            buildId: build.id, currentReleaseBuildId: null
+          }
+        })
+      };
+    } catch (error) {
+      if (error instanceof FrontendPreviewUnavailableError || error instanceof z.ZodError) {
+        return sendError(reply, 409, "FRONTEND_PREVIEW_INVALID", "Frontend candidate package is incomplete or invalid");
+      }
+      throw error;
+    }
   });
 
   server.get("/api/projects/:projectId/graph", { preHandler: requireAdmin }, async (request, reply) => {

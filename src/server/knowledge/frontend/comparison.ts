@@ -1,4 +1,4 @@
-import { frontendSourceReferenceIsValid, type FrontendSourceDescriptor } from "./reference-validation.js";
+import { frontendSourceReferenceIsValid, type FrontendSourceDescriptors } from "./reference-validation.js";
 
 interface Ref { snapshotId: string; path: string; startLine: number; endLine: number; blobHash: string }
 interface Entity { id: string; kind: string; canonicalPath: string; name: string; sourceRefs: Ref[] }
@@ -6,7 +6,7 @@ interface Edge { id: string; kind: string; fromEntityId: string; toEntityId: str
 
 export function compareFrontendKnowledge(input: {
   legacy: { entityKeys: string[]; factKeys: string[]; pageKeys: string[]; searchKeys: string[]; impactPaths: string[]; suggestedTestPaths: string[]; issueCount: number };
-  candidate: { snapshotId: string; entities: Entity[]; edges: Edge[]; pageKeys: string[]; searchKeys: string[]; impactPaths: string[]; suggestedTestPaths: string[]; issueCount: number; pageRefs: Ref[]; searchRefs: Ref[]; issueRefs: Ref[]; sources: FrontendSourceDescriptor[] };
+  candidate: { snapshotId: string; entities: Entity[]; edges: Edge[]; pageKeys: string[]; searchKeys: string[]; impactPaths: string[]; suggestedTestPaths: string[]; issueCount: number; pageRefs: Ref[]; searchRefs: Ref[]; issueRefs: Ref[]; sources: FrontendSourceDescriptors };
 }) {
   const factEdges = input.candidate.edges.filter((edge) => edge.evidenceClass === "fact");
   const references = [

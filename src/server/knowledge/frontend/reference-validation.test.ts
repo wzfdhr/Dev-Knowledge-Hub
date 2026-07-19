@@ -25,4 +25,18 @@ describe("frontend candidate reference validation", () => {
     expect(frontendSourceReferenceIsValid({ ...ref, blobHash: "0".repeat(64) }, "snapshot", sources)).toBe(false);
     expect(frontendSourceReferenceIsValid({ ...ref, endLine: 3 }, "snapshot", sources)).toBe(false);
   });
+
+  test("validates 50,000 source references through constant-time descriptor lookup", () => {
+    const blobHash = "a".repeat(64);
+    const sources = new Map(Array.from({ length: 50_000 }, (_, index) => {
+      const source = { path: `src/file-${index}.ts`, blobHash, lineCount: 10 };
+      return [source.path, source] as const;
+    }));
+
+    for (let index = 0; index < 50_000; index += 1) {
+      expect(frontendSourceReferenceIsValid({
+        snapshotId: "snapshot", path: `src/file-${index}.ts`, startLine: 1, endLine: 10, blobHash
+      }, "snapshot", sources)).toBe(true);
+    }
+  });
 });

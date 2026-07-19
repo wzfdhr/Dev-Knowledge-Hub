@@ -138,6 +138,12 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   await page.goto(`/projects/${projectId}/frontend-map`);
   await expect(page.getByRole("heading", { name: "React 前端地图" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "候选包可供验收" })).toBeVisible();
+  const frontendSearch = await page.evaluate(async (activeProjectId) => {
+    const response = await fetch(`/api/projects/${activeProjectId}/frontend-preview/search?q=DashboardPage`);
+    return { status: response.status, body: await response.json() };
+  }, projectId);
+  expect(frontendSearch.status).toBe(200);
+  expect(frontendSearch.body.results[0]).toMatchObject({ entityKey: "component:DashboardPage" });
   await expect(page.getByRole("region", { name: "新旧内核只读比较" })).toContainText("引用有效");
   const impact = page.getByRole("region", { name: "变更影响与建议测试" });
   await expect(impact).toContainText("src/app.tsx");

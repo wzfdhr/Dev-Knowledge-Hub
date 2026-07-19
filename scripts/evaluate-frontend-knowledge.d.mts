@@ -89,14 +89,9 @@ export function evaluateFrontendKnowledgeBySplit(
 ): { train: FrontendEvaluationReport; heldOut: FrontendEvaluationReport; all: FrontendEvaluationReport };
 export function assertFrontendEvaluationReport(report: FrontendEvaluationReport, cases: FrontendEvaluationCase[]): void;
 export function assertFrontendQualityGate(report: Pick<FrontendEvaluationReport, "denominators" | "metrics">): void;
-export const FRONTEND_EVALUATION_ACCESS: {
-  readableFixtures: ReadonlySet<string>;
-  publishedFixtures: ReadonlySet<string>;
-};
-export function frontendEvaluationIntent(query: string): string;
 export function observeFrontendEvaluationCase(
   item: FrontendEvaluationCase,
   graph: unknown,
-  deriveImpact: (input: unknown) => { affectedEntityIds: string[] },
-  access?: { readableFixtures: ReadonlySet<string>; publishedFixtures: ReadonlySet<string> }
+  documents: unknown[],
+  deriveImpact: (input: unknown) => { affectedEntityIds: string[] }
 ): FrontendEvaluationObservation;

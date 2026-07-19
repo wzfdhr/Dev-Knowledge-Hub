@@ -3,6 +3,9 @@ import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { generateFrontendKnowledge } from "../src/server/knowledge/frontend/knowledge-generator.ts";
+import { buildFrontendSearchDocuments, searchFrontendKnowledge } from "../src/server/knowledge/frontend/search.ts";
+
 export const FRONTEND_CAPABILITIES = Object.freeze([
   "typescript-javascript",
   "jsx-tsx",
@@ -432,7 +435,8 @@ export function evaluateFrontendKnowledge(cases, observations) {
     if (rank >= 0 && rank < 5) recalled += 1;
     else failures.push({ caseId: item.id, kind: "expected-search-result-missing" });
     if (rank >= 0) reciprocalRanks += 1 / (rank + 1);
-    for (const result of results.slice(0, 5)) {
+    if (rank < 0) citationsSeen += Math.max(1, item.expected.citations.length);
+    for (const result of rank >= 0 ? [results[rank]] : []) {
       const resultCitations = result.citations ?? [];
       if (!resultCitations.length) citationsSeen += 1;
       for (const citation of resultCitations) {
@@ -581,183 +585,37 @@ export function assertFrontendQualityGate(report) {
   }
 }
 
-export const FRONTEND_EVALUATION_ACCESS = Object.freeze({
-  readableFixtures: new Set(["react-vite", "react-vite-held-out", "unpublished-react-vite", "unpublished-react-vite-held-out"]),
-  publishedFixtures: new Set(["react-vite", "react-vite-held-out"])
-});
-
-export function frontendEvaluationIntent(query) {
-  const value = query.toLocaleLowerCase("en-US");
-  if (/playwright|e2e/.test(value)) return "e2e-testing";
-  if (/component test|组件测试|哪个测试渲染|unit test/.test(value)) return "unit-component-testing";
-  if (/vite/.test(value)) return "vite";
-  if (/echarts|dataset|series|dispose|柱状图|折线图/.test(value) && !/渲染树|render tree/.test(value)) return "echarts";
-  if (/axios|fetch|接口操作|request/.test(value)) return "fetch-axios";
-  if (/zustand|context|状态仓库|state store/.test(value)) return "zustand-context";
-  if (/动态路由|根路由|loader|lazy|router|route/.test(value)) return "react-router";
-  if (/css module|css 模块/.test(value)) return "css-modules";
-  if (/sass|scss|设计令牌/.test(value)) return "sass-less";
-  if (/html|mount point|挂载点/.test(value)) return "html";
-  if (/tsconfig|typescript 项目配置/.test(value)) return "tsconfig";
-  if (/workspace|工作区包/.test(value)) return "workspace";
-  if (/jsx|渲染树|render tree/.test(value)) return "jsx-tsx";
-  if (/typescript module|typescript 模块/.test(value)) return "typescript-javascript";
-  return "react";
-}
-
-function endpointNames(graph) {
-  return new Map(graph.nodes.map((entity) => [entity.id, entity]));
-}
-
-function packageEntity(graph) {
-  return graph.nodes.find((entity) => entity.kind === "workspace_package");
-}
-
-function analyticsProject(graph) {
-  return packageEntity(graph)?.name.toLocaleLowerCase("en-US").includes("analytics") ?? false;
-}
-
-function scopedPath(sourcePath, graph, keepExtension = true) {
-  if (!analyticsProject(graph)) return sourcePath;
-  const basename = path.posix.basename(sourcePath);
-  return keepExtension ? basename : basename.replace(/\.[^.]+$/, "");
-}
-
-function pageComponent(graph) {
-  return graph.nodes.filter((entity) => entity.kind === "component" && /Page$/.test(entity.name))
-    .sort((left, right) => left.canonicalPath.localeCompare(right.canonicalPath))[0];
-}
-
-function sourceFacet(entity, analyzerId, key) {
-  const value = entity?.facets?.[analyzerId]?.[key];
-  return typeof value === "string" ? value : null;
-}
-
-export function frontendEvaluationTarget(capability, graph) {
-  const component = pageComponent(graph);
-  const predicates = {
-    "typescript-javascript": (entity) => entity.kind === "application_entry" && entity.canonicalPath === component?.canonicalPath,
-    "jsx-tsx": (entity) => entity.id === component?.id,
-    html: (entity) => entity.kind === "dom_landmark" && Boolean(sourceFacet(entity, "html-core", "id")),
-    "css-modules": (entity) => entity.kind === "style_scope" && entity.canonicalPath.endsWith(".module.css") && entity.name !== ":global(:root)",
-    "sass-less": (entity) => entity.kind === "style_token" && entity.name.startsWith("$"),
-    workspace: (entity) => entity.kind === "workspace_package",
-    tsconfig: (entity) => entity.kind === "tooling_config" && entity.name === "tsconfig",
-    react: (entity) => entity.id === component?.id,
-    "react-router": (entity) => entity.kind === "route",
-    "zustand-context": (entity) => entity.kind === "state_store" && entity.name.startsWith("use"),
-    "fetch-axios": (entity) => entity.kind === "api_operation",
-    echarts: (entity) => entity.kind === "visualization",
-    "unit-component-testing": (entity) => entity.kind === "test_case" && entity.attributes?.testKind?.value === "component",
-    "e2e-testing": (entity) => entity.kind === "test_case" && entity.attributes?.testKind?.value === "e2e",
-    vite: (entity) => entity.kind === "tooling_config" && entity.name === "vite"
-  };
-  return graph.nodes.filter(predicates[capability] ?? (() => false))
-    .sort((left, right) => left.canonicalPath.localeCompare(right.canonicalPath) || left.name.localeCompare(right.name))[0] ?? null;
-}
-
-export function frontendEvaluationEntityKey(capability, entity, graph) {
-  if (!entity) return null;
-  const component = pageComponent(graph);
-  const projectPrefix = analyticsProject(graph) ? "analytics:" : "";
-  switch (capability) {
-    case "typescript-javascript": return `module:${entity.canonicalPath}`;
-    case "jsx-tsx": return `jsx:${scopedPath(entity.canonicalPath, graph, false)}:${entity.name}`;
-    case "html": return `html:${entity.canonicalPath}:${sourceFacet(entity, "html-core", "id") ?? entity.name}`;
-    case "css-modules": return `style:${scopedPath(entity.canonicalPath, graph)}:${entity.name.replace(/^\./, "")}`;
-    case "sass-less": return `token:${scopedPath(entity.canonicalPath, graph)}:${entity.name.replace(/^\$/, "")}`;
-    case "workspace": return `package:${entity.name}`;
-    case "tsconfig": return `config:${projectPrefix}${entity.canonicalPath}`;
-    case "react": return `component:${scopedPath(entity.canonicalPath, graph, false)}:${entity.name}`;
-    case "react-router": return entity.name === "/" ? `route:/:${component?.name ?? "unknown"}` : `route:${entity.name}`;
-    case "zustand-context": return `store:${scopedPath(entity.canonicalPath, graph, false)}:${entity.name}`;
-    case "fetch-axios": return `api:${entity.name.replace(" ", ":")}`;
-    case "echarts": {
-      const names = endpointNames(graph);
-      const owner = graph.edges.find((edge) => edge.kind === "visualizes" && edge.toEntityId === entity.id);
-      return `visualization:${scopedPath(entity.canonicalPath, graph, false)}:${names.get(owner?.fromEntityId)?.name ?? entity.name}`;
-    }
-    case "unit-component-testing": return `test:${scopedPath(entity.canonicalPath, graph, false)}:${component?.name ?? entity.name}`;
-    case "e2e-testing": {
-      const testPath = analyticsProject(graph) ? entity.canonicalPath.replace(/\.ts$/, "") : entity.canonicalPath;
-      const slug = entity.name.toLocaleLowerCase("en-US").includes("analytics") ? "analytics-route" : "dashboard-route";
-      return `test:${testPath}:${slug}`;
-    }
-    case "vite": return `config:${projectPrefix}${entity.canonicalPath}`;
-    default: return null;
-  }
-}
-
-export function frontendEvaluationFactKey(capability, target, graph) {
-  if (!target) return null;
-  const names = endpointNames(graph);
-  const component = pageComponent(graph);
-  const projectPrefix = analyticsProject(graph) ? "analytics-" : "";
-  const factEdges = graph.edges.filter((edge) => edge.evidenceClass === "fact");
-  const edge = capability === "fetch-axios"
-    ? factEdges.find((candidate) => candidate.kind === "requests"
-      && names.get(candidate.fromEntityId)?.id === component?.id
-      && names.get(candidate.toEntityId)?.kind === "symbol")
-    : capability === "echarts"
-      ? factEdges.find((candidate) => candidate.kind === "visualizes" && candidate.toEntityId === target.id)
-      : capability === "jsx-tsx" || capability === "react"
-        ? factEdges.find((candidate) => candidate.kind === "renders" && candidate.fromEntityId === target.id
-          && names.get(candidate.toEntityId)?.name.endsWith("Chart"))
-      : capability === "typescript-javascript"
-        ? factEdges.find((candidate) => candidate.kind === "exports" && candidate.fromEntityId === target.id
-          && names.get(candidate.toEntityId)?.name === component?.name)
-        : factEdges.find((candidate) => {
-          const kind = { "jsx-tsx": "renders", html: "contains", "css-modules": "styles", "sass-less": "configures", workspace: "contains", tsconfig: "configures", react: "renders", "react-router": "routes_to", "zustand-context": "reads_state", "unit-component-testing": "tests", "e2e-testing": "tests", vite: "configures" }[capability];
-          return candidate.kind === kind && (candidate.fromEntityId === target.id || candidate.toEntityId === target.id);
-        });
-  if (!edge) return null;
-  const from = names.get(edge.fromEntityId);
-  const to = names.get(edge.toEntityId);
-  switch (capability) {
-    case "typescript-javascript": return `exports:${scopedPath(target.canonicalPath, graph, false)}:${component?.name}`;
-    case "jsx-tsx": case "react": return `renders:${component?.name}:${to?.name === component?.name ? from?.name : to?.name}`;
-    case "html": return `contains:${target.canonicalPath}:${sourceFacet(target, "html-core", "id") ?? target.name}`;
-    case "workspace": return `contains:${analyticsProject(graph) ? "analytics-workspace" : "workspace"}:package`;
-    case "tsconfig": return `configures:${projectPrefix}tsconfig:paths`;
-    case "react-router": return `routes-to:${target.name === "/" ? "/" : "/analytics"}:${component?.name}`;
-    case "zustand-context": return `reads-state:${component?.name}:${target.name}`;
-    case "fetch-axios": return `requests:${component?.name}:${to?.name}`;
-    case "echarts": return `visualizes:${from?.name}:dataset`;
-    case "unit-component-testing": return `tests:${analyticsProject(graph) ? "analytics-page-test" : `${component?.name}-test`}:${component?.name}`;
-    case "vite": return `configures:${projectPrefix}vite:react-plugin`;
-    default: return null;
-  }
-}
-
-export function observeFrontendEvaluationCase(item, graph, deriveImpact, access = FRONTEND_EVALUATION_ACCESS) {
-  const readable = access.readableFixtures.has(item.fixture);
-  const published = access.publishedFixtures.has(item.fixture);
-  if (!readable || !published) {
-    return { caseId: item.id, entityIds: [], factEdgeIds: [], searchResults: [], impactEntityIds: [] };
-  }
-  const intent = frontendEvaluationIntent(item.query);
-  const target = frontendEvaluationTarget(intent, graph);
-  const entityId = frontendEvaluationEntityKey(intent, target, graph);
-  const factEdgeId = frontendEvaluationFactKey(intent, target, graph);
+export function observeFrontendEvaluationCase(item, graph, documents, deriveImpact) {
+  const buildId = `evaluation:${item.fixture}`;
+  const results = searchFrontendKnowledge({
+    query: item.query,
+    documents,
+    graph,
+    access: {
+      canReadProject: item.access !== "unauthorized",
+      visibility: "published",
+      viewerRole: "member",
+      buildId,
+      currentReleaseBuildId: item.access === "authorized-published" ? buildId : null
+    },
+    limit: 5
+  });
+  const target = results[0] ? graph.nodes.find((entity) => entity.id === results[0].entityId) : null;
   const changedPaths = target ? [...new Set(target.sourceRefs.map((reference) => reference.path))] : [];
   const impact = target ? deriveImpact({ changedPaths, graph: {
     schemaVersion: 2, snapshotId: graph.snapshotId, analyzerManifestDigest: graph.analyzerManifestDigest,
     analyzerManifest: [], entities: graph.nodes, edges: graph.edges
   } }) : null;
   const impacted = Boolean(target && impact?.affectedEntityIds.includes(target.id));
-  const primaryReferences = target
-    ? target.sourceRefs.filter((reference) => reference.path === target.canonicalPath)
-    : [];
   return {
     caseId: item.id,
-    entityIds: entityId ? [entityId] : [],
-    factEdgeIds: factEdgeId ? [factEdgeId] : [],
-    searchResults: entityId && target ? [{
-      entityId,
-      citations: (primaryReferences.length ? primaryReferences : target.sourceRefs)
-        .map(({ path: citationPath, startLine, endLine }) => ({ path: citationPath, startLine, endLine }))
-    }] : [],
-    impactEntityIds: impacted && entityId ? [entityId] : []
+    entityIds: results[0] ? [results[0].entityKey] : [],
+    factEdgeIds: results[0]?.factKeys ?? [],
+    searchResults: results.map((result) => ({
+      entityId: result.entityKey,
+      citations: result.citations.map(({ path: citationPath, startLine, endLine }) => ({ path: citationPath, startLine, endLine }))
+    })),
+    impactEntityIds: impacted && results[0] ? [results[0].entityKey] : []
   };
 }
 
@@ -803,7 +661,7 @@ export async function main() {
     import("../src/server/knowledge/frontend/graph-builder.ts"),
     import("../src/server/knowledge/frontend/change-impact.ts")
   ]);
-  const fixtureGraphs = new Map();
+  const fixtureKnowledge = new Map();
   for (const fixture of new Set(cases.map((item) => item.fixture))) {
     const fixtureRoot = path.join(root, "fixtures/frontend", fixture);
     const sources = await Promise.all((await fixtureFiles(fixtureRoot)).map(async (sourcePath) => {
@@ -816,11 +674,21 @@ export async function main() {
       analyzerIds: ["frontend-project", "frontend-project-core", "typescript-core", "html-core", "style-core", "react-core", "react-router-core", "state-data-core", "visualization-core", "tooling-test-core"],
       cachedAnalyses: [], sources
     });
-    fixtureGraphs.set(fixture, buildFrontendGraph(result.outputs[0].frontendIr));
+    const graph = buildFrontendGraph(result.outputs[0].frontendIr);
+    const pages = generateFrontendKnowledge({
+      schemaVersion: 2,
+      snapshotId: graph.snapshotId,
+      analyzerManifestDigest: graph.analyzerManifestDigest,
+      analyzerManifest: [],
+      entities: graph.nodes,
+      edges: graph.edges
+    }).pages;
+    fixtureKnowledge.set(fixture, { graph, documents: buildFrontendSearchDocuments(pages) });
   }
-  const observations = cases.map((item) => observeFrontendEvaluationCase(
-    item, fixtureGraphs.get(item.fixture), deriveFrontendChangeImpact
-  ));
+  const observations = cases.map((item) => {
+    const knowledge = fixtureKnowledge.get(item.fixture);
+    return observeFrontendEvaluationCase(item, knowledge.graph, knowledge.documents, deriveFrontendChangeImpact);
+  });
   const splitReports = evaluateFrontendKnowledgeBySplit(cases, observations);
   for (const [split, report] of Object.entries(splitReports)) {
     const scopedCases = split === "all" ? cases : cases.filter((item) => item.split === (split === "heldOut" ? "held-out" : split));
@@ -830,21 +698,28 @@ export async function main() {
       throw new Error(`Frontend evaluation ${split} report is invalid: ${error.message}`, { cause: error });
     }
   }
-  assertFrontendQualityGate(splitReports.heldOut);
+  let qualityGateError = null;
+  try {
+    assertFrontendQualityGate(splitReports.heldOut);
+  } catch (error) {
+    qualityGateError = error;
+  }
   const output = {
     dataset: "frontend-v1-core",
     datasetDigest,
-    status: "quality-gate-passed",
+    status: qualityGateError ? "quality-gate-failed" : "quality-gate-passed",
     qualityGateEnforced: true,
     qualityGateReport: "heldOut",
     generatedFromCommittedFixtures: true,
     suite,
+    observations,
     splitReports,
     report: splitReports.all
   };
   const outputPath = path.join(root, "artifacts/frontend-knowledge-evaluation.json");
   await mkdir(path.dirname(outputPath), { recursive: true });
   await writeFile(outputPath, `${JSON.stringify(output, null, 2)}\n`);
+  if (qualityGateError) throw qualityGateError;
   console.log(JSON.stringify({
     dataset: output.dataset,
     datasetDigest: output.datasetDigest,

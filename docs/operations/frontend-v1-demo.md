@@ -8,7 +8,7 @@ The React frontend knowledge kernel remains a shadow-only capability in this pha
 - `shadow` writes candidate artifacts for administrator review.
 - `active` remains rejected before F05.
 - Candidate pages, search documents, Graph relations, impact results, and quality issues never enter the current release, workspace search, or MCP.
-- The preview route is workspace-administrator-only and read-only.
+- The preview and candidate-search routes are workspace-administrator-only and read-only.
 
 The current V1 compatibility contract covers TypeScript/JavaScript, JSX/TSX, HTML, CSS Modules, SCSS, Less, React 18/19, React Router, Zustand/Context, fetch/Axios, ECharts, Vite, unit/component tests, and Playwright-style E2E tests. Indented `.sass` remains deferred because no maintained parser has been approved.
 
@@ -22,13 +22,13 @@ npm run evaluate:frontend
 
 The command executes the committed analyzers against all 300 train and held-out fixture cases. Missing observations, skipped datasets, malformed reports, or a failed threshold exit non-zero. The held-out gate is:
 
-Observations are derived from query intent, analyzer-produced entities, fact Graph edges, source references, directional impact output, and an independent fixture ACL. Expected entities, capabilities, relations, citations, and access labels are used only by the scoring step and are never inputs to observation generation.
+Observations are produced by the same candidate search implementation used by the administrator preview API. It ranks analyzer entities through the generated `index` documents and fact Graph, returns Graph semantic keys and physical source references, and applies project, release, and shadow-role visibility. Evaluation access cases instantiate those policy inputs; the policy decides whether results are visible. Expected entities, relations, citations, and impact labels are used only by the scoring step and are never inputs to retrieval or ranking.
 
 | Metric | Threshold | FK13 result |
 | --- | ---: | ---: |
 | Entity micro/macro F1 | >= 0.95 | 1.00 / 1.00 |
 | Fact edge precision | 1.00 | 1.00 |
-| Fact edge recall | >= 0.75 | 0.80 |
+| Fact edge recall | >= 0.75 | 1.00 |
 | Recall@5 | >= 0.95 | 1.00 |
 | MRR | >= 0.90 | 1.00 |
 | Citation validity | 1.00 | 1.00 |
@@ -36,7 +36,9 @@ Observations are derived from query intent, analyzer-produced entities, fact Gra
 | Empty-query false positives | 0 | 0 |
 | Unauthorized/unpublished leakage | 0 | 0 |
 
-The generated report is written to `artifacts/frontend-knowledge-evaluation.json`; it is evidence, not a runtime input.
+The generated report is written to `artifacts/frontend-knowledge-evaluation.json`; it includes the actual observations and is evidence, not a runtime input. A failed quality gate writes the diagnostic report before exiting non-zero.
+
+Physical candidate validation checks entity, fact, page, search, and quality references against snapshot bytes, blob hashes, and line bounds. It reads only referenced files with a fixed concurrency of four and uses a path-keyed descriptor map, so validation does not open 50,000 files at once or perform quadratic reference lookup.
 
 ## Product states
 
@@ -62,6 +64,7 @@ The administrator preview always explains what happened, whether data is safe, t
 
 - page-to-route, page-to-API, state, visualization, tooling, and test knowledge;
 - exact candidate source excerpts;
+- candidate search through the real shadow index while non-administrators receive 403;
 - legacy/candidate entity, fact, page, search, impact, quality, and citation comparison;
 - change impact and suggested tests;
 - current release identity before and after the shadow build;

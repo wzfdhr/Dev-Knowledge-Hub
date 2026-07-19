@@ -144,6 +144,11 @@ describe("pipeline build routes", () => {
       method: "GET", url: `/api/projects/${projectId}/frontend-preview`, headers: { cookie: authenticatedCookie(memberLogin) }
     });
     expect(forbidden.statusCode).toBe(403);
+    const forbiddenSearch = await app.inject({
+      method: "GET", url: `/api/projects/${projectId}/frontend-preview/search?q=DashboardPage`,
+      headers: { cookie: authenticatedCookie(memberLogin) }
+    });
+    expect(forbiddenSearch.statusCode).toBe(403);
   });
 });
 

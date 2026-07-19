@@ -120,7 +120,7 @@ export function analyzeHtmlSource(inputValue: FrontendAnalyzerSourceInput): Fron
     path.posix.basename(input.path),
     "html-document",
     document,
-    errors.length === 0 ? "complete" : "partial",
+    "partial",
     { language: "html", parseErrors: errors.map((error) => error.code).sort() },
     { routePath: { state: "unknown", reason: "unresolved" } }
   );

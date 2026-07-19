@@ -71,6 +71,8 @@ import {
   FrontendPreviewUnavailableError,
   loadFrontendCandidatePreview
 } from "./knowledge/frontend/preview.js";
+import { compareFrontendKnowledge } from "./knowledge/frontend/comparison.js";
+import { deriveFrontendChangeImpact } from "./knowledge/frontend/change-impact.js";
 import { exportKnowledgeGraph } from "./knowledge/pipeline/viz.js";
 import { legacyBuildStatus } from "./knowledge/pipeline/contracts.js";
 import {
@@ -1168,19 +1170,68 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!repository) return { status: "source_missing", preview: null };
     const build = (await options.store.listBuilds(admin.workspaceId, repository.id, { limit: 1, offset: 0 }))[0];
     if (!build) return { status: "build_missing", preview: null };
+    if (build.status === "failed") {
+      return { status: "build_failed", preview: null, build: { id: build.id, status: build.status } };
+    }
     const runs = await options.store.listPipelineStageRuns(admin.workspaceId, project.id, build.id);
     if (!runs.some((run) => run.stage === "package" && ["succeeded", "reused"].includes(run.status))) {
       return { status: "candidate_pending", preview: null, build: { id: build.id, status: build.status } };
     }
     try {
+      const preview = await loadFrontendCandidatePreview({
+        store: options.store,
+        reader: options.qualityArtifactReader,
+        workspaceId: admin.workspaceId,
+        projectId: project.id,
+        buildId: build.id
+      });
+      const [metadata, pages, searchDocuments, legacyGraph, change, latestSnapshot] = await Promise.all([
+        options.store.knowledgeMetadataForBuild(admin.workspaceId, build.id),
+        options.store.listKnowledgePagesForBuild(admin.workspaceId, build.id),
+        options.store.listPipelineSearchDocuments(admin.workspaceId, project.id, build.id),
+        options.store.getKnowledgeGraph(admin.workspaceId, project.id, build.id),
+        options.store.snapshotChangeSummary(admin.workspaceId, repository.id, build.snapshotId),
+        options.store.latestSnapshot(admin.workspaceId, repository.id)
+      ]);
+      const changedPaths = change ? [...change.added, ...change.modified, ...change.deleted] : [];
+      const legacyImpact = change
+        ? deriveChangeImpact(change, metadata, legacyGraph)
+        : null;
+      const candidateImpact = deriveFrontendChangeImpact({
+        changedPaths,
+        graph: {
+          schemaVersion: preview.graph.schemaVersion,
+          snapshotId: preview.graph.snapshotId,
+          analyzerManifestDigest: preview.graph.analyzerManifestDigest,
+          analyzerManifest: [],
+          entities: preview.graph.nodes,
+          edges: preview.graph.edges
+        }
+      });
       return {
         status: "ready",
-        preview: await loadFrontendCandidatePreview({
-          store: options.store,
-          reader: options.qualityArtifactReader,
-          workspaceId: admin.workspaceId,
-          projectId: project.id,
-          buildId: build.id
+        stale: latestSnapshot?.id !== build.snapshotId,
+        preview,
+        comparison: compareFrontendKnowledge({
+          legacy: {
+            entityKeys: metadata.symbols.map((symbol) => `${symbol.kind}:${symbol.path}:${symbol.name}`),
+            factKeys: metadata.dependencies.map((edge) => `${edge.kind}:${edge.path}->${edge.targetPath ?? edge.target}`),
+            pageKeys: pages.map((page) => page.slug),
+            searchKeys: searchDocuments.map((document) => document.documentKey),
+            impactPaths: legacyImpact?.affectedModules ?? [],
+            suggestedTestPaths: legacyImpact?.suggestedTests ?? [],
+            issueCount: 0
+          },
+          candidate: {
+            snapshotId: preview.build.snapshotId,
+            entities: preview.graph.nodes,
+            edges: preview.graph.edges,
+            pageKeys: preview.pages.map((page) => page.slug),
+            searchKeys: preview.search.map((document) => document.documentKey),
+            impactPaths: candidateImpact.affectedPaths,
+            suggestedTestPaths: candidateImpact.suggestedTestPaths,
+            issueCount: preview.quality.issues.length
+          }
         })
       };
     } catch (error) {

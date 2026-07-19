@@ -182,7 +182,8 @@ export function analyzeTypeScriptSource(inputValue: TypeScriptAnalyzerInput): Fr
       functionDeclarations.set(node.name.text, group);
     } else if (ts.isClassDeclaration(node) && node.name) {
       const entity = /^[A-Z]/.test(node.name.text) && exported(node)
-        ? componentEntity(input, input.path, node.name.text, node, {
+          ? componentEntity(input, input.path, node.name.text, node, {
+            exported: true,
             declarationKind: "class",
             genericParameters: genericParameters(node),
             utilityClasses: utilityClasses(node, source)
@@ -236,6 +237,7 @@ export function analyzeTypeScriptSource(inputValue: TypeScriptAnalyzerInput): Fr
         const kind = functionLike ? "function" : "variable";
         const entity = isExported && /^[A-Z]/.test(node.name.text) && functionLike
           ? componentEntity(input, input.path, node.name.text, node, {
+              exported: true,
               declarationKind: "function",
               genericParameters: genericParameters(node.initializer as ts.ArrowFunction),
               utilityClasses: utilityClasses(node, source)
@@ -268,6 +270,7 @@ export function analyzeTypeScriptSource(inputValue: TypeScriptAnalyzerInput): Fr
     const implementation = nodes.findLast((node) => node.body) ?? nodes[nodes.length - 1]!;
     const entity = /^[A-Z]/.test(name) && exported(implementation)
       ? componentEntity(input, input.path, name, implementation, {
+          exported: true,
           declarationKind: "function",
           overloadCount: nodes.length,
           genericParameters: genericParameters(implementation),

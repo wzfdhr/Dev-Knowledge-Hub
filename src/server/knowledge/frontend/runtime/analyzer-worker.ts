@@ -7,6 +7,7 @@ import { VirtualSourceFs } from "./virtual-source-fs.js";
 import { AnalyzerRegistry } from "../analyzer-registry.js";
 import { analyzeHtmlSource } from "../html-analyzer.js";
 import { analyzeFrontendProjectManifest, type FrontendProjectManifest } from "../project-manifest.js";
+import { analyzeProjectStructure } from "../project-structure-analyzer.js";
 import { analyzeReactSource } from "../react-analyzer.js";
 import { analyzeReactRouterSource } from "../react-router-analyzer.js";
 import { analyzeStateDataSource } from "../state-data-analyzer.js";
@@ -138,7 +139,12 @@ function analyzeFrontendIr(
   resolutions: Array<{ containingFile: string; specifier: string; resolvedPath: string | null }>,
   requestedAnalyzers: ReadonlySet<string>
 ) {
-  const outputs = sources.flatMap((source) => {
+  const outputs = [
+    ...(requestedAnalyzers.has("frontend-project-core") ? analyzeProjectStructure({
+      snapshotId,
+      sources: sources.map((source) => ({ ...source, blobHash: sourceHashes.get(source.path)! }))
+    }) : []),
+    ...sources.flatMap((source) => {
     const blobHash = sourceHashes.get(source.path);
     if (!blobHash) throw new Error("Frontend analyzer source hash is unavailable");
     const base = {
@@ -176,9 +182,11 @@ function analyzeFrontendIr(
       sourceOutputs.push(analyzeStyleSource(base));
     }
     return sourceOutputs;
-  });
+    })
+  ];
   const registry = new AnalyzerRegistry();
   for (const id of [
+    "frontend-project-core",
     "typescript-core",
     "html-core",
     "style-core",

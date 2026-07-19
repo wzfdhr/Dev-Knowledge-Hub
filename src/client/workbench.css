@@ -219,6 +219,130 @@
   font-size: 20px;
 }
 
+.frontend-preview-state,
+.frontend-comparison {
+  margin-bottom: 18px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.frontend-preview-state > header,
+.frontend-comparison > header {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.frontend-preview-state h2,
+.frontend-preview-state dd,
+.frontend-comparison h2,
+.frontend-comparison p {
+  margin: 0;
+}
+
+.frontend-preview-state h2,
+.frontend-comparison h2 {
+  font-size: 14px;
+}
+
+.frontend-preview-state > header span,
+.frontend-comparison > header span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.frontend-preview-state.is-success {
+  border-left: 3px solid #278154;
+}
+
+.frontend-preview-state.is-warning {
+  border-left: 3px solid #b7791f;
+}
+
+.frontend-preview-state.is-danger {
+  border-left: 3px solid #b23a48;
+}
+
+.frontend-preview-state dl,
+.frontend-comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+}
+
+.frontend-preview-state dl > div,
+.frontend-comparison-grid > div {
+  min-width: 0;
+  padding: 12px 16px;
+  border-right: 1px solid var(--border);
+}
+
+.frontend-preview-state dl > div:last-child,
+.frontend-comparison-grid > div:last-child {
+  border-right: 0;
+}
+
+.frontend-preview-state dt,
+.frontend-comparison-grid span {
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.frontend-preview-state dd,
+.frontend-comparison-grid strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.frontend-comparison > header p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.frontend-comparison-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.frontend-impact-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.frontend-impact-columns > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 14px 16px;
+}
+
+.frontend-impact-columns > div:first-child {
+  border-right: 1px solid var(--border);
+}
+
+.frontend-impact-columns h3 {
+  margin: 0 0 3px;
+  font-size: 11px;
+}
+
+.frontend-impact-columns code,
+.frontend-impact-columns span {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .frontend-map-section {
   border: 1px solid var(--border);
   border-radius: 7px;

@@ -5,6 +5,7 @@ import { describe, expect, test } from "vitest";
 
 import {
   assertFrontendEvaluationReport,
+  assertFrontendQualityGate,
   digestFrontendEvaluationDatasets,
   evaluateFrontendKnowledge,
   evaluateFrontendKnowledgeBySplit,
@@ -276,5 +277,21 @@ describe("frontend knowledge evaluation protocol", () => {
       ...report,
       metrics: { ...report.metrics, entityMicroF1: 1 }
     }, cases)).toThrow("derived metrics do not match");
+  });
+
+  test("enforces held-out quality thresholds without allowing skipped observations", () => {
+    const passing = {
+      denominators: { totalCases: 100 },
+      metrics: {
+        entityMicroF1: 0.98, entityMacroF1: 0.97, factEdgePrecision: 1, factEdgeRecall: 0.8,
+        recallAt5: 0.96, mrr: 0.92, citationValidity: 1, falsePositiveEmptyRate: 0,
+        impactPrecision: 1, impactRecall: 0.96, unauthorizedOrUnpublishedLeakage: 0
+      }
+    };
+    expect(() => assertFrontendQualityGate(passing)).not.toThrow();
+    expect(() => assertFrontendQualityGate({ ...passing, metrics: { ...passing.metrics, recallAt5: 0.5 } }))
+      .toThrow("recallAt5");
+    expect(() => assertFrontendQualityGate({ ...passing, denominators: { totalCases: 0 } }))
+      .toThrow("did not execute");
   });
 });

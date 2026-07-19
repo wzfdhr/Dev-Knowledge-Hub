@@ -349,6 +349,7 @@ export function createFrontendShadowStageExecutor(input: {
         snapshotId: run.snapshotId,
         analyzerIds: [
           "frontend-project",
+          "frontend-project-core",
           "typescript-core",
           "html-core",
           "style-core",

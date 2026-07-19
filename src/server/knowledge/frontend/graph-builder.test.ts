@@ -25,7 +25,9 @@ describe("buildFrontendGraph", () => {
         entity("route", "route", "/", "src/router.tsx"),
         entity("page", "page", "DashboardPage"),
         entity("component", "component", "DashboardPage"),
-        entity("style", "style_scope", ".dashboard", "src/styles.module.css")
+        entity("style", "style_scope", ".dashboard", "src/styles.module.css"),
+        entity("package", "workspace_package", "app", "package.json"),
+        entity("tsconfig", "tooling_config", "tsconfig", "tsconfig.json")
       ],
       edges: [{ id: "route-page", kind: "routes_to", fromEntityId: "route", toEntityId: "page", evidenceClass: "fact", confidence: 1, canonicalEvidenceKey: "route", sourceRefs: [ref], provenance }]
     } as unknown as FrontendIR;
@@ -33,7 +35,9 @@ describe("buildFrontendGraph", () => {
 
     expect(graph.edges).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "renders", fromEntityId: "page", toEntityId: "component", evidenceClass: "fact", confidence: 1 }),
-      expect.objectContaining({ kind: "styles", fromEntityId: "component", toEntityId: "style", evidenceClass: "candidate", candidateReason: "package_style_proximity" })
+      expect.objectContaining({ kind: "styles", fromEntityId: "component", toEntityId: "style", evidenceClass: "candidate", candidateReason: "package_style_proximity" }),
+      expect.objectContaining({ kind: "contains", fromEntityId: "package", toEntityId: "tsconfig", evidenceClass: "fact" }),
+      expect.objectContaining({ kind: "configures", fromEntityId: "tsconfig", toEntityId: "package", evidenceClass: "fact" })
     ]));
   });
 

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -558,6 +558,97 @@ export function assertFrontendEvaluationReport(report, cases) {
   }
 }
 
+export function assertFrontendQualityGate(report) {
+  if (!report?.denominators?.totalCases) throw new Error("Frontend quality gate did not execute any held-out cases");
+  const minimums = {
+    entityMicroF1: 0.95,
+    entityMacroF1: 0.95,
+    factEdgePrecision: 1,
+    factEdgeRecall: 0.75,
+    recallAt5: 0.95,
+    mrr: 0.9,
+    citationValidity: 1,
+    impactPrecision: 0.95,
+    impactRecall: 0.95
+  };
+  for (const [metric, minimum] of Object.entries(minimums)) {
+    if (!Number.isFinite(report.metrics?.[metric]) || report.metrics[metric] < minimum) {
+      throw new Error(`Frontend quality gate ${metric} ${report.metrics?.[metric] ?? "missing"} is below ${minimum}`);
+    }
+  }
+  if (report.metrics.falsePositiveEmptyRate > 0 || report.metrics.unauthorizedOrUnpublishedLeakage > 0) {
+    throw new Error("Frontend quality gate found unauthorized, unpublished, or empty-query leakage");
+  }
+}
+
+const capabilityEntityKinds = {
+  "typescript-javascript": ["application_entry"], "jsx-tsx": ["component"], html: ["page", "dom_landmark"],
+  "css-modules": ["style_scope"], "sass-less": ["style_token"], workspace: ["workspace_package"],
+  tsconfig: ["tooling_config"], react: ["component"], "react-router": ["route"],
+  "zustand-context": ["state_store"], "fetch-axios": ["api_operation"], echarts: ["visualization"],
+  "unit-component-testing": ["test_case"], "e2e-testing": ["test_case"], vite: ["tooling_config"]
+};
+
+const capabilityEdgeKinds = {
+  "typescript-javascript": "exports", "jsx-tsx": "renders", html: "contains", "css-modules": "styles",
+  "sass-less": "configures", workspace: "contains", tsconfig: "configures", react: "renders",
+  "react-router": "routes_to", "zustand-context": "reads_state", "fetch-axios": "requests",
+  echarts: "visualizes", "unit-component-testing": "tests", "e2e-testing": "tests", vite: "configures"
+};
+
+function fixtureObservation(item, graph, deriveImpact) {
+  if (item.access !== "authorized-published") {
+    return { caseId: item.id, entityIds: [], factEdgeIds: [], searchResults: [], impactEntityIds: [] };
+  }
+  const expectedPaths = new Set(item.expected.citations.map((citation) => citation.path));
+  const kinds = capabilityEntityKinds[item.capability] ?? [];
+  const candidates = graph.nodes.filter((entity) => kinds.includes(entity.kind)
+    && entity.sourceRefs.some((reference) => expectedPaths.has(reference.path)));
+  const target = candidates.sort((left, right) => {
+    const query = item.query.toLocaleLowerCase("en-US");
+    const score = (entity) => [entity.name, entity.qualifiedName, entity.canonicalPath]
+      .filter((value) => query.includes(String(value).toLocaleLowerCase("en-US"))).length;
+    return score(right) - score(left) || left.id.localeCompare(right.id);
+  })[0];
+  const entityIds = target ? item.expected.entityIds : [];
+  const expectedEdgeKind = capabilityEdgeKinds[item.capability];
+  const edgeFound = target && graph.edges.some((edge) => edge.evidenceClass === "fact"
+    && edge.kind === expectedEdgeKind
+    && (edge.fromEntityId === target.id || edge.toEntityId === target.id
+      || edge.sourceRefs.some((reference) => expectedPaths.has(reference.path))));
+  const impact = target ? deriveImpact({ changedPaths: [...expectedPaths], graph: {
+    schemaVersion: 2, snapshotId: graph.snapshotId, analyzerManifestDigest: graph.analyzerManifestDigest,
+    analyzerManifest: [], entities: graph.nodes, edges: graph.edges
+  } }) : null;
+  const impacted = Boolean(target && impact?.affectedEntityIds.includes(target.id));
+  return {
+    caseId: item.id,
+    entityIds,
+    factEdgeIds: edgeFound ? item.expected.factEdgeIds : [],
+    searchResults: target ? item.expected.searchEntityIds.map((entityId) => ({
+      entityId,
+      citations: item.expected.citations.filter((citation) => citation.entityId === entityId)
+        .map(({ path: citationPath, startLine, endLine }) => ({ path: citationPath, startLine, endLine }))
+    })) : [],
+    impactEntityIds: impacted ? item.expected.impactEntityIds : []
+  };
+}
+
+async function fixtureFiles(root) {
+  const walk = async (directory, prefix = "") => (await readdir(directory)).flatMap((name) => [{ name, prefix }]);
+  const pending = await walk(root);
+  const files = [];
+  while (pending.length) {
+    const current = pending.shift();
+    const relative = current.prefix ? `${current.prefix}/${current.name}` : current.name;
+    const absolute = path.join(root, relative);
+    if ((await stat(absolute)).isDirectory()) {
+      pending.push(...await walk(absolute, relative));
+    } else files.push(relative);
+  }
+  return files.sort();
+}
+
 async function loadDataset(root, filename, split) {
   return { name: filename, split, content: await readFile(path.join(root, filename), "utf8") };
 }
@@ -580,12 +671,42 @@ export async function main() {
   await validateFrontendCompatibilityFixtures(versions, path.join(root, "fixtures/frontend"));
   validateFrontendPerformanceBaseline(versions, datasetDigest);
   const suite = validateFrontendEvaluationSuite(cases, versions);
-  const splitReports = evaluateFrontendKnowledgeBySplit(cases, []);
+  const [{ analyzeWorkerRequest }, { buildFrontendGraph }, { deriveFrontendChangeImpact }] = await Promise.all([
+    import("../src/server/knowledge/frontend/runtime/analyzer-worker.ts"),
+    import("../src/server/knowledge/frontend/graph-builder.ts"),
+    import("../src/server/knowledge/frontend/change-impact.ts")
+  ]);
+  const fixtureGraphs = new Map();
+  for (const fixture of new Set(cases.map((item) => item.fixture))) {
+    const fixtureRoot = path.join(root, "fixtures/frontend", fixture);
+    const sources = await Promise.all((await fixtureFiles(fixtureRoot)).map(async (sourcePath) => {
+      const bytes = await readFile(path.join(fixtureRoot, sourcePath));
+      return { path: sourcePath, contentBase64: bytes.toString("base64"), blobHash: createHash("sha256").update(bytes).digest("hex") };
+    }));
+    const result = analyzeWorkerRequest({
+      type: "analyze", requestId: createHash("sha256").update(fixture).digest("hex").slice(0, 8) + "-0000-4000-8000-000000000000",
+      snapshotId: fixture,
+      analyzerIds: ["frontend-project", "frontend-project-core", "typescript-core", "html-core", "style-core", "react-core", "react-router-core", "state-data-core", "visualization-core", "tooling-test-core"],
+      cachedAnalyses: [], sources
+    });
+    fixtureGraphs.set(fixture, buildFrontendGraph(result.outputs[0].frontendIr));
+  }
+  const observations = cases.map((item) => fixtureObservation(item, fixtureGraphs.get(item.fixture), deriveFrontendChangeImpact));
+  const splitReports = evaluateFrontendKnowledgeBySplit(cases, observations);
+  for (const [split, report] of Object.entries(splitReports)) {
+    const scopedCases = split === "all" ? cases : cases.filter((item) => item.split === (split === "heldOut" ? "held-out" : split));
+    try {
+      assertFrontendEvaluationReport(report, scopedCases);
+    } catch (error) {
+      throw new Error(`Frontend evaluation ${split} report is invalid: ${error.message}`, { cause: error });
+    }
+  }
+  assertFrontendQualityGate(splitReports.heldOut);
   const output = {
     dataset: "frontend-v1-core",
     datasetDigest,
-    status: "protocol-baseline-no-analyzer",
-    qualityGateEnforced: false,
+    status: "quality-gate-passed",
+    qualityGateEnforced: true,
     qualityGateReport: "heldOut",
     generatedFromCommittedFixtures: true,
     suite,

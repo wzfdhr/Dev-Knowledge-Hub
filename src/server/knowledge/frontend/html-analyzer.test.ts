@@ -29,7 +29,7 @@ describe("analyzeHtmlSource", () => {
 
     expect(output.analyzerId).toBe("html-core");
     expect(output.entities).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: "page", name: "index.html" }),
+      expect.objectContaining({ kind: "page", name: "index.html", completeness: "partial" }),
       expect.objectContaining({ kind: "dom_landmark", name: "main", facets: {
         "html-core": expect.objectContaining({ tagName: "main", role: "main" })
       } }),

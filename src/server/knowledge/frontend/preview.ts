@@ -35,6 +35,20 @@ const qualitySchema = z.object({
   }))
 });
 
+const searchSchema = z.object({
+  schemaVersion: z.literal(2),
+  snapshotId: z.string().min(1),
+  analyzerManifestDigest: z.string().min(1),
+  documents: z.array(z.object({
+    documentKey: z.string().min(1),
+    kind: z.string().min(1),
+    title: z.string().min(1),
+    content: z.string(),
+    citations: z.array(sourceRefSchema),
+    metadata: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+  }))
+});
+
 const visualizationSchema = z.object({
   schemaVersion: z.literal(2), snapshotId: z.string().min(1), analyzerManifestDigest: z.string().min(1),
   routeIds: z.array(z.string()), componentIds: z.array(z.string()), visualizationIds: z.array(z.string()),
@@ -98,23 +112,24 @@ export async function loadFrontendCandidatePreview(input: {
   if (packageValue.snapshotId !== build.snapshotId) {
     throw new FrontendPreviewUnavailableError("Frontend candidate package snapshot does not match the build");
   }
-  const load = async (stage: "graph" | "synthesize" | "lint" | "viz" | "validate", kind: string) => {
+  const load = async (stage: "graph" | "synthesize" | "index" | "lint" | "viz" | "validate", kind: string) => {
     const value = await artifact({
       store: input.store, runs, ids: packageValue.artifacts[stage], workspaceId: input.workspaceId,
       projectId: input.projectId, snapshotId: build.snapshotId, stage, kind
     });
     return input.reader.getJson(value);
   };
-  const [graph, pages, quality, visualization, validation] = await Promise.all([
+  const [graph, pages, search, quality, visualization, validation] = await Promise.all([
     load("graph", "frontend-graph-v2").then((value) => frontendGraphV2Schema.parse(value)),
     load("synthesize", "frontend-knowledge-pages-v2").then((value) => knowledgePagesSchema.parse(value)),
+    load("index", "frontend-search-index-v2").then((value) => searchSchema.parse(value)),
     load("lint", "frontend-knowledge-quality-v2").then((value) => qualitySchema.parse(value)),
     load("viz", "frontend-visualization-v2").then((value) => visualizationSchema.parse(value)),
     load("validate", "frontend-validation-v2").then((value) => validationSchema.parse(value))
   ]);
   return {
     build: { id: build.id, snapshotId: build.snapshotId, commitSha: build.commitSha, status: build.status },
-    graph, pages: pages.pages, quality, visualization, validation
+    graph, pages: pages.pages, search: search.documents, quality, visualization, validation
   };
 }
 

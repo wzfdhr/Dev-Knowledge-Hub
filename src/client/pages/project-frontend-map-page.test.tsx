@@ -18,6 +18,12 @@ describe("ProjectFrontendMapPage", () => {
     const api = {
       getProjectFrontendPreview: vi.fn(async () => ({
         status: "ready",
+        stale: false,
+        comparison: {
+          legacy: { entities: 1, factRelations: 0, pages: 1, searchDocuments: 1, impactPaths: 0, issues: 0 },
+          candidate: { entities: 3, factRelations: 2, candidateRelations: 0, pages: 1, searchDocuments: 1, impactPaths: 1, issues: 0 },
+          candidateEntityKeys: [], candidateFactKeys: [], impact: { legacyPaths: [], candidatePaths: ["src/app.tsx"], legacySuggestedTests: [], candidateSuggestedTests: ["src/app.test.tsx"] }, citations: { valid: true, checked: 2, invalid: [] }
+        },
         preview: {
           build: { id: "build", snapshotId: "snapshot", commitSha: "a".repeat(40), status: "ready" },
           graph: {
@@ -33,6 +39,7 @@ describe("ProjectFrontendMapPage", () => {
             ]
           },
           pages: [],
+          search: [],
           quality: { summary: { entities: 3, factEdges: 2, candidateEdges: 0, citedEntities: 3, components: 1, testedComponents: 0, routes: 1, visualizations: 0 }, issues: [] },
           visualization: { routeIds: ["route"], componentIds: ["component"], visualizationIds: [], factEdgeIds: ["route-page", "page-component"] },
           validation: { valid: true, pageCount: 1, issueCount: 0 }
@@ -47,6 +54,10 @@ describe("ProjectFrontendMapPage", () => {
 
     expect(await screen.findByRole("heading", { name: "React 前端地图" })).toBeVisible();
     expect(screen.getByText("3")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "候选包可供验收" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "新旧内核比较" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "变更影响与建议测试" })).toBeVisible();
+    expect(screen.getByText("src/app.test.tsx")).toBeVisible();
     await user.click(screen.getByRole("tab", { name: "路由与页面" }));
     expect(screen.getByText("DashboardPage")).toBeVisible();
     await user.click(screen.getAllByRole("button", { name: /src\/app.tsx 第 1 至 3 行/ })[0]!);

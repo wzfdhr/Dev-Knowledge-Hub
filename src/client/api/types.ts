@@ -327,7 +327,7 @@ export interface WorkspaceSearchResult extends SearchResult {
   projectSlug: string;
 }
 export interface SourceExcerpt extends Citation { content: string }
-export type FrontendPreviewStatus = "source_missing" | "build_missing" | "candidate_pending" | "ready";
+export type FrontendPreviewStatus = "source_missing" | "build_missing" | "build_failed" | "candidate_pending" | "ready";
 export interface FrontendPreviewEntity {
   id: string;
   kind: string;
@@ -362,6 +362,7 @@ export interface FrontendCandidatePreview {
   build: { id: string; snapshotId: string; commitSha: string; status: BuildStatus };
   graph: { schemaVersion: 2; snapshotId: string; analyzerManifestDigest: string; nodes: FrontendPreviewEntity[]; edges: FrontendPreviewEdge[] };
   pages: FrontendPreviewPage[];
+  search: Array<{ documentKey: string; kind: string; title: string; content: string; citations: GraphSourceRef[]; metadata: Record<string, string | number | boolean> }>;
   quality: {
     summary: { entities: number; factEdges: number; candidateEdges: number; citedEntities: number; components: number; testedComponents: number; routes: number; visualizations: number };
     issues: Array<{ rule: string; severity: "warning" | "info"; targetId: string; message: string; sourceRefs: GraphSourceRef[] }>;
@@ -369,8 +370,16 @@ export interface FrontendCandidatePreview {
   visualization: { routeIds: string[]; componentIds: string[]; visualizationIds: string[]; factEdgeIds: string[] };
   validation: { valid: boolean; pageCount: number; issueCount: number };
 }
+export interface FrontendKnowledgeComparison {
+  legacy: { entities: number; factRelations: number; pages: number; searchDocuments: number; impactPaths: number; issues: number };
+  candidate: { entities: number; factRelations: number; candidateRelations: number; pages: number; searchDocuments: number; impactPaths: number; issues: number };
+  candidateEntityKeys: string[];
+  candidateFactKeys: string[];
+  impact: { legacyPaths: string[]; candidatePaths: string[]; legacySuggestedTests: string[]; candidateSuggestedTests: string[] };
+  citations: { valid: boolean; checked: number; invalid: string[] };
+}
 export type FrontendPreviewResponse =
-  | { status: "ready"; preview: FrontendCandidatePreview }
+  | { status: "ready"; preview: FrontendCandidatePreview; comparison: FrontendKnowledgeComparison; stale: boolean }
   | { status: Exclude<FrontendPreviewStatus, "ready">; preview: null; build?: { id: string; status: BuildStatus } };
 export interface Feedback {
   id: string;

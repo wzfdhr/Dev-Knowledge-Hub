@@ -139,6 +139,7 @@ describe("B02 shadow pipeline", () => {
       snapshotId: snapshot.id,
       analyzerIds: [
         "frontend-project",
+        "frontend-project-core",
         "typescript-core",
         "html-core",
         "style-core",

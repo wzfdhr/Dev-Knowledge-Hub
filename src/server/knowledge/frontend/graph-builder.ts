@@ -54,6 +54,9 @@ export function buildFrontendGraph(ir: FrontendIR): FrontendGraph {
   const components = ir.entities.filter((entity) => entity.kind === "component");
   const pages = ir.entities.filter((entity) => entity.kind === "page");
   const styles = ir.entities.filter((entity) => entity.kind === "style_scope");
+  const packages = ir.entities.filter((entity) => entity.kind === "workspace_package");
+  const tooling = ir.entities.filter((entity) => entity.kind === "tooling_config");
+  const entries = ir.entities.filter((entity) => entity.kind === "application_entry");
   for (const page of pages) {
     const component = components.find((candidate) =>
       candidate.name === page.name && candidate.canonicalPath === page.canonicalPath && candidate.packageKey === page.packageKey
@@ -67,6 +70,21 @@ export function buildFrontendGraph(ir: FrontendIR): FrontendGraph {
     for (const style of styles.filter((candidate) => candidate.packageKey === component.packageKey)) {
       if (ir.edges.some((edge) => edge.kind === "styles" && edge.fromEntityId === component.id && edge.toEntityId === style.id)) continue;
       const relation = derivedEdge("styles", component, style, "candidate", "package_style_proximity");
+      edges.set(relation.id, relation);
+    }
+  }
+  for (const config of tooling) {
+    const owner = packages.find((candidate) => candidate.packageKey === config.packageKey) ?? packages[0];
+    if (!owner) continue;
+    for (const relation of [
+      derivedEdge("contains", owner, config, "fact"),
+      derivedEdge("configures", config, owner, "fact")
+    ]) edges.set(relation.id, relation);
+  }
+  for (const entry of entries) {
+    for (const exported of ir.entities.filter((candidate) => candidate.canonicalPath === entry.canonicalPath
+      && candidate.id !== entry.id && candidate.facets["typescript-core"]?.exported === true)) {
+      const relation = derivedEdge("exports", entry, exported, "fact");
       edges.set(relation.id, relation);
     }
   }

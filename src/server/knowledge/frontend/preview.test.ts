@@ -21,6 +21,7 @@ function fixture() {
   const manifests = [
     manifest("graph", "graph", "frontend-graph-v2"),
     manifest("pages", "synthesize", "frontend-knowledge-pages-v2"),
+    manifest("search", "index", "frontend-search-index-v2"),
     manifest("quality", "lint", "frontend-knowledge-quality-v2"),
     manifest("viz", "viz", "frontend-visualization-v2"),
     manifest("validation", "validate", "frontend-validation-v2"),
@@ -30,16 +31,17 @@ function fixture() {
   const values = new Map<string, unknown>([
     ["graph", { schemaVersion: 2, snapshotId, analyzerManifestDigest: hash, nodes: [], edges: [] }],
     ["pages", { schemaVersion: 2, snapshotId, pages: [{ id: hash, slug: "frontend-routes", title: "Routes and Pages", kind: "routes", items: [], citations: [ref], chunks: [{ heading: "Routes", content: "route: /", citations: [ref] }] }] }],
+    ["search", { schemaVersion: 2, snapshotId, analyzerManifestDigest: hash, documents: [{ documentKey: "frontend-routes:0", kind: "page", title: "Routes and Pages", content: "route: /", citations: [ref], metadata: { pageSlug: "frontend-routes", position: 0 } }] }],
     ["quality", { schemaVersion: 2, snapshotId, analyzerManifestDigest: hash, summary: { entities: 1, factEdges: 0, candidateEdges: 0, citedEntities: 1, components: 0, testedComponents: 0, routes: 1, visualizations: 0 }, issues: [] }],
     ["viz", { schemaVersion: 2, snapshotId, analyzerManifestDigest: hash, routeIds: [], componentIds: [], visualizationIds: [], factEdgeIds: [] }],
     ["validation", { schemaVersion: 2, family: "frontend-v2", stage: "validate", snapshotId, analyzerManifestDigest: hash, upstreamManifestIds: [], sourceArtifactId: "legacy-validation", valid: true, pageCount: 1, issueCount: 0 }],
-    ["package", { schemaVersion: 2, family: "frontend-v2", stage: "package", snapshotId, analyzerManifestDigest: hash, upstreamManifestIds: ["legacy-validation", "validation"], sourceArtifactId: "legacy-package", irSchemaVersion: 2, graphSchemaVersion: 2, artifacts: { convert: ["legacy-convert"], extract: ["legacy-extract", "frontend-extract"], tables: ["legacy-tables", "frontend-tables"], graph: ["legacy-graph", "graph"], synthesize: ["legacy-pages", "pages"], index: ["legacy-index", "frontend-index"], lint: ["legacy-quality", "quality"], viz: ["legacy-viz", "viz"], validate: ["legacy-validation", "validation"], package: ["legacy-package"] } }]
+    ["package", { schemaVersion: 2, family: "frontend-v2", stage: "package", snapshotId, analyzerManifestDigest: hash, upstreamManifestIds: ["legacy-validation", "validation"], sourceArtifactId: "legacy-package", irSchemaVersion: 2, graphSchemaVersion: 2, artifacts: { convert: ["legacy-convert"], extract: ["legacy-extract", "frontend-extract"], tables: ["legacy-tables", "frontend-tables"], graph: ["legacy-graph", "graph"], synthesize: ["legacy-pages", "pages"], index: ["legacy-index", "search"], lint: ["legacy-quality", "quality"], viz: ["legacy-viz", "viz"], validate: ["legacy-validation", "validation"], package: ["legacy-package"] } }]
   ]);
   const store = {
     getBuild: vi.fn(async () => ({ id: buildId, workspaceId, repositoryId: "repository", snapshotId, commitSha: "a".repeat(40), status: "ready" })),
     getRepository: vi.fn(async () => ({ id: "repository", workspaceId, projectId })),
     listPipelineStageRuns: vi.fn(async () => [
-      ...[["graph", "graph"], ["synthesize", "pages"], ["lint", "quality"], ["viz", "viz"], ["validate", "validation"]].map(([stage, output]) => ({
+      ...[["graph", "graph"], ["synthesize", "pages"], ["index", "search"], ["lint", "quality"], ["viz", "viz"], ["validate", "validation"]].map(([stage, output]) => ({
         id: `${stage}-run`, workspaceId, projectId, snapshotId, buildId, stage, attempt: 1, status: "succeeded",
         inputDigest: hash, outputManifestIds: [`legacy-${output}`, output], startedAt: null, finishedAt: null,
         errorCode: null, errorDetail: null
@@ -58,6 +60,7 @@ describe("loadFrontendCandidatePreview", () => {
 
     expect(result.build).toMatchObject({ id: buildId, snapshotId });
     expect(result.pages[0]).toMatchObject({ slug: "frontend-routes" });
+    expect(result.search[0]).toMatchObject({ documentKey: "frontend-routes:0" });
     expect(result.validation).toMatchObject({ valid: true, pageCount: 1 });
   });
 

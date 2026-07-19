@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { cp, mkdir, rm } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { cp, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { buildServer } from "./app.js";
 import { BuildService, type BuildJobQueue } from "./knowledge/build-service.js";
 import { ParserClient } from "./knowledge/frontend/runtime/parser-client.js";
+import { analyzeWorkerRequest } from "./knowledge/frontend/runtime/analyzer-worker.js";
 import {
   createFrontendShadowStageExecutor,
   createFrontendShadowStageInputPlanner,
@@ -18,7 +20,15 @@ import {
   normalizedSourcesPipelineInputDigest
 } from "./knowledge/pipeline/convert-stage.js";
 import { createKnowledgeIrStageExecutor } from "./knowledge/pipeline/extract-stage.js";
+import { createKnowledgeGraphStageExecutor } from "./knowledge/pipeline/graph-stage.js";
+import { createPipelineSearchIndexStageExecutor } from "./knowledge/pipeline/index-stage.js";
+import { createKnowledgePackageStageExecutor } from "./knowledge/pipeline/package-stage.js";
+import { createKnowledgeQualityStageExecutor } from "./knowledge/pipeline/quality-stage.js";
 import { createPipelineStageExecutor } from "./knowledge/pipeline/stage-executor.js";
+import { createKnowledgeSynthesisStageExecutor } from "./knowledge/pipeline/synthesize-stage.js";
+import { createTableSchemasStageExecutor } from "./knowledge/pipeline/tables-stage.js";
+import { createKnowledgeValidationStageExecutor } from "./knowledge/pipeline/validate-stage.js";
+import { createKnowledgeVisualizationStageExecutor } from "./knowledge/pipeline/viz-stage.js";
 import {
   PipelineStageWorker,
   type PipelineStageJob,
@@ -28,6 +38,7 @@ import { MemoryAppStore } from "./persistence/memory-store.js";
 
 const execute = promisify(execFile);
 const fixtureSource = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../test/fixtures/code-intelligence");
+const frontendFixtureSource = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../fixtures/frontend/react-vite");
 const fixturePath = "/tmp/devkh-e2e-fixture";
 
 class ImmediateQueue implements BuildJobQueue {
@@ -68,7 +79,8 @@ const app = buildServer({
   masterKey: Buffer.alloc(32, 12).toString("base64"),
   sessionSecret: "deterministic-e2e-session-secret",
   dataDir: "/tmp/devkh-e2e-data",
-  nodeEnv: "test"
+  nodeEnv: "test",
+  qualityArtifactReader: frontendArtifactStore
 });
 
 app.get("/__test__/fixture", async () => ({ path: fixturePath }));
@@ -181,6 +193,92 @@ app.post("/__test__/parser-unavailable-shadow", async (_request, reply) => {
     stage: failed,
     releaseIdBefore: release.id,
     releaseIdAfter: (await store.currentRelease(workspace.id, repository.id))?.id ?? null
+  };
+});
+
+app.post("/__test__/frontend-shadow", async (_request, reply) => {
+  const workspace = await store.defaultWorkspace();
+  const repository = workspace ? await store.currentRepository(workspace.id) : null;
+  const releaseBefore = workspace && repository ? await store.currentRelease(workspace.id, repository.id) : null;
+  if (!workspace || !repository || !releaseBefore) return reply.code(409).send({ error: "Publish a release first" });
+  const sourcePaths: string[] = [];
+  const visit = async (directory: string) => {
+    for (const entry of await readdir(directory)) {
+      const absolute = path.join(directory, entry);
+      if ((await stat(absolute)).isDirectory()) await visit(absolute);
+      else sourcePaths.push(path.relative(frontendFixtureSource, absolute).split(path.sep).join("/"));
+    }
+  };
+  await visit(frontendFixtureSource);
+  const snapshotId = randomUUID();
+  const commitSha = "b".repeat(40);
+  const files = await Promise.all(sourcePaths.map(async (sourcePath) => {
+    const bytes = await readFile(path.join(frontendFixtureSource, sourcePath));
+    return {
+      id: randomUUID(), workspaceId: workspace.id, snapshotId, path: sourcePath,
+      byteSize: bytes.byteLength, contentHash: createHash("sha256").update(bytes).digest("hex"),
+      language: path.extname(sourcePath).slice(1) || null
+    };
+  }));
+  const snapshot = await store.createSnapshot({
+    snapshot: {
+      id: snapshotId, workspaceId: workspace.id, repositoryId: repository.id, commitSha,
+      ref: "frontend-v1-demo", remoteUrl: null, commitTimestamp: new Date(), storagePath: frontendFixtureSource
+    },
+    files
+  });
+  const { build } = await store.createBuild({
+    workspaceId: workspace.id, repositoryId: repository.id, snapshotId,
+    snapshotPath: frontendFixtureSource, commitSha
+  });
+  const pipelineQueue = new ManualPipelineQueue();
+  const knowledgeV1Store = createKnowledgeV1StoreView(store);
+  const legacy = createPipelineStageExecutor({
+    convert: createNormalizedSourcesStageExecutor({ store: knowledgeV1Store, artifactStore: frontendArtifactStore }),
+    extract: createKnowledgeIrStageExecutor({ store: knowledgeV1Store, artifactStore: frontendArtifactStore }),
+    tables: createTableSchemasStageExecutor({ store: knowledgeV1Store, artifactStore: frontendArtifactStore }),
+    graph: createKnowledgeGraphStageExecutor({ store: knowledgeV1Store, artifactStore: frontendArtifactStore }),
+    synthesize: createKnowledgeSynthesisStageExecutor({ store: knowledgeV1Store, artifactStore: frontendArtifactStore }),
+    index: createPipelineSearchIndexStageExecutor({ store: knowledgeV1Store, artifactStore: frontendArtifactStore }),
+    lint: createKnowledgeQualityStageExecutor({ store: knowledgeV1Store, artifactStore: frontendArtifactStore }),
+    viz: createKnowledgeVisualizationStageExecutor({ store: knowledgeV1Store, artifactStore: frontendArtifactStore }),
+    validate: createKnowledgeValidationStageExecutor({ store: knowledgeV1Store, artifactStore: frontendArtifactStore }),
+    package: createKnowledgePackageStageExecutor({ store: knowledgeV1Store, artifactStore: frontendArtifactStore })
+  });
+  const worker = new PipelineStageWorker(
+    store,
+    pipelineQueue,
+    createFrontendShadowStageExecutor({
+      store,
+      artifactStore: frontendArtifactStore,
+      legacy,
+      frontendParser: {
+        analyze: async (input) => analyzeWorkerRequest({
+          ...input, type: "analyze", requestId: randomUUID()
+        })
+      }
+    }),
+    ["convert", "extract", "tables", "graph", "synthesize", "index", "lint", "viz", "validate", "package"],
+    5_000,
+    createFrontendShadowStageInputPlanner(store)
+  );
+  await worker.schedule({
+    workspaceId: workspace.id, projectId: repository.projectId, snapshotId: snapshot.id,
+    buildId: build.id, inputDigest: normalizedSourcesPipelineInputDigest(snapshot, files, build.purpose)
+  });
+  for (let index = 0; index < pipelineQueue.sent.length; index += 1) {
+    await worker.process(pipelineQueue.sent[index]!);
+  }
+  const stages = await store.listPipelineStageRuns(workspace.id, repository.projectId, build.id);
+  const releaseAfter = await store.currentRelease(workspace.id, repository.id);
+  if (!stages.every((stage) => ["succeeded", "reused"].includes(stage.status))) {
+    return reply.code(500).send({ error: "Frontend shadow pipeline did not complete", stages });
+  }
+  return {
+    buildId: build.id,
+    stageCount: stages.length,
+    releaseIdBefore: releaseBefore.id,
+    releaseIdAfter: releaseAfter?.id ?? null
   };
 });
 

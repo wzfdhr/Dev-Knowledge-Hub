@@ -209,7 +209,7 @@ integration("PostgreSQL cited knowledge integration", () => {
         .toMatchObject({ status: "committed", snapshotId: left.snapshotId });
       expect(await store.getUploadSession(randomUUID(), session.id)).toBeNull();
     } finally {
-      await rm(dataDir, { recursive: true, force: true });
+      await removeReadonlyDirectory(dataDir);
     }
   }, 30_000);
 
@@ -669,14 +669,12 @@ integration("PostgreSQL cited knowledge integration", () => {
         setup!.workspace.id, { kind: "upload", name: "Upgrade source" }
       );
       const snapshotId = randomUUID();
-      await store.createSnapshot({
-        snapshot: {
-          id: snapshotId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
-          commitSha: "a".repeat(40), ref: "upload", remoteUrl: null,
-          commitTimestamp: new Date("2026-07-17T00:00:00.000Z"), storagePath: "/tmp/frontend-upgrade"
-        },
-        files: []
-      });
+      await scopedPool.query(
+        `INSERT INTO source_snapshots
+           (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path)
+         VALUES ($1, $2, $3, $4, 'upload', NULL, $5, '/tmp/frontend-upgrade')`,
+        [snapshotId, setup!.workspace.id, repository!.id, "a".repeat(40), new Date("2026-07-17T00:00:00.000Z")]
+      );
       const createPublishedBuild = async () => {
         const { build } = await store.createBuild({
           workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId,

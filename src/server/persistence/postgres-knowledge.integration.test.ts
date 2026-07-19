@@ -2134,7 +2134,13 @@ integration("PostgreSQL cited knowledge integration", () => {
             contentDigest: "0".repeat(64), storageKey: "pending", sourceRefs: [],
             producer: "deterministic", createdAt: new Date().toISOString()
           },
-          value: { schemaVersion: expected.schemaVersion, stage, kind: expected.kind }
+          value: expected.kind === "frontend-validation-v2" ? {
+            schemaVersion: 2, family: "frontend-v2", stage: "validate", snapshotId,
+            analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+            upstreamManifestIds: [], sourceArtifactId: "integration-validation-source",
+            valid: true, pageCount: 1, issueCount: 0,
+            graphReferenceCount: 1, checkedReferenceCount: 1, invalidReferenceCount: 0
+          } : { schemaVersion: expected.schemaVersion, stage, kind: expected.kind }
         })).manifest));
         if (stage !== "package") {
           const stageRun = await store.createStageRun({

@@ -286,9 +286,7 @@ export function analyzeTypeScriptSource(inputValue: TypeScriptAnalyzerInput): Fr
         const targetImport = importedComponents.get(node.tagName.text);
         if (targetImport) {
           const target = componentEntity(input, targetImport.path, node.tagName.text, targetImport.node, {
-            declarationKind: "imported",
-            genericParameters: [],
-            utilityClasses: []
+            // Import sites establish identity and evidence; the definition owns semantic facets.
           });
           entities.set(target.id, target);
           const edge = factEdge(input, "renders", entity.id, target.id, node, node.tagName.text);

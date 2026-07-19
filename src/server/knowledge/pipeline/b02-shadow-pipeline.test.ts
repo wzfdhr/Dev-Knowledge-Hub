@@ -137,7 +137,15 @@ describe("B02 shadow pipeline", () => {
     const runs = await store.listPipelineStageRuns(workspaceId, project.id, build.id);
     expect(parserAnalyze).toHaveBeenCalledWith(expect.objectContaining({
       snapshotId: snapshot.id,
-      analyzerIds: ["frontend-project", "typescript-core", "html-core", "style-core"],
+      analyzerIds: [
+        "frontend-project",
+        "typescript-core",
+        "html-core",
+        "style-core",
+        "react-core",
+        "react-router-core",
+        "state-data-core"
+      ],
       cachedAnalyses: [],
       sources: [expect.objectContaining({ path: sourcePath, blobHash: hash(source) })]
     }));

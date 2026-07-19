@@ -7,6 +7,9 @@ import { VirtualSourceFs } from "./virtual-source-fs.js";
 import { AnalyzerRegistry } from "../analyzer-registry.js";
 import { analyzeHtmlSource } from "../html-analyzer.js";
 import { analyzeFrontendProjectManifest, type FrontendProjectManifest } from "../project-manifest.js";
+import { analyzeReactSource } from "../react-analyzer.js";
+import { analyzeReactRouterSource } from "../react-router-analyzer.js";
+import { analyzeStateDataSource } from "../state-data-analyzer.js";
 import { analyzeStyleSource } from "../style-analyzer.js";
 import { analyzeTypeScriptSource } from "../typescript-analyzer.js";
 import {
@@ -144,22 +147,37 @@ function analyzeFrontendIr(
       packageKey: packageKeyForPath(projectManifest, source.path)
     };
     const extension = source.path.endsWith(".d.ts") ? ".d.ts" : source.path.slice(source.path.lastIndexOf(".")).toLowerCase();
-    if (requestedAnalyzers.has("typescript-core")
-      && [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs", ".d.ts"].includes(extension)) {
-      return [analyzeTypeScriptSource({
-        ...base,
-        resolutions: resolutions.filter((resolution) => resolution.containingFile === source.path)
-          .map(({ specifier, resolvedPath }) => ({ specifier, resolvedPath }))
-      })];
+    const sourceOutputs = [];
+    const typedSource = [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs", ".d.ts"].includes(extension);
+    const sourceResolutions = resolutions.filter((resolution) => resolution.containingFile === source.path)
+      .map(({ specifier, resolvedPath }) => ({ specifier, resolvedPath }));
+    if (requestedAnalyzers.has("typescript-core") && typedSource) {
+      sourceOutputs.push(analyzeTypeScriptSource({ ...base, resolutions: sourceResolutions }));
     }
-    if (requestedAnalyzers.has("html-core") && extension === ".html") return [analyzeHtmlSource(base)];
+    if (requestedAnalyzers.has("react-core") && [".tsx", ".jsx"].includes(extension)) {
+      sourceOutputs.push(analyzeReactSource({ ...base, resolutions: sourceResolutions }));
+    }
+    if (requestedAnalyzers.has("react-router-core") && [".tsx", ".jsx", ".ts", ".js"].includes(extension)) {
+      sourceOutputs.push(analyzeReactRouterSource({ ...base, resolutions: sourceResolutions }));
+    }
+    if (requestedAnalyzers.has("state-data-core") && typedSource) {
+      sourceOutputs.push(analyzeStateDataSource({ ...base, resolutions: sourceResolutions }));
+    }
+    if (requestedAnalyzers.has("html-core") && extension === ".html") sourceOutputs.push(analyzeHtmlSource(base));
     if (requestedAnalyzers.has("style-core") && [".css", ".scss", ".sass", ".less"].includes(extension)) {
-      return [analyzeStyleSource(base)];
+      sourceOutputs.push(analyzeStyleSource(base));
     }
-    return [];
+    return sourceOutputs;
   });
   const registry = new AnalyzerRegistry();
-  for (const id of ["typescript-core", "html-core", "style-core"]) {
+  for (const id of [
+    "typescript-core",
+    "html-core",
+    "style-core",
+    "react-core",
+    "react-router-core",
+    "state-data-core"
+  ]) {
     registry.register({ id, version: "1.0.0", role: "core", facetSchema: z.record(z.string(), z.unknown()) });
   }
   if (outputs.length === 0) {
@@ -167,7 +185,7 @@ function analyzeFrontendIr(
   }
   const merged = registry.mergeOutputs(outputs);
   if (!merged.valid) {
-    throw new Error(`Frontend analyzer outputs conflict: ${merged.lintIssues.map((issue) => issue.rule).join(", ")}`);
+    throw new Error(`Frontend analyzer outputs conflict: ${merged.lintIssues.map((issue) => `${issue.rule}:${issue.targetId}`).join(", ")}`);
   }
   return merged.ir;
 }

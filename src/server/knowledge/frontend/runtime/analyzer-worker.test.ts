@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import { describe, expect, test } from "vitest";
 
@@ -95,6 +96,95 @@ describe("analyzer worker structural limits", () => {
       expect.objectContaining({ kind: "style_token", name: "--brand" })
     ]));
     expect(ir?.analyzerManifest.map((entry) => entry.analyzerId)).toEqual(["html-core", "style-core"]);
+  });
+
+  test("merges React application, router, state, and request facts without canonical conflicts", () => {
+    const result = analyzeWorkerRequest({
+      type: "analyze",
+      requestId: randomUUID(),
+      snapshotId: "snapshot-react-app",
+      analyzerIds: [
+        "frontend-project",
+        "typescript-core",
+        "react-core",
+        "react-router-core",
+        "state-data-core"
+      ],
+      cachedAnalyses: [],
+      sources: [
+        parserSource("package.json", JSON.stringify({ name: "react-app", dependencies: { react: "19.2.0", "react-router-dom": "7.18.1", zustand: "5.0.0" } })),
+        parserSource("src/store.ts", "import { create } from 'zustand'; export const useStore = create(() => ({ count: 0 }));"),
+        parserSource("src/api.ts", "import axios from 'axios'; export function loadTeam(id: string) { return axios.get(`/api/teams/${id}`); }"),
+        parserSource("src/app.tsx", [
+          "import { useEffect } from 'react';",
+          "import { useStore } from './store';",
+          "import { loadTeam } from './api';",
+          "export function App() {",
+          "  const count = useStore((state) => state.count);",
+          "  useEffect(() => { void loadTeam('one'); }, []);",
+          "  return <main>{count}</main>;",
+          "}"
+        ].join("\n")),
+        parserSource("src/router.tsx", [
+          "import { createBrowserRouter } from 'react-router-dom';",
+          "import { App } from './app';",
+          "export const router = createBrowserRouter([{ path: '/', Component: App }]);"
+        ].join("\n"))
+      ]
+    });
+    const ir = result.outputs[0]?.frontendIr;
+
+    expect([...new Set(ir?.analyzerManifest.map((entry) => entry.analyzerId))]).toEqual([
+      "react-core",
+      "react-router-core",
+      "state-data-core",
+      "typescript-core"
+    ]);
+    expect(ir?.entities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "component", name: "App" }),
+      expect.objectContaining({ kind: "route", name: "/" }),
+      expect.objectContaining({ kind: "state_store", name: "useStore" }),
+      expect.objectContaining({ kind: "api_operation", name: "GET /api/teams/:id" })
+    ]));
+    expect(ir?.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "routes_to" }),
+      expect.objectContaining({ kind: "reads_state" }),
+      expect.objectContaining({ kind: "requests" })
+    ]));
+  });
+
+  test("analyzes the approved React 18 fixture as an application flow", () => {
+    const fixtureRoot = "fixtures/frontend/react-vite";
+    const paths = ["package.json", "tsconfig.json", "src/api.ts", "src/app.tsx", "src/chart.tsx", "src/main.tsx", "src/router.tsx", "src/store.ts"];
+    const result = analyzeWorkerRequest({
+      type: "analyze",
+      requestId: randomUUID(),
+      snapshotId: "snapshot-react-18-fixture",
+      analyzerIds: ["frontend-project", "typescript-core", "react-core", "react-router-core", "state-data-core"],
+      cachedAnalyses: [],
+      sources: paths.map((sourcePath) => parserSource(sourcePath, readFileSync(`${fixtureRoot}/${sourcePath}`, "utf8")))
+    });
+    const ir = result.outputs[0]?.frontendIr;
+    const dashboard = ir?.entities.find((entity) => entity.kind === "component" && entity.name === "DashboardPage");
+
+    expect(dashboard?.facets["react-core"]).toMatchObject({
+      props: [expect.objectContaining({ name: "teamId", defaultValue: "\"core\"" })],
+      loadingConsumers: ["loading"],
+      errorConsumers: ["error"]
+    });
+    expect(ir?.entities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "component", name: "DashboardShell" }),
+      expect.objectContaining({ kind: "route", name: "/" }),
+      expect.objectContaining({ kind: "state_store", name: "SessionContext" }),
+      expect.objectContaining({ kind: "state_store", name: "useDashboardStore" }),
+      expect.objectContaining({ kind: "api_operation", name: "GET /api/teams/:teamId/dashboard" })
+    ]));
+    expect(ir?.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "injects" }),
+      expect.objectContaining({ kind: "reads_state" }),
+      expect.objectContaining({ kind: "requests" }),
+      expect.objectContaining({ kind: "routes_to" })
+    ]));
   });
 
   test("reuses validated path-free cached syntax facts", () => {

@@ -316,7 +316,15 @@ export function createFrontendShadowStageExecutor(input: {
       }))).filter((item): item is NonNullable<typeof item> => item !== null);
       const parserResult = parserRuntimeResultSchema.parse(await input.frontendParser.analyze({
         snapshotId: run.snapshotId,
-        analyzerIds: ["frontend-project", "typescript-core", "html-core", "style-core"],
+        analyzerIds: [
+          "frontend-project",
+          "typescript-core",
+          "html-core",
+          "style-core",
+          "react-core",
+          "react-router-core",
+          "state-data-core"
+        ],
         sources: normalized.map((source) => ({
           path: source.path,
           contentBase64: Buffer.from(source.content, "utf8").toString("base64"),

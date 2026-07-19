@@ -52,6 +52,6 @@
     "node": "22.13.0",
     "dataset": "frontend-v1-core",
     "datasetDigestAlgorithm": "sha256",
-    "datasetDigest": "8b775c5ef674d22ef85504f11db2f479d74a7c9a63730abe326520bd27ceac8a"
+    "datasetDigest": "4a35d58e693f9770f086ce522ab3c0439d414ed17e597ddfe4cd29ce7b7cc6d1"
   }
 }

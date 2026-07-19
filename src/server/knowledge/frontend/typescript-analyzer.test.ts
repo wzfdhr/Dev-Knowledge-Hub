@@ -68,4 +68,18 @@ describe("analyzeTypeScriptSource", () => {
     ]));
     expect(output.edges.some((edge) => edge.kind === "lazy_loads")).toBe(false);
   });
+
+  test("does not claim definition facets for imported component placeholders", () => {
+    const source = "import { Button } from './button'; export function App() { return <Button />; }";
+    const output = analyzeTypeScriptSource({
+      snapshotId: "snapshot-3",
+      path: "src/app.tsx",
+      content: source,
+      blobHash: createHash("sha256").update(source).digest("hex"),
+      packageKey: "app",
+      resolutions: [{ specifier: "./button", resolvedPath: "src/button.tsx" }]
+    });
+
+    expect(output.entities.find((entity) => entity.kind === "component" && entity.name === "Button")?.facets).toEqual({});
+  });
 });

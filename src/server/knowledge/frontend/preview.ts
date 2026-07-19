@@ -2,7 +2,12 @@ import { z } from "zod";
 
 import { sourceRefSchema, type ArtifactManifest } from "../../../shared/api-contracts.js";
 import type { AppStore, PipelineStageRunRecord } from "../../persistence/store.js";
-import { frontendGraphV2Schema, frontendPipelinePackageSchema } from "./compatibility.js";
+import {
+  assertFrontendCandidateValid,
+  frontendGraphV2Schema,
+  frontendPipelinePackageSchema,
+  frontendValidationV2Schema
+} from "./compatibility.js";
 
 const knowledgePagesSchema = z.object({
   schemaVersion: z.literal(2),
@@ -53,19 +58,6 @@ const visualizationSchema = z.object({
   schemaVersion: z.literal(2), snapshotId: z.string().min(1), analyzerManifestDigest: z.string().min(1),
   routeIds: z.array(z.string()), componentIds: z.array(z.string()), visualizationIds: z.array(z.string()),
   factEdgeIds: z.array(z.string())
-});
-
-const validationSchema = z.object({
-  schemaVersion: z.literal(2), family: z.literal("frontend-v2"), stage: z.literal("validate"),
-  snapshotId: z.string().min(1), analyzerManifestDigest: z.string().min(1), valid: z.boolean(),
-  pageCount: z.number().int().nonnegative(), issueCount: z.number().int().nonnegative(),
-  graphReferenceCount: z.number().int().nonnegative(), checkedReferenceCount: z.number().int().nonnegative(),
-  invalidReferenceCount: z.number().int().nonnegative()
-}).passthrough().superRefine((value, context) => {
-  if (value.valid && (value.graphReferenceCount === 0 || value.checkedReferenceCount < value.graphReferenceCount
-    || value.invalidReferenceCount !== 0)) {
-    context.addIssue({ code: "custom", message: "Valid frontend candidate lacks complete Graph reference evidence" });
-  }
 });
 
 type PreviewStore = Pick<AppStore, "getBuild" | "getRepository" | "listPipelineStageRuns" | "findArtifactById">;
@@ -132,9 +124,13 @@ export async function loadFrontendCandidatePreview(input: {
     load("index", "frontend-search-index-v2").then((value) => searchSchema.parse(value)),
     load("lint", "frontend-knowledge-quality-v2").then((value) => qualitySchema.parse(value)),
     load("viz", "frontend-visualization-v2").then((value) => visualizationSchema.parse(value)),
-    load("validate", "frontend-validation-v2").then((value) => validationSchema.parse(value))
+    load("validate", "frontend-validation-v2").then((value) => frontendValidationV2Schema.parse(value))
   ]);
-  if (!validation.valid) throw new FrontendPreviewUnavailableError("Frontend candidate validation failed");
+  try {
+    assertFrontendCandidateValid(validation);
+  } catch {
+    throw new FrontendPreviewUnavailableError("Frontend candidate validation failed");
+  }
   return {
     build: { id: build.id, snapshotId: build.snapshotId, commitSha: build.commitSha, status: build.status },
     graph, pages: pages.pages, search: search.documents, quality, visualization, validation

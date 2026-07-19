@@ -77,6 +77,7 @@ describe("loadFrontendCandidatePreview", () => {
     values.set("validation", {
       schemaVersion: 2, family: "frontend-v2", stage: "validate", snapshotId,
       analyzerManifestDigest: hash, valid: false, pageCount: 1, issueCount: 0,
+      upstreamManifestIds: [], sourceArtifactId: "legacy-validation",
       graphReferenceCount: 2, checkedReferenceCount: 5, invalidReferenceCount: 1
     });
 

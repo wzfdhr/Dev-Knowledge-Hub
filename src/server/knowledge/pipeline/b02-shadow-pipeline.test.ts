@@ -67,7 +67,11 @@ describe("B02 shadow pipeline", () => {
   test("refuses to package a candidate whose complete reference validation failed", () => {
     expect(() => assertFrontendCandidateValid({ valid: false, invalidReferenceCount: 1 }))
       .toThrow("requires a valid candidate");
-    expect(() => assertFrontendCandidateValid({ valid: true, invalidReferenceCount: 0 })).not.toThrow();
+    expect(() => assertFrontendCandidateValid({ valid: true, invalidReferenceCount: 0 }))
+      .toThrow("complete Graph reference evidence");
+    expect(() => assertFrontendCandidateValid({
+      valid: true, graphReferenceCount: 2, checkedReferenceCount: 5, invalidReferenceCount: 0
+    })).not.toThrow();
   });
 
   test("persists, reuses, and verifies both artifact families without changing v1 graph behavior", async () => {

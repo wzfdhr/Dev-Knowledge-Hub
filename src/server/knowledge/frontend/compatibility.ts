@@ -77,6 +77,38 @@ export const frontendGraphV2Schema = z.object({
   edges: z.array(frontendEdgeSchema)
 }).strict();
 
+const frontendValidationEvidenceSchema = z.object({
+  valid: z.literal(true),
+  graphReferenceCount: z.number().int().positive(),
+  checkedReferenceCount: z.number().int().positive(),
+  invalidReferenceCount: z.literal(0)
+}).passthrough().superRefine((value, context) => {
+  if (value.checkedReferenceCount < value.graphReferenceCount) {
+    context.addIssue({ code: "custom", message: "Checked references do not cover Graph references" });
+  }
+});
+
+export const frontendValidationV2Schema = frontendPipelineEnvelopeSchema.extend({
+  stage: z.literal("validate"),
+  valid: z.boolean(),
+  pageCount: z.number().int().nonnegative(),
+  issueCount: z.number().int().nonnegative(),
+  graphReferenceCount: z.number().int().nonnegative(),
+  checkedReferenceCount: z.number().int().nonnegative(),
+  invalidReferenceCount: z.number().int().nonnegative()
+}).strict();
+
+export function assertFrontendCandidateValid(value: unknown): asserts value is {
+  valid: true; graphReferenceCount: number; checkedReferenceCount: number; invalidReferenceCount: 0;
+} {
+  if (!value || typeof value !== "object" || !("valid" in value) || value.valid !== true) {
+    throw new Error("Frontend shadow package requires a valid candidate");
+  }
+  if (!frontendValidationEvidenceSchema.safeParse(value).success) {
+    throw new Error("Frontend shadow package requires complete Graph reference evidence");
+  }
+}
+
 export const frontendPipelinePackageSchema = frontendPipelineEnvelopeSchema.extend({
   stage: z.literal("package"),
   irSchemaVersion: z.literal(FRONTEND_V2_IR_SCHEMA_VERSION),
@@ -165,21 +197,36 @@ export async function createVerifiedFrontendReleaseDraft(input: {
       && candidate.snapshotId === build.snapshotId
       && ids.every((id) => candidate.outputManifestIds.includes(id)));
     if (!stageRun) throw new Error(`Frontend v2 package ${stage} artifacts are not completed build outputs`);
-    const manifests = await Promise.all(ids.map(async (id) => {
+    const artifacts = await Promise.all(ids.map(async (id) => {
       const internal = await input.store.findArtifactById(id);
       if (!internal || internal.workspaceId !== input.workspaceId
         || internal.projectId !== repository.projectId || internal.snapshotId !== build.snapshotId
         || internal.stage !== stage) {
         throw new Error(`Frontend v2 package ${stage} artifact does not belong to this build scope`);
       }
-      await input.artifactReader.getJson(internal);
-      return internal;
+      return { manifest: internal, value: await input.artifactReader.getJson(internal) };
     }));
     assertFrontendArtifactFamily(
       stage,
       stage === "package" ? ["knowledge-v1"] : ["knowledge-v1", "frontend-v2"],
-      manifests
+      artifacts.map((artifact) => artifact.manifest)
     );
+    if (stage === "validate") {
+      const expected = ARTIFACT_KINDS.validate["frontend-v2"];
+      const validation = artifacts.find((artifact) => artifact.manifest.kind === expected.kind
+        && artifact.manifest.schemaVersion === expected.schemaVersion);
+      const parsed = frontendValidationV2Schema.safeParse(validation?.value);
+      if (!parsed.success) throw new Error("Frontend v2 release requires complete Graph reference evidence");
+      try {
+        assertFrontendCandidateValid(parsed.data);
+      } catch (error) {
+        throw new Error("Frontend v2 release requires complete Graph reference evidence", { cause: error });
+      }
+      if (parsed.data.snapshotId !== build.snapshotId
+        || parsed.data.analyzerManifestDigest !== value.analyzerManifestDigest) {
+        throw new Error("Frontend v2 validation provenance does not match its release package");
+      }
+    }
   }
   return input.store.createReleaseDraft(input.workspaceId, repository.id, build.id, input.version, {
     releaseArtifactFamily: "frontend-v2",

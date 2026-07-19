@@ -30,8 +30,10 @@ import {
   EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
   FRONTEND_V2_GRAPH_SCHEMA_VERSION,
   FRONTEND_V2_IR_SCHEMA_VERSION,
+  assertFrontendCandidateValid,
   assertFrontendArtifactFamily,
-  frontendGraphV2Schema
+  frontendGraphV2Schema,
+  frontendValidationV2Schema
 } from "./compatibility.js";
 import type { FrontendKnowledgeMode } from "./rollout-mode.js";
 import type { ParserAnalyzeRequest } from "./runtime/parser-protocol.js";
@@ -297,11 +299,7 @@ function irFromGraph(value: ReturnType<typeof buildFrontendGraph>): FrontendIR {
   };
 }
 
-export function assertFrontendCandidateValid(value: unknown): asserts value is { valid: true } {
-  if (!value || typeof value !== "object" || !("valid" in value) || value.valid !== true) {
-    throw new Error("Frontend shadow package requires a valid candidate");
-  }
-}
+export { assertFrontendCandidateValid } from "./compatibility.js";
 
 export function createFrontendShadowStageExecutor(input: {
   store: ShadowStore;
@@ -537,8 +535,14 @@ export function createFrontendShadowStageExecutor(input: {
         break;
       }
       case "package": {
-        const validation = await frontendUpstreamValue(input, upstreamIds, "validate");
+        const validation = frontendValidationV2Schema.parse(
+          await frontendUpstreamValue(input, upstreamIds, "validate")
+        );
         assertFrontendCandidateValid(validation);
+        if (validation.snapshotId !== run.snapshotId
+          || validation.analyzerManifestDigest !== baseValue.analyzerManifestDigest) {
+          throw new Error("Frontend shadow package validation provenance does not match the candidate");
+        }
         value = {
             ...baseValue,
             irSchemaVersion: FRONTEND_V2_IR_SCHEMA_VERSION,

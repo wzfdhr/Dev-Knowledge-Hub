@@ -6,12 +6,27 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
-import type { ApiClient } from "../api/client";
+import { ApiError, type ApiClient } from "../api/client";
 import { ProjectFrontendMapPage } from "./project-frontend-map-page";
 
 afterEach(cleanup);
 
 describe("ProjectFrontendMapPage", () => {
+  test("shows invalid candidate evidence instead of a network diagnosis for preview 409", async () => {
+    const api = {
+      getProjectFrontendPreview: vi.fn(async () => {
+        throw new ApiError(409, "FRONTEND_PREVIEW_INVALID", "Frontend candidate package is incomplete or invalid");
+      })
+    } as unknown as ApiClient;
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={["/projects/project/frontend-map"]}><Routes>
+      <Route path="/projects/:projectId/frontend-map" element={<ProjectFrontendMapPage api={api} />} />
+    </Routes></MemoryRouter></QueryClientProvider>);
+
+    expect(await screen.findByRole("heading", { name: "候选引用校验未通过" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "暂时无法读取预览" })).not.toBeInTheDocument();
+  });
+
   test("navigates the frontend map and opens an exact candidate citation", async () => {
     const user = userEvent.setup();
     const ref = { snapshotId: "snapshot", path: "src/app.tsx", startLine: 1, endLine: 3, blobHash: "1".repeat(64) };

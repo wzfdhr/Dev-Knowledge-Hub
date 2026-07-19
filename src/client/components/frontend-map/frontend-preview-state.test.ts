@@ -37,6 +37,8 @@ describe("frontend preview product states", () => {
 
   test("distinguishes permission loss from network failure", () => {
     expect(frontendPreviewErrorState(new ApiError(403, "FORBIDDEN", "Forbidden")).code).toBe("permission_lost");
+    expect(frontendPreviewErrorState(new ApiError(409, "FRONTEND_PREVIEW_INVALID", "Invalid candidate")).code)
+      .toBe("citation_invalid");
     expect(frontendPreviewErrorState(new TypeError("fetch failed")).code).toBe("network_failure");
   });
 });

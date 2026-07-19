@@ -207,7 +207,12 @@ describe("B02 shadow pipeline", () => {
       pages: expect.arrayContaining([expect.objectContaining({ slug: "frontend-architecture" })])
     });
     await expect(frontendValue("index", "frontend-search-index-v2")).resolves.toMatchObject({
-      documents: expect.arrayContaining([expect.objectContaining({ title: "Frontend Architecture" })])
+      documents: expect.arrayContaining([expect.objectContaining({
+        title: `Frontend Architecture: ${sourcePath}`,
+        content: expect.stringContaining(`application_entry: ${sourcePath}`),
+        citations: expect.arrayContaining([expect.objectContaining({ path: sourcePath })]),
+        metadata: expect.objectContaining({ entityId: expect.any(String) })
+      })])
     });
     await expect(frontendValue("lint", "frontend-knowledge-quality-v2")).resolves.toMatchObject({
       summary: expect.objectContaining({ entities: expect.any(Number), citedEntities: expect.any(Number) })

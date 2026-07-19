@@ -105,10 +105,14 @@ function parseCase(value, declaredSplit, line, datasetName) {
   if (negative && (expectedValues.length || !forbiddenEntityIds.length || !forbiddenFactEdgeIds.length || !forbiddenCitations.length)) {
     throw new Error(`Frontend evaluation case ${id} negative access cases must expect no results and declare forbidden evidence`);
   }
-  if (!negative && (!parsedExpected.entityIds.length || !parsedExpected.searchEntityIds.length)) {
+  const authorizedEmpty = !negative && parsedExpected.searchEntityIds.length === 0;
+  if (authorizedEmpty && expectedValues.length) {
+    throw new Error(`Frontend evaluation case ${id} authorized empty cases must expect no results`);
+  }
+  if (!negative && !authorizedEmpty && (!parsedExpected.entityIds.length || !parsedExpected.searchEntityIds.length)) {
     throw new Error(`Frontend evaluation case ${id} requires expected entities and search results`);
   }
-  if (!negative && !parsedExpected.citations.length) {
+  if (!negative && !authorizedEmpty && !parsedExpected.citations.length) {
     throw new Error(`Frontend evaluation case ${id} requires at least one citation`);
   }
   if (!negative && parsedExpected.citations.some((citation) => !parsedExpected.searchEntityIds.includes(citation.entityId))) {
@@ -399,6 +403,7 @@ export function evaluateFrontendKnowledge(cases, observations) {
   let citationsSeen = 0;
   let validCitations = 0;
   let negativeCases = 0;
+  let authorizedEmptyCases = 0;
   let falsePositiveEmpty = 0;
   let leakage = 0;
   const failures = [];
@@ -425,8 +430,19 @@ export function evaluateFrontendKnowledge(cases, observations) {
         || results.length > 0
         || results.some((result) => (result.citations?.length ?? 0) > 0);
       if (returnedAnything) {
-        falsePositiveEmpty += 1;
         leakage += 1;
+      }
+      continue;
+    }
+    if (!item.expected.searchEntityIds.length) {
+      authorizedEmptyCases += 1;
+      const returnedAnything = (observation.entityIds?.length ?? 0) > 0
+        || (observation.factEdgeIds?.length ?? 0) > 0
+        || (observation.impactEntityIds?.length ?? 0) > 0
+        || results.length > 0;
+      if (returnedAnything) {
+        falsePositiveEmpty += 1;
+        failures.push({ caseId: item.id, kind: "unexpected-search-result" });
       }
       continue;
     }
@@ -448,7 +464,6 @@ export function evaluateFrontendKnowledge(cases, observations) {
   }
 
   const activeCapabilityMetrics = [...capabilityEntities.values()].filter((metric) => metric.expected || metric.actual);
-  const positiveCases = cases.length - negativeCases;
   const rawCounts = {
     entity,
     edge,
@@ -456,14 +471,16 @@ export function evaluateFrontendKnowledge(cases, observations) {
     capabilityEntities: Object.fromEntries(capabilityEntities),
     search: { cases: searchCases, recalled, reciprocalRanks },
     citations: { checked: citationsSeen, valid: validCitations },
-    negative: { cases: negativeCases, falsePositive: falsePositiveEmpty, leakageCases: leakage }
+    empty: { cases: authorizedEmptyCases, falsePositive: falsePositiveEmpty },
+    negative: { cases: negativeCases, leakageCases: leakage }
   };
   return {
     protocolVersion: 1,
     caseIds: cases.map((item) => item.id),
     denominators: {
       totalCases: cases.length,
-      positiveCases,
+      positiveCases: searchCases,
+      authorizedEmptyCases,
       negativeCases,
       capabilities: new Set(cases.map((item) => item.capability)).size,
       entityExpected: entity.expected,
@@ -484,7 +501,7 @@ export function evaluateFrontendKnowledge(cases, observations) {
       recallAt5: searchCases ? recalled / searchCases : 0,
       mrr: searchCases ? reciprocalRanks / searchCases : 0,
       citationValidity: citationsSeen ? validCitations / citationsSeen : 0,
-      falsePositiveEmptyRate: negativeCases ? falsePositiveEmpty / negativeCases : 0,
+      falsePositiveEmptyRate: authorizedEmptyCases ? falsePositiveEmpty / authorizedEmptyCases : 0,
       impactPrecision: precision(impact),
       impactRecall: recall(impact),
       unauthorizedOrUnpublishedLeakage: leakage
@@ -512,11 +529,13 @@ function close(left, right) {
 }
 
 export function assertFrontendEvaluationReport(report, cases) {
-  const positiveCases = cases.filter((item) => item.access === "authorized-published").length;
+  const positiveCases = cases.filter((item) => item.access === "authorized-published" && item.expected.searchEntityIds.length).length;
+  const authorizedEmptyCases = cases.filter((item) => item.access === "authorized-published" && !item.expected.searchEntityIds.length).length;
   const expectedDenominators = {
     totalCases: cases.length,
     positiveCases,
-    negativeCases: cases.length - positiveCases,
+    authorizedEmptyCases,
+    negativeCases: cases.length - positiveCases - authorizedEmptyCases,
     capabilities: new Set(cases.map((item) => item.capability)).size,
     entityExpected: cases.reduce((sum, item) => sum + item.expected.entityIds.length, 0),
     edgeExpected: cases.reduce((sum, item) => sum + item.expected.factEdgeIds.length, 0),
@@ -535,6 +554,8 @@ export function assertFrontendEvaluationReport(report, cases) {
     || report.denominators.edgeExpected !== raw.edge.expected
     || report.denominators.edgePredicted !== raw.edge.actual
     || report.denominators.searchCases !== raw.search.cases
+    || report.denominators.authorizedEmptyCases !== raw.empty.cases
+    || report.denominators.negativeCases !== raw.negative.cases
     || report.denominators.citations !== raw.citations.checked
     || report.denominators.impactExpected !== raw.impact.expected
     || report.denominators.impactPredicted !== raw.impact.actual) {
@@ -549,7 +570,7 @@ export function assertFrontendEvaluationReport(report, cases) {
     recallAt5: raw.search.cases ? raw.search.recalled / raw.search.cases : 0,
     mrr: raw.search.cases ? raw.search.reciprocalRanks / raw.search.cases : 0,
     citationValidity: raw.citations.checked ? raw.citations.valid / raw.citations.checked : 0,
-    falsePositiveEmptyRate: raw.negative.cases ? raw.negative.falsePositive / raw.negative.cases : 0,
+    falsePositiveEmptyRate: raw.empty.cases ? raw.empty.falsePositive / raw.empty.cases : 0,
     impactPrecision: precision(raw.impact),
     impactRecall: recall(raw.impact),
     unauthorizedOrUnpublishedLeakage: raw.negative.leakageCases
@@ -643,8 +664,10 @@ export async function main() {
   const inputs = await Promise.all([
     loadDataset(root, "evaluation/frontend/train/react-core.jsonl", "train"),
     loadDataset(root, "evaluation/frontend/train/security-negative.jsonl", "train"),
+    loadDataset(root, "evaluation/frontend/train/no-result.jsonl", "train"),
     loadDataset(root, "evaluation/frontend/held-out/react-core.jsonl", "held-out"),
-    loadDataset(root, "evaluation/frontend/held-out/security-negative.jsonl", "held-out")
+    loadDataset(root, "evaluation/frontend/held-out/security-negative.jsonl", "held-out"),
+    loadDataset(root, "evaluation/frontend/held-out/no-result.jsonl", "held-out")
   ]);
   const cases = parseFrontendEvaluationDatasets(inputs);
   const datasetDigest = digestFrontendEvaluationDatasets(inputs);

@@ -22,19 +22,31 @@ const edge: FrontendEdge = {
 };
 const document = {
   documentKey: "frontend-components:0", kind: "page" as const, title: "Components and Design",
-  content: "component: DashboardPage\ncomponent: DashboardChart", citations: [ref], metadata: {}
+  content: "component: DashboardPage react component jsx render tree", citations: [ref], metadata: { entityId: page.id }
+};
+const chartDocument = {
+  documentKey: "frontend-components:1", kind: "page" as const, title: "Components and Design",
+  content: "component: DashboardChart react component chart", citations: [ref], metadata: { entityId: chart.id }
 };
 
 describe("frontend candidate knowledge search", () => {
   test("ranks analyzer entities from real index documents and returns fact evidence", () => {
     const results = searchFrontendKnowledge({
-      query: "Where does DashboardPage render its chart?", documents: [document],
+      query: "Where does DashboardPage render its chart?", documents: [document, chartDocument],
       graph: { nodes: [page, chart], edges: [edge] },
       access: { canReadProject: true, visibility: "published", buildId: "build", currentReleaseBuildId: "build", viewerRole: "member" }
     });
 
     expect(results[0]).toMatchObject({ entityKey: "component:DashboardPage", factKeys: ["renders:component:DashboardPage->component:DashboardChart"] });
     expect(results[0]?.citations).toEqual([ref]);
+  });
+
+  test("requires the generated index document content instead of ranking Graph data alone", () => {
+    const access = { canReadProject: true, visibility: "published" as const, buildId: "build", currentReleaseBuildId: "build", viewerRole: "member" as const };
+    expect(searchFrontendKnowledge({
+      query: "DashboardPage", documents: [{ ...document, title: "", content: "" }],
+      graph: { nodes: [page, chart], edges: [edge] }, access
+    })).toEqual([]);
   });
 
   test("enforces project, release, and administrator shadow visibility", () => {

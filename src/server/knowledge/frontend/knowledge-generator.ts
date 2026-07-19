@@ -14,7 +14,7 @@ export interface FrontendKnowledgePage {
 }
 
 const sections: Array<{ slug: string; title: string; kind: FrontendKnowledgePage["kind"]; entityKinds: FrontendEntity["kind"][] }> = [
-  { slug: "frontend-architecture", title: "Frontend Architecture", kind: "architecture", entityKinds: ["workspace_package", "application_entry"] },
+  { slug: "frontend-architecture", title: "Frontend Architecture", kind: "architecture", entityKinds: ["workspace_package", "application_entry", "dom_landmark"] },
   { slug: "frontend-components", title: "Components and Design", kind: "components", entityKinds: ["component", "style_scope", "style_token", "form"] },
   { slug: "frontend-data", title: "State and Data", kind: "data", entityKinds: ["state_store", "state_field", "api_operation", "data_schema"] },
   { slug: "frontend-routes", title: "Routes and Pages", kind: "routes", entityKinds: ["route", "layout", "page"] },

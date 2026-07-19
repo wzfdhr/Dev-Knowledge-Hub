@@ -20,7 +20,7 @@ Run:
 npm run evaluate:frontend
 ```
 
-The command executes the committed analyzers against all 300 train and held-out fixture cases. Missing observations, skipped datasets, malformed reports, or a failed threshold exit non-zero. The held-out gate is:
+The command executes the committed analyzers and candidate search against all 318 train and held-out fixture cases. The suite includes 15 authorized queries whose correct result is empty, separately from unauthorized and unpublished access cases. Missing observations, skipped datasets, malformed reports, or a failed threshold exit non-zero. The held-out gate is:
 
 Observations are produced by the same candidate search implementation used by the administrator preview API. It ranks analyzer entities through the generated `index` documents and fact Graph, returns Graph semantic keys and physical source references, and applies project, release, and shadow-role visibility. Evaluation access cases instantiate those policy inputs; the policy decides whether results are visible. Expected entities, relations, citations, and impact labels are used only by the scoring step and are never inputs to retrieval or ranking.
 

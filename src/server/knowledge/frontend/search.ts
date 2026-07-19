@@ -65,6 +65,10 @@ function normalized(value: string): string {
   return value.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLocaleLowerCase("en-US").replace(/[^\p{L}\p{N}_:/.@-]+/gu, " ").trim();
 }
 
+function searchableTerm(term: string): boolean {
+  return term.length >= 3 || /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]{2}/u.test(term);
+}
+
 function sourceRefKey(reference: SourceRef): string {
   return `${reference.snapshotId}\0${reference.path}\0${reference.startLine}\0${reference.endLine}\0${reference.blobHash}`;
 }
@@ -74,13 +78,13 @@ function uniqueRefs(references: readonly SourceRef[]): SourceRef[] {
 }
 
 export function buildFrontendSearchDocuments(pages: readonly FrontendKnowledgePage[]): FrontendSearchDocument[] {
-  return pages.flatMap((page) => page.chunks.map((chunk, position) => ({
-    documentKey: `${page.slug}:${position}`,
+  return pages.flatMap((page) => page.items.map((item, position) => ({
+    documentKey: `${page.slug}:${item.entityId}`,
     kind: "page" as const,
-    title: page.title,
-    content: chunk.content,
-    citations: chunk.citations,
-    metadata: { pageId: page.id, pageSlug: page.slug, heading: chunk.heading, position }
+    title: `${page.title}: ${item.qualifiedName}`,
+    content: `${item.kind}: ${item.qualifiedName}\n${kindTerms[item.kind].join(" ")}`,
+    citations: item.sourceRefs,
+    metadata: { pageId: page.id, pageSlug: page.slug, entityId: item.entityId, position }
   })));
 }
 
@@ -109,6 +113,27 @@ function entityScore(query: string, entity: FrontendEntity): { score: number; re
   return { score, reason: reasons.join(",") || "none" };
 }
 
+function documentScore(query: string, entity: FrontendEntity, entityDocuments: readonly FrontendSearchDocument[]): number {
+  let best = 0;
+  for (const document of entityDocuments) {
+    const haystack = normalized(`${document.title} ${document.content}`);
+    if (!haystack) continue;
+    const identityTerms = [entity.name, entity.qualifiedName, entity.canonicalPath,
+      entity.identity.type === "named" ? entity.identity.semanticKey : entity.identity.enclosingSemanticKey]
+      .map(normalized).filter(searchableTerm);
+    const exactIdentity = identityTerms.some((term) => query.includes(term) && haystack.includes(term));
+    const aliases = kindTerms[entity.kind].map(normalized)
+      .filter((term) => searchableTerm(term) && query.includes(term) && haystack.includes(term));
+    const queryTokens = query.split(" ").filter((token) => token.length >= 3 && !/^\d+$/u.test(token));
+    const lexicalMatches = queryTokens.filter((token) => haystack.includes(token));
+    if (!exactIdentity && !aliases.length) continue;
+    const score = (exactIdentity ? 24 : 0) + Math.min(12, aliases.length * 6)
+      + Math.min(8, lexicalMatches.length * 2);
+    best = Math.max(best, score);
+  }
+  return best;
+}
+
 function structuralScore(
   query: string,
   entity: FrontendEntity,
@@ -125,25 +150,29 @@ function structuralScore(
   if (entity.kind === "application_entry" && connectedNameMatch(["exports"])
     && !query.includes("css")
     && (query.includes("module") || query.includes("模块") || query.includes("typescript") || query.includes("type script"))) {
-    return { score: 40, reason: "exports-query-target" };
+    return { score: 50, reason: "exports-query-target" };
   }
-  if (entity.kind === "route" && connectedNameMatch(["routes_to"])) return { score: 26, reason: "routes-to-query-target" };
-  if (entity.kind === "test_case" && connectedNameMatch(["tests"])) return { score: 28, reason: "tests-query-target" };
+  if (entity.kind === "route" && connectedNameMatch(["routes_to"])) return { score: 60, reason: "routes-to-query-target" };
+  if (entity.kind === "test_case" && connectedNameMatch(["tests"])) return { score: 56, reason: "tests-query-target" };
   if (entity.kind === "visualization" && connectedNameMatch(["visualizes"])
     && (query.includes("echarts") || query.includes("dataset") || query.includes("dispose")
       || query.includes("visualization") || query.includes("图表") || query.includes("可视化"))) {
     return { score: 22, reason: "visualization-owner" };
+  }
+  if (entity.kind === "api_operation"
+    && (query.includes("api") || query.includes("request") || query.includes("接口") || query.includes("请求"))) {
+    return { score: 32, reason: "api-operation-intent" };
   }
   if (entity.kind === "dom_landmark" && (query.includes("html") || query.includes("mount point") || query.includes("挂载点"))) {
     return { score: 20, reason: "html-landmark" };
   }
   if (entity.kind === "component" && /Page$/u.test(entity.name)
     && (query.includes(normalized(entity.name)) || query.includes("jsx") || query.includes("react") || query.includes("渲染"))) {
-    return { score: 8, reason: "page-component" };
+    return { score: 16, reason: "page-component" };
   }
   if (entity.kind === "style_scope" && entity.canonicalPath.endsWith(".module.css")
     && !entity.name.startsWith(":global") && !entity.name.startsWith("@")) {
-    return { score: 20, reason: "css-module-selector" };
+    return { score: 52, reason: "css-module-selector" };
   }
   if (entity.kind === "style_token" && entity.name.startsWith("$")
     && (query.includes("sass") || query.includes("scss") || query.includes("设计令牌"))) {
@@ -208,15 +237,26 @@ export function searchFrontendKnowledge(input: {
   const query = normalized(input.query);
   if (!query || !searchAllowed(input.access)) return [];
   const entities = new Map(input.graph.nodes.map((entity) => [entity.id, entity]));
-  const documentPaths = new Set(input.documents.flatMap((document) => document.citations.map((citation) => citation.path)));
+  const documentsByEntity = new Map<string, FrontendSearchDocument[]>();
+  for (const document of input.documents) {
+    if (typeof document.metadata.entityId !== "string") continue;
+    const documents = documentsByEntity.get(document.metadata.entityId) ?? [];
+    documents.push(document);
+    documentsByEntity.set(document.metadata.entityId, documents);
+  }
   return input.graph.nodes.flatMap((entity) => {
-    const cited = entity.sourceRefs.filter((reference) => documentPaths.has(reference.path));
+    const entityDocuments = documentsByEntity.get(entity.id) ?? [];
+    const indexed = documentScore(query, entity, entityDocuments);
+    if (!indexed) return [];
+    const indexedReferences = uniqueRefs(entityDocuments.flatMap((document) => document.citations));
+    const indexedReferenceKeys = new Set(indexedReferences.map(sourceRefKey));
+    const cited = entity.sourceRefs.filter((reference) => indexedReferenceKeys.has(sourceRefKey(reference)));
     if (!cited.length) return [];
     const lexical = entityScore(query, entity);
     const structural = structuralScore(query, entity, input.graph.edges, entities);
     const match = {
-      score: lexical.score + structural.score,
-      reason: [lexical.reason, structural.reason].filter(Boolean).join(",")
+      score: indexed + lexical.score + structural.score,
+      reason: ["index-document", lexical.reason, structural.reason].filter(Boolean).join(",")
     };
     if (match.score < 5) return [];
     const entityKey = entity.identity.type === "named"

@@ -145,8 +145,10 @@ describe("frontend knowledge evaluation protocol", () => {
     const datasetFiles: Array<[FrontendEvaluationInput["split"], string]> = [
       ["train", "evaluation/frontend/train/react-core.jsonl"],
       ["train", "evaluation/frontend/train/security-negative.jsonl"],
+      ["train", "evaluation/frontend/train/no-result.jsonl"],
       ["held-out", "evaluation/frontend/held-out/react-core.jsonl"],
-      ["held-out", "evaluation/frontend/held-out/security-negative.jsonl"]
+      ["held-out", "evaluation/frontend/held-out/security-negative.jsonl"],
+      ["held-out", "evaluation/frontend/held-out/no-result.jsonl"]
     ];
     const inputs = await Promise.all(datasetFiles.map(async ([split, filename]) => ({
       name: filename,
@@ -157,7 +159,7 @@ describe("frontend knowledge evaluation protocol", () => {
     const versions = JSON.parse(await readFile(path.join(root, "evaluation/frontend/versions.json"), "utf8"));
     const summary = validateFrontendEvaluationSuite(cases, versions);
 
-    expect(summary.total).toBe(300);
+    expect(summary.total).toBe(318);
     expect(summary.capabilities).toHaveLength(15);
     expect(summary.capabilities.every((item) => item.train >= 12 && item.heldOut >= 8)).toBe(true);
     expect(summary.chineseRate).toBeGreaterThanOrEqual(0.4);
@@ -247,6 +249,34 @@ describe("frontend knowledge evaluation protocol", () => {
     expect(() => assertFrontendEvaluationReport(report, cases)).toThrow("forbidden result leakage");
   });
 
+  test("measures authorized no-result false positives separately from access leakage", () => {
+    const empty = {
+      ...positiveCase("authorized-empty"),
+      query: "COBOL payroll batch reconciliation",
+      expected: { entityIds: [], factEdgeIds: [], searchEntityIds: [], impactEntityIds: [], citations: [] }
+    };
+    const cases = parseFrontendEvaluationDatasets([
+      { name: "empty", split: "train", content: dataset([empty]) }
+    ]);
+    const report = evaluateFrontendKnowledge(cases, [{
+      caseId: "authorized-empty", entityIds: ["component:wrong"], factEdgeIds: [], impactEntityIds: [],
+      searchResults: [{ entityId: "component:wrong", citations: [] }]
+    }]);
+
+    expect(report.denominators).toMatchObject({ positiveCases: 0, authorizedEmptyCases: 1, negativeCases: 0 });
+    expect(report.metrics.falsePositiveEmptyRate).toBe(1);
+    expect(report.metrics.unauthorizedOrUnpublishedLeakage).toBe(0);
+    expect(() => assertFrontendEvaluationReport(report, cases)).not.toThrow();
+    expect(() => assertFrontendQualityGate({
+      denominators: { totalCases: 1 },
+      metrics: {
+        entityMicroF1: 1, entityMacroF1: 1, factEdgePrecision: 1, factEdgeRecall: 1,
+        recallAt5: 1, mrr: 1, citationValidity: 1, falsePositiveEmptyRate: 1,
+        impactPrecision: 1, impactRecall: 1, unauthorizedOrUnpublishedLeakage: 0
+      }
+    })).toThrow("empty-query leakage");
+  });
+
   test("binds citation validity to the result entity and counts omitted citations", () => {
     const cases = parseFrontendEvaluationDatasets([
       { name: "positive", split: "train", content: dataset([positiveCase()]) }
@@ -306,7 +336,7 @@ describe("frontend knowledge evaluation protocol", () => {
       ],
       edges: []
     };
-    const documents = [{ documentKey: "components:0", kind: "page", title: "Components", content: "component: DashboardPage", citations: [ref], metadata: {} }];
+    const documents = [{ documentKey: "components:0", kind: "page", title: "Components", content: "component: DashboardPage", citations: [ref], metadata: { entityId: "page" } }];
     const item = positiveCase() as never;
     const deriveImpact = () => ({ affectedEntityIds: ["page"] });
     const original = observeFrontendEvaluationCase(item, graph, documents, deriveImpact);

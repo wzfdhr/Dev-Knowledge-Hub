@@ -30,7 +30,7 @@ import {
   ARTIFACT_KINDS,
   createVerifiedFrontendReleaseDraft
 } from "../frontend/compatibility";
-import { extractTypeScriptSyntaxFacts, typeScriptSyntaxParserConfigDigest } from "../frontend/typescript-program";
+import { analyzeWorkerRequest } from "../frontend/runtime/analyzer-worker";
 
 const directories: string[] = [];
 
@@ -108,24 +108,10 @@ describe("B02 shadow pipeline", () => {
       validate: createKnowledgeValidationStageExecutor({ store: knowledgeV1Store, artifactStore }),
       package: createKnowledgePackageStageExecutor({ store: knowledgeV1Store, artifactStore })
     });
-    const parserAnalyze = vi.fn(async () => ({
-      schemaVersion: 1,
-      snapshotId: snapshot.id,
-      analyzerIds: ["frontend-project"],
-      sourcePaths: [sourcePath],
-      outputs: [{
-        analyzerId: "typescript-project",
-        analyzerVersion: "1.0.0",
-        projectManifest: { workspace: null, packages: [], tsconfigs: [], ignoredPaths: [] },
-        projectReferences: [],
-        resolutions: [],
-        files: [{
-          path: sourcePath,
-          blobHash: hash(source),
-          parserConfigDigest: typeScriptSyntaxParserConfigDigest(sourcePath),
-          facts: extractTypeScriptSyntaxFacts(source, sourcePath)
-        }]
-      }]
+    const parserAnalyze = vi.fn(async (request) => analyzeWorkerRequest({
+      type: "analyze",
+      requestId: randomUUID(),
+      ...request
     }));
     const worker = new PipelineStageWorker(
       store,
@@ -151,7 +137,7 @@ describe("B02 shadow pipeline", () => {
     const runs = await store.listPipelineStageRuns(workspaceId, project.id, build.id);
     expect(parserAnalyze).toHaveBeenCalledWith(expect.objectContaining({
       snapshotId: snapshot.id,
-      analyzerIds: ["frontend-project"],
+      analyzerIds: ["frontend-project", "typescript-core", "html-core", "style-core"],
       cachedAnalyses: [],
       sources: [expect.objectContaining({ path: sourcePath, blobHash: hash(source) })]
     }));
@@ -188,6 +174,14 @@ describe("B02 shadow pipeline", () => {
           factsDigest: expect.stringMatching(/^[a-f0-9]{64}$/)
         }]
       }
+    });
+    await expect(artifactStore.getJson(frontendExtractManifest)).resolves.toMatchObject({
+      entities: expect.arrayContaining([
+        expect.objectContaining({ kind: "symbol", name: "answer", canonicalPath: sourcePath })
+      ]),
+      analyzerManifest: expect.arrayContaining([
+        expect.objectContaining({ analyzerId: "typescript-core" })
+      ])
     });
     await expect(store.getKnowledgeGraph(workspaceId, project.id, build.id)).resolves.toMatchObject({
       nodes: expect.arrayContaining([expect.objectContaining({

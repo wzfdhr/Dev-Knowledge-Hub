@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import { z } from "zod";
 
+import { frontendIrSchema } from "../../../shared/frontend-ir.js";
+
 import type { BuildRecord } from "../build-service.js";
 import { type ArtifactStore } from "../pipeline/artifact-store.js";
 import { BUILD_STAGES, type ArtifactManifest, type BuildStage } from "../pipeline/contracts.js";
@@ -86,7 +88,8 @@ const parserRuntimeResultSchema = z.object({
       blobHash: z.string().regex(/^[a-f0-9]{64}$/i),
       parserConfigDigest: z.string().regex(/^[a-f0-9]{64}$/i),
       facts: z.record(z.string(), z.json())
-    }).strict())
+    }).strict()),
+    frontendIr: frontendIrSchema
   }).strict()).max(1)
 });
 
@@ -239,6 +242,27 @@ async function packageArtifacts(
   return Object.fromEntries(entries);
 }
 
+async function upstreamAnalyzerManifestDigest(
+  input: { store: ShadowStore; artifactStore: ArtifactStore },
+  manifestIds: readonly string[]
+): Promise<string> {
+  const digests = new Set<string>();
+  for (const artifactId of manifestIds) {
+    const manifest = await input.store.findArtifactById(artifactId);
+    if (!manifest) throw new Error("Frontend upstream manifest is unavailable");
+    const expected = ARTIFACT_KINDS[manifest.stage]["frontend-v2"];
+    if (manifest.kind !== expected.kind || manifest.schemaVersion !== expected.schemaVersion) continue;
+    const value = await input.artifactStore.getJson(manifest);
+    if (value && typeof value === "object" && "analyzerManifestDigest" in value
+      && typeof value.analyzerManifestDigest === "string"
+      && value.analyzerManifestDigest !== EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST) {
+      digests.add(value.analyzerManifestDigest);
+    }
+  }
+  if (digests.size > 1) throw new Error("Frontend upstream analyzer manifests disagree");
+  return [...digests][0] ?? EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST;
+}
+
 export function createFrontendShadowStageExecutor(input: {
   store: ShadowStore;
   artifactStore: ArtifactStore;
@@ -262,6 +286,7 @@ export function createFrontendShadowStageExecutor(input: {
     if (run.inputDigest !== shadowDigest) throw new Error("Frontend shadow stage input digest does not match enabled families");
 
     let projectAnalysis: Record<string, unknown> | null = null;
+    let frontendIr: z.infer<typeof frontendIrSchema> | null = null;
     if (run.stage === "extract" && input.frontendParser) {
       const normalized = (await Promise.all(upstreamIds.map(async (artifactId) => {
         const manifest = await input.store.findArtifactById(artifactId);
@@ -291,7 +316,7 @@ export function createFrontendShadowStageExecutor(input: {
       }))).filter((item): item is NonNullable<typeof item> => item !== null);
       const parserResult = parserRuntimeResultSchema.parse(await input.frontendParser.analyze({
         snapshotId: run.snapshotId,
-        analyzerIds: ["frontend-project"],
+        analyzerIds: ["frontend-project", "typescript-core", "html-core", "style-core"],
         sources: normalized.map((source) => ({
           path: source.path,
           contentBase64: Buffer.from(source.content, "utf8").toString("base64"),
@@ -304,6 +329,8 @@ export function createFrontendShadowStageExecutor(input: {
       }
       if (parserResult.outputs.length !== 1) throw new Error("Frontend project analyzer output is missing");
       const output = parserResult.outputs[0]!;
+      if (output.frontendIr.snapshotId !== run.snapshotId) throw new Error("Frontend IR crosses snapshots");
+      frontendIr = output.frontendIr;
       const sourceByPath = new Map(normalized.map((source) => [source.path, source]));
       const bindings = await Promise.all(output.files.map(async (file) => {
         const source = sourceByPath.get(file.path);
@@ -349,30 +376,34 @@ export function createFrontendShadowStageExecutor(input: {
       throw new Error(`Frontend shadow ${run.stage} knowledge-v1 output is invalid`);
     }
     const expected = ARTIFACT_KINDS[run.stage]["frontend-v2"];
+    const analyzerManifestDigest = frontendIr?.analyzerManifestDigest
+      ?? await upstreamAnalyzerManifestDigest(input, upstreamIds);
     const baseValue = {
       schemaVersion: 2 as const,
       family: "frontend-v2" as const,
       stage: run.stage,
       snapshotId: run.snapshotId,
-      analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+      analyzerManifestDigest,
       upstreamManifestIds: upstreamIds,
       sourceArtifactId: legacyManifest.id
     };
     const value = run.stage === "extract"
       ? {
-          schemaVersion: 2,
-          snapshotId: run.snapshotId,
-          analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
-          analyzerManifest: [],
-          entities: [],
-          edges: [],
+          ...(frontendIr ?? {
+            schemaVersion: 2,
+            snapshotId: run.snapshotId,
+            analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+            analyzerManifest: [],
+            entities: [],
+            edges: []
+          }),
           ...(projectAnalysis ? { projectAnalysis } : {})
         }
       : run.stage === "graph"
         ? {
             schemaVersion: 2,
             snapshotId: run.snapshotId,
-            analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+            analyzerManifestDigest,
             nodes: [],
             edges: []
           }

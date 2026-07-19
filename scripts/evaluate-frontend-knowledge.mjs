@@ -232,6 +232,12 @@ function validateVersions(value) {
   }
   const parsers = object(manifest.parsers, "Frontend version manifest requires parsers");
   nonEmptyString(parsers.typescript, "parsers.typescript", "versions");
+  for (const capability of ["html", "css", "selector", "sass", "less"]) {
+    const parser = object(parsers[capability], `Frontend version manifest requires parsers.${capability}`);
+    if (parser.status !== "approved") throw new Error(`Frontend parser ${capability} is not approved`);
+    nonEmptyString(parser.package, `parsers.${capability}.package`, "versions");
+    nonEmptyString(parser.version, `parsers.${capability}.version`, "versions");
+  }
   const performance = object(manifest.performanceBaseline, "Frontend version manifest requires performanceBaseline");
   for (const field of ["runner", "cpu", "datasetDigestAlgorithm"]) nonEmptyString(performance[field], `performanceBaseline.${field}`, "versions");
   if (!Number.isInteger(performance.logicalCores) || performance.logicalCores < 1
@@ -258,6 +264,14 @@ export function validateFrontendVersionManifestAgainstPackage(versionManifest, p
     const locked = lockedPackages[`node_modules/${packageName}`]?.version;
     if (typeof locked !== "string" || manifest.currentRepository[field] !== locked) {
       throw new Error(`Frontend version manifest currentRepository.${field} must match locked ${packageName} version`);
+    }
+  }
+  for (const capability of ["html", "css", "selector", "sass", "less"]) {
+    const parser = manifest.parsers[capability];
+    const declared = packageData.dependencies?.[parser.package];
+    const locked = lockedPackages[`node_modules/${parser.package}`]?.version;
+    if (declared !== parser.version || locked !== parser.version) {
+      throw new Error(`Frontend version manifest parsers.${capability} must match direct locked ${parser.package} version`);
     }
   }
 }

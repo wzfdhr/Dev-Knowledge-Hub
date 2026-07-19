@@ -174,6 +174,13 @@ describe("frontend knowledge evaluation protocol", () => {
         "node_modules/react": { ...packageLock.packages["node_modules/react"], version: "20.0.0" }
       }
     })).toThrow("currentRepository.react");
+    expect(() => validateFrontendVersionManifestAgainstPackage(versions, packageJson, {
+      ...packageLock,
+      packages: {
+        ...packageLock.packages,
+        "node_modules/parse5": { ...packageLock.packages["node_modules/parse5"], version: "9.0.0" }
+      }
+    })).toThrow("parsers.html");
     await expect(validateFrontendCompatibilityFixtures(versions, path.join(root, "fixtures/frontend"))).resolves.toBeUndefined();
     const datasetDigest = digestFrontendEvaluationDatasets(inputs);
     expect(() => validateFrontendPerformanceBaseline(versions, datasetDigest)).not.toThrow();

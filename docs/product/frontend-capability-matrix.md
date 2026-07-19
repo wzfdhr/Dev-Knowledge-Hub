@@ -17,7 +17,8 @@
 | JSX/TSX | 只将导出大写变量猜为 component | 深度支持 | component、props、render tree、children | 组件库、页面组成、使用热点 | V1 Core |
 | HTML | 上传过滤 | 深度支持 | document、landmark、form、asset ref | 页面结构、资产、a11y 事实 | V1 Core |
 | CSS/CSS Modules | 上传过滤 | 深度支持 | style scope、selector、custom property、media/container query | 样式来源、token、组件影响 | V1 Core |
-| Sass/Less | 上传过滤 | 深度支持 | variable、mixin、selector、import/use | token、全局样式、影响 | V1 Core |
+| SCSS/Less | 上传过滤 | 深度支持 | variable、selector、media/container、import/use；mixin 在 V1 Trial 补齐 | token、全局样式、影响 | V1 Core |
+| 缩进式 `.sass` | 上传过滤 | 基础识别 | 明确 `partial/unsupported`，不使用正则冒充 AST | 文件级引用 | V1 Trial |
 | SVG | 上传过滤 | 基础识别 | symbol/id/viewBox/asset ref；永不直接渲染 | 资产查询和引用影响 | V1 Core |
 | 图片/字体/媒体 | 不采集 | 仅资产索引 | path、hash、size、MIME、referenced_by | 资产清单和影响 | V1 Trial |
 | npm/pnpm/yarn/bun workspace | 部分 package/lock 文档事实 | 深度支持 | workspace package、exports、scripts、dependency | monorepo 地图、命令、包影响 | V1 Core |

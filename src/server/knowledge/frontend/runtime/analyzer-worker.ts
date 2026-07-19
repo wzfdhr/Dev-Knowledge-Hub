@@ -1,8 +1,14 @@
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 
+import { z } from "zod";
+
 import { parserAnalyzeRequestSchema, type ParserAnalyzeRequest } from "./parser-protocol.js";
 import { VirtualSourceFs } from "./virtual-source-fs.js";
-import { analyzeFrontendProjectManifest } from "../project-manifest.js";
+import { AnalyzerRegistry } from "../analyzer-registry.js";
+import { analyzeHtmlSource } from "../html-analyzer.js";
+import { analyzeFrontendProjectManifest, type FrontendProjectManifest } from "../project-manifest.js";
+import { analyzeStyleSource } from "../style-analyzer.js";
+import { analyzeTypeScriptSource } from "../typescript-analyzer.js";
 import {
   createRestrictedTypeScriptProgram,
   extractTypeScriptSyntaxFacts,
@@ -79,6 +85,7 @@ function analyzeFrontendProject(
     entry.facts
   ]));
   const typed = createRestrictedTypeScriptProgram(projectSources);
+  const projectManifest = analyzeFrontendProjectManifest(projectSources);
   const sourceHash = (sourcePath: string) => {
     const value = sourceHashes.get(sourcePath);
     if (!value) throw new Error("TypeScript Program source hash is unavailable");
@@ -87,7 +94,7 @@ function analyzeFrontendProject(
   return {
     analyzerId: "typescript-project",
     analyzerVersion: "1.0.0",
-    projectManifest: analyzeFrontendProjectManifest(projectSources),
+    projectManifest,
     projectReferences: typed.projectReferences,
     resolutions: typed.resolutions,
     files: typed.rootNames.map((sourcePath) => ({
@@ -99,8 +106,70 @@ function analyzeFrontendProject(
         sourceHash(sourcePath),
         typeScriptSyntaxParserConfigDigest(sourcePath)
       ].join("\0")) ?? extractTypeScriptSyntaxFacts(sourcesText(projectSources, sourcePath), sourcePath)
-    }))
+    })),
+    frontendIr: analyzeFrontendIr(
+      projectSources,
+      sourceHashes,
+      request.snapshotId,
+      projectManifest,
+      typed.resolutions,
+      new Set(request.analyzerIds)
+    )
   };
+}
+
+function packageKeyForPath(projectManifest: FrontendProjectManifest, sourcePath: string): string {
+  const owner = projectManifest.packages.filter((candidate) =>
+    candidate.root === "" || sourcePath.startsWith(`${candidate.root}/`)
+  ).sort((left, right) => right.root.length - left.root.length)[0];
+  return owner?.name || owner?.root || "workspace";
+}
+
+function analyzeFrontendIr(
+  sources: Array<{ path: string; content: string }>,
+  sourceHashes: ReadonlyMap<string, string>,
+  snapshotId: string,
+  projectManifest: FrontendProjectManifest,
+  resolutions: Array<{ containingFile: string; specifier: string; resolvedPath: string | null }>,
+  requestedAnalyzers: ReadonlySet<string>
+) {
+  const outputs = sources.flatMap((source) => {
+    const blobHash = sourceHashes.get(source.path);
+    if (!blobHash) throw new Error("Frontend analyzer source hash is unavailable");
+    const base = {
+      snapshotId,
+      path: source.path,
+      content: source.content,
+      blobHash,
+      packageKey: packageKeyForPath(projectManifest, source.path)
+    };
+    const extension = source.path.endsWith(".d.ts") ? ".d.ts" : source.path.slice(source.path.lastIndexOf(".")).toLowerCase();
+    if (requestedAnalyzers.has("typescript-core")
+      && [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs", ".d.ts"].includes(extension)) {
+      return [analyzeTypeScriptSource({
+        ...base,
+        resolutions: resolutions.filter((resolution) => resolution.containingFile === source.path)
+          .map(({ specifier, resolvedPath }) => ({ specifier, resolvedPath }))
+      })];
+    }
+    if (requestedAnalyzers.has("html-core") && extension === ".html") return [analyzeHtmlSource(base)];
+    if (requestedAnalyzers.has("style-core") && [".css", ".scss", ".sass", ".less"].includes(extension)) {
+      return [analyzeStyleSource(base)];
+    }
+    return [];
+  });
+  const registry = new AnalyzerRegistry();
+  for (const id of ["typescript-core", "html-core", "style-core"]) {
+    registry.register({ id, version: "1.0.0", role: "core", facetSchema: z.record(z.string(), z.unknown()) });
+  }
+  if (outputs.length === 0) {
+    return registry.emptyIr(snapshotId);
+  }
+  const merged = registry.mergeOutputs(outputs);
+  if (!merged.valid) {
+    throw new Error(`Frontend analyzer outputs conflict: ${merged.lintIssues.map((issue) => issue.rule).join(", ")}`);
+  }
+  return merged.ir;
 }
 
 function sourcesText(sources: Array<{ path: string; content: string }>, sourcePath: string): string {

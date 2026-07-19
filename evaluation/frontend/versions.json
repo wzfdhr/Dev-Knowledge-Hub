@@ -31,10 +31,18 @@
   },
   "parsers": {
     "typescript": "6.0.3",
-    "html": { "status": "pending-dependency-approval", "package": "parse5" },
-    "css": { "status": "pending-dependency-approval", "package": "postcss" },
-    "sass": { "status": "pending-dependency-approval", "package": "postcss-scss" },
-    "less": { "status": "pending-dependency-approval", "package": "postcss-less" }
+    "html": { "status": "approved", "package": "parse5", "version": "8.0.1" },
+    "css": { "status": "approved", "package": "postcss", "version": "8.5.19" },
+    "selector": { "status": "approved", "package": "postcss-selector-parser", "version": "7.1.4" },
+    "sass": {
+      "status": "approved",
+      "package": "postcss-scss",
+      "version": "4.0.9",
+      "syntax": "scss",
+      "knownUnsupported": ["indented .sass syntax"]
+    },
+    "indentedSass": { "status": "deferred", "target": "V1 Trial", "reason": "no approved maintained parser" },
+    "less": { "status": "approved", "package": "postcss-less", "version": "6.0.0" }
   },
   "performanceBaseline": {
     "runner": "github-actions-ubuntu-24.04-x64",

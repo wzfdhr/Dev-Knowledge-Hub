@@ -25,7 +25,7 @@ describe("analyzer worker structural limits", () => {
       type: "analyze",
       requestId: randomUUID(),
       snapshotId: "snapshot-1",
-      analyzerIds: ["frontend-project"],
+      analyzerIds: ["frontend-project", "typescript-core", "html-core", "style-core"],
       cachedAnalyses: [],
       sources: [
         parserSource("package.json", JSON.stringify({ workspaces: ["apps/*"] })),
@@ -62,6 +62,39 @@ describe("analyzer worker structural limits", () => {
     expect(JSON.stringify(output.files)).not.toContain("snapshot-1");
     expect(output.files.every((file) => Object.hasOwn(file, "path"))).toBe(true);
     expect(output.files.some((file) => Object.hasOwn(file.facts, "path"))).toBe(false);
+    expect(output.frontendIr).toMatchObject({
+      schemaVersion: 2,
+      snapshotId: "snapshot-1",
+      entities: expect.arrayContaining([
+        expect.objectContaining({ kind: "application_entry", canonicalPath: "apps/site/src/main.ts" }),
+        expect.objectContaining({ kind: "symbol", name: "total" })
+      ])
+    });
+    expect(output.frontendIr.analyzerManifest).toEqual(expect.arrayContaining([
+      expect.objectContaining({ analyzerId: "typescript-core", analyzerVersion: "1.0.0" })
+    ]));
+  });
+
+  test("merges HTML and style analyzer facts into one validated frontend IR", () => {
+    const result = analyzeWorkerRequest({
+      type: "analyze",
+      requestId: randomUUID(),
+      snapshotId: "snapshot-web",
+      analyzerIds: ["frontend-project", "html-core", "style-core"],
+      cachedAnalyses: [],
+      sources: [
+        parserSource("public/index.html", "<main><form action='/search'><input name='q'></form></main>"),
+        parserSource("src/theme.css", ":root { --brand: #1677ff; } .card { color: var(--brand); }")
+      ]
+    });
+    const ir = result.outputs[0]?.frontendIr;
+
+    expect(ir?.entities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "dom_landmark", name: "main" }),
+      expect.objectContaining({ kind: "form" }),
+      expect.objectContaining({ kind: "style_token", name: "--brand" })
+    ]));
+    expect(ir?.analyzerManifest.map((entry) => entry.analyzerId)).toEqual(["html-core", "style-core"]);
   });
 
   test("reuses validated path-free cached syntax facts", () => {
@@ -84,6 +117,24 @@ describe("analyzer worker structural limits", () => {
     });
 
     expect(result.outputs[0]?.files[0]?.facts).toEqual(cachedFacts);
+  });
+
+  test("uses a stable non-empty package key for unnamed root packages", () => {
+    const result = analyzeWorkerRequest({
+      type: "analyze",
+      requestId: randomUUID(),
+      snapshotId: "snapshot-root",
+      analyzerIds: ["frontend-project", "typescript-core"],
+      cachedAnalyses: [],
+      sources: [
+        parserSource("package.json", "{}"),
+        parserSource("src/main.ts", "export const main = true;")
+      ]
+    });
+
+    expect(result.outputs[0]?.frontendIr.entities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ canonicalPath: "src/main.ts", packageKey: "workspace" })
+    ]));
   });
 
   test("accepts bounded analyzer output", () => {

@@ -327,6 +327,51 @@ export interface WorkspaceSearchResult extends SearchResult {
   projectSlug: string;
 }
 export interface SourceExcerpt extends Citation { content: string }
+export type FrontendPreviewStatus = "source_missing" | "build_missing" | "candidate_pending" | "ready";
+export interface FrontendPreviewEntity {
+  id: string;
+  kind: string;
+  name: string;
+  qualifiedName: string;
+  canonicalPath: string;
+  packageKey: string;
+  sourceRefs: GraphSourceRef[];
+  facets: Record<string, Record<string, unknown>>;
+  attributes: Record<string, unknown>;
+}
+export interface FrontendPreviewEdge {
+  id: string;
+  kind: string;
+  fromEntityId: string;
+  toEntityId: string;
+  evidenceClass: "fact" | "candidate";
+  confidence: number;
+  candidateReason?: string;
+  sourceRefs: GraphSourceRef[];
+}
+export interface FrontendPreviewPage {
+  id: string;
+  slug: string;
+  title: string;
+  kind: "architecture" | "routes" | "components" | "data" | "visualizations" | "tooling-tests";
+  items: Array<{ entityId: string; kind: string; name: string; qualifiedName: string; sourceRefs: GraphSourceRef[] }>;
+  citations: GraphSourceRef[];
+  chunks: Array<{ heading: string; content: string; citations: GraphSourceRef[] }>;
+}
+export interface FrontendCandidatePreview {
+  build: { id: string; snapshotId: string; commitSha: string; status: BuildStatus };
+  graph: { schemaVersion: 2; snapshotId: string; analyzerManifestDigest: string; nodes: FrontendPreviewEntity[]; edges: FrontendPreviewEdge[] };
+  pages: FrontendPreviewPage[];
+  quality: {
+    summary: { entities: number; factEdges: number; candidateEdges: number; citedEntities: number; components: number; testedComponents: number; routes: number; visualizations: number };
+    issues: Array<{ rule: string; severity: "warning" | "info"; targetId: string; message: string; sourceRefs: GraphSourceRef[] }>;
+  };
+  visualization: { routeIds: string[]; componentIds: string[]; visualizationIds: string[]; factEdgeIds: string[] };
+  validation: { valid: boolean; pageCount: number; issueCount: number };
+}
+export type FrontendPreviewResponse =
+  | { status: "ready"; preview: FrontendCandidatePreview }
+  | { status: Exclude<FrontendPreviewStatus, "ready">; preview: null; build?: { id: string; status: BuildStatus } };
 export interface Feedback {
   id: string;
   releaseId: string | null;

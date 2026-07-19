@@ -3,7 +3,8 @@ import type {
   ArchivedRepository, KnowledgeMetadata, ProjectKnowledgeQuality, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotChangeSummary, SnapshotSummary, SourceExcerpt,
   UploadSnapshotSummary, ImportReport, TeamMember, ProjectMember, Project, ProjectSummary, ProjectActivity, CodexConnectionPack,
   Remediation, RemediationEvent, RemediationState,
-  WorkspaceOverview, WorkspaceSearchResult, MfaStatus, ProjectGraphFormat, ProjectGraphResponse
+  WorkspaceOverview, WorkspaceSearchResult, MfaStatus, ProjectGraphFormat, ProjectGraphResponse,
+  FrontendPreviewResponse, GraphSourceRef
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
@@ -105,6 +106,8 @@ export interface ApiClient {
   syncRepository(): Promise<SnapshotSummary>;
   getProjectChanges(projectId: string): Promise<{ change: SnapshotChangeSummary | null }>;
   getProjectGraph<F extends ProjectGraphFormat = "tree">(projectId: string, format?: F, options?: ProjectGraphRequestOptions): Promise<ProjectGraphResponse<F>>;
+  getProjectFrontendPreview(projectId: string): Promise<FrontendPreviewResponse>;
+  getProjectFrontendPreviewSource(projectId: string, buildId: string, source: GraphSourceRef): Promise<SourceExcerpt>;
   getProjectKnowledgeQuality(projectId: string): Promise<ProjectKnowledgeQuality>;
   listProjectRemediations(projectId: string, params: RemediationListParams): Promise<{ remediations: Remediation[] }>;
   listProjectRemediationEvents(projectId: string, remediationId: string): Promise<{ events: RemediationEvent[] }>;
@@ -224,6 +227,13 @@ export const api: ApiClient = {
     const params = new URLSearchParams({ format });
     if (options?.releaseId) params.set("releaseId", options.releaseId);
     return request<ProjectGraphResponse<F>>(`/api/projects/${encodeURIComponent(projectId)}/graph?${params}`);
+  },
+  getProjectFrontendPreview: (projectId) => request(`/api/projects/${encodeURIComponent(projectId)}/frontend-preview`),
+  getProjectFrontendPreviewSource: (projectId, buildId, source) => {
+    const params = new URLSearchParams({
+      buildId, path: source.path, startLine: String(source.startLine), endLine: String(source.endLine)
+    });
+    return request(`/api/projects/${encodeURIComponent(projectId)}/frontend-preview/source?${params}`);
   },
   getProjectKnowledgeQuality: (projectId) => request(`/api/projects/${projectId}/knowledge-quality`),
   listProjectRemediations: (projectId, params) => request(listPath(

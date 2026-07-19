@@ -18,6 +18,7 @@ import { ProjectCodexPage } from "./pages/project-codex-page";
 import { ProjectCollaborationPage } from "./pages/project-collaboration-page";
 import { ProjectVersionsPage } from "./pages/project-versions-page";
 import { ProjectGraphPage } from "./pages/project-graph-page";
+import { ProjectFrontendMapPage } from "./pages/project-frontend-map-page";
 import { SystemSettingsPage } from "./pages/system-settings-page";
 
 function LegacyProjectRedirect({ section }: { section: string }) {
@@ -53,13 +54,14 @@ export function App({ api = defaultApi }: { api?: ApiClient }) {
   if (session.error instanceof ApiError && session.error.status === 401 || !session.data) return <AuthScreen mode="login" api={api} onSetup={() => {}} onAuthenticated={() => void session.refetch()} sessionExpired={session.error instanceof ApiError && session.error.status === 401} />;
   return <Routes><Route element={<AppShell email={session.data.admin.email} onLogout={() => logout.mutate()} />}>
     <Route path="/projects" element={<ProjectsPage api={api} />} />
-    <Route path="/projects/:projectId" element={<ProjectLayout api={api} />}>
+    <Route path="/projects/:projectId" element={<ProjectLayout api={api} workspaceRole={session.data.admin.role} />}>
       <Route index element={<Navigate to="overview" replace />} />
       <Route path="overview" element={<ProjectOverviewPage api={api} />} />
       <Route path="imports" element={<ProjectImportsPage api={api} />} />
       <Route path="versions" element={<ProjectVersionsPage api={api} />} />
       <Route path="knowledge" element={<KnowledgePage api={api} />} />
       <Route path="graph" element={<ProjectGraphPage api={api} />} />
+      <Route path="frontend-map" element={<ProjectFrontendMapPage api={api} />} />
       <Route path="collaboration" element={<ProjectCollaborationPage api={api} />} />
       <Route path="codex" element={<ProjectCodexPage api={api} />} />
     </Route>

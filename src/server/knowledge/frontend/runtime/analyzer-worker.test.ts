@@ -155,12 +155,32 @@ describe("analyzer worker structural limits", () => {
 
   test("analyzes the approved React 18 fixture as an application flow", () => {
     const fixtureRoot = "fixtures/frontend/react-vite";
-    const paths = ["package.json", "tsconfig.json", "src/api.ts", "src/app.tsx", "src/chart.tsx", "src/main.tsx", "src/router.tsx", "src/store.ts"];
+    const paths = [
+      "package.json",
+      "tsconfig.json",
+      "vite.config.ts",
+      "src/api.ts",
+      "src/app.tsx",
+      "src/app.test.tsx",
+      "src/chart.tsx",
+      "src/main.tsx",
+      "src/router.tsx",
+      "src/store.ts",
+      "e2e/app.spec.ts"
+    ];
     const result = analyzeWorkerRequest({
       type: "analyze",
       requestId: randomUUID(),
       snapshotId: "snapshot-react-18-fixture",
-      analyzerIds: ["frontend-project", "typescript-core", "react-core", "react-router-core", "state-data-core"],
+      analyzerIds: [
+        "frontend-project",
+        "typescript-core",
+        "react-core",
+        "react-router-core",
+        "state-data-core",
+        "visualization-core",
+        "tooling-test-core"
+      ],
       cachedAnalyses: [],
       sources: paths.map((sourcePath) => parserSource(sourcePath, readFileSync(`${fixtureRoot}/${sourcePath}`, "utf8")))
     });
@@ -177,13 +197,18 @@ describe("analyzer worker structural limits", () => {
       expect.objectContaining({ kind: "route", name: "/" }),
       expect.objectContaining({ kind: "state_store", name: "SessionContext" }),
       expect.objectContaining({ kind: "state_store", name: "useDashboardStore" }),
-      expect.objectContaining({ kind: "api_operation", name: "GET /api/teams/:teamId/dashboard" })
+      expect.objectContaining({ kind: "api_operation", name: "GET /api/teams/:teamId/dashboard" }),
+      expect.objectContaining({ kind: "visualization", name: "chart" }),
+      expect.objectContaining({ kind: "test_case", name: "renders the dashboard heading" }),
+      expect.objectContaining({ kind: "tooling_config", name: "vite" })
     ]));
     expect(ir?.edges).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "injects" }),
       expect.objectContaining({ kind: "reads_state" }),
       expect.objectContaining({ kind: "requests" }),
-      expect.objectContaining({ kind: "routes_to" })
+      expect.objectContaining({ kind: "routes_to" }),
+      expect.objectContaining({ kind: "visualizes" }),
+      expect.objectContaining({ kind: "tests" })
     ]));
   });
 

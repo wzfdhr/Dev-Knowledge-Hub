@@ -11,7 +11,9 @@ import { analyzeReactSource } from "../react-analyzer.js";
 import { analyzeReactRouterSource } from "../react-router-analyzer.js";
 import { analyzeStateDataSource } from "../state-data-analyzer.js";
 import { analyzeStyleSource } from "../style-analyzer.js";
+import { analyzeToolingTestSource } from "../tooling-test-analyzer.js";
 import { analyzeTypeScriptSource } from "../typescript-analyzer.js";
+import { analyzeVisualizationSource } from "../visualization-analyzer.js";
 import {
   createRestrictedTypeScriptProgram,
   extractTypeScriptSyntaxFacts,
@@ -163,6 +165,12 @@ function analyzeFrontendIr(
     if (requestedAnalyzers.has("state-data-core") && typedSource) {
       sourceOutputs.push(analyzeStateDataSource({ ...base, resolutions: sourceResolutions }));
     }
+    if (requestedAnalyzers.has("visualization-core") && typedSource) {
+      sourceOutputs.push(analyzeVisualizationSource({ ...base, resolutions: sourceResolutions }));
+    }
+    if (requestedAnalyzers.has("tooling-test-core") && typedSource) {
+      sourceOutputs.push(analyzeToolingTestSource({ ...base, resolutions: sourceResolutions }));
+    }
     if (requestedAnalyzers.has("html-core") && extension === ".html") sourceOutputs.push(analyzeHtmlSource(base));
     if (requestedAnalyzers.has("style-core") && [".css", ".scss", ".sass", ".less"].includes(extension)) {
       sourceOutputs.push(analyzeStyleSource(base));
@@ -176,7 +184,9 @@ function analyzeFrontendIr(
     "style-core",
     "react-core",
     "react-router-core",
-    "state-data-core"
+    "state-data-core",
+    "visualization-core",
+    "tooling-test-core"
   ]) {
     registry.register({ id, version: "1.0.0", role: "core", facetSchema: z.record(z.string(), z.unknown()) });
   }

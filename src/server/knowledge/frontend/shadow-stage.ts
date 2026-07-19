@@ -323,7 +323,9 @@ export function createFrontendShadowStageExecutor(input: {
           "style-core",
           "react-core",
           "react-router-core",
-          "state-data-core"
+          "state-data-core",
+          "visualization-core",
+          "tooling-test-core"
         ],
         sources: normalized.map((source) => ({
           path: source.path,

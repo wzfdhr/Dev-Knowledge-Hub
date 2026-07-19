@@ -144,7 +144,9 @@ describe("B02 shadow pipeline", () => {
         "style-core",
         "react-core",
         "react-router-core",
-        "state-data-core"
+        "state-data-core",
+        "visualization-core",
+        "tooling-test-core"
       ],
       cachedAnalyses: [],
       sources: [expect.objectContaining({ path: sourcePath, blobHash: hash(source) })]

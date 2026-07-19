@@ -1,11 +1,14 @@
 import type { KnowledgeMetadata, SnapshotChangeSummary } from "../persistence/store.js";
 import { buildImpactMindmap } from "./pipeline/mindmap.js";
 import type { KnowledgeGraphRecord } from "../persistence/store.js";
+import type { FrontendIR } from "../../shared/frontend-ir.js";
+import { deriveFrontendChangeImpact } from "./frontend/change-impact.js";
 
 export function deriveChangeImpact(
   change: SnapshotChangeSummary,
   metadata: KnowledgeMetadata,
-  graph?: KnowledgeGraphRecord | null
+  graph?: KnowledgeGraphRecord | null,
+  frontendGraph?: FrontendIR | null
 ): SnapshotChangeSummary {
   const changedPaths = new Set([...change.added, ...change.modified, ...change.deleted]);
   const related = metadata.dependencies.filter((edge) =>
@@ -22,6 +25,11 @@ export function deriveChangeImpact(
   }
   const impact = graph ? buildImpactMindmap({ changedPaths: [...changedPaths], graph }) : undefined;
   for (const path of impact?.affectedModulePaths ?? []) affectedModules.add(path);
+  if (frontendGraph) {
+    const frontendImpact = deriveFrontendChangeImpact({ changedPaths: [...changedPaths], graph: frontendGraph });
+    for (const path of frontendImpact.affectedPaths) affectedModules.add(path);
+    for (const path of frontendImpact.suggestedTestPaths) suggestedTests.add(path);
+  }
   return {
     ...change,
     affectedModules: [...affectedModules].sort(),

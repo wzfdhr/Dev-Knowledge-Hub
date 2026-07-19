@@ -193,6 +193,24 @@ describe("B02 shadow pipeline", () => {
         expect.objectContaining({ analyzerId: "typescript-core" })
       ])
     });
+    const frontendValue = async (stage: string, kind: string) => {
+      const run = runs.find((candidate) => candidate.stage === stage)!;
+      const manifest = (await Promise.all(run.outputManifestIds.map((id) => store.findArtifactById(id))))
+        .find((candidate) => candidate?.kind === kind)!;
+      return artifactStore.getJson(manifest);
+    };
+    await expect(frontendValue("graph", "frontend-graph-v2")).resolves.toMatchObject({
+      nodes: expect.arrayContaining([expect.objectContaining({ kind: "symbol", name: "answer" })])
+    });
+    await expect(frontendValue("synthesize", "frontend-knowledge-pages-v2")).resolves.toMatchObject({
+      pages: expect.arrayContaining([expect.objectContaining({ slug: "frontend-architecture" })])
+    });
+    await expect(frontendValue("index", "frontend-search-index-v2")).resolves.toMatchObject({
+      documents: expect.arrayContaining([expect.objectContaining({ title: "Frontend Architecture" })])
+    });
+    await expect(frontendValue("lint", "frontend-knowledge-quality-v2")).resolves.toMatchObject({
+      summary: expect.objectContaining({ entities: expect.any(Number), citedEntities: expect.any(Number) })
+    });
     await expect(store.getKnowledgeGraph(workspaceId, project.id, build.id)).resolves.toMatchObject({
       nodes: expect.arrayContaining([expect.objectContaining({
         kind: "module", name: "app.ts", qualifiedName: sourcePath

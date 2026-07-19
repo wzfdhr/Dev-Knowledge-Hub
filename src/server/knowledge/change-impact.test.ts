@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 
 import { deriveChangeImpact } from "./change-impact";
+import type { FrontendIR } from "../../shared/frontend-ir";
 
 describe("deriveChangeImpact", () => {
   test("maps changed source files through published dependency and test edges", () => {
@@ -50,5 +51,30 @@ describe("deriveChangeImpact", () => {
     expect(impact.impact?.crossLinks).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "candidate" })
     ]));
+  });
+
+  test("merges frontend fact paths and test paths into the existing response contract", () => {
+    const sourceRef = (path: string) => ({ snapshotId: "snapshot-2", path, startLine: 1, endLine: 1, blobHash: "a".repeat(64) });
+    const frontendGraph = {
+      entities: [
+        { id: "page", kind: "page", sourceRefs: [sourceRef("src/page.tsx")] },
+        { id: "api", kind: "api_operation", sourceRefs: [sourceRef("src/api.ts")] },
+        { id: "test", kind: "test_case", sourceRefs: [sourceRef("src/page.test.tsx")] },
+        { id: "style", kind: "style_scope", sourceRefs: [sourceRef("src/page.css")] }
+      ],
+      edges: [
+        { fromEntityId: "page", toEntityId: "api", evidenceClass: "fact" },
+        { fromEntityId: "test", toEntityId: "page", evidenceClass: "fact" },
+        { fromEntityId: "page", toEntityId: "style", evidenceClass: "candidate" }
+      ]
+    } as unknown as FrontendIR;
+    const impact = deriveChangeImpact({
+      snapshotId: "snapshot-2", previousSnapshotId: "snapshot-1", added: [], modified: ["src/api.ts"], deleted: [],
+      requiresBuild: true, affectedModules: [], suggestedTests: []
+    }, { symbols: [], dependencies: [] }, null, frontendGraph);
+
+    expect(impact.affectedModules).toEqual(["src/api.ts", "src/page.test.tsx", "src/page.tsx"]);
+    expect(impact.suggestedTests).toEqual(["src/page.test.tsx"]);
+    expect(impact.affectedModules).not.toContain("src/page.css");
   });
 });

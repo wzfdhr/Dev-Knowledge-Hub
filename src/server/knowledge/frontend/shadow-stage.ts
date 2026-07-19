@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { z } from "zod";
 
-import { frontendIrSchema } from "../../../shared/frontend-ir.js";
+import { frontendIrSchema, type FrontendIR } from "../../../shared/frontend-ir.js";
 
 import type { BuildRecord } from "../build-service.js";
 import { type ArtifactStore } from "../pipeline/artifact-store.js";
@@ -30,12 +30,16 @@ import {
   EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
   FRONTEND_V2_GRAPH_SCHEMA_VERSION,
   FRONTEND_V2_IR_SCHEMA_VERSION,
-  assertFrontendArtifactFamily
+  assertFrontendArtifactFamily,
+  frontendGraphV2Schema
 } from "./compatibility.js";
 import type { FrontendKnowledgeMode } from "./rollout-mode.js";
 import type { ParserAnalyzeRequest } from "./runtime/parser-protocol.js";
 import { SourceAnalysisCache } from "./source-analysis-cache.js";
 import { typeScriptSyntaxParserConfigDigest } from "./typescript-program.js";
+import { buildFrontendGraph } from "./graph-builder.js";
+import { generateFrontendKnowledge } from "./knowledge-generator.js";
+import { assessFrontendKnowledgeQuality } from "./quality-assessment.js";
 
 const SHADOW_FAMILIES = ["knowledge-v1", "frontend-v2"] as const;
 const UPSTREAM_STAGES: Record<Exclude<BuildStage, "convert">, readonly BuildStage[]> = {
@@ -263,6 +267,33 @@ async function upstreamAnalyzerManifestDigest(
   return [...digests][0] ?? EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST;
 }
 
+async function frontendUpstreamValue(
+  input: { store: ShadowStore; artifactStore: ArtifactStore },
+  manifestIds: readonly string[],
+  stage: BuildStage
+): Promise<unknown> {
+  const expected = ARTIFACT_KINDS[stage]["frontend-v2"];
+  for (const artifactId of manifestIds) {
+    const manifest = await input.store.findArtifactById(artifactId);
+    if (manifest?.kind === expected.kind && manifest.schemaVersion === expected.schemaVersion) {
+      return input.artifactStore.getJson(manifest);
+    }
+  }
+  throw new Error(`Frontend shadow upstream ${stage} artifact is unavailable`);
+}
+
+function irFromGraph(value: ReturnType<typeof buildFrontendGraph>): FrontendIR {
+  return {
+    schemaVersion: 2,
+    snapshotId: value.snapshotId,
+    analyzerManifestDigest: value.analyzerManifestDigest,
+    analyzerManifest: [...new Map(value.nodes.flatMap((node) => node.provenance)
+      .map((item) => [JSON.stringify(item), item])).values()].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+    entities: value.nodes,
+    edges: value.edges
+  };
+}
+
 export function createFrontendShadowStageExecutor(input: {
   store: ShadowStore;
   artifactStore: ArtifactStore;
@@ -397,8 +428,10 @@ export function createFrontendShadowStageExecutor(input: {
       upstreamManifestIds: upstreamIds,
       sourceArtifactId: legacyManifest.id
     };
-    const value = run.stage === "extract"
-      ? {
+    let value: unknown;
+    switch (run.stage) {
+      case "extract":
+        value = {
           ...(frontendIr ?? {
             schemaVersion: 2,
             snapshotId: run.snapshotId,
@@ -408,23 +441,75 @@ export function createFrontendShadowStageExecutor(input: {
             edges: []
           }),
           ...(projectAnalysis ? { projectAnalysis } : {})
-        }
-      : run.stage === "graph"
-        ? {
-            schemaVersion: 2,
-            snapshotId: run.snapshotId,
-            analyzerManifestDigest,
-            nodes: [],
-            edges: []
-          }
-        : run.stage === "package"
-        ? {
+        };
+        break;
+      case "graph":
+        value = buildFrontendGraph(frontendIrSchema.parse(await frontendUpstreamValue(input, upstreamIds, "extract")));
+        break;
+      case "synthesize": {
+        const graph = frontendGraphV2Schema.parse(await frontendUpstreamValue(input, upstreamIds, "graph"));
+        value = generateFrontendKnowledge(irFromGraph(graph));
+        break;
+      }
+      case "index": {
+        const knowledge = await frontendUpstreamValue(input, upstreamIds, "synthesize") as ReturnType<typeof generateFrontendKnowledge>;
+        value = {
+          schemaVersion: 2,
+          snapshotId: run.snapshotId,
+          analyzerManifestDigest,
+          documents: knowledge.pages.flatMap((page) => page.chunks.map((chunk, position) => ({
+            documentKey: `${page.slug}:${position}`,
+            kind: "page",
+            title: page.title,
+            content: chunk.content,
+            citations: chunk.citations,
+            metadata: { pageId: page.id, pageSlug: page.slug, heading: chunk.heading, position }
+          })))
+        };
+        break;
+      }
+      case "lint": {
+        const ir = frontendIrSchema.parse(await frontendUpstreamValue(input, upstreamIds, "extract"));
+        value = { ...assessFrontendKnowledgeQuality(ir), analyzerManifestDigest };
+        break;
+      }
+      case "viz": {
+        const graph = frontendGraphV2Schema.parse(await frontendUpstreamValue(input, upstreamIds, "graph"));
+        value = {
+          schemaVersion: 2,
+          snapshotId: run.snapshotId,
+          analyzerManifestDigest,
+          routeIds: graph.nodes.filter((node) => node.kind === "route").map((node) => node.id),
+          componentIds: graph.nodes.filter((node) => node.kind === "component").map((node) => node.id),
+          visualizationIds: graph.nodes.filter((node) => node.kind === "visualization").map((node) => node.id),
+          factEdgeIds: graph.edges.filter((edge) => edge.evidenceClass === "fact").map((edge) => edge.id)
+        };
+        break;
+      }
+      case "validate": {
+        const knowledge = await frontendUpstreamValue(input, upstreamIds, "synthesize") as ReturnType<typeof generateFrontendKnowledge>;
+        const quality = await frontendUpstreamValue(input, upstreamIds, "lint") as ReturnType<typeof assessFrontendKnowledgeQuality>;
+        value = {
+          ...baseValue,
+          valid: knowledge.pages.every((page) => page.citations.length > 0
+            && page.chunks.every((chunk) => chunk.citations.length > 0)),
+          pageCount: knowledge.pages.length,
+          issueCount: quality.issues.length
+        };
+        break;
+      }
+      case "package":
+        value = {
             ...baseValue,
             irSchemaVersion: FRONTEND_V2_IR_SCHEMA_VERSION,
             graphSchemaVersion: FRONTEND_V2_GRAPH_SCHEMA_VERSION,
             artifacts: await packageArtifacts(input.store, run, legacyManifest)
-          }
-        : baseValue;
+          };
+        break;
+      case "tables":
+        value = baseValue;
+        break;
+    }
     const companion = await input.artifactStore.putJson({
       manifest: {
         id: randomUUID(), workspaceId: run.workspaceId, projectId: run.projectId,

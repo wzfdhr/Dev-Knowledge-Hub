@@ -21,6 +21,7 @@ import type {
 
 const codeExtensions = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"]);
 const documentExtensions = new Set([".md", ".json", ".yaml", ".yml"]);
+const frontendV2OnlyExtensions = new Set([".html", ".css", ".scss", ".sass", ".less", ".svelte", ".astro", ".svg"]);
 
 const normalizedSourceSchema = z.object({
   snapshotId: z.string().min(1),
@@ -148,6 +149,7 @@ function extractSource(source: NormalizedSource) {
   if (extension === ".vue") return extractVueSfc(source);
   if (documentExtensions.has(extension)) return extractDocumentSource(source);
   if (codeExtensions.has(extension)) return extractWebSource(source);
+  if (frontendV2OnlyExtensions.has(extension)) return null;
   throw new Error(`Normalized sources artifact contains unsupported source: ${source.path}`);
 }
 
@@ -158,7 +160,8 @@ function combineKnowledgeIr(snapshotId: string, sources: readonly NormalizedSour
   const extracted = sources
     .slice()
     .sort((left, right) => Buffer.compare(Buffer.from(left.path, "utf8"), Buffer.from(right.path, "utf8")))
-    .map(extractSource);
+    .map(extractSource)
+    .filter((result): result is NonNullable<typeof result> => result !== null);
   const ir = knowledgeIrSchema.parse({
     schemaVersion: 1,
     snapshotId,

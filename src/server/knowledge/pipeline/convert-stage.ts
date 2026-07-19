@@ -17,7 +17,8 @@ import type {
 
 const supportedExtensions = new Set([
   ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs",
-  ".vue", ".md", ".json", ".yaml", ".yml"
+  ".vue", ".html", ".css", ".scss", ".sass", ".less", ".svelte", ".astro", ".svg",
+  ".md", ".json", ".yaml", ".yml"
 ]);
 
 export interface NormalizedSourcesStageStore extends PipelineArtifactStore {

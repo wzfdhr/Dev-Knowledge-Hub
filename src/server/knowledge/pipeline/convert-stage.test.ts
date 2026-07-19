@@ -95,6 +95,27 @@ describe("normalized sources pipeline stage", () => {
     });
   });
 
+  test("keeps verified frontend text in normalized sources for the frontend-v2 analyzer family", async () => {
+    const sources = {
+      "src/App.vue": "<template><main /></template>\n",
+      "src/index.html": "<main></main>\n",
+      "src/app.css": ":root { --brand: blue; }\n",
+      "src/theme.scss": "$brand: blue;\n",
+      "src/theme.less": "@brand: blue;\n",
+      "src/widget.svelte": "<main>Widget</main>\n",
+      "src/page.astro": "---\nconst title = 'Page';\n---\n<main>{title}</main>\n",
+      "public/icon.svg": "<svg viewBox=\"0 0 1 1\"></svg>\n"
+    };
+    const prepared = await fixture(sources);
+    const execute = createNormalizedSourcesStageExecutor({ store: prepared.store, artifactStore: prepared.artifactStore });
+
+    const result = await execute(prepared.run);
+    const artifact = prepared.store.knowledgeArtifacts.find((candidate) => candidate.id === result.outputManifestIds![0])!;
+    const value = await prepared.artifactStore.getJson(artifact) as { sources: Array<{ path: string }> };
+
+    expect(value.sources.map((source) => source.path)).toEqual(Object.keys(sources).sort());
+  });
+
   test("reuses the immutable artifact for the same owned run inputs", async () => {
     const prepared = await fixture({ "src/app.ts": "export const answer = 42;\n" });
     const execute = createNormalizedSourcesStageExecutor({ store: prepared.store, artifactStore: prepared.artifactStore });

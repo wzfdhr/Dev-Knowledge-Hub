@@ -110,11 +110,11 @@ V1 可演示约在第 12–16 工程周，可试用约在第 22–30 周，可�
 
 ## V1 Demo：React/Vite + ECharts 端到端
 
-### FK06 放行前端文本与受限资产清单
+### FK06 放行前端文本与受限 SVG
 
-**Files:** Modify `src/shared/import-filter.ts`, `src/shared/import-filter.test.ts`, `src/client/api/folder-import.ts`, `src/client/api/folder-import.test.ts`, `src/server/uploads/folder-import.ts`, `src/server/uploads/folder-import.test.ts`, `src/client/components/import-report.tsx`, `src/client/api/types.ts`.
+**Files:** Modify `docs/product/frontend-capability-matrix.md`, `src/shared/import-filter.ts`, `src/shared/import-filter.test.ts`, `src/client/api/folder-import.test.ts`, `src/server/uploads/folder-import.ts`, `src/server/uploads/folder-import.test.ts`, `src/server/git/snapshot.ts`, `src/server/knowledge/pipeline/convert-stage.ts`, `src/server/knowledge/pipeline/convert-stage.test.ts`, `src/server/knowledge/pipeline/extract-stage.ts`, `src/server/knowledge/pipeline/extract-stage.test.ts`.
 
-**Acceptance:** `.vue/.html/.css/.scss/.sass/.less/.svelte/.astro/.d.ts` 和必要前端 config 双端一致；SVG 作受限文本解析但永不直接渲染；图片/字体/媒体只存 `trust=client_unverified` 的 asset manifest，API 和界面显示“未由服务端验证”，不作为服务端内容事实、Graph 事实边或 citation。忽略目录在读取内容前跳过。
+**Acceptance:** `.vue/.html/.css/.scss/.sass/.less/.svelte/.astro/.d.ts` 和必要前端 config 双端一致；SVG 只作为经服务端 UTF-8 校验的受限文本进入快照且永不直接渲染；图片、字体和媒体在读取内容前继续过滤，不进入上传、快照、算法或 50,000 文件上限。它们的 `trust=client_unverified` asset manifest 经用户于 2026-07-19 确认推迟到 FK14 的分页 manifest 合同，不在缺少持久化 trust 合同的 FK06 伪造记录。新增 v2 专属文本进入 normalized sources，但 knowledge-v1 extractor 只忽略明确允许的 v2 扩展名，意外扩展仍作为损坏 artifact 拒绝。
 
 **Commit:** `feat: ingest frontend source formats`.
 

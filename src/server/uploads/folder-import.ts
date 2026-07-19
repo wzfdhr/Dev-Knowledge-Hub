@@ -11,7 +11,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
-import { filterImportFile } from "../../shared/import-filter.js";
+import { filterImportFile, importLanguageForPath } from "../../shared/import-filter.js";
 
 import type { AppStore, SourceFileRecord, SourceSnapshotRecord } from "../persistence/store.js";
 
@@ -62,22 +62,6 @@ function safePath(value: string): string {
 
 function recordIgnored(reasons: Record<string, number>, reason: string): void {
   reasons[reason] = (reasons[reason] ?? 0) + 1;
-}
-
-function languageFor(filePath: string): string | null {
-  const extension = path.posix.extname(filePath).toLowerCase();
-  return ({
-    ".ts": "typescript",
-    ".tsx": "tsx",
-    ".js": "javascript",
-    ".jsx": "jsx",
-    ".md": "markdown",
-    ".json": "json",
-    ".yaml": "yaml",
-    ".yml": "yaml",
-    ".csv": "csv",
-    ".xlsx": "xlsx"
-  } as Record<string, string>)[extension] ?? null;
 }
 
 async function makeReadOnly(storagePath: string, filePaths: string[]): Promise<void> {
@@ -168,7 +152,7 @@ export async function importFolderFiles({
         filePath,
         byteSize: content.byteLength,
         contentHash: createHash("sha256").update(content).digest("hex"),
-        language: languageFor(filePath)
+        language: importLanguageForPath(filePath)
       });
     }
 

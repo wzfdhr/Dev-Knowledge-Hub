@@ -16,6 +16,8 @@ import { requireIsolatedTestDatabase } from "../../test/integration-database";
 import { buildServer } from "../app";
 import { syncRepository } from "../git/snapshot";
 import { BuildService } from "../knowledge/build-service";
+import { SourceAnalysisCache } from "../knowledge/frontend/source-analysis-cache";
+import { analyzeWorkerRequest } from "../knowledge/frontend/runtime/analyzer-worker";
 import { analyzeSnapshot, type CodeIndex } from "../knowledge/intelligence";
 import { generateKnowledge } from "../knowledge/generator";
 import {
@@ -113,6 +115,50 @@ async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean):
 }
 
 integration("PostgreSQL cited knowledge integration", () => {
+  test(databaseUrl
+    ? "persists immutable workspace-scoped source analysis facts without project leakage"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("source-analysis@example.com", "hash");
+    const cache = new SourceAnalysisCache(store);
+    const key = {
+      workspaceId: setup!.workspace.id,
+      contentHash: "a".repeat(64),
+      analyzerId: "typescript-syntax",
+      analyzerVersion: "1.0.0",
+      parserConfigDigest: "b".repeat(64)
+    };
+    const facts = { schemaVersion: 1, declarations: [{ name: "Chart", start: 0, end: 5 }] };
+
+    const concurrent = await Promise.all([cache.put(key, facts), cache.put(key, facts)]);
+    expect(concurrent[0]).toMatchObject({ ...key, facts });
+    expect(concurrent[1]).toMatchObject({ ...key, facts });
+    await expect(cache.get(key)).resolves.toEqual(facts);
+    await expect(cache.put(key, { schemaVersion: 1, declarations: [] }))
+      .rejects.toThrow("cache collision");
+    await expect(pool.query(
+      "UPDATE source_analysis_artifacts SET facts = $1 WHERE workspace_id = $2",
+      [{ schemaVersion: 1 }, setup!.workspace.id]
+    )).rejects.toThrow("source analysis artifacts are immutable");
+
+    const otherWorkspaceId = randomUUID();
+    await pool.query(
+      "INSERT INTO workspaces (id, name, slug) VALUES ($1, 'Other', $2)",
+      [otherWorkspaceId, `other-${otherWorkspaceId}`]
+    );
+    await expect(cache.get({ ...key, workspaceId: otherWorkspaceId })).resolves.toBeNull();
+    await cache.put({ ...key, workspaceId: otherWorkspaceId }, facts);
+    const count = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM source_analysis_artifacts");
+    expect(count.rows[0]?.count).toBe("2");
+    await pool.query("DELETE FROM workspaces WHERE id = $1", [otherWorkspaceId]);
+    const remaining = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM source_analysis_artifacts");
+    expect(remaining.rows[0]?.count).toBe("1");
+  }, 30_000);
+
   test(databaseUrl
     ? "changes project frontend rollout and its audit event in one transaction"
     : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
@@ -1068,7 +1114,18 @@ integration("PostgreSQL cited knowledge integration", () => {
       const worker = new PipelineStageWorker(
         store,
         queue,
-        createFrontendShadowStageExecutor({ store, artifactStore, legacy: legacyExecutor }),
+        createFrontendShadowStageExecutor({
+          store,
+          artifactStore,
+          legacy: legacyExecutor,
+          frontendParser: {
+            analyze: async (request) => analyzeWorkerRequest({
+              type: "analyze",
+              requestId: randomUUID(),
+              ...request
+            })
+          }
+        }),
         ["convert", "extract", "tables", "graph", "synthesize", "index", "lint", "viz", "validate", "package"],
         5_000,
         createFrontendShadowStageInputPlanner(store)
@@ -1122,6 +1179,18 @@ integration("PostgreSQL cited knowledge integration", () => {
           ]));
         }
       }
+      const validateRun = firstRuns.find((run) => run.stage === "validate")!;
+      const validationManifest = (await Promise.all(validateRun.outputManifestIds.map((id) => store.findArtifactById(id))))
+        .find((manifest) => manifest?.kind === "frontend-validation-v2")!;
+      const validationValue = await artifactStore.getJson(validationManifest) as {
+        valid: boolean; graphReferenceCount: number; invalidReferenceCount: number;
+      };
+      expect(validationValue).toMatchObject({
+        valid: true,
+        graphReferenceCount: expect.any(Number),
+        invalidReferenceCount: 0
+      });
+      expect(validationValue.graphReferenceCount).toBeGreaterThan(0);
 
       await store.transitionBuild(firstBuild.id, "queued", "ready");
       const release = await store.createReleaseDraft(setup!.workspace.id, repository!.id, firstBuild.id, "1.0.0");
@@ -2065,7 +2134,13 @@ integration("PostgreSQL cited knowledge integration", () => {
             contentDigest: "0".repeat(64), storageKey: "pending", sourceRefs: [],
             producer: "deterministic", createdAt: new Date().toISOString()
           },
-          value: { schemaVersion: expected.schemaVersion, stage, kind: expected.kind }
+          value: expected.kind === "frontend-validation-v2" ? {
+            schemaVersion: 2, family: "frontend-v2", stage: "validate", snapshotId,
+            analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+            upstreamManifestIds: [], sourceArtifactId: "integration-validation-source",
+            valid: true, pageCount: 1, issueCount: 0,
+            graphReferenceCount: 1, checkedReferenceCount: 1, invalidReferenceCount: 0
+          } : { schemaVersion: expected.schemaVersion, stage, kind: expected.kind }
         })).manifest));
         if (stage !== "package") {
           const stageRun = await store.createStageRun({

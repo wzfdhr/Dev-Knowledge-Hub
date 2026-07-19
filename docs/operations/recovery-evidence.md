@@ -40,21 +40,23 @@
     "snapshotCount": 1,
     "releaseCount": 3,
     "releaseChannelCount": 1,
-    "artifactCount": 8
+    "artifactCount": 8,
+    "sourceAnalysisArtifactCount": 12
   },
   "integrity": {
     "orphanedReleases": 0,
     "orphanedReleaseChannels": 0,
     "crossWorkspaceProjectMembers": 0,
     "projectMembersWithoutWorkspaceMembership": 0,
-    "orphanedArtifacts": 0
+    "orphanedArtifacts": 0,
+    "orphanedSourceAnalysisArtifacts": 0
   }
 }
 ```
 
 验收时必须验证 `result=success`、`productionVolumeTouched=false`，且 `volumeArchives`
 中的 `snapshots.tgz`、`repositories.tgz`、`sources.tgz`、`artifacts.tgz` 齐全。恢复演练还必须
-真实恢复临时 PostgreSQL、校验 release/build/snapshot/repository/channel 一致性、项目权限和 artifact
+真实恢复临时 PostgreSQL、校验 release/build/snapshot/repository/channel 一致性、项目权限、source analysis cache 和 artifact
 引用，并逐条按 `storageKey` 校验 artifact 文件路径、JSON 与内容 SHA-256。随后启动临时应用完成健康检查；
 对应字段均为 `true`，`artifactContentVerifiedCount` 必须等于 `databaseStats.artifactCount`，`integrity`
 各项均为 `0`。`resticSnapshotId` 必须是 restic 返回的完整 64 位快照 ID，并与备份或恢复日志对应；

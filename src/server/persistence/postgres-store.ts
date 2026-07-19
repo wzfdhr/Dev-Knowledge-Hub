@@ -64,6 +64,8 @@ import type {
   WorkspaceKnowledgeSearchRecord,
   WorkspaceProjectOverviewRecord,
   SetupResult,
+  SourceAnalysisArtifactKey,
+  SourceAnalysisArtifactRecord,
   SourceFileRecord,
   SourceSnapshotRecord,
   TeamMemberRecord,
@@ -205,6 +207,17 @@ interface ArtifactRow extends QueryResultRow {
   storage_key: string;
   source_refs: ArtifactManifest["sourceRefs"];
   producer: ArtifactManifest["producer"];
+  created_at: Date;
+}
+
+interface SourceAnalysisArtifactRow extends QueryResultRow {
+  workspace_id: string;
+  content_hash: string;
+  analyzer_id: string;
+  analyzer_version: string;
+  parser_config_digest: string;
+  facts: SourceAnalysisArtifactRecord["facts"];
+  facts_digest: string;
   created_at: Date;
 }
 
@@ -538,6 +551,19 @@ function artifactManifest(row: ArtifactRow): ArtifactManifest {
     producer: row.producer,
     createdAt: row.created_at.toISOString()
   });
+}
+
+function sourceAnalysisArtifact(row: SourceAnalysisArtifactRow): SourceAnalysisArtifactRecord {
+  return {
+    workspaceId: row.workspace_id,
+    contentHash: row.content_hash,
+    analyzerId: row.analyzer_id,
+    analyzerVersion: row.analyzer_version,
+    parserConfigDigest: row.parser_config_digest,
+    facts: row.facts,
+    factsDigest: row.facts_digest,
+    createdAt: row.created_at
+  };
 }
 
 function pipelineSearchDocument(row: PipelineSearchDocumentRow): PipelineSearchDocumentRecord {
@@ -1199,6 +1225,55 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       [artifactId]
     );
     return rows[0] ? artifactManifest(rows[0]) : null;
+  }
+
+  async findSourceAnalysisArtifact(key: SourceAnalysisArtifactKey): Promise<SourceAnalysisArtifactRecord | null> {
+    const { rows } = await this.pool.query<SourceAnalysisArtifactRow>(
+      `SELECT workspace_id, content_hash, analyzer_id, analyzer_version,
+              parser_config_digest, facts, facts_digest, created_at
+       FROM source_analysis_artifacts
+       WHERE workspace_id = $1 AND content_hash = $2 AND analyzer_id = $3
+         AND analyzer_version = $4 AND parser_config_digest = $5`,
+      [key.workspaceId, key.contentHash, key.analyzerId, key.analyzerVersion, key.parserConfigDigest]
+    );
+    return rows[0] ? sourceAnalysisArtifact(rows[0]) : null;
+  }
+
+  async putSourceAnalysisArtifact(
+    input: Omit<SourceAnalysisArtifactRecord, "createdAt">
+  ): Promise<SourceAnalysisArtifactRecord> {
+    return this.transaction(async (client) => {
+      const values = [
+        input.workspaceId,
+        input.contentHash,
+        input.analyzerId,
+        input.analyzerVersion,
+        input.parserConfigDigest,
+        input.facts,
+        input.factsDigest
+      ];
+      const inserted = await client.query<SourceAnalysisArtifactRow>(
+        `INSERT INTO source_analysis_artifacts
+           (workspace_id, content_hash, analyzer_id, analyzer_version, parser_config_digest, facts, facts_digest)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT DO NOTHING
+         RETURNING workspace_id, content_hash, analyzer_id, analyzer_version,
+                   parser_config_digest, facts, facts_digest, created_at`,
+        values
+      );
+      const row = inserted.rows[0] ?? (await client.query<SourceAnalysisArtifactRow>(
+        `SELECT workspace_id, content_hash, analyzer_id, analyzer_version,
+                parser_config_digest, facts, facts_digest, created_at
+         FROM source_analysis_artifacts
+         WHERE workspace_id = $1 AND content_hash = $2 AND analyzer_id = $3
+           AND analyzer_version = $4 AND parser_config_digest = $5
+         FOR SHARE`,
+        values.slice(0, 5)
+      )).rows[0];
+      if (!row) throw new Error("Source analysis artifact could not be persisted");
+      if (row.facts_digest !== input.factsDigest) throw new Error("Source analysis cache collision");
+      return sourceAnalysisArtifact(row);
+    });
   }
 
   async savePipelineSearchDocuments(input: {

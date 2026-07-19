@@ -41,14 +41,16 @@ function validEvidence() {
       snapshotCount: 1,
       releaseCount: 1,
       releaseChannelCount: 1,
-      artifactCount: 1
+      artifactCount: 1,
+      sourceAnalysisArtifactCount: 1
     },
     integrity: {
       orphanedReleases: 0,
       orphanedReleaseChannels: 0,
       crossWorkspaceProjectMembers: 0,
       projectMembersWithoutWorkspaceMembership: 0,
-      orphanedArtifacts: 0
+      orphanedArtifacts: 0,
+      orphanedSourceAnalysisArtifacts: 0
     }
   };
 }
@@ -75,6 +77,8 @@ test("rejects incomplete or inconsistent recovery evidence", () => {
     (value) => { delete value.pgRestoreListValidated; },
     (value) => { delete value.integrity; },
     (value) => { delete value.integrity.orphanedArtifacts; },
+    (value) => { delete value.integrity.orphanedSourceAnalysisArtifacts; },
+    (value) => { delete value.databaseStats.sourceAnalysisArtifactCount; },
     (value) => { value.databaseArchiveSha256 = "invalid"; },
     (value) => { value.artifactContentVerifiedCount = 0; },
     (value) => { value.resticSnapshotId = "abc123ef"; },

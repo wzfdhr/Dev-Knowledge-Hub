@@ -22,6 +22,15 @@ const virtualSourceSchema = z.object({
   blobHash: z.string().regex(/^[a-f0-9]{64}$/i)
 });
 
+const cachedSourceAnalysisSchema = z.object({
+  path: z.string().min(1).max(1_024),
+  blobHash: z.string().regex(/^[a-f0-9]{64}$/i),
+  analyzerId: z.literal("typescript-syntax"),
+  analyzerVersion: z.literal("1.0.0"),
+  parserConfigDigest: z.string().regex(/^[a-f0-9]{64}$/i),
+  facts: z.record(z.string(), z.json())
+}).strict();
+
 export const parserRequestIdSchema = z.uuid();
 
 export const parserAnalyzeRequestSchema = z.object({
@@ -29,7 +38,8 @@ export const parserAnalyzeRequestSchema = z.object({
   requestId: parserRequestIdSchema,
   snapshotId: z.string().min(1).max(200),
   analyzerIds: z.array(z.string().regex(/^[a-z0-9][a-z0-9._-]{0,119}$/)).max(100),
-  sources: z.array(virtualSourceSchema)
+  sources: z.array(virtualSourceSchema),
+  cachedAnalyses: z.array(cachedSourceAnalysisSchema).max(5_000).default([])
 });
 
 export interface ParserAnalyzeRequest {
@@ -38,6 +48,7 @@ export interface ParserAnalyzeRequest {
   snapshotId: string;
   analyzerIds: string[];
   sources: VirtualSourceInput[];
+  cachedAnalyses?: z.infer<typeof cachedSourceAnalysisSchema>[];
 }
 
 export const parserCancelRequestSchema = z.object({

@@ -67,6 +67,18 @@ import {
   validateProjectFrontendMode,
   type FrontendKnowledgeMode
 } from "./knowledge/frontend/rollout-mode.js";
+import {
+  FrontendPreviewUnavailableError,
+  loadFrontendCandidatePreview
+} from "./knowledge/frontend/preview.js";
+import { compareFrontendKnowledge } from "./knowledge/frontend/comparison.js";
+import { deriveFrontendChangeImpact } from "./knowledge/frontend/change-impact.js";
+import {
+  frontendSourceReferenceIsValid,
+  loadFrontendSourceDescriptors
+} from "./knowledge/frontend/reference-validation.js";
+import { frontendCandidateRunStatus } from "./knowledge/frontend/preview-status.js";
+import { searchFrontendKnowledge } from "./knowledge/frontend/search.js";
 import { exportKnowledgeGraph } from "./knowledge/pipeline/viz.js";
 import { legacyBuildStatus } from "./knowledge/pipeline/contracts.js";
 import {
@@ -92,7 +104,7 @@ import {
 import {
   FolderUploadError,
   importFolderFiles,
-  MAX_FOLDER_UPLOAD_FILES,
+  MAX_FOLDER_SCAN_FILES,
   type FolderUploadFile
 } from "./uploads/folder-import.js";
 
@@ -375,9 +387,9 @@ function requestedProjectId(request: FastifyRequest): string | undefined {
 async function* directFolderParts(request: FastifyRequest): AsyncGenerator<FolderUploadFile> {
   for await (const part of request.parts({
     limits: {
-      files: MAX_FOLDER_UPLOAD_FILES,
+      files: MAX_FOLDER_SCAN_FILES,
       fields: 0,
-      parts: MAX_FOLDER_UPLOAD_FILES,
+      parts: MAX_FOLDER_SCAN_FILES,
       fileSize: MAX_IMPORT_TABLE_WORKBOOK_BYTES
     }
   })) {
@@ -432,9 +444,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   void server.register(multipart, {
     preservePath: true,
     limits: {
-      files: MAX_FOLDER_UPLOAD_FILES,
+      files: MAX_FOLDER_SCAN_FILES,
       fields: 0,
-      parts: MAX_FOLDER_UPLOAD_FILES,
+      parts: MAX_FOLDER_SCAN_FILES,
       fileSize: MAX_IMPORT_TABLE_WORKBOOK_BYTES
     }
   });
@@ -1146,6 +1158,226 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         ? deriveChangeImpact(change, metadata!, graph)
         : change
     };
+  });
+
+  server.get("/api/projects/:projectId/frontend-preview", { preHandler: requireAdministrator }, async (request, reply) => {
+    if (!options.qualityArtifactReader) {
+      return sendError(reply, 503, "FRONTEND_PREVIEW_UNAVAILABLE", "Frontend preview artifacts are unavailable");
+    }
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid frontend preview project");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const project = (await options.store.listProjects(admin.workspaceId))
+      .find((candidate) => candidate.id === params.data.projectId);
+    if (!project || project.archivedAt !== null) {
+      return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    }
+    const repository = await options.store.currentRepository(admin.workspaceId, project.id);
+    if (!repository) return { status: "source_missing", preview: null };
+    const build = (await options.store.listBuilds(admin.workspaceId, repository.id, { limit: 1, offset: 0 }))[0];
+    if (!build) return { status: "build_missing", preview: null };
+    if (build.status === "failed") {
+      return { status: "build_failed", preview: null, build: { id: build.id, status: build.status } };
+    }
+    const runs = await options.store.listPipelineStageRuns(admin.workspaceId, project.id, build.id);
+    const candidateStatus = frontendCandidateRunStatus(runs);
+    if (candidateStatus.status === "candidate_failed") {
+      return {
+        status: "candidate_failed", preview: null, build: { id: build.id, status: build.status },
+        failedStage: candidateStatus.failedStage
+      };
+    }
+    if (candidateStatus.status === "candidate_pending") {
+      return { status: "candidate_pending", preview: null, build: { id: build.id, status: build.status } };
+    }
+    try {
+      const preview = await loadFrontendCandidatePreview({
+        store: options.store,
+        reader: options.qualityArtifactReader,
+        workspaceId: admin.workspaceId,
+        projectId: project.id,
+        buildId: build.id
+      });
+      const [metadata, pages, searchDocuments, legacyGraph, change, latestSnapshot] = await Promise.all([
+        options.store.knowledgeMetadataForBuild(admin.workspaceId, build.id),
+        options.store.listKnowledgePagesForBuild(admin.workspaceId, build.id),
+        options.store.listPipelineSearchDocuments(admin.workspaceId, project.id, build.id),
+        options.store.getKnowledgeGraph(admin.workspaceId, project.id, build.id),
+        options.store.snapshotChangeSummary(admin.workspaceId, repository.id, build.snapshotId),
+        options.store.latestSnapshot(admin.workspaceId, repository.id)
+      ]);
+      const changedPaths = change ? [...change.added, ...change.modified, ...change.deleted] : [];
+      const legacyImpact = change
+        ? deriveChangeImpact(change, metadata, legacyGraph)
+        : null;
+      const candidateImpact = deriveFrontendChangeImpact({
+        changedPaths,
+        graph: {
+          schemaVersion: preview.graph.schemaVersion,
+          snapshotId: preview.graph.snapshotId,
+          analyzerManifestDigest: preview.graph.analyzerManifestDigest,
+          analyzerManifest: [],
+          entities: preview.graph.nodes,
+          edges: preview.graph.edges
+        }
+      });
+      const buildSnapshot = await options.store.findSnapshotById(admin.workspaceId, build.snapshotId);
+      if (!buildSnapshot) throw new FrontendPreviewUnavailableError("Frontend candidate snapshot is unavailable");
+      const pageRefs = preview.pages.flatMap((page) => [
+        ...page.citations,
+        ...page.items.flatMap((item) => item.sourceRefs),
+        ...page.chunks.flatMap((chunk) => chunk.citations)
+      ]);
+      const searchRefs = preview.search.flatMap((document) => document.citations);
+      const issueRefs = preview.quality.issues.flatMap((issue) => issue.sourceRefs);
+      const referencedPaths = new Set([
+        ...preview.graph.nodes.flatMap((node) => node.sourceRefs),
+        ...preview.graph.edges
+          .filter((edge) => edge.evidenceClass === "fact")
+          .flatMap((edge) => edge.sourceRefs),
+        ...pageRefs,
+        ...searchRefs,
+        ...issueRefs
+      ].map((reference) => reference.path));
+      const candidateSources = await loadFrontendSourceDescriptors({
+        snapshot: buildSnapshot,
+        files: (await options.store.listSnapshotFiles(admin.workspaceId, build.snapshotId))
+          .filter((file) => referencedPaths.has(file.path))
+      });
+      return {
+        status: "ready",
+        stale: latestSnapshot?.id !== build.snapshotId,
+        preview,
+        comparison: compareFrontendKnowledge({
+          legacy: {
+            entityKeys: metadata.symbols.map((symbol) => `${symbol.kind}:${symbol.path}:${symbol.name}`),
+            factKeys: metadata.dependencies.map((edge) => `${edge.kind}:${edge.path}->${edge.targetPath ?? edge.target}`),
+            pageKeys: pages.map((page) => page.slug),
+            searchKeys: searchDocuments.map((document) => document.documentKey),
+            impactPaths: legacyImpact?.affectedModules ?? [],
+            suggestedTestPaths: legacyImpact?.suggestedTests ?? [],
+            issueCount: 0
+          },
+          candidate: {
+            snapshotId: preview.build.snapshotId,
+            sources: candidateSources,
+            pageRefs,
+            searchRefs,
+            issueRefs,
+            entities: preview.graph.nodes,
+            edges: preview.graph.edges,
+            pageKeys: preview.pages.map((page) => page.slug),
+            searchKeys: preview.search.map((document) => document.documentKey),
+            impactPaths: candidateImpact.affectedPaths,
+            suggestedTestPaths: candidateImpact.suggestedTestPaths,
+            issueCount: preview.quality.issues.length
+          }
+        })
+      };
+    } catch (error) {
+      if (error instanceof FrontendPreviewUnavailableError || error instanceof z.ZodError) {
+        return sendError(reply, 409, "FRONTEND_PREVIEW_INVALID", "Frontend candidate package is incomplete or invalid");
+      }
+      throw error;
+    }
+  });
+
+  server.get("/api/projects/:projectId/frontend-preview/source", { preHandler: requireAdministrator }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    const query = z.object({
+      buildId: z.uuid(), path: z.string().min(1).max(500),
+      startLine: z.coerce.number().int().positive(), endLine: z.coerce.number().int().positive()
+    }).refine((value) => value.endLine >= value.startLine && value.endLine - value.startLine + 1 <= 500)
+      .safeParse(request.query);
+    if (!params.success || !query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid frontend preview source range");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const build = await options.store.getBuild(admin.workspaceId, query.data.buildId);
+    const repository = build ? await options.store.getRepository(admin.workspaceId, build.repositoryId) : null;
+    if (!build || !repository || repository.projectId !== params.data.projectId) {
+      return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    }
+    const snapshot = await options.store.findSnapshotById(admin.workspaceId, build.snapshotId);
+    const sourceFile = await options.store.findSourceFile(admin.workspaceId, build.snapshotId, query.data.path);
+    if (!snapshot || !sourceFile) return sendError(reply, 404, "SOURCE_NOT_FOUND", "Source file was not found");
+    const root = await fs.realpath(snapshot.storagePath);
+    const candidate = await fs.realpath(path.resolve(root, query.data.path)).catch(() => null);
+    if (!candidate || (!candidate.startsWith(`${root}${path.sep}`) && candidate !== root)) {
+      return sendError(reply, 400, "INVALID_SOURCE_PATH", "Source path is outside the snapshot");
+    }
+    const bytes = await fs.readFile(candidate);
+    if (createHash("sha256").update(bytes).digest("hex") !== sourceFile.contentHash) {
+      return sendError(reply, 409, "SOURCE_CHANGED", "Snapshot source no longer matches its citation");
+    }
+    let content: string;
+    try {
+      content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      return sendError(reply, 409, "SOURCE_INVALID", "Snapshot source is not valid UTF-8 text");
+    }
+    const lines = content.split(/\r?\n/);
+    if (query.data.endLine > lines.length) return sendError(reply, 400, "INVALID_SOURCE_RANGE", "Source range exceeds the file");
+    return {
+      path: query.data.path, startLine: query.data.startLine, endLine: query.data.endLine,
+      commitSha: snapshot.commitSha, blobHash: sourceFile.contentHash,
+      content: lines.slice(query.data.startLine - 1, query.data.endLine).join("\n")
+    };
+  });
+
+  server.get("/api/projects/:projectId/frontend-preview/search", { preHandler: requireAdministrator }, async (request, reply) => {
+    if (!options.qualityArtifactReader) {
+      return sendError(reply, 503, "FRONTEND_PREVIEW_UNAVAILABLE", "Frontend preview artifacts are unavailable");
+    }
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    const query = z.object({ q: z.string().trim().min(1).max(500) }).safeParse(request.query);
+    if (!params.success || !query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid frontend preview search");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const project = (await options.store.listProjects(admin.workspaceId))
+      .find((candidate) => candidate.id === params.data.projectId && candidate.archivedAt === null);
+    if (!project) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    const repository = await options.store.currentRepository(admin.workspaceId, project.id);
+    const build = repository
+      ? (await options.store.listBuilds(admin.workspaceId, repository.id, { limit: 1, offset: 0 }))[0]
+      : null;
+    if (!build) return { results: [] };
+    try {
+      const preview = await loadFrontendCandidatePreview({
+        store: options.store,
+        reader: options.qualityArtifactReader,
+        workspaceId: admin.workspaceId,
+        projectId: project.id,
+        buildId: build.id
+      });
+      const results = searchFrontendKnowledge({
+        query: query.data.q,
+        documents: preview.search,
+        graph: { nodes: preview.graph.nodes, edges: preview.graph.edges },
+        access: {
+          canReadProject: true, visibility: "shadow", viewerRole: "admin",
+          buildId: build.id, currentReleaseBuildId: null
+        }
+      });
+      const snapshot = await options.store.findSnapshotById(admin.workspaceId, build.snapshotId);
+      if (!snapshot) throw new FrontendPreviewUnavailableError("Frontend candidate snapshot is unavailable");
+      const referencedPaths = new Set(results.flatMap((result) => result.citations.map((reference) => reference.path)));
+      const sources = await loadFrontendSourceDescriptors({
+        snapshot,
+        files: (await options.store.listSnapshotFiles(admin.workspaceId, build.snapshotId))
+          .filter((file) => referencedPaths.has(file.path))
+      });
+      if (results.some((result) => result.citations.some((reference) => !frontendSourceReferenceIsValid(
+        reference, build.snapshotId, sources
+      )))) {
+        throw new FrontendPreviewUnavailableError("Frontend candidate search citation is invalid");
+      }
+      return {
+        results
+      };
+    } catch (error) {
+      if (error instanceof FrontendPreviewUnavailableError || error instanceof z.ZodError) {
+        return sendError(reply, 409, "FRONTEND_PREVIEW_INVALID", "Frontend candidate package is incomplete or invalid");
+      }
+      throw error;
+    }
   });
 
   server.get("/api/projects/:projectId/graph", { preHandler: requireAdmin }, async (request, reply) => {

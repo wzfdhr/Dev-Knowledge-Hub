@@ -24,12 +24,14 @@ import type { PipelineArtifactStore } from "../../persistence/store";
 import {
   createFrontendShadowStageExecutor,
   createFrontendShadowStageInputPlanner,
-  createKnowledgeV1StoreView
+  createKnowledgeV1StoreView,
+  assertFrontendCandidateValid
 } from "../frontend/shadow-stage";
 import {
   ARTIFACT_KINDS,
   createVerifiedFrontendReleaseDraft
 } from "../frontend/compatibility";
+import { analyzeWorkerRequest } from "../frontend/runtime/analyzer-worker";
 
 const directories: string[] = [];
 
@@ -62,6 +64,16 @@ afterEach(async () => {
 });
 
 describe("B02 shadow pipeline", () => {
+  test("refuses to package a candidate whose complete reference validation failed", () => {
+    expect(() => assertFrontendCandidateValid({ valid: false, invalidReferenceCount: 1 }))
+      .toThrow("requires a valid candidate");
+    expect(() => assertFrontendCandidateValid({ valid: true, invalidReferenceCount: 0 }))
+      .toThrow("complete Graph reference evidence");
+    expect(() => assertFrontendCandidateValid({
+      valid: true, graphReferenceCount: 2, checkedReferenceCount: 5, invalidReferenceCount: 0
+    })).not.toThrow();
+  });
+
   test("persists, reuses, and verifies both artifact families without changing v1 graph behavior", async () => {
     const snapshotRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-b02-snapshot-"));
     const artifactRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-b02-artifacts-"));
@@ -107,8 +119,10 @@ describe("B02 shadow pipeline", () => {
       validate: createKnowledgeValidationStageExecutor({ store: knowledgeV1Store, artifactStore }),
       package: createKnowledgePackageStageExecutor({ store: knowledgeV1Store, artifactStore })
     });
-    const parserAnalyze = vi.fn(async () => ({
-      schemaVersion: 1, snapshotId: snapshot.id, analyzerIds: [], sourcePaths: [sourcePath], outputs: []
+    const parserAnalyze = vi.fn(async (request) => analyzeWorkerRequest({
+      type: "analyze",
+      requestId: randomUUID(),
+      ...request
     }));
     const worker = new PipelineStageWorker(
       store,
@@ -134,8 +148,22 @@ describe("B02 shadow pipeline", () => {
     const runs = await store.listPipelineStageRuns(workspaceId, project.id, build.id);
     expect(parserAnalyze).toHaveBeenCalledWith(expect.objectContaining({
       snapshotId: snapshot.id,
+      analyzerIds: [
+        "frontend-project",
+        "frontend-project-core",
+        "typescript-core",
+        "html-core",
+        "style-core",
+        "react-core",
+        "react-router-core",
+        "state-data-core",
+        "visualization-core",
+        "tooling-test-core"
+      ],
+      cachedAnalyses: [],
       sources: [expect.objectContaining({ path: sourcePath, blobHash: hash(source) })]
     }));
+    expect(store.sourceAnalysisArtifacts).toHaveLength(1);
     expect(runs.find((run) => run.stage === "extract")?.errorDetail).toBeNull();
     expect(runs.map((run) => [run.stage, run.status])).toEqual([
       ["convert", "succeeded"], ["extract", "succeeded"], ["tables", "succeeded"], ["graph", "succeeded"],
@@ -154,6 +182,63 @@ describe("B02 shadow pipeline", () => {
         ]));
       }
     }
+    const extractRun = runs.find((run) => run.stage === "extract")!;
+    const frontendExtractManifest = (await Promise.all(extractRun.outputManifestIds.map((id) =>
+      store.findArtifactById(id)
+    ))).find((manifest) => manifest?.kind === "frontend-ir-v2")!;
+    await expect(artifactStore.getJson(frontendExtractManifest)).resolves.toMatchObject({
+      projectAnalysis: {
+        analyzerId: "typescript-project",
+        sourceAnalysisBindings: [{
+          path: sourcePath,
+          snapshotId: snapshot.id,
+          blobHash: hash(source),
+          factsDigest: expect.stringMatching(/^[a-f0-9]{64}$/)
+        }]
+      }
+    });
+    await expect(artifactStore.getJson(frontendExtractManifest)).resolves.toMatchObject({
+      entities: expect.arrayContaining([
+        expect.objectContaining({ kind: "symbol", name: "answer", canonicalPath: sourcePath })
+      ]),
+      analyzerManifest: expect.arrayContaining([
+        expect.objectContaining({ analyzerId: "typescript-core" })
+      ])
+    });
+    const frontendValue = async (stage: string, kind: string) => {
+      const run = runs.find((candidate) => candidate.stage === stage)!;
+      const manifest = (await Promise.all(run.outputManifestIds.map((id) => store.findArtifactById(id))))
+        .find((candidate) => candidate?.kind === kind)!;
+      return artifactStore.getJson(manifest);
+    };
+    await expect(frontendValue("graph", "frontend-graph-v2")).resolves.toMatchObject({
+      nodes: expect.arrayContaining([expect.objectContaining({ kind: "symbol", name: "answer" })])
+    });
+    await expect(frontendValue("synthesize", "frontend-knowledge-pages-v2")).resolves.toMatchObject({
+      pages: expect.arrayContaining([expect.objectContaining({ slug: "frontend-architecture" })])
+    });
+    await expect(frontendValue("index", "frontend-search-index-v2")).resolves.toMatchObject({
+      documents: expect.arrayContaining([expect.objectContaining({
+        title: `Frontend Architecture: ${sourcePath}`,
+        content: expect.stringContaining(`application_entry: ${sourcePath}`),
+        citations: expect.arrayContaining([expect.objectContaining({ path: sourcePath })]),
+        metadata: expect.objectContaining({ entityId: expect.any(String) })
+      })])
+    });
+    await expect(frontendValue("lint", "frontend-knowledge-quality-v2")).resolves.toMatchObject({
+      summary: expect.objectContaining({ entities: expect.any(Number), citedEntities: expect.any(Number) })
+    });
+    const frontendValidation = await frontendValue("validate", "frontend-validation-v2") as {
+      valid: boolean; graphReferenceCount: number; checkedReferenceCount: number; invalidReferenceCount: number;
+    };
+    expect(frontendValidation).toMatchObject({
+      valid: true,
+      graphReferenceCount: expect.any(Number),
+      checkedReferenceCount: expect.any(Number),
+      invalidReferenceCount: 0
+    });
+    expect(frontendValidation.graphReferenceCount).toBeGreaterThan(0);
+    expect(frontendValidation.checkedReferenceCount).toBeGreaterThanOrEqual(frontendValidation.graphReferenceCount);
     await expect(store.getKnowledgeGraph(workspaceId, project.id, build.id)).resolves.toMatchObject({
       nodes: expect.arrayContaining([expect.objectContaining({
         kind: "module", name: "app.ts", qualifiedName: sourcePath

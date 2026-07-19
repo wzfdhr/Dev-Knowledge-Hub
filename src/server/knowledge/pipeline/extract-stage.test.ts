@@ -142,6 +142,41 @@ describe("knowledge IR pipeline stage", () => {
     })).rejects.toThrow("input digest does not match the persisted upstream manifests");
   });
 
+  test("keeps legacy extraction stable when normalized sources include frontend-v2-only text", async () => {
+    const prepared = await fixture({
+      "src/app.ts": "export const answer = 42;\n",
+      "src/index.html": "<main></main>\n",
+      "src/app.css": ":root { --brand: blue; }\n",
+      "src/icon.svg": "<svg viewBox=\"0 0 1 1\"></svg>\n"
+    });
+    const convert = await createNormalizedSourcesStageExecutor({
+      store: prepared.store,
+      artifactStore: prepared.artifactStore
+    })(prepared.convertRun);
+    const upstream = prepared.store.knowledgeArtifacts.find((artifact) => artifact.id === convert.outputManifestIds![0])!;
+    const run: PipelineStageRunRecord = {
+      ...prepared.convertRun,
+      id: "extract-run",
+      stage: "extract",
+      outputManifestIds: [],
+      inputDigest: knowledgeIrPipelineInputDigest(prepared.snapshot, prepared.build.purpose, convert.outputManifestIds!)
+    };
+    const execute = createKnowledgeIrStageExecutor({
+      store: stageStore(
+        prepared,
+        new Map([[upstream.id, upstream]]),
+        [completedConvertRun(prepared, convert.outputManifestIds!)]
+      ),
+      artifactStore: prepared.artifactStore
+    });
+
+    const result = await execute(run);
+    const artifact = prepared.store.knowledgeArtifacts.find((candidate) => candidate.id === result.outputManifestIds![0])!;
+    const ir = await prepared.artifactStore.getJson(artifact) as { files: Array<{ path: string }> };
+
+    expect(ir.files.map((file) => file.path)).toEqual(["src/app.ts"]);
+  });
+
   test("rejects missing, non-successful, empty, and duplicate convert outputs", async () => {
     const prepared = await fixture({ "src/app.ts": "export const answer = 42;\n" });
     const run: PipelineStageRunRecord = {

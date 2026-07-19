@@ -57,6 +57,52 @@ describe("folder snapshot import", () => {
     expect((await stat(path.join(summary.storagePath, "src/index.ts"))).mode & 0o222).toBe(0);
   });
 
+  test("does not count filtered dependency files toward the accepted source limit", async () => {
+    const context = await fixture();
+    async function* dependencyHeavyUpload(): AsyncGenerator<FolderUploadFile> {
+      for (let index = 0; index < 50_001; index += 1) {
+        yield { path: `node_modules/pkg-${index}/index.js`, content: Buffer.from("ignored") };
+      }
+      yield { path: "src/index.ts", content: Buffer.from("export const ready = true;\n") };
+    }
+
+    const summary = await importFolderFiles({
+      files: dependencyHeavyUpload(), dataDir: context.dataDir, workspaceId: "workspace-1",
+      repositoryId: "repository-1", actorId: "admin-1", store: context.store
+    });
+
+    expect(summary).toMatchObject({ fileCount: 1, ignored: { total: 50_001 } });
+  });
+
+  test("persists verified frontend text with stable language metadata and ignores binary assets", async () => {
+    const context = await fixture();
+    const summary = await importFolderFiles({
+      files: files([
+        ["src/App.vue", "<template><main /></template>"],
+        ["src/index.html", "<main></main>"],
+        ["src/app.css", ":root { --brand: blue; }"],
+        ["src/theme.scss", "$brand: blue;"],
+        ["src/icon.svg", "<svg viewBox=\"0 0 1 1\"></svg>"],
+        ["assets/logo.png", "not uploaded as an FK06 asset"]
+      ]),
+      dataDir: context.dataDir,
+      workspaceId: "workspace-1",
+      repositoryId: "repository-1",
+      actorId: "admin-1",
+      store: context.store
+    });
+
+    expect(summary).toMatchObject({ fileCount: 5, ignored: { total: 1, reasons: { unsupported_extension: 1 } } });
+    expect(context.store.sourceFiles.map(({ path: filePath, language }) => [filePath, language]))
+      .toEqual([
+        ["src/App.vue", "vue"],
+        ["src/app.css", "css"],
+        ["src/icon.svg", "svg"],
+        ["src/index.html", "html"],
+        ["src/theme.scss", "scss"]
+      ]);
+  });
+
   test("rejects unsafe and duplicate relative paths", async () => {
     const context = await fixture();
     const options = { dataDir: context.dataDir, workspaceId: "workspace-1", repositoryId: "repository-1", actorId: "admin-1", store: context.store };

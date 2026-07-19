@@ -73,6 +73,31 @@ describe("folder import scanning", () => {
     expect(report.ignored.reasons).toEqual({ unsupported_extension: 1 });
   });
 
+  test("collects frontend text but rejects binary assets before reading their contents", async () => {
+    const binaryAsset = {
+      name: "logo.png",
+      size: 1024,
+      arrayBuffer: async () => { throw new Error("FK06 binary assets must not be read"); },
+      webkitRelativePath: "demo/assets/logo.png"
+    } as unknown as File;
+    const sources = [
+      ["App.vue", "<template><main /></template>"],
+      ["index.html", "<main></main>"],
+      ["app.css", ":root { --brand: blue; }"],
+      ["theme.scss", "$brand: blue;"],
+      ["icon.svg", "<svg viewBox=\"0 0 1 1\"></svg>"]
+    ].map(([name, content]) => Object.assign(browserFile(name!, content!), {
+      webkitRelativePath: `demo/src/${name}`
+    }));
+
+    const report = await scanSelectedFiles([...sources, binaryAsset]);
+
+    expect(report.acceptedFiles.map((item) => item.path)).toEqual([
+      "src/App.vue", "src/index.html", "src/app.css", "src/theme.scss", "src/icon.svg"
+    ]);
+    expect(report.ignored.reasons).toEqual({ unsupported_extension: 1 });
+  });
+
   test("does not count ignored dependency files against the accepted-file limit", async () => {
     const ignoredFiles = Array.from({ length: 50_001 }, (_, index) => ({
       name: `${index}.js`, size: 1, arrayBuffer: async () => { throw new Error("ignored content must not be read"); },

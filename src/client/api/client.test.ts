@@ -70,6 +70,22 @@ describe("build API client", () => {
   });
 });
 
+describe("frontend preview API client", () => {
+  test("requests the exact project candidate preview", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ status: "source_missing", preview: null }), {
+      status: 200, headers: { "content-type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.getProjectFrontendPreview("project / one");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/projects/project%20%2F%20one/frontend-preview",
+      expect.objectContaining({ credentials: "same-origin" })
+    );
+  });
+});
+
 describe("project graph API client", () => {
   test("pins graph exports to the selected published release", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({

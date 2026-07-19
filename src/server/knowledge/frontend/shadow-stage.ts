@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import { z } from "zod";
 
+import { frontendIrSchema, type FrontendIR } from "../../../shared/frontend-ir.js";
+
 import type { BuildRecord } from "../build-service.js";
 import { type ArtifactStore } from "../pipeline/artifact-store.js";
 import { BUILD_STAGES, type ArtifactManifest, type BuildStage } from "../pipeline/contracts.js";
@@ -20,6 +22,7 @@ import type { PipelineStageExecutor, PipelineStageInputPlanner } from "../pipeli
 import type {
   PipelineArtifactStore,
   PipelineStageRunRecord,
+  SourceAnalysisArtifactStore,
   SourceSnapshotRecord
 } from "../../persistence/store.js";
 import {
@@ -27,10 +30,21 @@ import {
   EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
   FRONTEND_V2_GRAPH_SCHEMA_VERSION,
   FRONTEND_V2_IR_SCHEMA_VERSION,
-  assertFrontendArtifactFamily
+  assertFrontendCandidateValid,
+  assertFrontendArtifactFamily,
+  assertFrontendValidationProvenance,
+  frontendGraphV2Schema,
+  frontendValidationV2Schema
 } from "./compatibility.js";
 import type { FrontendKnowledgeMode } from "./rollout-mode.js";
 import type { ParserAnalyzeRequest } from "./runtime/parser-protocol.js";
+import { SourceAnalysisCache } from "./source-analysis-cache.js";
+import { typeScriptSyntaxParserConfigDigest } from "./typescript-program.js";
+import { buildFrontendGraph } from "./graph-builder.js";
+import { generateFrontendKnowledge } from "./knowledge-generator.js";
+import { assessFrontendKnowledgeQuality } from "./quality-assessment.js";
+import { frontendSourceReferenceIsValid, loadFrontendSourceDescriptors } from "./reference-validation.js";
+import { buildFrontendSearchDocuments } from "./search.js";
 
 const SHADOW_FAMILIES = ["knowledge-v1", "frontend-v2"] as const;
 const UPSTREAM_STAGES: Record<Exclude<BuildStage, "convert">, readonly BuildStage[]> = {
@@ -41,13 +55,14 @@ const UPSTREAM_STAGES: Record<Exclude<BuildStage, "convert">, readonly BuildStag
   index: ["synthesize"],
   lint: ["extract", "tables", "synthesize", "index"],
   viz: ["graph"],
-  validate: ["synthesize", "index", "lint", "viz"],
+  validate: ["graph", "synthesize", "index", "lint", "viz"],
   package: ["validate"]
 };
 
-type ShadowStore = PipelineArtifactStore & {
+type ShadowStore = PipelineArtifactStore & SourceAnalysisArtifactStore & {
   getBuild(workspaceId: string, buildId: string): Promise<BuildRecord | null>;
   findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null>;
+  listSnapshotFiles(workspaceId: string, snapshotId: string): Promise<Array<{ path: string; contentHash: string }>>;
   listPipelineStageRuns(workspaceId: string, projectId: string, buildId: string): Promise<PipelineStageRunRecord[]>;
 };
 
@@ -68,8 +83,31 @@ const parserNormalizedSourcesSchema = z.object({
 const parserRuntimeResultSchema = z.object({
   schemaVersion: z.literal(1),
   snapshotId: z.string().min(1),
-  outputs: z.array(z.unknown())
+  outputs: z.array(z.object({
+    analyzerId: z.literal("typescript-project"),
+    analyzerVersion: z.literal("1.0.0"),
+    projectManifest: z.json(),
+    projectReferences: z.array(z.object({ from: z.string().min(1), to: z.string().min(1) }).strict()),
+    resolutions: z.array(z.object({
+      containingFile: z.string().min(1),
+      specifier: z.string().min(1),
+      resolvedPath: z.string().min(1).nullable()
+    }).strict()),
+    files: z.array(z.object({
+      path: z.string().min(1),
+      blobHash: z.string().regex(/^[a-f0-9]{64}$/i),
+      parserConfigDigest: z.string().regex(/^[a-f0-9]{64}$/i),
+      facts: z.record(z.string(), z.json())
+    }).strict()),
+    frontendIr: frontendIrSchema
+  }).strict()).max(1)
 });
+
+const typedSourceExtensions = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"]);
+
+function isTypedSource(sourcePath: string): boolean {
+  return sourcePath.endsWith(".d.ts") || typedSourceExtensions.has(sourcePath.slice(sourcePath.lastIndexOf(".")).toLowerCase());
+}
 
 function completedRun(runs: readonly PipelineStageRunRecord[], stage: BuildStage): PipelineStageRunRecord {
   const run = runs.findLast((candidate) => candidate.stage === stage
@@ -214,6 +252,56 @@ async function packageArtifacts(
   return Object.fromEntries(entries);
 }
 
+async function upstreamAnalyzerManifestDigest(
+  input: { store: ShadowStore; artifactStore: ArtifactStore },
+  manifestIds: readonly string[]
+): Promise<string> {
+  const digests = new Set<string>();
+  for (const artifactId of manifestIds) {
+    const manifest = await input.store.findArtifactById(artifactId);
+    if (!manifest) throw new Error("Frontend upstream manifest is unavailable");
+    const expected = ARTIFACT_KINDS[manifest.stage]["frontend-v2"];
+    if (manifest.kind !== expected.kind || manifest.schemaVersion !== expected.schemaVersion) continue;
+    const value = await input.artifactStore.getJson(manifest);
+    if (value && typeof value === "object" && "analyzerManifestDigest" in value
+      && typeof value.analyzerManifestDigest === "string"
+      && value.analyzerManifestDigest !== EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST) {
+      digests.add(value.analyzerManifestDigest);
+    }
+  }
+  if (digests.size > 1) throw new Error("Frontend upstream analyzer manifests disagree");
+  return [...digests][0] ?? EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST;
+}
+
+async function frontendUpstreamValue(
+  input: { store: ShadowStore; artifactStore: ArtifactStore },
+  manifestIds: readonly string[],
+  stage: BuildStage
+): Promise<unknown> {
+  const expected = ARTIFACT_KINDS[stage]["frontend-v2"];
+  for (const artifactId of manifestIds) {
+    const manifest = await input.store.findArtifactById(artifactId);
+    if (manifest?.kind === expected.kind && manifest.schemaVersion === expected.schemaVersion) {
+      return input.artifactStore.getJson(manifest);
+    }
+  }
+  throw new Error(`Frontend shadow upstream ${stage} artifact is unavailable`);
+}
+
+function irFromGraph(value: ReturnType<typeof buildFrontendGraph>): FrontendIR {
+  return {
+    schemaVersion: 2,
+    snapshotId: value.snapshotId,
+    analyzerManifestDigest: value.analyzerManifestDigest,
+    analyzerManifest: [...new Map(value.nodes.flatMap((node) => node.provenance)
+      .map((item) => [JSON.stringify(item), item])).values()].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+    entities: value.nodes,
+    edges: value.edges
+  };
+}
+
+export { assertFrontendCandidateValid } from "./compatibility.js";
+
 export function createFrontendShadowStageExecutor(input: {
   store: ShadowStore;
   artifactStore: ArtifactStore;
@@ -236,6 +324,8 @@ export function createFrontendShadowStageExecutor(input: {
     });
     if (run.inputDigest !== shadowDigest) throw new Error("Frontend shadow stage input digest does not match enabled families");
 
+    let projectAnalysis: Record<string, unknown> | null = null;
+    let frontendIr: z.infer<typeof frontendIrSchema> | null = null;
     if (run.stage === "extract" && input.frontendParser) {
       const normalized = (await Promise.all(upstreamIds.map(async (artifactId) => {
         const manifest = await input.store.findArtifactById(artifactId);
@@ -244,18 +334,82 @@ export function createFrontendShadowStageExecutor(input: {
         }
         return parserNormalizedSourcesSchema.parse(await input.artifactStore.getJson(manifest));
       }))).flatMap((artifact) => artifact.sources);
+      const cache = new SourceAnalysisCache(input.store);
+      const cachedAnalyses = (await Promise.all(normalized.filter((source) => isTypedSource(source.path)).map(async (source) => {
+        const parserConfigDigest = typeScriptSyntaxParserConfigDigest(source.path);
+        const facts = await cache.get({
+          workspaceId: run.workspaceId,
+          contentHash: source.blobHash.toLowerCase(),
+          analyzerId: "typescript-syntax",
+          analyzerVersion: "1.0.0",
+          parserConfigDigest
+        });
+        return facts ? {
+          path: source.path,
+          blobHash: source.blobHash.toLowerCase(),
+          analyzerId: "typescript-syntax" as const,
+          analyzerVersion: "1.0.0" as const,
+          parserConfigDigest,
+          facts
+        } : null;
+      }))).filter((item): item is NonNullable<typeof item> => item !== null);
       const parserResult = parserRuntimeResultSchema.parse(await input.frontendParser.analyze({
         snapshotId: run.snapshotId,
-        analyzerIds: [],
+        analyzerIds: [
+          "frontend-project",
+          "frontend-project-core",
+          "typescript-core",
+          "html-core",
+          "style-core",
+          "react-core",
+          "react-router-core",
+          "state-data-core",
+          "visualization-core",
+          "tooling-test-core"
+        ],
         sources: normalized.map((source) => ({
           path: source.path,
           contentBase64: Buffer.from(source.content, "utf8").toString("base64"),
           blobHash: source.blobHash
-        }))
+        })),
+        cachedAnalyses
       }));
       if (parserResult.snapshotId !== run.snapshotId) {
         throw new Error("Frontend parser result crosses snapshots");
       }
+      if (parserResult.outputs.length !== 1) throw new Error("Frontend project analyzer output is missing");
+      const output = parserResult.outputs[0]!;
+      if (output.frontendIr.snapshotId !== run.snapshotId) throw new Error("Frontend IR crosses snapshots");
+      frontendIr = output.frontendIr;
+      const sourceByPath = new Map(normalized.map((source) => [source.path, source]));
+      const bindings = await Promise.all(output.files.map(async (file) => {
+        const source = sourceByPath.get(file.path);
+        if (!source || source.blobHash.toLowerCase() !== file.blobHash.toLowerCase()
+          || typeScriptSyntaxParserConfigDigest(file.path) !== file.parserConfigDigest) {
+          throw new Error("Frontend source analysis does not match normalized sources");
+        }
+        const record = await cache.put({
+          workspaceId: run.workspaceId,
+          contentHash: file.blobHash.toLowerCase(),
+          analyzerId: "typescript-syntax",
+          analyzerVersion: "1.0.0",
+          parserConfigDigest: file.parserConfigDigest
+        }, file.facts);
+        return {
+          path: file.path,
+          snapshotId: run.snapshotId,
+          blobHash: file.blobHash.toLowerCase(),
+          factsDigest: record.factsDigest
+        };
+      }));
+      projectAnalysis = {
+        analyzerId: output.analyzerId,
+        analyzerVersion: output.analyzerVersion,
+        projectManifest: output.projectManifest,
+        projectReferences: output.projectReferences,
+        resolutions: output.resolutions,
+        sourceAnalysisBindings: bindings
+      };
     }
 
     const legacyResult = await input.legacy({
@@ -272,40 +426,136 @@ export function createFrontendShadowStageExecutor(input: {
       throw new Error(`Frontend shadow ${run.stage} knowledge-v1 output is invalid`);
     }
     const expected = ARTIFACT_KINDS[run.stage]["frontend-v2"];
+    const analyzerManifestDigest = frontendIr?.analyzerManifestDigest
+      ?? await upstreamAnalyzerManifestDigest(input, upstreamIds);
     const baseValue = {
       schemaVersion: 2 as const,
       family: "frontend-v2" as const,
       stage: run.stage,
       snapshotId: run.snapshotId,
-      analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+      analyzerManifestDigest,
       upstreamManifestIds: upstreamIds,
       sourceArtifactId: legacyManifest.id
     };
-    const value = run.stage === "extract"
-      ? {
-          schemaVersion: 2,
-          snapshotId: run.snapshotId,
-          analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
-          analyzerManifest: [],
-          entities: [],
-          edges: []
-        }
-      : run.stage === "graph"
-        ? {
+    let value: unknown;
+    switch (run.stage) {
+      case "extract":
+        value = {
+          ...(frontendIr ?? {
             schemaVersion: 2,
             snapshotId: run.snapshotId,
             analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
-            nodes: [],
+            analyzerManifest: [],
+            entities: [],
             edges: []
-          }
-        : run.stage === "package"
-        ? {
+          }),
+          ...(projectAnalysis ? { projectAnalysis } : {})
+        };
+        break;
+      case "graph":
+        value = buildFrontendGraph(frontendIrSchema.parse(await frontendUpstreamValue(input, upstreamIds, "extract")));
+        break;
+      case "synthesize": {
+        const graph = frontendGraphV2Schema.parse(await frontendUpstreamValue(input, upstreamIds, "graph"));
+        value = generateFrontendKnowledge(irFromGraph(graph));
+        break;
+      }
+      case "index": {
+        const knowledge = await frontendUpstreamValue(input, upstreamIds, "synthesize") as ReturnType<typeof generateFrontendKnowledge>;
+        value = {
+          schemaVersion: 2,
+          snapshotId: run.snapshotId,
+          analyzerManifestDigest,
+          documents: buildFrontendSearchDocuments(knowledge.pages)
+        };
+        break;
+      }
+      case "lint": {
+        const ir = frontendIrSchema.parse(await frontendUpstreamValue(input, upstreamIds, "extract"));
+        value = { ...assessFrontendKnowledgeQuality(ir), analyzerManifestDigest };
+        break;
+      }
+      case "viz": {
+        const graph = frontendGraphV2Schema.parse(await frontendUpstreamValue(input, upstreamIds, "graph"));
+        value = {
+          schemaVersion: 2,
+          snapshotId: run.snapshotId,
+          analyzerManifestDigest,
+          routeIds: graph.nodes.filter((node) => node.kind === "route").map((node) => node.id),
+          componentIds: graph.nodes.filter((node) => node.kind === "component").map((node) => node.id),
+          visualizationIds: graph.nodes.filter((node) => node.kind === "visualization").map((node) => node.id),
+          factEdgeIds: graph.edges.filter((edge) => edge.evidenceClass === "fact").map((edge) => edge.id)
+        };
+        break;
+      }
+      case "validate": {
+        const graph = frontendGraphV2Schema.parse(await frontendUpstreamValue(input, upstreamIds, "graph"));
+        const knowledge = await frontendUpstreamValue(input, upstreamIds, "synthesize") as ReturnType<typeof generateFrontendKnowledge>;
+        const search = await frontendUpstreamValue(input, upstreamIds, "index") as {
+          documents: Array<{ citations: Array<{ snapshotId: string; path: string; startLine: number; endLine: number; blobHash: string }> }>;
+        };
+        const quality = await frontendUpstreamValue(input, upstreamIds, "lint") as ReturnType<typeof assessFrontendKnowledgeQuality>;
+        const graphReferences = [
+          ...graph.nodes.flatMap((node) => node.sourceRefs),
+          ...graph.edges.flatMap((edge) => edge.sourceRefs)
+        ];
+        const references = [
+          ...graphReferences,
+          ...knowledge.pages.flatMap((page) => [
+            ...page.citations,
+            ...page.items.flatMap((item) => item.sourceRefs),
+            ...page.chunks.flatMap((chunk) => chunk.citations)
+          ]),
+          ...search.documents.flatMap((document) => document.citations),
+          ...quality.issues.flatMap((issue) => issue.sourceRefs)
+        ];
+        const referencedPaths = new Set(references.map((reference) => reference.path));
+        const sources = await loadFrontendSourceDescriptors({
+          snapshot,
+          files: (await input.store.listSnapshotFiles(run.workspaceId, run.snapshotId))
+            .filter((file) => referencedPaths.has(file.path))
+        });
+        const invalidReferenceCount = references.filter((reference) => !frontendSourceReferenceIsValid(
+          reference, run.snapshotId, sources
+        )).length;
+        value = {
+          ...baseValue,
+          valid: graph.nodes.every((node) => node.sourceRefs.length > 0)
+            && graph.edges.filter((edge) => edge.evidenceClass === "fact")
+              .every((edge) => edge.sourceRefs.length > 0)
+            && knowledge.pages.every((page) => page.citations.length > 0
+            && page.chunks.every((chunk) => chunk.citations.length > 0))
+            && references.length > 0
+            && invalidReferenceCount === 0,
+          pageCount: knowledge.pages.length,
+          issueCount: quality.issues.length,
+          graphReferenceCount: graphReferences.length,
+          checkedReferenceCount: references.length,
+          invalidReferenceCount
+        };
+        break;
+      }
+      case "package": {
+        const validation = frontendValidationV2Schema.parse(
+          await frontendUpstreamValue(input, upstreamIds, "validate")
+        );
+        assertFrontendCandidateValid(validation);
+        assertFrontendValidationProvenance(validation, {
+          snapshotId: run.snapshotId,
+          analyzerManifestDigest: baseValue.analyzerManifestDigest
+        });
+        value = {
             ...baseValue,
             irSchemaVersion: FRONTEND_V2_IR_SCHEMA_VERSION,
             graphSchemaVersion: FRONTEND_V2_GRAPH_SCHEMA_VERSION,
             artifacts: await packageArtifacts(input.store, run, legacyManifest)
-          }
-        : baseValue;
+          };
+        break;
+      }
+      case "tables":
+        value = baseValue;
+        break;
+    }
     const companion = await input.artifactStore.putJson({
       manifest: {
         id: randomUUID(), workspaceId: run.workspaceId, projectId: run.projectId,

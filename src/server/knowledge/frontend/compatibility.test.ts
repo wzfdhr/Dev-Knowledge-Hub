@@ -77,7 +77,19 @@ function releaseFixture() {
     createReleaseDraft
   };
   const artifactReader = {
-    getJson: vi.fn(async (manifest: ArtifactManifest) => manifest.id === packageArtifactId ? packageValue : { ok: true })
+    getJson: vi.fn(async (manifest: ArtifactManifest): Promise<unknown> => {
+      if (manifest.id === packageArtifactId) return packageValue;
+      if (manifest.id === artifacts.validate[1]) {
+        return {
+          schemaVersion: 2, family: "frontend-v2", stage: "validate", snapshotId,
+          analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+          upstreamManifestIds: artifacts.viz, sourceArtifactId: artifacts.validate[0],
+          valid: true, pageCount: 1, issueCount: 0,
+          graphReferenceCount: 2, checkedReferenceCount: 5, invalidReferenceCount: 0
+        };
+      }
+      return { ok: true };
+    })
   };
   const releaseInput = {
     store, artifactReader, workspaceId, repositoryId, buildId, version: "frontend-v2.0.0",
@@ -182,6 +194,43 @@ describe("frontend v2 compatibility contracts", () => {
         : { ok: true };
     });
     await expect(createVerifiedFrontendReleaseDraft(unreadable.releaseInput)).rejects.toThrow("digest mismatch");
+  });
+
+  test("rejects a release package whose frontend validation lacks complete Graph evidence", async () => {
+    const fixture = releaseFixture();
+    const validationId = fixture.artifacts.validate[1]!;
+    fixture.artifactReader.getJson.mockImplementation(async (manifest) => {
+      if (manifest.id === fixture.releaseInput.packageArtifactId) return fixture.packageValue;
+      if (manifest.id === validationId) {
+        return {
+          schemaVersion: 2, family: "frontend-v2", stage: "validate",
+          snapshotId: "snapshot-1", analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+          upstreamManifestIds: fixture.artifacts.viz, sourceArtifactId: fixture.artifacts.validate[0],
+          valid: true, pageCount: 1, issueCount: 0
+        };
+      }
+      return { ok: true };
+    });
+
+    await expect(createVerifiedFrontendReleaseDraft(fixture.releaseInput))
+      .rejects.toThrow("complete Graph reference evidence");
+    expect(fixture.createReleaseDraft).not.toHaveBeenCalled();
+  });
+
+  test("rejects valid reference evidence from a different validation snapshot", async () => {
+    const fixture = releaseFixture();
+    const validationId = fixture.artifacts.validate[1]!;
+    const original = fixture.artifactReader.getJson.getMockImplementation()!;
+    fixture.artifactReader.getJson.mockImplementation(async (manifest) => {
+      const value = await original(manifest);
+      return manifest.id === validationId && value && typeof value === "object"
+        ? { ...value, snapshotId: "other-snapshot" }
+        : value;
+    });
+
+    await expect(createVerifiedFrontendReleaseDraft(fixture.releaseInput))
+      .rejects.toThrow("validation provenance");
+    expect(fixture.createReleaseDraft).not.toHaveBeenCalled();
   });
 
   test("defines additive immutable v2 release provenance and project rollout storage", async () => {

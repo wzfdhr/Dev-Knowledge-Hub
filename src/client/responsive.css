@@ -20,6 +20,103 @@
   }
 }
 
+@media (max-width: 900px) {
+  .frontend-preview-state dl,
+  .frontend-comparison-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .frontend-preview-state dl > div:nth-child(2n),
+  .frontend-comparison-grid > div:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .frontend-map-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .frontend-map-overview > div {
+    border-bottom: 1px solid var(--border);
+  }
+
+  .frontend-map-overview > div:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .frontend-entity-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .frontend-entity-main {
+    flex-basis: 100%;
+  }
+
+  .frontend-relation-list,
+  .frontend-source-actions {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 430px) {
+  .frontend-impact-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .frontend-impact-columns > div:first-child {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .frontend-preview-state dl,
+  .frontend-comparison-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .frontend-preview-state dl > div,
+  .frontend-comparison-grid > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .frontend-preview-state dl > div:last-child,
+  .frontend-comparison-grid > div:last-child {
+    border-bottom: 0;
+  }
+
+  .frontend-map-tabs {
+    flex-wrap: wrap;
+    column-gap: 16px;
+    row-gap: 0;
+    overflow-x: visible;
+  }
+
+  .frontend-map-overview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .frontend-map-overview > div,
+  .frontend-map-overview > div:nth-child(2n) {
+    min-height: 72px;
+    border-right: 0;
+  }
+
+  .frontend-source-actions {
+    flex-direction: column;
+  }
+
+  .frontend-source-actions button {
+    width: 100%;
+  }
+
+  .frontend-preview-source {
+    width: 100vw;
+    padding: 16px;
+  }
+}
+
 /* Project imports workspace */
 .project-imports-page {
   padding-top: 28px;

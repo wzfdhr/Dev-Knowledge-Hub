@@ -209,6 +209,29 @@ export const sourceFiles = pgTable("source_files", {
   }).onDelete("cascade")
 ]);
 
+export const sourceAnalysisArtifacts = pgTable("source_analysis_artifacts", {
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  contentHash: text("content_hash").notNull(),
+  analyzerId: text("analyzer_id").notNull(),
+  analyzerVersion: text("analyzer_version").notNull(),
+  parserConfigDigest: text("parser_config_digest").notNull(),
+  facts: jsonb("facts").$type<Record<string, unknown>>().notNull(),
+  factsDigest: text("facts_digest").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+}, (table) => [
+  primaryKey({
+    columns: [table.workspaceId, table.contentHash, table.analyzerId, table.analyzerVersion, table.parserConfigDigest],
+    name: "source_analysis_artifacts_pkey"
+  }),
+  check("source_analysis_artifacts_content_hash_check", sql`${table.contentHash} ~ '^[0-9a-f]{64}$'`),
+  check("source_analysis_artifacts_analyzer_id_check", sql`${table.analyzerId} ~ '^[a-z0-9][a-z0-9._-]{0,127}$'`),
+  check("source_analysis_artifacts_analyzer_version_check", sql`${table.analyzerVersion} ~ '^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}$'`),
+  check("source_analysis_artifacts_parser_config_digest_check", sql`${table.parserConfigDigest} ~ '^[0-9a-f]{64}$'`),
+  check("source_analysis_artifacts_facts_object_check", sql`jsonb_typeof(${table.facts}) = 'object'`),
+  check("source_analysis_artifacts_facts_size_check", sql`octet_length(${table.facts}::text) <= 8388608`),
+  check("source_analysis_artifacts_facts_digest_check", sql`${table.factsDigest} ~ '^[0-9a-f]{64}$'`)
+]);
+
 export const codeSymbols = pgTable("code_symbols", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),

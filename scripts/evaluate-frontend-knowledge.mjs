@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { generateFrontendKnowledge } from "../src/server/knowledge/frontend/knowledge-generator.ts";
+import { buildFrontendSearchDocuments, searchFrontendKnowledge } from "../src/server/knowledge/frontend/search.ts";
 
 export const FRONTEND_CAPABILITIES = Object.freeze([
   "typescript-javascript",
@@ -102,10 +105,14 @@ function parseCase(value, declaredSplit, line, datasetName) {
   if (negative && (expectedValues.length || !forbiddenEntityIds.length || !forbiddenFactEdgeIds.length || !forbiddenCitations.length)) {
     throw new Error(`Frontend evaluation case ${id} negative access cases must expect no results and declare forbidden evidence`);
   }
-  if (!negative && (!parsedExpected.entityIds.length || !parsedExpected.searchEntityIds.length)) {
+  const authorizedEmpty = !negative && parsedExpected.searchEntityIds.length === 0;
+  if (authorizedEmpty && expectedValues.length) {
+    throw new Error(`Frontend evaluation case ${id} authorized empty cases must expect no results`);
+  }
+  if (!negative && !authorizedEmpty && (!parsedExpected.entityIds.length || !parsedExpected.searchEntityIds.length)) {
     throw new Error(`Frontend evaluation case ${id} requires expected entities and search results`);
   }
-  if (!negative && !parsedExpected.citations.length) {
+  if (!negative && !authorizedEmpty && !parsedExpected.citations.length) {
     throw new Error(`Frontend evaluation case ${id} requires at least one citation`);
   }
   if (!negative && parsedExpected.citations.some((citation) => !parsedExpected.searchEntityIds.includes(citation.entityId))) {
@@ -232,6 +239,12 @@ function validateVersions(value) {
   }
   const parsers = object(manifest.parsers, "Frontend version manifest requires parsers");
   nonEmptyString(parsers.typescript, "parsers.typescript", "versions");
+  for (const capability of ["html", "css", "selector", "sass", "less"]) {
+    const parser = object(parsers[capability], `Frontend version manifest requires parsers.${capability}`);
+    if (parser.status !== "approved") throw new Error(`Frontend parser ${capability} is not approved`);
+    nonEmptyString(parser.package, `parsers.${capability}.package`, "versions");
+    nonEmptyString(parser.version, `parsers.${capability}.version`, "versions");
+  }
   const performance = object(manifest.performanceBaseline, "Frontend version manifest requires performanceBaseline");
   for (const field of ["runner", "cpu", "datasetDigestAlgorithm"]) nonEmptyString(performance[field], `performanceBaseline.${field}`, "versions");
   if (!Number.isInteger(performance.logicalCores) || performance.logicalCores < 1
@@ -258,6 +271,14 @@ export function validateFrontendVersionManifestAgainstPackage(versionManifest, p
     const locked = lockedPackages[`node_modules/${packageName}`]?.version;
     if (typeof locked !== "string" || manifest.currentRepository[field] !== locked) {
       throw new Error(`Frontend version manifest currentRepository.${field} must match locked ${packageName} version`);
+    }
+  }
+  for (const capability of ["html", "css", "selector", "sass", "less"]) {
+    const parser = manifest.parsers[capability];
+    const declared = packageData.dependencies?.[parser.package];
+    const locked = lockedPackages[`node_modules/${parser.package}`]?.version;
+    if (declared !== parser.version || locked !== parser.version) {
+      throw new Error(`Frontend version manifest parsers.${capability} must match direct locked ${parser.package} version`);
     }
   }
 }
@@ -359,8 +380,8 @@ function f1(metric) {
 
 function citationMatches(expected, entityId, actual) {
   return expected.some((citation) => citation.entityId === entityId && citation.path === actual.path
-    && citation.startLine === actual.startLine
-    && citation.endLine === actual.endLine);
+    && actual.startLine <= citation.endLine
+    && actual.endLine >= citation.startLine);
 }
 
 export function evaluateFrontendKnowledge(cases, observations) {
@@ -382,6 +403,7 @@ export function evaluateFrontendKnowledge(cases, observations) {
   let citationsSeen = 0;
   let validCitations = 0;
   let negativeCases = 0;
+  let authorizedEmptyCases = 0;
   let falsePositiveEmpty = 0;
   let leakage = 0;
   const failures = [];
@@ -408,8 +430,19 @@ export function evaluateFrontendKnowledge(cases, observations) {
         || results.length > 0
         || results.some((result) => (result.citations?.length ?? 0) > 0);
       if (returnedAnything) {
-        falsePositiveEmpty += 1;
         leakage += 1;
+      }
+      continue;
+    }
+    if (!item.expected.searchEntityIds.length) {
+      authorizedEmptyCases += 1;
+      const returnedAnything = (observation.entityIds?.length ?? 0) > 0
+        || (observation.factEdgeIds?.length ?? 0) > 0
+        || (observation.impactEntityIds?.length ?? 0) > 0
+        || results.length > 0;
+      if (returnedAnything) {
+        falsePositiveEmpty += 1;
+        failures.push({ caseId: item.id, kind: "unexpected-search-result" });
       }
       continue;
     }
@@ -418,7 +451,8 @@ export function evaluateFrontendKnowledge(cases, observations) {
     if (rank >= 0 && rank < 5) recalled += 1;
     else failures.push({ caseId: item.id, kind: "expected-search-result-missing" });
     if (rank >= 0) reciprocalRanks += 1 / (rank + 1);
-    for (const result of results.slice(0, 5)) {
+    if (rank < 0) citationsSeen += Math.max(1, item.expected.citations.length);
+    for (const result of rank >= 0 ? [results[rank]] : []) {
       const resultCitations = result.citations ?? [];
       if (!resultCitations.length) citationsSeen += 1;
       for (const citation of resultCitations) {
@@ -430,7 +464,6 @@ export function evaluateFrontendKnowledge(cases, observations) {
   }
 
   const activeCapabilityMetrics = [...capabilityEntities.values()].filter((metric) => metric.expected || metric.actual);
-  const positiveCases = cases.length - negativeCases;
   const rawCounts = {
     entity,
     edge,
@@ -438,14 +471,16 @@ export function evaluateFrontendKnowledge(cases, observations) {
     capabilityEntities: Object.fromEntries(capabilityEntities),
     search: { cases: searchCases, recalled, reciprocalRanks },
     citations: { checked: citationsSeen, valid: validCitations },
-    negative: { cases: negativeCases, falsePositive: falsePositiveEmpty, leakageCases: leakage }
+    empty: { cases: authorizedEmptyCases, falsePositive: falsePositiveEmpty },
+    negative: { cases: negativeCases, leakageCases: leakage }
   };
   return {
     protocolVersion: 1,
     caseIds: cases.map((item) => item.id),
     denominators: {
       totalCases: cases.length,
-      positiveCases,
+      positiveCases: searchCases,
+      authorizedEmptyCases,
       negativeCases,
       capabilities: new Set(cases.map((item) => item.capability)).size,
       entityExpected: entity.expected,
@@ -466,7 +501,7 @@ export function evaluateFrontendKnowledge(cases, observations) {
       recallAt5: searchCases ? recalled / searchCases : 0,
       mrr: searchCases ? reciprocalRanks / searchCases : 0,
       citationValidity: citationsSeen ? validCitations / citationsSeen : 0,
-      falsePositiveEmptyRate: negativeCases ? falsePositiveEmpty / negativeCases : 0,
+      falsePositiveEmptyRate: authorizedEmptyCases ? falsePositiveEmpty / authorizedEmptyCases : 0,
       impactPrecision: precision(impact),
       impactRecall: recall(impact),
       unauthorizedOrUnpublishedLeakage: leakage
@@ -494,11 +529,13 @@ function close(left, right) {
 }
 
 export function assertFrontendEvaluationReport(report, cases) {
-  const positiveCases = cases.filter((item) => item.access === "authorized-published").length;
+  const positiveCases = cases.filter((item) => item.access === "authorized-published" && item.expected.searchEntityIds.length).length;
+  const authorizedEmptyCases = cases.filter((item) => item.access === "authorized-published" && !item.expected.searchEntityIds.length).length;
   const expectedDenominators = {
     totalCases: cases.length,
     positiveCases,
-    negativeCases: cases.length - positiveCases,
+    authorizedEmptyCases,
+    negativeCases: cases.length - positiveCases - authorizedEmptyCases,
     capabilities: new Set(cases.map((item) => item.capability)).size,
     entityExpected: cases.reduce((sum, item) => sum + item.expected.entityIds.length, 0),
     edgeExpected: cases.reduce((sum, item) => sum + item.expected.factEdgeIds.length, 0),
@@ -517,6 +554,8 @@ export function assertFrontendEvaluationReport(report, cases) {
     || report.denominators.edgeExpected !== raw.edge.expected
     || report.denominators.edgePredicted !== raw.edge.actual
     || report.denominators.searchCases !== raw.search.cases
+    || report.denominators.authorizedEmptyCases !== raw.empty.cases
+    || report.denominators.negativeCases !== raw.negative.cases
     || report.denominators.citations !== raw.citations.checked
     || report.denominators.impactExpected !== raw.impact.expected
     || report.denominators.impactPredicted !== raw.impact.actual) {
@@ -531,7 +570,7 @@ export function assertFrontendEvaluationReport(report, cases) {
     recallAt5: raw.search.cases ? raw.search.recalled / raw.search.cases : 0,
     mrr: raw.search.cases ? raw.search.reciprocalRanks / raw.search.cases : 0,
     citationValidity: raw.citations.checked ? raw.citations.valid / raw.citations.checked : 0,
-    falsePositiveEmptyRate: raw.negative.cases ? raw.negative.falsePositive / raw.negative.cases : 0,
+    falsePositiveEmptyRate: raw.empty.cases ? raw.empty.falsePositive / raw.empty.cases : 0,
     impactPrecision: precision(raw.impact),
     impactRecall: recall(raw.impact),
     unauthorizedOrUnpublishedLeakage: raw.negative.leakageCases
@@ -544,6 +583,90 @@ export function assertFrontendEvaluationReport(report, cases) {
   }
 }
 
+export function assertFrontendQualityGate(report) {
+  if (!report?.denominators?.totalCases) throw new Error("Frontend quality gate did not execute any held-out cases");
+  const minimums = {
+    entityMicroF1: 0.95,
+    entityMacroF1: 0.95,
+    factEdgePrecision: 1,
+    factEdgeRecall: 0.75,
+    recallAt5: 0.95,
+    mrr: 0.9,
+    citationValidity: 1,
+    impactPrecision: 0.95,
+    impactRecall: 0.95
+  };
+  for (const [metric, minimum] of Object.entries(minimums)) {
+    if (!Number.isFinite(report.metrics?.[metric]) || report.metrics[metric] < minimum) {
+      throw new Error(`Frontend quality gate ${metric} ${report.metrics?.[metric] ?? "missing"} is below ${minimum}`);
+    }
+  }
+  if (report.metrics.falsePositiveEmptyRate > 0 || report.metrics.unauthorizedOrUnpublishedLeakage > 0) {
+    throw new Error("Frontend quality gate found unauthorized, unpublished, or empty-query leakage");
+  }
+}
+
+export function collectFrontendQualityGateFailures(reports) {
+  const failures = [];
+  for (const [name, report] of Object.entries(reports)) {
+    try {
+      assertFrontendQualityGate(report);
+    } catch (error) {
+      failures.push(new Error(`Frontend evaluation ${name} quality gate failed: ${error.message}`, { cause: error }));
+    }
+  }
+  return failures;
+}
+
+export function observeFrontendEvaluationCase(item, graph, documents, deriveImpact) {
+  const buildId = `evaluation:${item.fixture}`;
+  const results = searchFrontendKnowledge({
+    query: item.query,
+    documents,
+    graph,
+    access: {
+      canReadProject: item.access !== "unauthorized",
+      visibility: "published",
+      viewerRole: "member",
+      buildId,
+      currentReleaseBuildId: item.access === "authorized-published" ? buildId : null
+    },
+    limit: 5
+  });
+  const target = results[0] ? graph.nodes.find((entity) => entity.id === results[0].entityId) : null;
+  const changedPaths = target ? [...new Set(target.sourceRefs.map((reference) => reference.path))] : [];
+  const impact = target ? deriveImpact({ changedPaths, graph: {
+    schemaVersion: 2, snapshotId: graph.snapshotId, analyzerManifestDigest: graph.analyzerManifestDigest,
+    analyzerManifest: [], entities: graph.nodes, edges: graph.edges
+  } }) : null;
+  const impacted = Boolean(target && impact?.affectedEntityIds.includes(target.id));
+  return {
+    caseId: item.id,
+    entityIds: results[0] ? [results[0].entityKey] : [],
+    factEdgeIds: results[0]?.factKeys ?? [],
+    searchResults: results.map((result) => ({
+      entityId: result.entityKey,
+      citations: result.citations.map(({ path: citationPath, startLine, endLine }) => ({ path: citationPath, startLine, endLine }))
+    })),
+    impactEntityIds: impacted && results[0] ? [results[0].entityKey] : []
+  };
+}
+
+async function fixtureFiles(root) {
+  const walk = async (directory, prefix = "") => (await readdir(directory)).flatMap((name) => [{ name, prefix }]);
+  const pending = await walk(root);
+  const files = [];
+  while (pending.length) {
+    const current = pending.shift();
+    const relative = current.prefix ? `${current.prefix}/${current.name}` : current.name;
+    const absolute = path.join(root, relative);
+    if ((await stat(absolute)).isDirectory()) {
+      pending.push(...await walk(absolute, relative));
+    } else files.push(relative);
+  }
+  return files.sort();
+}
+
 async function loadDataset(root, filename, split) {
   return { name: filename, split, content: await readFile(path.join(root, filename), "utf8") };
 }
@@ -553,8 +676,10 @@ export async function main() {
   const inputs = await Promise.all([
     loadDataset(root, "evaluation/frontend/train/react-core.jsonl", "train"),
     loadDataset(root, "evaluation/frontend/train/security-negative.jsonl", "train"),
+    loadDataset(root, "evaluation/frontend/train/no-result.jsonl", "train"),
     loadDataset(root, "evaluation/frontend/held-out/react-core.jsonl", "held-out"),
-    loadDataset(root, "evaluation/frontend/held-out/security-negative.jsonl", "held-out")
+    loadDataset(root, "evaluation/frontend/held-out/security-negative.jsonl", "held-out"),
+    loadDataset(root, "evaluation/frontend/held-out/no-result.jsonl", "held-out")
   ]);
   const cases = parseFrontendEvaluationDatasets(inputs);
   const datasetDigest = digestFrontendEvaluationDatasets(inputs);
@@ -566,21 +691,65 @@ export async function main() {
   await validateFrontendCompatibilityFixtures(versions, path.join(root, "fixtures/frontend"));
   validateFrontendPerformanceBaseline(versions, datasetDigest);
   const suite = validateFrontendEvaluationSuite(cases, versions);
-  const splitReports = evaluateFrontendKnowledgeBySplit(cases, []);
+  const [{ analyzeWorkerRequest }, { buildFrontendGraph }, { deriveFrontendChangeImpact }] = await Promise.all([
+    import("../src/server/knowledge/frontend/runtime/analyzer-worker.ts"),
+    import("../src/server/knowledge/frontend/graph-builder.ts"),
+    import("../src/server/knowledge/frontend/change-impact.ts")
+  ]);
+  const fixtureKnowledge = new Map();
+  for (const fixture of new Set(cases.map((item) => item.fixture))) {
+    const fixtureRoot = path.join(root, "fixtures/frontend", fixture);
+    const sources = await Promise.all((await fixtureFiles(fixtureRoot)).map(async (sourcePath) => {
+      const bytes = await readFile(path.join(fixtureRoot, sourcePath));
+      return { path: sourcePath, contentBase64: bytes.toString("base64"), blobHash: createHash("sha256").update(bytes).digest("hex") };
+    }));
+    const result = analyzeWorkerRequest({
+      type: "analyze", requestId: createHash("sha256").update(fixture).digest("hex").slice(0, 8) + "-0000-4000-8000-000000000000",
+      snapshotId: fixture,
+      analyzerIds: ["frontend-project", "frontend-project-core", "typescript-core", "html-core", "style-core", "react-core", "react-router-core", "state-data-core", "visualization-core", "tooling-test-core"],
+      cachedAnalyses: [], sources
+    });
+    const graph = buildFrontendGraph(result.outputs[0].frontendIr);
+    const pages = generateFrontendKnowledge({
+      schemaVersion: 2,
+      snapshotId: graph.snapshotId,
+      analyzerManifestDigest: graph.analyzerManifestDigest,
+      analyzerManifest: [],
+      entities: graph.nodes,
+      edges: graph.edges
+    }).pages;
+    fixtureKnowledge.set(fixture, { graph, documents: buildFrontendSearchDocuments(pages) });
+  }
+  const observations = cases.map((item) => {
+    const knowledge = fixtureKnowledge.get(item.fixture);
+    return observeFrontendEvaluationCase(item, knowledge.graph, knowledge.documents, deriveFrontendChangeImpact);
+  });
+  const splitReports = evaluateFrontendKnowledgeBySplit(cases, observations);
+  for (const [split, report] of Object.entries(splitReports)) {
+    const scopedCases = split === "all" ? cases : cases.filter((item) => item.split === (split === "heldOut" ? "held-out" : split));
+    try {
+      assertFrontendEvaluationReport(report, scopedCases);
+    } catch (error) {
+      throw new Error(`Frontend evaluation ${split} report is invalid: ${error.message}`, { cause: error });
+    }
+  }
+  const [qualityGateError = null] = collectFrontendQualityGateFailures(splitReports);
   const output = {
     dataset: "frontend-v1-core",
     datasetDigest,
-    status: "protocol-baseline-no-analyzer",
-    qualityGateEnforced: false,
-    qualityGateReport: "heldOut",
+    status: qualityGateError ? "quality-gate-failed" : "quality-gate-passed",
+    qualityGateEnforced: true,
+    qualityGateReports: ["train", "heldOut", "all"],
     generatedFromCommittedFixtures: true,
     suite,
+    observations,
     splitReports,
     report: splitReports.all
   };
   const outputPath = path.join(root, "artifacts/frontend-knowledge-evaluation.json");
   await mkdir(path.dirname(outputPath), { recursive: true });
   await writeFile(outputPath, `${JSON.stringify(output, null, 2)}\n`);
+  if (qualityGateError) throw qualityGateError;
   console.log(JSON.stringify({
     dataset: output.dataset,
     datasetDigest: output.datasetDigest,

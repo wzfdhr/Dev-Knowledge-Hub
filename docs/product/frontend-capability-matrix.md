@@ -17,9 +17,10 @@
 | JSX/TSX | 只将导出大写变量猜为 component | 深度支持 | component、props、render tree、children | 组件库、页面组成、使用热点 | V1 Core |
 | HTML | 上传过滤 | 深度支持 | document、landmark、form、asset ref | 页面结构、资产、a11y 事实 | V1 Core |
 | CSS/CSS Modules | 上传过滤 | 深度支持 | style scope、selector、custom property、media/container query | 样式来源、token、组件影响 | V1 Core |
-| Sass/Less | 上传过滤 | 深度支持 | variable、mixin、selector、import/use | token、全局样式、影响 | V1 Core |
+| SCSS/Less | 上传过滤 | 深度支持 | variable、selector、media/container、import/use；mixin 在 V1 Trial 补齐 | token、全局样式、影响 | V1 Core |
+| 缩进式 `.sass` | 上传过滤 | 基础识别 | 明确 `partial/unsupported`，不使用正则冒充 AST | 文件级引用 | V1 Trial |
 | SVG | 上传过滤 | 基础识别 | symbol/id/viewBox/asset ref；永不直接渲染 | 资产查询和引用影响 | V1 Core |
-| 图片/字体/媒体 | 不采集 | 仅资产索引 | path、hash、size、MIME、referenced_by | 资产清单和影响 | V1 Core |
+| 图片/字体/媒体 | 不采集 | 仅资产索引 | path、hash、size、MIME、referenced_by | 资产清单和影响 | V1 Trial |
 | npm/pnpm/yarn/bun workspace | 部分 package/lock 文档事实 | 深度支持 | workspace package、exports、scripts、dependency | monorepo 地图、命令、包影响 | V1 Core |
 | tsconfig/project references | legacy 只读根 tsconfig | 深度支持 | project、reference、paths alias、compiler boundary | 模块解析、包依赖、影响 | V1 Core |
 | React 18/19 + Vite | 通用 JS/TS 识别 | 深度支持 | component、props、Hook、Context、render/effect | 页面、组件、状态、变更影响 | V1 Core |
@@ -68,6 +69,8 @@
 | 微信/多端小程序 | 无 | 暂不支持 | - | 需独立平台语义与 fixture 立项 | 后续 |
 
 上表的“目标等级”是交付目标，不是当前已上线状态。管理端和 MCP 只能根据当前 release 持久化的 analyzer manifest 与已通过评测门禁显示“深度支持”；不得根据本目标矩阵提前宣称能力。
+
+2026-07-19 产品决策：V1 Demo 的 FK06 只接入经客户端和服务端共同验证的前端文本与 SVG。图片、字体和媒体继续在读取内容前过滤；其 `client_unverified` 资产清单随 FK14 的分页 manifest 上传合同在 V1 Trial 交付，避免在缺少持久化信任字段时伪造 source file。
 
 ## 版本范围治理
 

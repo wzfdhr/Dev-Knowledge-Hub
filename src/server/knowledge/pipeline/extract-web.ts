@@ -96,6 +96,8 @@ export function extractWebSource(input: WebSourceInput): WebExtractionResult {
       }
     } else if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
       ir.imports.push({ fromPath: input.path, specifier: node.moduleSpecifier.text, kind: "static", sourceRef: ref(input, source, node) });
+    } else if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+      ir.imports.push({ fromPath: input.path, specifier: node.moduleSpecifier.text, kind: "static", sourceRef: ref(input, source, node) });
     } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword
       && node.arguments.length === 1 && ts.isStringLiteral(node.arguments[0])) {
       ir.imports.push({ fromPath: input.path, specifier: node.arguments[0].text, kind: "dynamic", sourceRef: ref(input, source, node) });

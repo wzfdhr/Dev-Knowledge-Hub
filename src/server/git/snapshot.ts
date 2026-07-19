@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { filterImportFile } from "../../shared/import-filter.js";
+import { filterImportFile, importLanguageForPath } from "../../shared/import-filter.js";
 
 import type {
   AppStore,
@@ -56,22 +56,6 @@ function changedPaths(status: Buffer): string[] {
     }
   }
   return [...new Set(paths)].sort();
-}
-
-function languageFor(filePath: string): string | null {
-  const extension = path.posix.extname(filePath).toLowerCase();
-  return ({
-    ".ts": "typescript",
-    ".tsx": "tsx",
-    ".js": "javascript",
-    ".jsx": "jsx",
-    ".md": "markdown",
-    ".json": "json",
-    ".yaml": "yaml",
-    ".yml": "yaml",
-    ".csv": "csv",
-    ".xlsx": "xlsx"
-  } as Record<string, string>)[extension] ?? null;
 }
 
 function sanitizeRemoteUrl(value: string | null): string | null {
@@ -243,7 +227,7 @@ async function syncRepositoryUnlocked({
       path: filePath,
       byteSize: content.length,
       contentHash: createHash("sha256").update(content).digest("hex"),
-      language: languageFor(filePath)
+      language: importLanguageForPath(filePath)
     });
   }
 

@@ -106,6 +106,50 @@ describe("pipeline build routes", () => {
     expect(response.statusCode).toBe(403);
     expect(response.json()).toMatchObject({ error: { code: "FORBIDDEN" } });
   });
+
+  test("reserves the frontend candidate preview for workspace administrators", async () => {
+    const store = new MemoryAppStore();
+    const app = buildServer({
+      store,
+      masterKey: randomBytes(32).toString("base64"),
+      sessionSecret: "frontend-preview-session-secret",
+      dataDir: "/tmp/devkh-frontend-preview",
+      nodeEnv: "test",
+      qualityArtifactReader: { getJson: async () => ({}) }
+    });
+    apps.push(app);
+    await app.inject({
+      method: "POST", url: "/api/setup", payload: { email: "admin@example.com", password: "a secure admin password" }
+    });
+    const login = await app.inject({
+      method: "POST", url: "/api/session", payload: { email: "admin@example.com", password: "a secure admin password" }
+    });
+    const adminCookie = authenticatedCookie(login);
+    const projectId = (await app.inject({ method: "GET", url: "/api/projects", headers: { cookie: adminCookie } })).json().projects[0].id as string;
+
+    const empty = await app.inject({
+      method: "GET", url: `/api/projects/${projectId}/frontend-preview`, headers: { cookie: adminCookie }
+    });
+    expect(empty.statusCode).toBe(200);
+    expect(empty.json()).toEqual({ status: "source_missing", preview: null });
+
+    await app.inject({
+      method: "POST", url: "/api/members", headers: { cookie: adminCookie, ...csrfHeaders(adminCookie) },
+      payload: { email: "member@example.com", password: "another secure password", role: "member" }
+    });
+    const memberLogin = await app.inject({
+      method: "POST", url: "/api/session", payload: { email: "member@example.com", password: "another secure password" }
+    });
+    const forbidden = await app.inject({
+      method: "GET", url: `/api/projects/${projectId}/frontend-preview`, headers: { cookie: authenticatedCookie(memberLogin) }
+    });
+    expect(forbidden.statusCode).toBe(403);
+    const forbiddenSearch = await app.inject({
+      method: "GET", url: `/api/projects/${projectId}/frontend-preview/search?q=DashboardPage`,
+      headers: { cookie: authenticatedCookie(memberLogin) }
+    });
+    expect(forbiddenSearch.statusCode).toBe(403);
+  });
 });
 
 afterEach(async () => {

@@ -62,10 +62,13 @@ const commonEntityFields = {
 export const frontendEntitySchema = z.discriminatedUnion("kind", [
   z.object({ ...commonEntityFields, kind: z.literal("workspace_package"), attributes: z.object({ packageManager: knowledgeValue(z.enum(["npm", "pnpm", "yarn", "bun", "unknown"])), version: knowledgeValue(z.string().min(1)) }) }),
   z.object({ ...commonEntityFields, kind: z.literal("application_entry"), attributes: z.object({ runtime: knowledgeValue(z.enum(["spa", "ssr", "ssg", "worker", "server", "client"])) }) }),
+  z.object({ ...commonEntityFields, kind: z.literal("symbol"), attributes: z.object({ symbolKind: knowledgeValue(z.enum(["function", "class", "interface", "type", "enum", "variable"])) }) }),
   z.object({ ...commonEntityFields, kind: z.literal("route"), attributes: z.object({ path: knowledgeValue(z.string()), dynamic: knowledgeValue(z.boolean()) }) }),
   z.object({ ...commonEntityFields, kind: z.literal("layout"), attributes: z.object({ nestingDepth: knowledgeValue(z.number().int().nonnegative()) }) }),
   z.object({ ...commonEntityFields, kind: z.literal("page"), attributes: z.object({ routePath: knowledgeValue(z.string()) }) }),
   z.object({ ...commonEntityFields, kind: z.literal("component"), attributes: z.object({ componentType: knowledgeValue(z.enum(["function", "class", "unknown"])) }) }),
+  z.object({ ...commonEntityFields, kind: z.literal("dom_landmark"), attributes: z.object({ tagName: knowledgeValue(z.string().min(1)), role: knowledgeValue(z.string().min(1)) }) }),
+  z.object({ ...commonEntityFields, kind: z.literal("form"), attributes: z.object({ method: knowledgeValue(z.string().min(1)), action: knowledgeValue(z.string().min(1)) }) }),
   z.object({ ...commonEntityFields, kind: z.literal("hook_or_composable"), attributes: z.object({ effectful: knowledgeValue(z.boolean()) }) }),
   z.object({ ...commonEntityFields, kind: z.literal("state_store"), attributes: z.object({ library: knowledgeValue(z.string().min(1)) }) }),
   z.object({ ...commonEntityFields, kind: z.literal("state_field"), attributes: z.object({ fieldType: knowledgeValue(z.string().min(1)) }) }),

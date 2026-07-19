@@ -52,6 +52,8 @@ import type {
   RepositoryConnectionInput,
   RepositoryRecord,
   SourceFileRecord,
+  SourceAnalysisArtifactKey,
+  SourceAnalysisArtifactRecord,
   SourceSnapshotRecord,
   SaveKnowledgeGraphInput,
   SetupResult,
@@ -131,6 +133,7 @@ export class MemoryAppStore implements AppStore {
   readonly encryptedCredentials: EncryptedCredentialRecord[] = [];
   readonly sourceSnapshots: SourceSnapshotRecord[] = [];
   readonly sourceFiles: SourceFileRecord[] = [];
+  readonly sourceAnalysisArtifacts: SourceAnalysisArtifactRecord[] = [];
   readonly importReports: ImportReportRecord[] = [];
   readonly builds: BuildRecord[] = [];
   readonly buildEvents: BuildEvent[] = [];
@@ -2075,6 +2078,33 @@ export class MemoryAppStore implements AppStore {
   async findArtifactById(artifactId: string): Promise<ArtifactManifest | null> {
     const artifact = this.knowledgeArtifacts.find((candidate) => candidate.id === artifactId);
     return artifact ? structuredClone(artifact) : null;
+  }
+
+  async findSourceAnalysisArtifact(key: SourceAnalysisArtifactKey): Promise<SourceAnalysisArtifactRecord | null> {
+    const artifact = this.sourceAnalysisArtifacts.find((candidate) =>
+      candidate.workspaceId === key.workspaceId
+      && candidate.contentHash === key.contentHash
+      && candidate.analyzerId === key.analyzerId
+      && candidate.analyzerVersion === key.analyzerVersion
+      && candidate.parserConfigDigest === key.parserConfigDigest
+    );
+    return artifact ? structuredClone(artifact) : null;
+  }
+
+  async putSourceAnalysisArtifact(
+    input: Omit<SourceAnalysisArtifactRecord, "createdAt">
+  ): Promise<SourceAnalysisArtifactRecord> {
+    if (this.workspace?.id !== input.workspaceId) {
+      throw new Error("Source analysis artifact workspace does not exist");
+    }
+    const existing = await this.findSourceAnalysisArtifact(input);
+    if (existing) {
+      if (existing.factsDigest !== input.factsDigest) throw new Error("Source analysis cache collision");
+      return existing;
+    }
+    const artifact = { ...structuredClone(input), createdAt: new Date() };
+    this.sourceAnalysisArtifacts.push(artifact);
+    return structuredClone(artifact);
   }
 
   async savePipelineSearchDocuments(input: {

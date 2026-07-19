@@ -137,6 +137,18 @@ export class AnalyzerRegistry {
     this.#registrations.set(registration.id, registration);
   }
 
+  emptyIr(snapshotId: string): FrontendIR {
+    const analyzerManifest: FrontendAnalyzerManifestEntry[] = [];
+    return frontendIrSchema.parse({
+      schemaVersion: 2,
+      snapshotId,
+      analyzerManifestDigest: frontendAnalyzerManifestDigest(analyzerManifest),
+      analyzerManifest,
+      entities: [],
+      edges: []
+    });
+  }
+
   validateOutput(output: FrontendAnalyzerOutput): void {
     const registration = this.#registrations.get(output.analyzerId);
     if (!registration || registration.version !== output.analyzerVersion) {

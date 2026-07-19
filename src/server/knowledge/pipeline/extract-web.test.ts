@@ -47,4 +47,18 @@ describe("extractWebSource", () => {
     ]));
     expect(result.ir.imports).toEqual([expect.objectContaining({ specifier: "react", kind: "static" })]);
   });
+
+  test("keeps barrel and named re-exports visible to the legacy dependency graph", () => {
+    const result = extractWebSource({
+      snapshotId: "snapshot-1",
+      path: "src/index.ts",
+      content: "export * from './button';\nexport { chartOptions } from './chart';\n",
+      blobHash: digest
+    });
+
+    expect(result.ir.imports).toEqual([
+      expect.objectContaining({ specifier: "./button", kind: "static", sourceRef: expect.objectContaining({ startLine: 1 }) }),
+      expect.objectContaining({ specifier: "./chart", kind: "static", sourceRef: expect.objectContaining({ startLine: 2 }) })
+    ]);
+  });
 });

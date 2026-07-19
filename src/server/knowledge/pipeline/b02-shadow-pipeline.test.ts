@@ -24,7 +24,8 @@ import type { PipelineArtifactStore } from "../../persistence/store";
 import {
   createFrontendShadowStageExecutor,
   createFrontendShadowStageInputPlanner,
-  createKnowledgeV1StoreView
+  createKnowledgeV1StoreView,
+  assertFrontendCandidateValid
 } from "../frontend/shadow-stage";
 import {
   ARTIFACT_KINDS,
@@ -63,6 +64,12 @@ afterEach(async () => {
 });
 
 describe("B02 shadow pipeline", () => {
+  test("refuses to package a candidate whose complete reference validation failed", () => {
+    expect(() => assertFrontendCandidateValid({ valid: false, invalidReferenceCount: 1 }))
+      .toThrow("requires a valid candidate");
+    expect(() => assertFrontendCandidateValid({ valid: true, invalidReferenceCount: 0 })).not.toThrow();
+  });
+
   test("persists, reuses, and verifies both artifact families without changing v1 graph behavior", async () => {
     const snapshotRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-b02-snapshot-"));
     const artifactRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-b02-artifacts-"));
@@ -217,6 +224,17 @@ describe("B02 shadow pipeline", () => {
     await expect(frontendValue("lint", "frontend-knowledge-quality-v2")).resolves.toMatchObject({
       summary: expect.objectContaining({ entities: expect.any(Number), citedEntities: expect.any(Number) })
     });
+    const frontendValidation = await frontendValue("validate", "frontend-validation-v2") as {
+      valid: boolean; graphReferenceCount: number; checkedReferenceCount: number; invalidReferenceCount: number;
+    };
+    expect(frontendValidation).toMatchObject({
+      valid: true,
+      graphReferenceCount: expect.any(Number),
+      checkedReferenceCount: expect.any(Number),
+      invalidReferenceCount: 0
+    });
+    expect(frontendValidation.graphReferenceCount).toBeGreaterThan(0);
+    expect(frontendValidation.checkedReferenceCount).toBeGreaterThanOrEqual(frontendValidation.graphReferenceCount);
     await expect(store.getKnowledgeGraph(workspaceId, project.id, build.id)).resolves.toMatchObject({
       nodes: expect.arrayContaining([expect.objectContaining({
         kind: "module", name: "app.ts", qualifiedName: sourcePath

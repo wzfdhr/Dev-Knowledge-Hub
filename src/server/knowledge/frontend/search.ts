@@ -49,7 +49,7 @@ const kindTerms: Record<FrontendEntity["kind"], readonly string[]> = {
   visualization: ["echarts", "chart", "dataset", "series", "dispose", "visualization", "图表", "可视化"],
   test_case: ["test", "unit test", "component test", "playwright", "e2e", "测试", "组件测试", "端到端"],
   test_fixture: ["fixture", "测试夹具"],
-  tooling_config: ["vite", "tsconfig", "tooling", "config", "配置", "插件", "alias", "sourcemap"]
+  tooling_config: ["vite", "tsconfig", "tooling", "config", "plugin", "配置", "插件", "alias", "sourcemap"]
 };
 
 const relationPriority: Partial<Record<FrontendEntity["kind"], readonly string[]>> = {
@@ -61,12 +61,64 @@ const relationPriority: Partial<Record<FrontendEntity["kind"], readonly string[]
   visualization: ["visualizes"], test_case: ["tests"], tooling_config: ["configures"]
 };
 
+const queryStopWords = new Set([
+  "and", "application", "cite", "codebase", "configured", "definition", "does", "entity", "explain",
+  "find", "for", "from", "how", "implemented", "implementation", "in", "its", "knowledge", "locate",
+  "of", "opens", "project", "represents", "source", "that", "the", "this", "through", "trace", "where",
+  "which", "with", "type", "script", "owns", "configuration", "path", "reads", "renders", "dynamic",
+  "loads", "alias"
+]);
+
+const chineseQueryStopPhrases = [
+  "并给出源码位置", "在这个项目里如何实现", "对应的知识实体", "哪个文件负责", "查找与", "请定位",
+  "在哪里", "如何实现", "哪个", "项目", "源码", "位置", "知识", "实体", "对应", "负责", "通过",
+  "进入", "消费", "状态", "渲染", "加载", "打开", "标题", "前端", "应用", "路径", "别名", "配置",
+  "动态", "页面", "组件", "模块", "测试", "路由", "请求", "接口", "图表", "可视化", "状态仓库",
+  "挂载点", "设计令牌", "作用域", "的", "并", "和"
+].sort((left, right) => right.length - left.length);
+
+const termPatterns = new Map<string, RegExp>();
+
 function normalized(value: string): string {
   return value.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLocaleLowerCase("en-US").replace(/[^\p{L}\p{N}_:/.@-]+/gu, " ").trim();
 }
 
 function searchableTerm(term: string): boolean {
   return term.length >= 3 || /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]{2}/u.test(term);
+}
+
+function containsTerm(text: string, term: string): boolean {
+  if (/[^\p{ASCII}]/u.test(term)) return text.includes(term);
+  if (!text.includes(term)) return false;
+  let pattern = termPatterns.get(term);
+  if (!pattern) {
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    pattern = new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, "u");
+    termPatterns.set(term, pattern);
+  }
+  return pattern.test(text);
+}
+
+export function frontendUnknownQuerySubjects(rawQuery: string, documents: readonly FrontendSearchDocument[]): string[] {
+  const corpus = normalized(documents.map((document) => `${document.title} ${document.content}`).join(" "));
+  const aliases = new Set(Object.values(kindTerms).flatMap((terms) => terms.map(normalized))
+    .flatMap((term) => term.split(" ")));
+  const latinTokens = normalized(rawQuery).split(" ")
+    .filter((token) => /^[a-z][a-z0-9_$@./:-]*$/u.test(token) && token.length >= 4)
+    .filter((token) => !queryStopWords.has(token) && !aliases.has(token));
+  const unknown = latinTokens.filter((token) => !containsTerm(corpus, token));
+
+  const chineseSegments = rawQuery.match(/[\p{Script=Han}]+/gu) ?? [];
+  for (const segment of chineseSegments) {
+    let subject = segment;
+    for (const phrase of chineseQueryStopPhrases) subject = subject.replaceAll(phrase, "");
+    if (subject.length >= 2 && !corpus.includes(subject)) unknown.push(subject);
+  }
+  return [...new Set(unknown)];
+}
+
+export function frontendQuerySubjectsAreKnown(rawQuery: string, documents: readonly FrontendSearchDocument[]): boolean {
+  return frontendUnknownQuerySubjects(rawQuery, documents).length === 0;
 }
 
 function sourceRefKey(reference: SourceRef): string {
@@ -101,10 +153,10 @@ function entityScore(query: string, entity: FrontendEntity): { score: number; re
   const haystack = normalized(`${entity.qualifiedName} ${entity.canonicalPath} ${semanticKey} ${JSON.stringify(entity.facets)} ${JSON.stringify(entity.attributes)}`);
   let score = 0;
   const reasons: string[] = [];
-  if (name.length >= 3 && query.includes(name)) { score += 20; reasons.push("exact-name"); }
-  if (path.length >= 3 && query.includes(path)) { score += 16; reasons.push("exact-path"); }
+  if (name.length >= 3 && containsTerm(query, name)) { score += 20; reasons.push("exact-name"); }
+  if (path.length >= 3 && containsTerm(query, path)) { score += 16; reasons.push("exact-path"); }
   for (const term of kindTerms[entity.kind]) {
-    if (query.includes(normalized(term))) { score += term.length > 5 ? 10 : 6; reasons.push(`kind:${term}`); }
+    if (containsTerm(query, normalized(term))) { score += term.length > 5 ? 10 : 6; reasons.push(`kind:${term}`); }
   }
   const tokens = query.split(" ").filter((token) => token.length >= 3 && !/^\d+$/u.test(token));
   const matchedTokens = tokens.filter((token) => haystack.includes(token));
@@ -121,9 +173,9 @@ function documentScore(query: string, entity: FrontendEntity, entityDocuments: r
     const identityTerms = [entity.name, entity.qualifiedName, entity.canonicalPath,
       entity.identity.type === "named" ? entity.identity.semanticKey : entity.identity.enclosingSemanticKey]
       .map(normalized).filter(searchableTerm);
-    const exactIdentity = identityTerms.some((term) => query.includes(term) && haystack.includes(term));
+    const exactIdentity = identityTerms.some((term) => containsTerm(query, term) && containsTerm(haystack, term));
     const aliases = kindTerms[entity.kind].map(normalized)
-      .filter((term) => searchableTerm(term) && query.includes(term) && haystack.includes(term));
+      .filter((term) => searchableTerm(term) && containsTerm(query, term) && containsTerm(haystack, term));
     const queryTokens = query.split(" ").filter((token) => token.length >= 3 && !/^\d+$/u.test(token));
     const lexicalMatches = queryTokens.filter((token) => haystack.includes(token));
     if (!exactIdentity && !aliases.length) continue;
@@ -137,10 +189,10 @@ function documentScore(query: string, entity: FrontendEntity, entityDocuments: r
 function structuralScore(
   query: string,
   entity: FrontendEntity,
-  edges: readonly FrontendEdge[],
+  connectedEdges: readonly FrontendEdge[],
   entities: ReadonlyMap<string, FrontendEntity>
 ): { score: number; reason: string | null } {
-  const connectedNameMatch = (kinds: readonly FrontendEdge["kind"][]) => edges.some((edge) =>
+  const connectedNameMatch = (kinds: readonly FrontendEdge["kind"][]) => connectedEdges.some((edge) =>
     edge.evidenceClass === "fact" && kinds.includes(edge.kind)
     && (edge.fromEntityId === entity.id || edge.toEntityId === entity.id)
     && (() => {
@@ -198,10 +250,9 @@ function factKey(edge: FrontendEdge, entities: ReadonlyMap<string, FrontendEntit
   return `${edge.kind}:${key(edge.fromEntityId)}->${key(edge.toEntityId)}`;
 }
 
-function bestFact(entity: FrontendEntity, edges: readonly FrontendEdge[], entities: ReadonlyMap<string, FrontendEntity>): string[] {
+function bestFact(entity: FrontendEntity, connectedEdges: readonly FrontendEdge[], entities: ReadonlyMap<string, FrontendEntity>): string[] {
   const priorities = relationPriority[entity.kind] ?? [];
-  const candidates = edges.filter((edge) => edge.evidenceClass === "fact"
-    && (edge.fromEntityId === entity.id || edge.toEntityId === entity.id));
+  const candidates = connectedEdges.filter((edge) => edge.evidenceClass === "fact");
   candidates.sort((left, right) => {
     const leftRank = priorities.indexOf(left.kind);
     const rightRank = priorities.indexOf(right.kind);
@@ -236,7 +287,16 @@ export function searchFrontendKnowledge(input: {
 }): FrontendSearchResult[] {
   const query = normalized(input.query);
   if (!query || !searchAllowed(input.access)) return [];
+  if (!frontendQuerySubjectsAreKnown(input.query, input.documents)) return [];
   const entities = new Map(input.graph.nodes.map((entity) => [entity.id, entity]));
+  const edgesByEntity = new Map<string, FrontendEdge[]>();
+  for (const edge of input.graph.edges) {
+    for (const entityId of new Set([edge.fromEntityId, edge.toEntityId])) {
+      const edges = edgesByEntity.get(entityId) ?? [];
+      edges.push(edge);
+      edgesByEntity.set(entityId, edges);
+    }
+  }
   const documentsByEntity = new Map<string, FrontendSearchDocument[]>();
   for (const document of input.documents) {
     if (typeof document.metadata.entityId !== "string") continue;
@@ -253,7 +313,8 @@ export function searchFrontendKnowledge(input: {
     const cited = entity.sourceRefs.filter((reference) => indexedReferenceKeys.has(sourceRefKey(reference)));
     if (!cited.length) return [];
     const lexical = entityScore(query, entity);
-    const structural = structuralScore(query, entity, input.graph.edges, entities);
+    const connectedEdges = edgesByEntity.get(entity.id) ?? [];
+    const structural = structuralScore(query, entity, connectedEdges, entities);
     const match = {
       score: indexed + lexical.score + structural.score,
       reason: ["index-document", lexical.reason, structural.reason].filter(Boolean).join(",")
@@ -277,7 +338,7 @@ export function searchFrontendKnowledge(input: {
           || left.path.localeCompare(right.path) || left.startLine - right.startLine)
           .slice(0, 1);
       })(),
-      factKeys: bestFact(entity, input.graph.edges, entities)
+      factKeys: bestFact(entity, connectedEdges, entities)
     }];
   }).sort((left, right) => right.score - left.score || left.entityKey.localeCompare(right.entityKey))
     .slice(0, input.limit ?? 5);

@@ -73,7 +73,10 @@ import {
 } from "./knowledge/frontend/preview.js";
 import { compareFrontendKnowledge } from "./knowledge/frontend/comparison.js";
 import { deriveFrontendChangeImpact } from "./knowledge/frontend/change-impact.js";
-import { loadFrontendSourceDescriptors } from "./knowledge/frontend/reference-validation.js";
+import {
+  frontendSourceReferenceIsValid,
+  loadFrontendSourceDescriptors
+} from "./knowledge/frontend/reference-validation.js";
 import { frontendCandidateRunStatus } from "./knowledge/frontend/preview-status.js";
 import { searchFrontendKnowledge } from "./knowledge/frontend/search.js";
 import { exportKnowledgeGraph } from "./knowledge/pipeline/viz.js";
@@ -1344,16 +1347,30 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         projectId: project.id,
         buildId: build.id
       });
+      const results = searchFrontendKnowledge({
+        query: query.data.q,
+        documents: preview.search,
+        graph: { nodes: preview.graph.nodes, edges: preview.graph.edges },
+        access: {
+          canReadProject: true, visibility: "shadow", viewerRole: "admin",
+          buildId: build.id, currentReleaseBuildId: null
+        }
+      });
+      const snapshot = await options.store.findSnapshotById(admin.workspaceId, build.snapshotId);
+      if (!snapshot) throw new FrontendPreviewUnavailableError("Frontend candidate snapshot is unavailable");
+      const referencedPaths = new Set(results.flatMap((result) => result.citations.map((reference) => reference.path)));
+      const sources = await loadFrontendSourceDescriptors({
+        snapshot,
+        files: (await options.store.listSnapshotFiles(admin.workspaceId, build.snapshotId))
+          .filter((file) => referencedPaths.has(file.path))
+      });
+      if (results.some((result) => result.citations.some((reference) => !frontendSourceReferenceIsValid(
+        reference, build.snapshotId, sources
+      )))) {
+        throw new FrontendPreviewUnavailableError("Frontend candidate search citation is invalid");
+      }
       return {
-        results: searchFrontendKnowledge({
-          query: query.data.q,
-          documents: preview.search,
-          graph: { nodes: preview.graph.nodes, edges: preview.graph.edges },
-          access: {
-            canReadProject: true, visibility: "shadow", viewerRole: "admin",
-            buildId: build.id, currentReleaseBuildId: null
-          }
-        })
+        results
       };
     } catch (error) {
       if (error instanceof FrontendPreviewUnavailableError || error instanceof z.ZodError) {

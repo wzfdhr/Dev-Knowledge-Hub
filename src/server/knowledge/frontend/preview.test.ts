@@ -50,7 +50,7 @@ function fixture() {
     ]),
     findArtifactById: vi.fn(async (id: string) => manifests.find((item) => item.id === id) ?? manifest(id, "convert", `legacy-${id}`))
   };
-  return { store, reader: { getJson: vi.fn(async (item: ArtifactManifest) => values.get(item.id)) }, manifests };
+  return { store, reader: { getJson: vi.fn(async (item: ArtifactManifest) => values.get(item.id)) }, manifests, values };
 }
 
 describe("loadFrontendCandidatePreview", () => {
@@ -70,5 +70,16 @@ describe("loadFrontendCandidatePreview", () => {
 
     await expect(loadFrontendCandidatePreview({ store: store as never, reader, workspaceId, projectId, buildId }))
       .rejects.toBeInstanceOf(FrontendPreviewUnavailableError);
+  });
+
+  test("rejects a packaged candidate whose validation is false", async () => {
+    const { store, reader, values } = fixture();
+    values.set("validation", {
+      schemaVersion: 2, family: "frontend-v2", stage: "validate", snapshotId,
+      analyzerManifestDigest: hash, valid: false, pageCount: 1, issueCount: 0
+    });
+
+    await expect(loadFrontendCandidatePreview({ store: store as never, reader, workspaceId, projectId, buildId }))
+      .rejects.toThrow("validation failed");
   });
 });

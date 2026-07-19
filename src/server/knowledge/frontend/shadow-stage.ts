@@ -52,7 +52,7 @@ const UPSTREAM_STAGES: Record<Exclude<BuildStage, "convert">, readonly BuildStag
   index: ["synthesize"],
   lint: ["extract", "tables", "synthesize", "index"],
   viz: ["graph"],
-  validate: ["synthesize", "index", "lint", "viz"],
+  validate: ["graph", "synthesize", "index", "lint", "viz"],
   package: ["validate"]
 };
 
@@ -297,6 +297,12 @@ function irFromGraph(value: ReturnType<typeof buildFrontendGraph>): FrontendIR {
   };
 }
 
+export function assertFrontendCandidateValid(value: unknown): asserts value is { valid: true } {
+  if (!value || typeof value !== "object" || !("valid" in value) || value.valid !== true) {
+    throw new Error("Frontend shadow package requires a valid candidate");
+  }
+}
+
 export function createFrontendShadowStageExecutor(input: {
   store: ShadowStore;
   artifactStore: ArtifactStore;
@@ -484,12 +490,18 @@ export function createFrontendShadowStageExecutor(input: {
         break;
       }
       case "validate": {
+        const graph = frontendGraphV2Schema.parse(await frontendUpstreamValue(input, upstreamIds, "graph"));
         const knowledge = await frontendUpstreamValue(input, upstreamIds, "synthesize") as ReturnType<typeof generateFrontendKnowledge>;
         const search = await frontendUpstreamValue(input, upstreamIds, "index") as {
           documents: Array<{ citations: Array<{ snapshotId: string; path: string; startLine: number; endLine: number; blobHash: string }> }>;
         };
         const quality = await frontendUpstreamValue(input, upstreamIds, "lint") as ReturnType<typeof assessFrontendKnowledgeQuality>;
+        const graphReferences = [
+          ...graph.nodes.flatMap((node) => node.sourceRefs),
+          ...graph.edges.flatMap((edge) => edge.sourceRefs)
+        ];
         const references = [
+          ...graphReferences,
           ...knowledge.pages.flatMap((page) => [
             ...page.citations,
             ...page.items.flatMap((item) => item.sourceRefs),
@@ -504,18 +516,29 @@ export function createFrontendShadowStageExecutor(input: {
           files: (await input.store.listSnapshotFiles(run.workspaceId, run.snapshotId))
             .filter((file) => referencedPaths.has(file.path))
         });
+        const invalidReferenceCount = references.filter((reference) => !frontendSourceReferenceIsValid(
+          reference, run.snapshotId, sources
+        )).length;
         value = {
           ...baseValue,
-          valid: knowledge.pages.every((page) => page.citations.length > 0
+          valid: graph.nodes.every((node) => node.sourceRefs.length > 0)
+            && graph.edges.filter((edge) => edge.evidenceClass === "fact")
+              .every((edge) => edge.sourceRefs.length > 0)
+            && knowledge.pages.every((page) => page.citations.length > 0
             && page.chunks.every((chunk) => chunk.citations.length > 0))
             && references.length > 0
-            && references.every((reference) => frontendSourceReferenceIsValid(reference, run.snapshotId, sources)),
+            && invalidReferenceCount === 0,
           pageCount: knowledge.pages.length,
-          issueCount: quality.issues.length
+          issueCount: quality.issues.length,
+          graphReferenceCount: graphReferences.length,
+          checkedReferenceCount: references.length,
+          invalidReferenceCount
         };
         break;
       }
-      case "package":
+      case "package": {
+        const validation = await frontendUpstreamValue(input, upstreamIds, "validate");
+        assertFrontendCandidateValid(validation);
         value = {
             ...baseValue,
             irSchemaVersion: FRONTEND_V2_IR_SCHEMA_VERSION,
@@ -523,6 +546,7 @@ export function createFrontendShadowStageExecutor(input: {
             artifacts: await packageArtifacts(input.store, run, legacyManifest)
           };
         break;
+      }
       case "tables":
         value = baseValue;
         break;

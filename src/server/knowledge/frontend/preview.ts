@@ -127,6 +127,7 @@ export async function loadFrontendCandidatePreview(input: {
     load("viz", "frontend-visualization-v2").then((value) => visualizationSchema.parse(value)),
     load("validate", "frontend-validation-v2").then((value) => validationSchema.parse(value))
   ]);
+  if (!validation.valid) throw new FrontendPreviewUnavailableError("Frontend candidate validation failed");
   return {
     build: { id: build.id, snapshotId: build.snapshotId, commitSha: build.commitSha, status: build.status },
     graph, pages: pages.pages, search: search.documents, quality, visualization, validation

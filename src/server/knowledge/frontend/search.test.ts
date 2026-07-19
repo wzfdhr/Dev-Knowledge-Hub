@@ -62,4 +62,42 @@ describe("frontend candidate knowledge search", () => {
     expect(searchFrontendKnowledge({ query: "", documents: [document], graph: { nodes: [page, chart], edges: [edge] }, access })).toEqual([]);
     expect(searchFrontendKnowledge({ query: "COBOL payroll batch", documents: [document], graph: { nodes: [page, chart], edges: [edge] }, access })).toEqual([]);
   });
+
+  test("returns no result for unknown frontend subjects instead of matching only category words", () => {
+    const access = { canReadProject: true, visibility: "published" as const, buildId: "build", currentReleaseBuildId: "build", viewerRole: "member" as const };
+    const input = { documents: [document, chartDocument], graph: { nodes: [page, chart], edges: [edge] }, access };
+    expect(searchFrontendKnowledge({ ...input, query: "Where is the PaymentPage React component?" })).toEqual([]);
+    expect(searchFrontendKnowledge({ ...input, query: "支付页面的 React 组件在哪里？" })).toEqual([]);
+    expect(searchFrontendKnowledge({ ...input, query: "nonexistent billing checkout" })).toEqual([]);
+  });
+
+  test("indexes Graph adjacency once for a 4,000-entity candidate", () => {
+    const nodes: FrontendEntity[] = Array.from({ length: 4_000 }, (_, index) => ({
+      ...page,
+      id: `node-${index}`,
+      name: `Component${index}`,
+      qualifiedName: `Component${index}`,
+      identity: { type: "named" as const, semanticKey: `component:Component${index}` }
+    }));
+    const documents = nodes.map((node, index) => ({
+      documentKey: `components:${index}`, kind: "page", title: `Components: ${node.name}`,
+      content: `component: ${node.name} react component jsx render tree`, citations: [ref],
+      metadata: { entityId: node.id }
+    }));
+    const edges: FrontendEdge[] = nodes.flatMap((node, index) => [1, 2, 3, 4].map((offset) => ({
+      ...edge,
+      id: `edge-${index}-${offset}`,
+      fromEntityId: node.id,
+      toEntityId: nodes[(index + offset) % nodes.length]!.id,
+      canonicalEvidenceKey: `edge-${index}-${offset}`
+    })));
+    const startedAt = performance.now();
+    const results = searchFrontendKnowledge({
+      query: "React component", documents, graph: { nodes, edges },
+      access: { canReadProject: true, visibility: "published", buildId: "build", currentReleaseBuildId: "build", viewerRole: "member" }
+    });
+
+    expect(results).toHaveLength(5);
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+  }, 10_000);
 });

@@ -73,6 +73,7 @@ import {
 } from "./knowledge/frontend/preview.js";
 import { compareFrontendKnowledge } from "./knowledge/frontend/comparison.js";
 import { deriveFrontendChangeImpact } from "./knowledge/frontend/change-impact.js";
+import { loadFrontendSourceDescriptors } from "./knowledge/frontend/reference-validation.js";
 import { exportKnowledgeGraph } from "./knowledge/pipeline/viz.js";
 import { legacyBuildStatus } from "./knowledge/pipeline/contracts.js";
 import {
@@ -98,7 +99,7 @@ import {
 import {
   FolderUploadError,
   importFolderFiles,
-  MAX_FOLDER_UPLOAD_FILES,
+  MAX_FOLDER_SCAN_FILES,
   type FolderUploadFile
 } from "./uploads/folder-import.js";
 
@@ -381,9 +382,9 @@ function requestedProjectId(request: FastifyRequest): string | undefined {
 async function* directFolderParts(request: FastifyRequest): AsyncGenerator<FolderUploadFile> {
   for await (const part of request.parts({
     limits: {
-      files: MAX_FOLDER_UPLOAD_FILES,
+      files: MAX_FOLDER_SCAN_FILES,
       fields: 0,
-      parts: MAX_FOLDER_UPLOAD_FILES,
+      parts: MAX_FOLDER_SCAN_FILES,
       fileSize: MAX_IMPORT_TABLE_WORKBOOK_BYTES
     }
   })) {
@@ -438,9 +439,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   void server.register(multipart, {
     preservePath: true,
     limits: {
-      files: MAX_FOLDER_UPLOAD_FILES,
+      files: MAX_FOLDER_SCAN_FILES,
       fields: 0,
-      parts: MAX_FOLDER_UPLOAD_FILES,
+      parts: MAX_FOLDER_SCAN_FILES,
       fileSize: MAX_IMPORT_TABLE_WORKBOOK_BYTES
     }
   });
@@ -1174,6 +1175,13 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       return { status: "build_failed", preview: null, build: { id: build.id, status: build.status } };
     }
     const runs = await options.store.listPipelineStageRuns(admin.workspaceId, project.id, build.id);
+    const failedRun = runs.findLast((run) => run.status === "failed" || run.status === "cancelled");
+    if (failedRun) {
+      return {
+        status: "candidate_failed", preview: null, build: { id: build.id, status: build.status },
+        failedStage: { stage: failedRun.stage, errorCode: failedRun.errorCode }
+      };
+    }
     if (!runs.some((run) => run.stage === "package" && ["succeeded", "reused"].includes(run.status))) {
       return { status: "candidate_pending", preview: null, build: { id: build.id, status: build.status } };
     }
@@ -1208,6 +1216,29 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           edges: preview.graph.edges
         }
       });
+      const buildSnapshot = await options.store.findSnapshotById(admin.workspaceId, build.snapshotId);
+      if (!buildSnapshot) throw new FrontendPreviewUnavailableError("Frontend candidate snapshot is unavailable");
+      const pageRefs = preview.pages.flatMap((page) => [
+        ...page.citations,
+        ...page.items.flatMap((item) => item.sourceRefs),
+        ...page.chunks.flatMap((chunk) => chunk.citations)
+      ]);
+      const searchRefs = preview.search.flatMap((document) => document.citations);
+      const issueRefs = preview.quality.issues.flatMap((issue) => issue.sourceRefs);
+      const referencedPaths = new Set([
+        ...preview.graph.nodes.flatMap((node) => node.sourceRefs),
+        ...preview.graph.edges
+          .filter((edge) => edge.evidenceClass === "fact")
+          .flatMap((edge) => edge.sourceRefs),
+        ...pageRefs,
+        ...searchRefs,
+        ...issueRefs
+      ].map((reference) => reference.path));
+      const candidateSources = await loadFrontendSourceDescriptors({
+        snapshot: buildSnapshot,
+        files: (await options.store.listSnapshotFiles(admin.workspaceId, build.snapshotId))
+          .filter((file) => referencedPaths.has(file.path))
+      });
       return {
         status: "ready",
         stale: latestSnapshot?.id !== build.snapshotId,
@@ -1224,6 +1255,10 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           },
           candidate: {
             snapshotId: preview.build.snapshotId,
+            sources: candidateSources,
+            pageRefs,
+            searchRefs,
+            issueRefs,
             entities: preview.graph.nodes,
             edges: preview.graph.edges,
             pageKeys: preview.pages.map((page) => page.slug),

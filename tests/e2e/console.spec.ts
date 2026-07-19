@@ -106,6 +106,13 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   const shadowFailureBody = await shadowFailure.json();
   expect(shadowFailureBody.releaseIdBefore).toBe(releaseBeforeShadow);
   expect(shadowFailureBody.releaseIdAfter).toBe(releaseBeforeShadow);
+  const failedPreview = await page.evaluate(async (activeProjectId) => {
+    const response = await fetch(`/api/projects/${activeProjectId}/frontend-preview`);
+    return response.json();
+  }, projectId);
+  expect(failedPreview).toMatchObject({
+    status: "candidate_failed", failedStage: { stage: "extract", errorCode: "PARSER_RUNTIME_UNAVAILABLE" }
+  });
   await page.reload();
   const shadowPanel = page.getByRole("region", { name: "影子验证状态" });
   await expect(shadowPanel).toContainText("影子验证发现问题");

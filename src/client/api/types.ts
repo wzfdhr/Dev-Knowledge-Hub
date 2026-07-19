@@ -327,7 +327,7 @@ export interface WorkspaceSearchResult extends SearchResult {
   projectSlug: string;
 }
 export interface SourceExcerpt extends Citation { content: string }
-export type FrontendPreviewStatus = "source_missing" | "build_missing" | "build_failed" | "candidate_pending" | "ready";
+export type FrontendPreviewStatus = "source_missing" | "build_missing" | "build_failed" | "candidate_failed" | "candidate_pending" | "ready";
 export interface FrontendPreviewEntity {
   id: string;
   kind: string;
@@ -380,7 +380,7 @@ export interface FrontendKnowledgeComparison {
 }
 export type FrontendPreviewResponse =
   | { status: "ready"; preview: FrontendCandidatePreview; comparison: FrontendKnowledgeComparison; stale: boolean }
-  | { status: Exclude<FrontendPreviewStatus, "ready">; preview: null; build?: { id: string; status: BuildStatus } };
+  | { status: Exclude<FrontendPreviewStatus, "ready">; preview: null; build?: { id: string; status: BuildStatus }; failedStage?: { stage: string; errorCode: string | null } };
 export interface Feedback {
   id: string;
   releaseId: string | null;

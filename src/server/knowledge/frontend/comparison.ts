@@ -1,19 +1,22 @@
+import { frontendSourceReferenceIsValid, type FrontendSourceDescriptor } from "./reference-validation.js";
+
 interface Ref { snapshotId: string; path: string; startLine: number; endLine: number; blobHash: string }
 interface Entity { id: string; kind: string; canonicalPath: string; name: string; sourceRefs: Ref[] }
 interface Edge { id: string; kind: string; fromEntityId: string; toEntityId: string; evidenceClass: "fact" | "candidate"; sourceRefs: Ref[] }
 
-function validRef(ref: Ref, snapshotId: string): boolean {
-  return ref.snapshotId === snapshotId && Boolean(ref.path) && Number.isInteger(ref.startLine) && Number.isInteger(ref.endLine)
-    && ref.startLine > 0 && ref.endLine >= ref.startLine && /^[a-f0-9]{64}$/i.test(ref.blobHash);
-}
-
 export function compareFrontendKnowledge(input: {
   legacy: { entityKeys: string[]; factKeys: string[]; pageKeys: string[]; searchKeys: string[]; impactPaths: string[]; suggestedTestPaths: string[]; issueCount: number };
-  candidate: { snapshotId: string; entities: Entity[]; edges: Edge[]; pageKeys: string[]; searchKeys: string[]; impactPaths: string[]; suggestedTestPaths: string[]; issueCount: number };
+  candidate: { snapshotId: string; entities: Entity[]; edges: Edge[]; pageKeys: string[]; searchKeys: string[]; impactPaths: string[]; suggestedTestPaths: string[]; issueCount: number; pageRefs: Ref[]; searchRefs: Ref[]; issueRefs: Ref[]; sources: FrontendSourceDescriptor[] };
 }) {
   const factEdges = input.candidate.edges.filter((edge) => edge.evidenceClass === "fact");
-  const references = [...input.candidate.entities.flatMap((entity) => entity.sourceRefs), ...factEdges.flatMap((edge) => edge.sourceRefs)];
-  const invalid = references.filter((reference) => !validRef(reference, input.candidate.snapshotId))
+  const references = [
+    ...input.candidate.entities.flatMap((entity) => entity.sourceRefs),
+    ...factEdges.flatMap((edge) => edge.sourceRefs),
+    ...input.candidate.pageRefs, ...input.candidate.searchRefs, ...input.candidate.issueRefs
+  ];
+  const invalid = references.filter((reference) => !frontendSourceReferenceIsValid(
+    reference, input.candidate.snapshotId, input.candidate.sources
+  ))
     .map((reference) => `${reference.path}:${reference.startLine}-${reference.endLine}`);
   return {
     legacy: {

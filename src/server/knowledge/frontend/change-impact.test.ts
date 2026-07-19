@@ -28,4 +28,22 @@ describe("deriveFrontendChangeImpact", () => {
     expect(impact.suggestedTestIds).toEqual(["test"]);
     expect(impact.affectedEntityIds).not.toContain("style");
   });
+
+  test("does not walk from a changed consumer into its dependencies", () => {
+    const ref = (path: string) => ({ snapshotId: "snapshot", path, startLine: 1, endLine: 2, blobHash: "1".repeat(64) });
+    const ir = {
+      entities: [
+        { id: "page", kind: "page", name: "Dashboard", sourceRefs: [ref("src/page.tsx")] },
+        { id: "api", kind: "api_operation", name: "GET /api", sourceRefs: [ref("src/api.ts")] },
+        { id: "store", kind: "state_store", name: "dashboard", sourceRefs: [ref("src/store.ts")] }
+      ],
+      edges: [
+        { kind: "requests", fromEntityId: "page", toEntityId: "api", evidenceClass: "fact" },
+        { kind: "reads_state", fromEntityId: "page", toEntityId: "store", evidenceClass: "fact" }
+      ]
+    } as unknown as FrontendIR;
+
+    expect(deriveFrontendChangeImpact({ changedPaths: ["src/page.tsx"], graph: ir }).affectedEntityIds)
+      .toEqual(["page"]);
+  });
 });

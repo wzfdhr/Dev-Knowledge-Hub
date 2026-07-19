@@ -16,6 +16,7 @@ import { filterImportFile, importLanguageForPath } from "../../shared/import-fil
 import type { AppStore, SourceFileRecord, SourceSnapshotRecord } from "../persistence/store.js";
 
 export const MAX_FOLDER_UPLOAD_FILES = 50_000;
+export const MAX_FOLDER_SCAN_FILES = 100_000;
 export const MAX_FOLDER_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
 export type FolderUploadErrorCode =
@@ -127,9 +128,6 @@ export async function importFolderFiles({
   try {
     for await (const uploaded of files) {
       receivedFiles += 1;
-      if (receivedFiles > MAX_FOLDER_UPLOAD_FILES) {
-        throw new FolderUploadError("TOO_MANY_FILES", "Folder upload contains more than 50,000 files");
-      }
       const filePath = safePath(uploaded.path);
       if (seenPaths.has(filePath)) {
         throw new FolderUploadError("DUPLICATE_FOLDER_PATH", "Folder upload contains duplicate paths");
@@ -140,6 +138,9 @@ export async function importFolderFiles({
       if (!decision.accepted) {
         recordIgnored(ignoredReasons, decision.reason);
         continue;
+      }
+      if (accepted.length >= MAX_FOLDER_UPLOAD_FILES) {
+        throw new FolderUploadError("TOO_MANY_FILES", "Folder upload contains more than 50,000 accepted source files");
       }
       acceptedBytes += content.byteLength;
       if (acceptedBytes > MAX_FOLDER_UPLOAD_BYTES) {

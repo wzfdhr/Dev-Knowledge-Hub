@@ -9,6 +9,7 @@ import {
   digestFrontendEvaluationDatasets,
   evaluateFrontendKnowledge,
   evaluateFrontendKnowledgeBySplit,
+  observeFrontendEvaluationCase,
   parseFrontendEvaluationDatasets,
   type FrontendEvaluationInput,
   validateFrontendEvaluationSuite,
@@ -293,5 +294,28 @@ describe("frontend knowledge evaluation protocol", () => {
       .toThrow("recallAt5");
     expect(() => assertFrontendQualityGate({ ...passing, denominators: { totalCases: 0 } }))
       .toThrow("did not execute");
+  });
+
+  test("derives observations from analyzer output and fixture access without reading expected answers", () => {
+    const ref = { snapshotId: "snapshot", path: "src/app.tsx", startLine: 8, endLine: 14, blobHash: "1".repeat(64) };
+    const graph = {
+      snapshotId: "snapshot", analyzerManifestDigest: "2".repeat(64),
+      nodes: [
+        { id: "page", kind: "component", name: "DashboardPage", canonicalPath: "src/app.tsx", sourceRefs: [ref], facets: {}, attributes: {} },
+        { id: "package", kind: "workspace_package", name: "frontend-evaluation-react-vite", canonicalPath: "package.json", sourceRefs: [ref], facets: {}, attributes: {} }
+      ],
+      edges: []
+    };
+    const item = positiveCase() as never;
+    const deriveImpact = () => ({ affectedEntityIds: ["page"] });
+    const original = observeFrontendEvaluationCase(item, graph, deriveImpact);
+    const changedExpected = observeFrontendEvaluationCase({
+      ...positiveCase(), capability: "vite", expected: { ...positiveCase().expected, entityIds: ["fabricated-answer"] }
+    } as never, graph, deriveImpact);
+
+    expect(original).toEqual(changedExpected);
+    expect(original.entityIds).toEqual(["component:src/app.tsx:DashboardPage"]);
+    expect(observeFrontendEvaluationCase({ ...positiveCase(), fixture: "private-react-vite" } as never, graph, deriveImpact))
+      .toMatchObject({ entityIds: [], searchResults: [] });
   });
 });

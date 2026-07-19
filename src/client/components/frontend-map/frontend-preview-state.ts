@@ -2,7 +2,7 @@ import { ApiError } from "../../api/client";
 import type { FrontendPreviewResponse } from "../../api/types";
 
 export type FrontendPreviewStateCode =
-  | "source_missing" | "build_missing" | "build_failed" | "candidate_pending"
+  | "source_missing" | "build_missing" | "build_failed" | "candidate_failed" | "candidate_pending"
   | "candidate_unpublished" | "snapshot_updated" | "graph_empty" | "permission_lost"
   | "network_failure" | "citation_invalid";
 
@@ -29,6 +29,7 @@ export function frontendPreviewState(response: FrontendPreviewResponse): Fronten
   if (response.status === "source_missing") return state({ code: "source_missing", title: "尚未导入前端资料", happened: "项目还没有可分析的资料来源。", safety: "项目数据为空，没有丢失或覆盖任何正式知识。", next: "前往资料页导入 React/Vite 项目。", retry: "导入操作按新快照执行，失败后可安全重试。", severity: "neutral" });
   if (response.status === "build_missing") return state({ code: "build_missing", title: "等待首次构建", happened: "资料已经导入，但还没有构建记录。", safety: "上传快照已保存，正式发布未改变。", next: "手动发起一次影子构建。", retry: "构建按快照去重，可安全重试。", severity: "neutral" });
   if (response.status === "build_failed") return state({ code: "build_failed", title: "最新构建失败", happened: "旧内核或影子流水线未能完成最新构建。", safety: "失败构建不会替换当前正式发布。", next: "在构建详情查看失败阶段，修复后重新构建。", retry: "修复原因后重试会创建新 attempt，不覆盖失败证据。", severity: "danger" });
+  if (response.status === "candidate_failed") return state({ code: "candidate_failed", title: "影子候选构建失败", happened: `新内核在 ${response.failedStage?.stage ?? "未知"} 阶段失败${response.failedStage?.errorCode ? `（${response.failedStage.errorCode}）` : ""}。`, safety: "旧内核正式发布、搜索和 MCP 继续可用。", next: "在构建详情检查失败阶段，修复后重新发起影子构建。", retry: "重试会创建新 attempt，失败证据不会被覆盖，也不会自动发布。", severity: "danger" });
   if (response.status === "candidate_pending") return state({ code: "candidate_pending", title: "候选包仍在生成", happened: "影子流水线尚未完成 terminal package。", safety: "旧内核继续提供正式知识，候选结果不会进入搜索或 MCP。", next: "等待阶段完成，必要时在构建详情检查队列。", retry: "读取可重复；不要在任务运行时重复发起相同构建。", severity: "warning" });
   if (response.status !== "ready") throw new Error(`Unsupported frontend preview status: ${response.status}`);
   if (!response.comparison.citations.valid || !response.preview.validation.valid) return state({ code: "citation_invalid", title: "候选引用校验未通过", happened: "候选知识存在无效引用或 package 校验失败。", safety: "候选包未发布，正式知识和 MCP 不受影响。", next: "检查无效引用和 validate 阶段，再重新构建。", retry: "修复后重建是幂等的，不会自动发布。", severity: "danger" });

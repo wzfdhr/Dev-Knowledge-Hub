@@ -22,6 +22,8 @@ npm run evaluate:frontend
 
 The command executes the committed analyzers against all 300 train and held-out fixture cases. Missing observations, skipped datasets, malformed reports, or a failed threshold exit non-zero. The held-out gate is:
 
+Observations are derived from query intent, analyzer-produced entities, fact Graph edges, source references, directional impact output, and an independent fixture ACL. Expected entities, capabilities, relations, citations, and access labels are used only by the scoring step and are never inputs to observation generation.
+
 | Metric | Threshold | FK13 result |
 | --- | ---: | ---: |
 | Entity micro/macro F1 | >= 0.95 | 1.00 / 1.00 |
@@ -45,6 +47,7 @@ The administrator preview always explains what happened, whether data is safe, t
 | No import | No repository source | No release is changed |
 | No build | Snapshot exists without a build | Snapshot remains available |
 | Build failed | Latest build failed | Current release remains active |
+| Candidate failed | A shadow stage failed or was cancelled | Current release remains active; the failed stage and stable error code are shown |
 | Candidate pending | Terminal package is incomplete | Candidate is not queryable |
 | Candidate unpublished | Candidate package is valid | Legacy release/search/MCP remain active |
 | Snapshot updated | Candidate snapshot is stale | Manual rebuild is required |

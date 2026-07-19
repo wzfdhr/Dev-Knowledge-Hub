@@ -40,6 +40,7 @@ import { typeScriptSyntaxParserConfigDigest } from "./typescript-program.js";
 import { buildFrontendGraph } from "./graph-builder.js";
 import { generateFrontendKnowledge } from "./knowledge-generator.js";
 import { assessFrontendKnowledgeQuality } from "./quality-assessment.js";
+import { frontendSourceReferenceIsValid, loadFrontendSourceDescriptors } from "./reference-validation.js";
 
 const SHADOW_FAMILIES = ["knowledge-v1", "frontend-v2"] as const;
 const UPSTREAM_STAGES: Record<Exclude<BuildStage, "convert">, readonly BuildStage[]> = {
@@ -57,6 +58,7 @@ const UPSTREAM_STAGES: Record<Exclude<BuildStage, "convert">, readonly BuildStag
 type ShadowStore = PipelineArtifactStore & SourceAnalysisArtifactStore & {
   getBuild(workspaceId: string, buildId: string): Promise<BuildRecord | null>;
   findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null>;
+  listSnapshotFiles(workspaceId: string, snapshotId: string): Promise<Array<{ path: string; contentHash: string }>>;
   listPipelineStageRuns(workspaceId: string, projectId: string, buildId: string): Promise<PipelineStageRunRecord[]>;
 };
 
@@ -489,11 +491,31 @@ export function createFrontendShadowStageExecutor(input: {
       }
       case "validate": {
         const knowledge = await frontendUpstreamValue(input, upstreamIds, "synthesize") as ReturnType<typeof generateFrontendKnowledge>;
+        const search = await frontendUpstreamValue(input, upstreamIds, "index") as {
+          documents: Array<{ citations: Array<{ snapshotId: string; path: string; startLine: number; endLine: number; blobHash: string }> }>;
+        };
         const quality = await frontendUpstreamValue(input, upstreamIds, "lint") as ReturnType<typeof assessFrontendKnowledgeQuality>;
+        const references = [
+          ...knowledge.pages.flatMap((page) => [
+            ...page.citations,
+            ...page.items.flatMap((item) => item.sourceRefs),
+            ...page.chunks.flatMap((chunk) => chunk.citations)
+          ]),
+          ...search.documents.flatMap((document) => document.citations),
+          ...quality.issues.flatMap((issue) => issue.sourceRefs)
+        ];
+        const referencedPaths = new Set(references.map((reference) => reference.path));
+        const sources = await loadFrontendSourceDescriptors({
+          snapshot,
+          files: (await input.store.listSnapshotFiles(run.workspaceId, run.snapshotId))
+            .filter((file) => referencedPaths.has(file.path))
+        });
         value = {
           ...baseValue,
           valid: knowledge.pages.every((page) => page.citations.length > 0
-            && page.chunks.every((chunk) => chunk.citations.length > 0)),
+            && page.chunks.every((chunk) => chunk.citations.length > 0))
+            && references.length > 0
+            && references.every((reference) => frontendSourceReferenceIsValid(reference, run.snapshotId, sources)),
           pageCount: knowledge.pages.length,
           issueCount: quality.issues.length
         };

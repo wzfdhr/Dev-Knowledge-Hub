@@ -18,6 +18,7 @@ describe("frontend preview product states", () => {
     [{ status: "source_missing", preview: null }, "source_missing"],
     [{ status: "build_missing", preview: null }, "build_missing"],
     [{ status: "build_failed", preview: null, build: { id: "build", status: "failed" } }, "build_failed"],
+    [{ status: "candidate_failed", preview: null, build: { id: "build", status: "ready" }, failedStage: { stage: "extract", errorCode: "PARSER_RUNTIME_UNAVAILABLE" } }, "candidate_failed"],
     [{ status: "candidate_pending", preview: null, build: { id: "build", status: "running" } }, "candidate_pending"]
   ] as const)("maps %o to %s with recovery guidance", (response, code) => {
     const result = frontendPreviewState(response as FrontendPreviewResponse);

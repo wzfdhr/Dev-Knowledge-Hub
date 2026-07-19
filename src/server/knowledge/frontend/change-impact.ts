@@ -10,8 +10,8 @@ export function deriveFrontendChangeImpact(input: { changedPaths: string[]; grap
   while (queue.length > 0) {
     const current = queue.shift()!;
     for (const edge of factEdges) {
-      if (edge.fromEntityId !== current && edge.toEntityId !== current) continue;
-      const neighbor = edge.fromEntityId === current ? edge.toEntityId : edge.fromEntityId;
+      if (edge.toEntityId !== current) continue;
+      const neighbor = edge.fromEntityId;
       if (!affected.has(neighbor)) {
         affected.add(neighbor);
         queue.push(neighbor);

@@ -20,19 +20,19 @@ Run:
 npm run evaluate:frontend
 ```
 
-The command executes the committed analyzers and candidate search against all 318 train and held-out fixture cases. The suite includes 15 authorized, frontend-domain queries for absent components, routes, stores, APIs, charts, tests, styles, and tooling whose correct result is empty; these are scored separately from unauthorized and unpublished access cases. Missing observations, skipped datasets, malformed reports, or a failed threshold exit non-zero. The held-out gate is:
+The command executes the committed analyzers and candidate search against all 318 train and held-out fixture cases. The suite includes 15 authorized, frontend-domain queries for absent components, routes, stores, APIs, charts, tests, styles, and tooling whose correct result is empty; these are scored separately from unauthorized and unpublished access cases. Missing observations, skipped datasets, malformed reports, or a failed threshold exit non-zero. Train, held-out, and combined reports must each pass the same gate:
 
 Observations are produced by the same candidate search implementation used by the administrator preview API. It ranks analyzer entities through the generated `index` documents and fact Graph, returns Graph semantic keys and physical source references, and applies project, release, and shadow-role visibility. Evaluation access cases instantiate those policy inputs; the policy decides whether results are visible. Expected entities, relations, citations, and impact labels are used only by the scoring step and are never inputs to retrieval or ranking.
 
-| Metric | Threshold | FK13 result |
+| Metric | Threshold | Lowest report result |
 | --- | ---: | ---: |
-| Entity micro/macro F1 | >= 0.95 | 1.00 / 1.00 |
+| Entity micro/macro F1 | >= 0.95 | 0.98 / 0.98 |
 | Fact edge precision | 1.00 | 1.00 |
 | Fact edge recall | >= 0.75 | 1.00 |
 | Recall@5 | >= 0.95 | 1.00 |
-| MRR | >= 0.90 | 1.00 |
+| MRR | >= 0.90 | 0.9867 |
 | Citation validity | 1.00 | 1.00 |
-| Impact precision/recall | >= 0.95 | 1.00 / 1.00 |
+| Impact precision/recall | >= 0.95 | 0.98 / 0.98 |
 | Empty-query false positives | 0 | 0 |
 | Unauthorized/unpublished leakage | 0 | 0 |
 

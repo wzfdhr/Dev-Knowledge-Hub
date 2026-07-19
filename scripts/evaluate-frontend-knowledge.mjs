@@ -606,6 +606,18 @@ export function assertFrontendQualityGate(report) {
   }
 }
 
+export function collectFrontendQualityGateFailures(reports) {
+  const failures = [];
+  for (const [name, report] of Object.entries(reports)) {
+    try {
+      assertFrontendQualityGate(report);
+    } catch (error) {
+      failures.push(new Error(`Frontend evaluation ${name} quality gate failed: ${error.message}`, { cause: error }));
+    }
+  }
+  return failures;
+}
+
 export function observeFrontendEvaluationCase(item, graph, documents, deriveImpact) {
   const buildId = `evaluation:${item.fixture}`;
   const results = searchFrontendKnowledge({
@@ -721,18 +733,13 @@ export async function main() {
       throw new Error(`Frontend evaluation ${split} report is invalid: ${error.message}`, { cause: error });
     }
   }
-  let qualityGateError = null;
-  try {
-    assertFrontendQualityGate(splitReports.heldOut);
-  } catch (error) {
-    qualityGateError = error;
-  }
+  const [qualityGateError = null] = collectFrontendQualityGateFailures(splitReports);
   const output = {
     dataset: "frontend-v1-core",
     datasetDigest,
     status: qualityGateError ? "quality-gate-failed" : "quality-gate-passed",
     qualityGateEnforced: true,
-    qualityGateReport: "heldOut",
+    qualityGateReports: ["train", "heldOut", "all"],
     generatedFromCommittedFixtures: true,
     suite,
     observations,

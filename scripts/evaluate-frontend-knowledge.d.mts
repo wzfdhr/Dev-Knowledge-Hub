@@ -89,6 +89,9 @@ export function evaluateFrontendKnowledgeBySplit(
 ): { train: FrontendEvaluationReport; heldOut: FrontendEvaluationReport; all: FrontendEvaluationReport };
 export function assertFrontendEvaluationReport(report: FrontendEvaluationReport, cases: FrontendEvaluationCase[]): void;
 export function assertFrontendQualityGate(report: Pick<FrontendEvaluationReport, "denominators" | "metrics">): void;
+export function collectFrontendQualityGateFailures(
+  reports: Record<string, Pick<FrontendEvaluationReport, "denominators" | "metrics">>
+): Error[];
 export function observeFrontendEvaluationCase(
   item: FrontendEvaluationCase,
   graph: unknown,

@@ -20,6 +20,21 @@ const edge: FrontendEdge = {
   id: "3".repeat(64), kind: "renders" as const, fromEntityId: page.id, toEntityId: chart.id,
   evidenceClass: "fact" as const, confidence: 1 as const, sourceRefs: [ref], canonicalEvidenceKey: "dashboard-renders-chart"
 };
+const moduleEntity: FrontendEntity = {
+  ...page, id: "5".repeat(64), kind: "application_entry", name: "src/dashboard.tsx",
+  qualifiedName: "src/dashboard.tsx", canonicalPath: "src/dashboard.tsx",
+  identity: { type: "named", semanticKey: "module:src/dashboard.tsx" },
+  attributes: { runtime: { state: "known", value: "client" } }
+};
+const exportEdge: FrontendEdge = {
+  ...edge, id: "6".repeat(64), kind: "exports", fromEntityId: moduleEntity.id, toEntityId: page.id,
+  canonicalEvidenceKey: "dashboard-module-exports-page"
+};
+const moduleDocument = {
+  documentKey: "frontend-architecture:0", kind: "page" as const, title: "Architecture: src/dashboard.tsx",
+  content: "application_entry: src/dashboard.tsx typescript module 模块", citations: [ref],
+  metadata: { entityId: moduleEntity.id }
+};
 const document = {
   documentKey: "frontend-components:0", kind: "page" as const, title: "Components and Design",
   content: "component: DashboardPage react component jsx render tree", citations: [ref], metadata: { entityId: page.id }
@@ -27,6 +42,20 @@ const document = {
 const chartDocument = {
   documentKey: "frontend-components:1", kind: "page" as const, title: "Components and Design",
   content: "component: DashboardChart react component chart", citations: [ref], metadata: { entityId: chart.id }
+};
+const apiOperation: FrontendEntity = {
+  ...page, id: "4".repeat(64), kind: "api_operation", name: "GET /api/teams/:teamId/dashboard",
+  qualifiedName: "GET /api/teams/:teamId/dashboard", canonicalPath: "src/api.ts",
+  identity: { type: "named", semanticKey: "api:GET:/api/teams/:teamId/dashboard" },
+  attributes: {
+    method: { state: "known", value: "GET" },
+    path: { state: "known", value: "/api/teams/:teamId/dashboard" }
+  }
+};
+const apiDocument = {
+  documentKey: "frontend-data:0", kind: "page" as const, title: "Data: GET /api/teams/${teamId}/dashboard",
+  content: "api_operation: GET /api/teams/${teamId}/dashboard fetch request api", citations: [ref],
+  metadata: { entityId: apiOperation.id }
 };
 
 describe("frontend candidate knowledge search", () => {
@@ -69,6 +98,29 @@ describe("frontend candidate knowledge search", () => {
     expect(searchFrontendKnowledge({ ...input, query: "Where is the PaymentPage React component?" })).toEqual([]);
     expect(searchFrontendKnowledge({ ...input, query: "支付页面的 React 组件在哪里？" })).toEqual([]);
     expect(searchFrontendKnowledge({ ...input, query: "nonexistent billing checkout" })).toEqual([]);
+    expect(searchFrontendKnowledge({ ...input, query: "Locate the /billing/checkout dynamic route and its page" })).toEqual([]);
+  });
+
+  test("accepts an indexed parameterized API path while rejecting unknown paths", () => {
+    const access = { canReadProject: true, visibility: "published" as const, buildId: "build", currentReleaseBuildId: "build", viewerRole: "member" as const };
+    const input = { documents: [apiDocument], graph: { nodes: [apiOperation], edges: [] }, access };
+
+    expect(searchFrontendKnowledge({ ...input, query: "Locate GET /api/teams/:teamId/dashboard API request that loads the dashboard summary" })[0])
+      .toMatchObject({ entityKey: "api:GET:/api/teams/:teamId/dashboard" });
+    expect(searchFrontendKnowledge({ ...input, query: "Locate GET /api/teams/:otherId/invoices API request" })).toEqual([]);
+  });
+
+  test("ranks the exporting TypeScript module ahead of its exported component for module intent", () => {
+    const results = searchFrontendKnowledge({
+      query: "DashboardPage 对应的 TypeScript 模块在这个项目里如何实现",
+      documents: [document, moduleDocument], graph: { nodes: [page, moduleEntity], edges: [exportEdge] },
+      access: { canReadProject: true, visibility: "published", buildId: "build", currentReleaseBuildId: "build", viewerRole: "member" }
+    });
+
+    expect(results[0]).toMatchObject({
+      entityKey: "module:src/dashboard.tsx",
+      factKeys: ["exports:module:src/dashboard.tsx->component:DashboardPage"]
+    });
   });
 
   test("indexes Graph adjacency once for a 4,000-entity candidate", () => {

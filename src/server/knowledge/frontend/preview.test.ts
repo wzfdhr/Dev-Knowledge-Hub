@@ -34,7 +34,7 @@ function fixture() {
     ["search", { schemaVersion: 2, snapshotId, analyzerManifestDigest: hash, documents: [{ documentKey: "frontend-routes:0", kind: "page", title: "Routes and Pages", content: "route: /", citations: [ref], metadata: { pageSlug: "frontend-routes", position: 0 } }] }],
     ["quality", { schemaVersion: 2, snapshotId, analyzerManifestDigest: hash, summary: { entities: 1, factEdges: 0, candidateEdges: 0, citedEntities: 1, components: 0, testedComponents: 0, routes: 1, visualizations: 0 }, issues: [] }],
     ["viz", { schemaVersion: 2, snapshotId, analyzerManifestDigest: hash, routeIds: [], componentIds: [], visualizationIds: [], factEdgeIds: [] }],
-    ["validation", { schemaVersion: 2, family: "frontend-v2", stage: "validate", snapshotId, analyzerManifestDigest: hash, upstreamManifestIds: [], sourceArtifactId: "legacy-validation", valid: true, pageCount: 1, issueCount: 0 }],
+    ["validation", { schemaVersion: 2, family: "frontend-v2", stage: "validate", snapshotId, analyzerManifestDigest: hash, upstreamManifestIds: [], sourceArtifactId: "legacy-validation", valid: true, pageCount: 1, issueCount: 0, graphReferenceCount: 2, checkedReferenceCount: 5, invalidReferenceCount: 0 }],
     ["package", { schemaVersion: 2, family: "frontend-v2", stage: "package", snapshotId, analyzerManifestDigest: hash, upstreamManifestIds: ["legacy-validation", "validation"], sourceArtifactId: "legacy-package", irSchemaVersion: 2, graphSchemaVersion: 2, artifacts: { convert: ["legacy-convert"], extract: ["legacy-extract", "frontend-extract"], tables: ["legacy-tables", "frontend-tables"], graph: ["legacy-graph", "graph"], synthesize: ["legacy-pages", "pages"], index: ["legacy-index", "search"], lint: ["legacy-quality", "quality"], viz: ["legacy-viz", "viz"], validate: ["legacy-validation", "validation"], package: ["legacy-package"] } }]
   ]);
   const store = {
@@ -76,10 +76,22 @@ describe("loadFrontendCandidatePreview", () => {
     const { store, reader, values } = fixture();
     values.set("validation", {
       schemaVersion: 2, family: "frontend-v2", stage: "validate", snapshotId,
-      analyzerManifestDigest: hash, valid: false, pageCount: 1, issueCount: 0
+      analyzerManifestDigest: hash, valid: false, pageCount: 1, issueCount: 0,
+      graphReferenceCount: 2, checkedReferenceCount: 5, invalidReferenceCount: 1
     });
 
     await expect(loadFrontendCandidatePreview({ store: store as never, reader, workspaceId, projectId, buildId }))
       .rejects.toThrow("validation failed");
+  });
+
+  test("rejects historical valid artifacts without complete Graph reference evidence", async () => {
+    const { store, reader, values } = fixture();
+    values.set("validation", {
+      schemaVersion: 2, family: "frontend-v2", stage: "validate", snapshotId,
+      analyzerManifestDigest: hash, valid: true, pageCount: 1, issueCount: 0
+    });
+
+    await expect(loadFrontendCandidatePreview({ store: store as never, reader, workspaceId, projectId, buildId }))
+      .rejects.toBeDefined();
   });
 });

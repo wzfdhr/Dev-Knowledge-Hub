@@ -83,6 +83,12 @@ function normalized(value: string): string {
   return value.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLocaleLowerCase("en-US").replace(/[^\p{L}\p{N}_:/.@-]+/gu, " ").trim();
 }
 
+function normalizedPathSubject(value: string): string {
+  return normalized(value
+    .replace(/\$\{[A-Za-z_$][\w$]*\}/gu, ":param")
+    .replace(/(?<=\/):[A-Za-z_$][\w$]*(?=\/|\s|$)/gu, ":param"));
+}
+
 function searchableTerm(term: string): boolean {
   return term.length >= 3 || /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]{2}/u.test(term);
 }
@@ -105,8 +111,17 @@ export function frontendUnknownQuerySubjects(rawQuery: string, documents: readon
     .flatMap((term) => term.split(" ")));
   const latinTokens = normalized(rawQuery).split(" ")
     .filter((token) => /^[a-z][a-z0-9_$@./:-]*$/u.test(token) && token.length >= 4)
+    .filter((token) => !token.includes("/"))
     .filter((token) => !queryStopWords.has(token) && !aliases.has(token));
   const unknown = latinTokens.filter((token) => !containsTerm(corpus, token));
+  const pathSubjects = rawQuery.match(/\/[A-Za-z0-9_:@.-]+(?:\/[A-Za-z0-9_:@.-]+)+/gu) ?? [];
+  const canonicalPathCorpus = normalizedPathSubject(documents.map((document) => `${document.title} ${document.content}`).join(" "));
+  const unknownPaths: string[] = [];
+  for (const subject of pathSubjects) {
+    const normalizedSubject = normalizedPathSubject(subject);
+    if (!containsTerm(canonicalPathCorpus, normalizedSubject)) unknownPaths.push(normalizedSubject);
+  }
+  if (pathSubjects.length) return [...new Set(unknownPaths)];
 
   const chineseSegments = rawQuery.match(/[\p{Script=Han}]+/gu) ?? [];
   for (const segment of chineseSegments) {
@@ -202,7 +217,7 @@ function structuralScore(
   if (entity.kind === "application_entry" && connectedNameMatch(["exports"])
     && !query.includes("css")
     && (query.includes("module") || query.includes("模块") || query.includes("typescript") || query.includes("type script"))) {
-    return { score: 50, reason: "exports-query-target" };
+    return { score: 80, reason: "exports-query-target" };
   }
   if (entity.kind === "route" && connectedNameMatch(["routes_to"])) return { score: 60, reason: "routes-to-query-target" };
   if (entity.kind === "test_case" && connectedNameMatch(["tests"])) return { score: 56, reason: "tests-query-target" };

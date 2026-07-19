@@ -58,8 +58,15 @@ const visualizationSchema = z.object({
 const validationSchema = z.object({
   schemaVersion: z.literal(2), family: z.literal("frontend-v2"), stage: z.literal("validate"),
   snapshotId: z.string().min(1), analyzerManifestDigest: z.string().min(1), valid: z.boolean(),
-  pageCount: z.number().int().nonnegative(), issueCount: z.number().int().nonnegative()
-}).passthrough();
+  pageCount: z.number().int().nonnegative(), issueCount: z.number().int().nonnegative(),
+  graphReferenceCount: z.number().int().nonnegative(), checkedReferenceCount: z.number().int().nonnegative(),
+  invalidReferenceCount: z.number().int().nonnegative()
+}).passthrough().superRefine((value, context) => {
+  if (value.valid && (value.graphReferenceCount === 0 || value.checkedReferenceCount < value.graphReferenceCount
+    || value.invalidReferenceCount !== 0)) {
+    context.addIssue({ code: "custom", message: "Valid frontend candidate lacks complete Graph reference evidence" });
+  }
+});
 
 type PreviewStore = Pick<AppStore, "getBuild" | "getRepository" | "listPipelineStageRuns" | "findArtifactById">;
 type PreviewReader = { getJson(manifest: ArtifactManifest): Promise<unknown> };

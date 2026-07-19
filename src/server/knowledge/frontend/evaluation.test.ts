@@ -6,6 +6,7 @@ import { describe, expect, test } from "vitest";
 import {
   assertFrontendEvaluationReport,
   assertFrontendQualityGate,
+  collectFrontendQualityGateFailures,
   digestFrontendEvaluationDatasets,
   evaluateFrontendKnowledge,
   evaluateFrontendKnowledgeBySplit,
@@ -324,6 +325,25 @@ describe("frontend knowledge evaluation protocol", () => {
       .toThrow("recallAt5");
     expect(() => assertFrontendQualityGate({ ...passing, denominators: { totalCases: 0 } }))
       .toThrow("did not execute");
+  });
+
+  test("enforces quality gates for train, held-out, and all reports", () => {
+    const passing = {
+      denominators: { totalCases: 100 },
+      metrics: {
+        entityMicroF1: 0.98, entityMacroF1: 0.97, factEdgePrecision: 1, factEdgeRecall: 0.8,
+        recallAt5: 0.96, mrr: 0.92, citationValidity: 1, falsePositiveEmptyRate: 0,
+        impactPrecision: 1, impactRecall: 0.96, unauthorizedOrUnpublishedLeakage: 0
+      }
+    };
+    const failures = collectFrontendQualityGateFailures({
+      train: { ...passing, metrics: { ...passing.metrics, falsePositiveEmptyRate: 0.1 } },
+      heldOut: passing,
+      all: passing
+    });
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.message).toContain("train quality gate failed");
   });
 
   test("derives observations from analyzer output and fixture access without reading expected answers", () => {

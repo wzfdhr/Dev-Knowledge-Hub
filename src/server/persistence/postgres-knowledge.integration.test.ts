@@ -17,6 +17,7 @@ import { buildServer } from "../app";
 import { syncRepository } from "../git/snapshot";
 import { BuildService } from "../knowledge/build-service";
 import { SourceAnalysisCache } from "../knowledge/frontend/source-analysis-cache";
+import { analyzeWorkerRequest } from "../knowledge/frontend/runtime/analyzer-worker";
 import { analyzeSnapshot, type CodeIndex } from "../knowledge/intelligence";
 import { generateKnowledge } from "../knowledge/generator";
 import {
@@ -1113,7 +1114,18 @@ integration("PostgreSQL cited knowledge integration", () => {
       const worker = new PipelineStageWorker(
         store,
         queue,
-        createFrontendShadowStageExecutor({ store, artifactStore, legacy: legacyExecutor }),
+        createFrontendShadowStageExecutor({
+          store,
+          artifactStore,
+          legacy: legacyExecutor,
+          frontendParser: {
+            analyze: async (request) => analyzeWorkerRequest({
+              type: "analyze",
+              requestId: randomUUID(),
+              ...request
+            })
+          }
+        }),
         ["convert", "extract", "tables", "graph", "synthesize", "index", "lint", "viz", "validate", "package"],
         5_000,
         createFrontendShadowStageInputPlanner(store)
@@ -1167,6 +1179,18 @@ integration("PostgreSQL cited knowledge integration", () => {
           ]));
         }
       }
+      const validateRun = firstRuns.find((run) => run.stage === "validate")!;
+      const validationManifest = (await Promise.all(validateRun.outputManifestIds.map((id) => store.findArtifactById(id))))
+        .find((manifest) => manifest?.kind === "frontend-validation-v2")!;
+      const validationValue = await artifactStore.getJson(validationManifest) as {
+        valid: boolean; graphReferenceCount: number; invalidReferenceCount: number;
+      };
+      expect(validationValue).toMatchObject({
+        valid: true,
+        graphReferenceCount: expect.any(Number),
+        invalidReferenceCount: 0
+      });
+      expect(validationValue.graphReferenceCount).toBeGreaterThan(0);
 
       await store.transitionBuild(firstBuild.id, "queued", "ready");
       const release = await store.createReleaseDraft(setup!.workspace.id, repository!.id, firstBuild.id, "1.0.0");

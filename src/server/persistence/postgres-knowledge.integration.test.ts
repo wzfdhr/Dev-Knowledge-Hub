@@ -16,6 +16,7 @@ import { requireIsolatedTestDatabase } from "../../test/integration-database";
 import { buildServer } from "../app";
 import { syncRepository } from "../git/snapshot";
 import { BuildService } from "../knowledge/build-service";
+import { SourceAnalysisCache } from "../knowledge/frontend/source-analysis-cache";
 import { analyzeSnapshot, type CodeIndex } from "../knowledge/intelligence";
 import { generateKnowledge } from "../knowledge/generator";
 import {
@@ -113,6 +114,50 @@ async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean):
 }
 
 integration("PostgreSQL cited knowledge integration", () => {
+  test(databaseUrl
+    ? "persists immutable workspace-scoped source analysis facts without project leakage"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("source-analysis@example.com", "hash");
+    const cache = new SourceAnalysisCache(store);
+    const key = {
+      workspaceId: setup!.workspace.id,
+      contentHash: "a".repeat(64),
+      analyzerId: "typescript-syntax",
+      analyzerVersion: "1.0.0",
+      parserConfigDigest: "b".repeat(64)
+    };
+    const facts = { schemaVersion: 1, declarations: [{ name: "Chart", start: 0, end: 5 }] };
+
+    const concurrent = await Promise.all([cache.put(key, facts), cache.put(key, facts)]);
+    expect(concurrent[0]).toMatchObject({ ...key, facts });
+    expect(concurrent[1]).toMatchObject({ ...key, facts });
+    await expect(cache.get(key)).resolves.toEqual(facts);
+    await expect(cache.put(key, { schemaVersion: 1, declarations: [] }))
+      .rejects.toThrow("cache collision");
+    await expect(pool.query(
+      "UPDATE source_analysis_artifacts SET facts = $1 WHERE workspace_id = $2",
+      [{ schemaVersion: 1 }, setup!.workspace.id]
+    )).rejects.toThrow("source analysis artifacts are immutable");
+
+    const otherWorkspaceId = randomUUID();
+    await pool.query(
+      "INSERT INTO workspaces (id, name, slug) VALUES ($1, 'Other', $2)",
+      [otherWorkspaceId, `other-${otherWorkspaceId}`]
+    );
+    await expect(cache.get({ ...key, workspaceId: otherWorkspaceId })).resolves.toBeNull();
+    await cache.put({ ...key, workspaceId: otherWorkspaceId }, facts);
+    const count = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM source_analysis_artifacts");
+    expect(count.rows[0]?.count).toBe("2");
+    await pool.query("DELETE FROM workspaces WHERE id = $1", [otherWorkspaceId]);
+    const remaining = await pool.query<{ count: string }>("SELECT count(*)::text AS count FROM source_analysis_artifacts");
+    expect(remaining.rows[0]?.count).toBe("1");
+  }, 30_000);
+
   test(databaseUrl
     ? "changes project frontend rollout and its audit event in one transaction"
     : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {

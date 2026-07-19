@@ -119,6 +119,29 @@ export interface PipelineArtifactStore {
   ): Promise<void>;
 }
 
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+export interface SourceAnalysisArtifactKey {
+  workspaceId: string;
+  contentHash: string;
+  analyzerId: string;
+  analyzerVersion: string;
+  parserConfigDigest: string;
+}
+
+export interface SourceAnalysisArtifactRecord extends SourceAnalysisArtifactKey {
+  facts: { [key: string]: JsonValue };
+  factsDigest: string;
+  createdAt: Date;
+}
+
+export interface SourceAnalysisArtifactStore {
+  findSourceAnalysisArtifact(key: SourceAnalysisArtifactKey): Promise<SourceAnalysisArtifactRecord | null>;
+  putSourceAnalysisArtifact(
+    input: Omit<SourceAnalysisArtifactRecord, "createdAt">
+  ): Promise<SourceAnalysisArtifactRecord>;
+}
+
 export interface KnowledgeGraphRecord {
   nodes: GraphNode[];
   edges: GraphEdge[];
@@ -720,7 +743,7 @@ export interface KnowledgeStore {
   ): Promise<ReleaseRecord[]>;
 }
 
-export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, PipelineArtifactStore, PipelineSearchDocumentStore {
+export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, PipelineArtifactStore, PipelineSearchDocumentStore, SourceAnalysisArtifactStore {
   listPipelineStageRuns(
     workspaceId: string,
     projectId: string,

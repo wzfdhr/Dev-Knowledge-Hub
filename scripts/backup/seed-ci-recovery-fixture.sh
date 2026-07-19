@@ -43,6 +43,13 @@ VALUES (
   '33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json',
   '[]'::jsonb, 'deterministic'
 );
+INSERT INTO source_analysis_artifacts (
+  workspace_id, content_hash, analyzer_id, analyzer_version, parser_config_digest, facts, facts_digest
+)
+VALUES (
+  '11111111-1111-4111-8111-111111111111', repeat('a', 64), 'recovery-syntax', '1.0.0', repeat('b', 64),
+  '{"schemaVersion":1,"declarations":[]}'::jsonb, repeat('c', 64)
+);
 INSERT INTO releases (id, workspace_id, repository_id, build_job_id, snapshot_id, version, published_at)
 VALUES ('88888888-8888-4888-8888-888888888888', '11111111-1111-4111-8111-111111111111', '44444444-4444-4444-8444-444444444444', '66666666-6666-4666-8666-666666666666', '55555555-5555-4555-8555-555555555555', 'recovery-v1', now());
 INSERT INTO release_channels (id, workspace_id, repository_id, release_id, name)

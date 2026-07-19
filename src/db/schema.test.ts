@@ -13,6 +13,7 @@ describe("schema exports", () => {
         "encryptedCredentials",
         "sourceSnapshots",
         "sourceFiles",
+        "sourceAnalysisArtifacts",
         "codeSymbols",
         "codeEdges",
         "buildJobs",
@@ -43,6 +44,27 @@ describe("schema exports", () => {
     ]));
     expect(getTableConfig(schema.buildStageRuns).name).toBe("build_stage_runs");
     expect(getTableConfig(schema.knowledgeArtifacts).name).toBe("knowledge_artifacts");
+  });
+
+  test("keeps source analysis cache workspace-scoped and content-addressed", () => {
+    const config = getTableConfig(schema.sourceAnalysisArtifacts);
+    expect(config.name).toBe("source_analysis_artifacts");
+    expect(config.primaryKeys).toHaveLength(1);
+    expect(config.primaryKeys[0]!.columns.map((column) => column.name)).toEqual([
+      "workspace_id",
+      "content_hash",
+      "analyzer_id",
+      "analyzer_version",
+      "parser_config_digest"
+    ]);
+    expect(config.foreignKeys).toHaveLength(1);
+    expect(config.checks.map((check) => check.name)).toEqual(expect.arrayContaining([
+      "source_analysis_artifacts_content_hash_check",
+      "source_analysis_artifacts_parser_config_digest_check",
+      "source_analysis_artifacts_facts_digest_check",
+      "source_analysis_artifacts_facts_object_check",
+      "source_analysis_artifacts_facts_size_check"
+    ]));
   });
 
   test("exports required status values", () => {

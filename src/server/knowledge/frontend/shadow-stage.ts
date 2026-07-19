@@ -20,6 +20,7 @@ import type { PipelineStageExecutor, PipelineStageInputPlanner } from "../pipeli
 import type {
   PipelineArtifactStore,
   PipelineStageRunRecord,
+  SourceAnalysisArtifactStore,
   SourceSnapshotRecord
 } from "../../persistence/store.js";
 import {
@@ -31,6 +32,8 @@ import {
 } from "./compatibility.js";
 import type { FrontendKnowledgeMode } from "./rollout-mode.js";
 import type { ParserAnalyzeRequest } from "./runtime/parser-protocol.js";
+import { SourceAnalysisCache } from "./source-analysis-cache.js";
+import { typeScriptSyntaxParserConfigDigest } from "./typescript-program.js";
 
 const SHADOW_FAMILIES = ["knowledge-v1", "frontend-v2"] as const;
 const UPSTREAM_STAGES: Record<Exclude<BuildStage, "convert">, readonly BuildStage[]> = {
@@ -45,7 +48,7 @@ const UPSTREAM_STAGES: Record<Exclude<BuildStage, "convert">, readonly BuildStag
   package: ["validate"]
 };
 
-type ShadowStore = PipelineArtifactStore & {
+type ShadowStore = PipelineArtifactStore & SourceAnalysisArtifactStore & {
   getBuild(workspaceId: string, buildId: string): Promise<BuildRecord | null>;
   findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null>;
   listPipelineStageRuns(workspaceId: string, projectId: string, buildId: string): Promise<PipelineStageRunRecord[]>;
@@ -68,8 +71,30 @@ const parserNormalizedSourcesSchema = z.object({
 const parserRuntimeResultSchema = z.object({
   schemaVersion: z.literal(1),
   snapshotId: z.string().min(1),
-  outputs: z.array(z.unknown())
+  outputs: z.array(z.object({
+    analyzerId: z.literal("typescript-project"),
+    analyzerVersion: z.literal("1.0.0"),
+    projectManifest: z.json(),
+    projectReferences: z.array(z.object({ from: z.string().min(1), to: z.string().min(1) }).strict()),
+    resolutions: z.array(z.object({
+      containingFile: z.string().min(1),
+      specifier: z.string().min(1),
+      resolvedPath: z.string().min(1).nullable()
+    }).strict()),
+    files: z.array(z.object({
+      path: z.string().min(1),
+      blobHash: z.string().regex(/^[a-f0-9]{64}$/i),
+      parserConfigDigest: z.string().regex(/^[a-f0-9]{64}$/i),
+      facts: z.record(z.string(), z.json())
+    }).strict())
+  }).strict()).max(1)
 });
+
+const typedSourceExtensions = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"]);
+
+function isTypedSource(sourcePath: string): boolean {
+  return sourcePath.endsWith(".d.ts") || typedSourceExtensions.has(sourcePath.slice(sourcePath.lastIndexOf(".")).toLowerCase());
+}
 
 function completedRun(runs: readonly PipelineStageRunRecord[], stage: BuildStage): PipelineStageRunRecord {
   const run = runs.findLast((candidate) => candidate.stage === stage
@@ -236,6 +261,7 @@ export function createFrontendShadowStageExecutor(input: {
     });
     if (run.inputDigest !== shadowDigest) throw new Error("Frontend shadow stage input digest does not match enabled families");
 
+    let projectAnalysis: Record<string, unknown> | null = null;
     if (run.stage === "extract" && input.frontendParser) {
       const normalized = (await Promise.all(upstreamIds.map(async (artifactId) => {
         const manifest = await input.store.findArtifactById(artifactId);
@@ -244,18 +270,69 @@ export function createFrontendShadowStageExecutor(input: {
         }
         return parserNormalizedSourcesSchema.parse(await input.artifactStore.getJson(manifest));
       }))).flatMap((artifact) => artifact.sources);
+      const cache = new SourceAnalysisCache(input.store);
+      const cachedAnalyses = (await Promise.all(normalized.filter((source) => isTypedSource(source.path)).map(async (source) => {
+        const parserConfigDigest = typeScriptSyntaxParserConfigDigest(source.path);
+        const facts = await cache.get({
+          workspaceId: run.workspaceId,
+          contentHash: source.blobHash.toLowerCase(),
+          analyzerId: "typescript-syntax",
+          analyzerVersion: "1.0.0",
+          parserConfigDigest
+        });
+        return facts ? {
+          path: source.path,
+          blobHash: source.blobHash.toLowerCase(),
+          analyzerId: "typescript-syntax" as const,
+          analyzerVersion: "1.0.0" as const,
+          parserConfigDigest,
+          facts
+        } : null;
+      }))).filter((item): item is NonNullable<typeof item> => item !== null);
       const parserResult = parserRuntimeResultSchema.parse(await input.frontendParser.analyze({
         snapshotId: run.snapshotId,
-        analyzerIds: [],
+        analyzerIds: ["frontend-project"],
         sources: normalized.map((source) => ({
           path: source.path,
           contentBase64: Buffer.from(source.content, "utf8").toString("base64"),
           blobHash: source.blobHash
-        }))
+        })),
+        cachedAnalyses
       }));
       if (parserResult.snapshotId !== run.snapshotId) {
         throw new Error("Frontend parser result crosses snapshots");
       }
+      if (parserResult.outputs.length !== 1) throw new Error("Frontend project analyzer output is missing");
+      const output = parserResult.outputs[0]!;
+      const sourceByPath = new Map(normalized.map((source) => [source.path, source]));
+      const bindings = await Promise.all(output.files.map(async (file) => {
+        const source = sourceByPath.get(file.path);
+        if (!source || source.blobHash.toLowerCase() !== file.blobHash.toLowerCase()
+          || typeScriptSyntaxParserConfigDigest(file.path) !== file.parserConfigDigest) {
+          throw new Error("Frontend source analysis does not match normalized sources");
+        }
+        const record = await cache.put({
+          workspaceId: run.workspaceId,
+          contentHash: file.blobHash.toLowerCase(),
+          analyzerId: "typescript-syntax",
+          analyzerVersion: "1.0.0",
+          parserConfigDigest: file.parserConfigDigest
+        }, file.facts);
+        return {
+          path: file.path,
+          snapshotId: run.snapshotId,
+          blobHash: file.blobHash.toLowerCase(),
+          factsDigest: record.factsDigest
+        };
+      }));
+      projectAnalysis = {
+        analyzerId: output.analyzerId,
+        analyzerVersion: output.analyzerVersion,
+        projectManifest: output.projectManifest,
+        projectReferences: output.projectReferences,
+        resolutions: output.resolutions,
+        sourceAnalysisBindings: bindings
+      };
     }
 
     const legacyResult = await input.legacy({
@@ -288,7 +365,8 @@ export function createFrontendShadowStageExecutor(input: {
           analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
           analyzerManifest: [],
           entities: [],
-          edges: []
+          edges: [],
+          ...(projectAnalysis ? { projectAnalysis } : {})
         }
       : run.stage === "graph"
         ? {

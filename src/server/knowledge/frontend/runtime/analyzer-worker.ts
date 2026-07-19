@@ -2,6 +2,12 @@ import { isMainThread, parentPort, workerData } from "node:worker_threads";
 
 import { parserAnalyzeRequestSchema, type ParserAnalyzeRequest } from "./parser-protocol.js";
 import { VirtualSourceFs } from "./virtual-source-fs.js";
+import { analyzeFrontendProjectManifest } from "../project-manifest.js";
+import {
+  createRestrictedTypeScriptProgram,
+  extractTypeScriptSyntaxFacts,
+  typeScriptSyntaxParserConfigDigest
+} from "../typescript-program.js";
 
 export const MAX_ANALYZER_OUTPUT_BYTES = 16 * 1024 * 1024;
 export const MAX_ANALYZER_OUTPUT_NODES = 100_000;
@@ -48,13 +54,59 @@ export function assertAnalyzerOutputStructure(
 export function analyzeWorkerRequest(raw: unknown) {
   const request = parserAnalyzeRequestSchema.parse(raw) as ParserAnalyzeRequest;
   const sources = new VirtualSourceFs(request.sources);
+  const projectSources = sources.paths().map((sourcePath) => ({
+    path: sourcePath,
+    content: sources.readText(sourcePath)
+  }));
+  const requested = new Set(request.analyzerIds);
+  const outputs = requested.has("frontend-project") ? [analyzeFrontendProject(projectSources, request)] : [];
   return {
     schemaVersion: 1,
     snapshotId: request.snapshotId,
     analyzerIds: [...new Set(request.analyzerIds)].sort(),
     sourcePaths: sources.paths(),
-    outputs: []
+    outputs
   };
+}
+
+function analyzeFrontendProject(
+  projectSources: Array<{ path: string; content: string }>,
+  request: ParserAnalyzeRequest
+) {
+  const sourceHashes = new Map(request.sources.map((source) => [source.path, source.blobHash.toLowerCase()]));
+  const cached = new Map((request.cachedAnalyses ?? []).map((entry) => [
+    `${entry.path}\0${entry.blobHash}\0${entry.parserConfigDigest}`,
+    entry.facts
+  ]));
+  const typed = createRestrictedTypeScriptProgram(projectSources);
+  const sourceHash = (sourcePath: string) => {
+    const value = sourceHashes.get(sourcePath);
+    if (!value) throw new Error("TypeScript Program source hash is unavailable");
+    return value;
+  };
+  return {
+    analyzerId: "typescript-project",
+    analyzerVersion: "1.0.0",
+    projectManifest: analyzeFrontendProjectManifest(projectSources),
+    projectReferences: typed.projectReferences,
+    resolutions: typed.resolutions,
+    files: typed.rootNames.map((sourcePath) => ({
+      path: sourcePath,
+      blobHash: sourceHash(sourcePath),
+      parserConfigDigest: typeScriptSyntaxParserConfigDigest(sourcePath),
+      facts: cached.get([
+        sourcePath,
+        sourceHash(sourcePath),
+        typeScriptSyntaxParserConfigDigest(sourcePath)
+      ].join("\0")) ?? extractTypeScriptSyntaxFacts(sourcesText(projectSources, sourcePath), sourcePath)
+    }))
+  };
+}
+
+function sourcesText(sources: Array<{ path: string; content: string }>, sourcePath: string): string {
+  const source = sources.find((candidate) => candidate.path === sourcePath);
+  if (!source) throw new Error("TypeScript Program source disappeared during analysis");
+  return source.content;
 }
 
 if (!isMainThread) {

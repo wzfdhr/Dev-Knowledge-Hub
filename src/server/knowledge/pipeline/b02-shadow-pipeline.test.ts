@@ -30,6 +30,7 @@ import {
   ARTIFACT_KINDS,
   createVerifiedFrontendReleaseDraft
 } from "../frontend/compatibility";
+import { extractTypeScriptSyntaxFacts, typeScriptSyntaxParserConfigDigest } from "../frontend/typescript-program";
 
 const directories: string[] = [];
 
@@ -108,7 +109,23 @@ describe("B02 shadow pipeline", () => {
       package: createKnowledgePackageStageExecutor({ store: knowledgeV1Store, artifactStore })
     });
     const parserAnalyze = vi.fn(async () => ({
-      schemaVersion: 1, snapshotId: snapshot.id, analyzerIds: [], sourcePaths: [sourcePath], outputs: []
+      schemaVersion: 1,
+      snapshotId: snapshot.id,
+      analyzerIds: ["frontend-project"],
+      sourcePaths: [sourcePath],
+      outputs: [{
+        analyzerId: "typescript-project",
+        analyzerVersion: "1.0.0",
+        projectManifest: { workspace: null, packages: [], tsconfigs: [], ignoredPaths: [] },
+        projectReferences: [],
+        resolutions: [],
+        files: [{
+          path: sourcePath,
+          blobHash: hash(source),
+          parserConfigDigest: typeScriptSyntaxParserConfigDigest(sourcePath),
+          facts: extractTypeScriptSyntaxFacts(source, sourcePath)
+        }]
+      }]
     }));
     const worker = new PipelineStageWorker(
       store,
@@ -134,8 +151,11 @@ describe("B02 shadow pipeline", () => {
     const runs = await store.listPipelineStageRuns(workspaceId, project.id, build.id);
     expect(parserAnalyze).toHaveBeenCalledWith(expect.objectContaining({
       snapshotId: snapshot.id,
+      analyzerIds: ["frontend-project"],
+      cachedAnalyses: [],
       sources: [expect.objectContaining({ path: sourcePath, blobHash: hash(source) })]
     }));
+    expect(store.sourceAnalysisArtifacts).toHaveLength(1);
     expect(runs.find((run) => run.stage === "extract")?.errorDetail).toBeNull();
     expect(runs.map((run) => [run.stage, run.status])).toEqual([
       ["convert", "succeeded"], ["extract", "succeeded"], ["tables", "succeeded"], ["graph", "succeeded"],
@@ -154,6 +174,21 @@ describe("B02 shadow pipeline", () => {
         ]));
       }
     }
+    const extractRun = runs.find((run) => run.stage === "extract")!;
+    const frontendExtractManifest = (await Promise.all(extractRun.outputManifestIds.map((id) =>
+      store.findArtifactById(id)
+    ))).find((manifest) => manifest?.kind === "frontend-ir-v2")!;
+    await expect(artifactStore.getJson(frontendExtractManifest)).resolves.toMatchObject({
+      projectAnalysis: {
+        analyzerId: "typescript-project",
+        sourceAnalysisBindings: [{
+          path: sourcePath,
+          snapshotId: snapshot.id,
+          blobHash: hash(source),
+          factsDigest: expect.stringMatching(/^[a-f0-9]{64}$/)
+        }]
+      }
+    });
     await expect(store.getKnowledgeGraph(workspaceId, project.id, build.id)).resolves.toMatchObject({
       nodes: expect.arrayContaining([expect.objectContaining({
         kind: "module", name: "app.ts", qualifiedName: sourcePath

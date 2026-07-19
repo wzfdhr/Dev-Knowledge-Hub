@@ -193,6 +193,70 @@ describe("project Codex API client", () => {
     ]);
   });
 
+  test("reports verified file and byte progress while paginated files are transferred", async () => {
+    const files = [
+      { path: "src/one.ts", kind: "source" as const, file: new File(["1234"], "one.ts") },
+      { path: "src/two.ts", kind: "source" as const, file: new File(["123456"], "two.ts") }
+    ];
+    const responses = [
+      new Response(JSON.stringify({ id: "session-progress", status: "open", entryCount: 2, expiresAt: "2026-07-20T00:00:00.000Z" }), { status: 201 }),
+      new Response(JSON.stringify({ entries: [
+        { ordinal: 0, disposition: "upload_required", trust: "pending" },
+        { ordinal: 1, disposition: "upload_required", trust: "pending" }
+      ] }), { status: 200 }),
+      new Response(JSON.stringify({ ordinal: 0, disposition: "upload_required", trust: "server_verified" }), { status: 200 }),
+      new Response(JSON.stringify({ ordinal: 1, disposition: "upload_required", trust: "server_verified" }), { status: 200 }),
+      new Response(JSON.stringify({ snapshotId: "snapshot-progress", sourceVersion: "f".repeat(40), fileCount: 2, textBytes: 10, unchanged: false, ignored: { total: 0, reasons: {} }, assetCount: 0 }), { status: 201 })
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => responses.shift()!));
+    vi.stubGlobal("localStorage", { getItem: vi.fn(() => null), setItem: vi.fn(), removeItem: vi.fn() });
+    const progress = vi.fn();
+
+    await api.uploadFolder("project-1", "repository-1", files, { onProgress: progress });
+
+    expect(progress).toHaveBeenCalledWith(expect.objectContaining({
+      phase: "uploading", status: "running", processedFiles: 1, totalFiles: 2,
+      processedBytes: 4, totalBytes: 10, percent: 40
+    }));
+    expect(progress).toHaveBeenCalledWith(expect.objectContaining({
+      phase: "uploading", status: "running", processedFiles: 2, totalFiles: 2,
+      processedBytes: 10, totalBytes: 10, percent: 100
+    }));
+    expect(progress).toHaveBeenCalledWith(expect.objectContaining({
+      phase: "validating", status: "running", percent: 100
+    }));
+  });
+
+  test("counts server-filtered source files as processed before validation", async () => {
+    const files = [
+      { path: "src/kept.ts", kind: "source" as const, file: new File(["1234"], "kept.ts") },
+      { path: "src/ignored.ts", kind: "source" as const, file: new File(["123456"], "ignored.ts") }
+    ];
+    const responses = [
+      new Response(JSON.stringify({ id: "session-filtered", status: "open", entryCount: 2, expiresAt: "2026-07-20T00:00:00.000Z" }), { status: 201 }),
+      new Response(JSON.stringify({ entries: [
+        { ordinal: 0, disposition: "upload_required", trust: "pending" },
+        { ordinal: 1, disposition: "ignored", trust: "server_verified" }
+      ] }), { status: 200 }),
+      new Response(JSON.stringify({ ordinal: 0, disposition: "upload_required", trust: "server_verified" }), { status: 200 }),
+      new Response(JSON.stringify({ snapshotId: "snapshot-filtered", sourceVersion: "1".repeat(40), fileCount: 1, textBytes: 4, unchanged: false, ignored: { total: 1, reasons: { binary: 1 } }, assetCount: 0 }), { status: 201 })
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => responses.shift()!));
+    vi.stubGlobal("localStorage", { getItem: vi.fn(() => null), setItem: vi.fn(), removeItem: vi.fn() });
+    const progress = vi.fn();
+
+    await api.uploadFolder("project-1", "repository-1", files, { onProgress: progress });
+
+    expect(progress).toHaveBeenCalledWith(expect.objectContaining({
+      phase: "uploading", processedFiles: 2, totalFiles: 2,
+      processedBytes: 10, totalBytes: 10, percent: 100
+    }));
+    expect(progress).toHaveBeenCalledWith(expect.objectContaining({
+      phase: "validating", processedFiles: 2, totalFiles: 2,
+      processedBytes: 10, totalBytes: 10, percent: 100
+    }));
+  });
+
   test("reuses the durable session key after an interrupted manifest request", async () => {
     const storage = new Map<string, string>();
     vi.stubGlobal("localStorage", {
@@ -254,13 +318,18 @@ describe("project Codex API client", () => {
     }];
 
     await expect(api.uploadFolder("project-1", "repository-1", files)).rejects.toMatchObject({ code: "TEMPORARY" });
-    await expect(api.uploadFolder("project-1", "repository-1", files))
+    const resumedProgress = vi.fn();
+    await expect(api.uploadFolder("project-1", "repository-1", files, { onProgress: resumedProgress }))
       .resolves.toMatchObject({ snapshotId: "snapshot-resume" });
 
     const fileRequests = (fetch.mock.calls as unknown as Array<[string, RequestInit]>).filter(([, init]) =>
       init.method === "PUT" && init.headers && (init.headers as Record<string, string>)["content-type"] === "application/octet-stream"
     );
     expect(fileRequests).toHaveLength(1);
+    expect(resumedProgress).toHaveBeenCalledWith(expect.objectContaining({
+      phase: "uploading", processedFiles: 1, processedBytes: 10,
+      bytesPerSecond: undefined, estimatedSeconds: undefined
+    }));
     expect(storage.size).toBe(0);
   });
 

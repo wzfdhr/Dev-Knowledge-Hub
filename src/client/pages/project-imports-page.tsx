@@ -23,6 +23,33 @@ function idleProgress(): ImportProgressValue {
   return { phase: "reading", status: "idle", percent: 0 };
 }
 
+function uploadFailure(error: unknown): { message: string; description: string } {
+  if (error instanceof ApiError && ["UPLOAD_SESSION_EXPIRED", "UPLOAD_SESSION_INVALIDATED", "UPLOAD_SESSION_NOT_FOUND"].includes(error.code)) {
+    return {
+      message: "上传会话已失效，请重新选择项目文件夹",
+      description: "当前已发布知识不会自动变化。请先刷新导入历史确认处理结果；重新选择后会开始新的安全上传。"
+    };
+  }
+  if (!(error instanceof ApiError) || error.status >= 500 || ["TEMPORARY", "RATE_LIMITED"].includes(error.code)) {
+    return {
+      message: "上传暂时中断，已验证文件会保留约 24 小时",
+      description: "上传结果尚未确认，当前已发布知识不会自动变化。直接安全重试，或刷新后重新选择同一文件夹即可继续；不会重复上传已验证文件，也不会重复创建内容版本。"
+    };
+  }
+  const knownMessages: Record<string, string> = {
+    TOO_MANY_FILES: "可采集文件数量超过上限",
+    FOLDER_SIZE_LIMIT: "可采集源码总大小超过 2 GiB",
+    MANIFEST_INCOMPLETE: "文件清单不完整，请重新选择项目文件夹",
+    MANIFEST_DIGEST_MISMATCH: "文件夹内容已变化，请重新选择后再试",
+    PROJECT_ACCESS_DENIED: "你已没有该项目的上传权限",
+    UPLOAD_SESSION_STATE: "当前上传状态无法继续，请重新选择项目文件夹"
+  };
+  return {
+    message: knownMessages[error.code] ?? "上传未完成，请检查项目文件夹后重试",
+    description: `当前已发布知识不会自动变化。请刷新导入历史确认处理结果，修正问题后可以安全重试。错误代码：${error.code}`
+  };
+}
+
 export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api: ApiClient; projectId?: string }) {
   const params = useParams();
   const projectId = explicitProjectId ?? params.projectId ?? "";
@@ -86,9 +113,8 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
       const sourceCount = files.filter((file) => file.kind === "source").length;
       setProgress({ phase: "uploading", status: "running", percent: 0, processedFiles: 0, totalFiles: sourceCount, detail: `正在上传 ${sourceCount} 个源码文件` });
       const summary = source.replacement
-        ? await api.uploadReplacementFolder(projectId, source.repository.id, files)
-        : await api.uploadFolder(source.repository.projectId || projectId, source.repository.id, files);
-      setProgress({ phase: "validating", status: "running", percent: 100, processedFiles: sourceCount, totalFiles: sourceCount, detail: "服务端已完成安全校验" });
+        ? await api.uploadReplacementFolder(projectId, source.repository.id, files, { onProgress: setProgress })
+        : await api.uploadFolder(source.repository.projectId || projectId, source.repository.id, files, { onProgress: setProgress });
       return summary;
     },
     onSuccess: (value) => {
@@ -143,6 +169,8 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
         <p className="eyebrow">推荐方式</p>
         <h2>选择完整项目文件夹</h2>
         <p>无需手动删除 <code>node_modules</code>、<code>dist</code> 或密钥文件，过滤发生在上传之前。</p>
+        <p className="import-resume-note">上传中断后，会话最多保留 24 小时；重新选择同一文件夹即可继续，已验证文件不会重复上传。</p>
+        <p className="import-limit-note">单次上限：100,000 条清单、50,000 个源码文件、2 GiB 可采集源码。</p>
         <input ref={folderInput} className="visually-hidden" aria-label="项目文件夹" type="file" multiple onChange={(event) => {
           const files = Array.from(event.target.files ?? []);
           event.target.value = "";
@@ -154,7 +182,7 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
     </div>
     {report && <div className="import-report-row"><FolderFilterReport report={report} /><div className="import-confirm-panel"><h2>确认上传这些资料</h2><p>{currentRepository && currentRepository.kind !== "upload" ? "当前资料来源会保留为只读归档，完成上传后切换到新内容版本。" : "上传完成后仍需人工构建并发布，当前线上知识不会自动变化。"}</p><Button type="primary" loading={upload.isPending} disabled={!report.acceptedFiles.length} onClick={uploadFolder}>确认并开始上传</Button></div></div>}
     {result && <ImportResultReport upload={result} localIgnored={completedFilter} />}
-    {upload.error && <ErrorState message={errorMessage(upload.error)} />}
+    {upload.error && <ErrorState {...uploadFailure(upload.error)} retry={uploadFolder} />}
     <section className="import-history" aria-labelledby="import-history-title">
       <header><div><p className="eyebrow">服务端记录</p><h2 id="import-history-title">导入历史</h2></div></header>
       {importHistory.isLoading ? <Loading label="正在加载导入历史" /> : importHistory.error ? <ErrorState message={errorMessage(importHistory.error)} retry={() => void importHistory.refetch()} /> : importHistory.data?.reports.length ? <div className="import-history-list">{importHistory.data.reports.map((item) => <div className="import-history-item" key={item.id}><div><strong>{item.sourceKind === "upload" ? "文件夹上传" : item.sourceKind}</strong><small>{new Date(item.startedAt).toLocaleString("zh-CN")}</small></div><div><span>{item.collectedFileCount} 个文件 · {formatBytes(item.collectedTextBytes)}</span>{item.ignored.total > 0 && <small>服务端过滤 {item.ignored.total} 项</small>}</div><div>{item.status === "succeeded" ? <Tag color="green">成功</Tag> : item.status === "failed" ? <Tag color="red">失败</Tag> : <Tag>{item.status === "running" ? "进行中" : "已取消"}</Tag>}{item.failureCode && <small>{item.failureCode}</small>}</div></div>)}</div> : <div className="document-empty"><h2>暂无服务端导入记录</h2><p>完成一次资料上传后，这里会显示服务端实际采集结果和二次过滤原因。</p></div>}

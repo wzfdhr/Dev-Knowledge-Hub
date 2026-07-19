@@ -4,7 +4,7 @@ import type {
   UploadSnapshotSummary, ImportReport, TeamMember, ProjectMember, Project, ProjectSummary, ProjectActivity, CodexConnectionPack,
   Remediation, RemediationEvent, RemediationState,
   WorkspaceOverview, WorkspaceSearchResult, MfaStatus, ProjectGraphFormat, ProjectGraphResponse,
-  FrontendPreviewResponse, GraphSourceRef
+  FrontendPreviewResponse, GraphSourceRef, ImportProgress
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
@@ -36,6 +36,10 @@ export interface RemediationListParams extends PaginationParams {
 export interface PaginatedResponse {
   total: number;
   nextOffset: number | null;
+}
+
+export interface UploadFolderOptions {
+  onProgress?(progress: ImportProgress): void;
 }
 
 export const LIST_PAGE_SIZE = 100;
@@ -115,8 +119,8 @@ export interface ApiClient {
   connectRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository }>;
   replaceRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository; pendingUpload?: boolean }>;
   listArchivedRepositories(): Promise<{ repositories: ArchivedRepository[] }>;
-  uploadFolder(projectId: string, repositoryId: string, files: FolderImportFile[]): Promise<UploadSnapshotSummary>;
-  uploadReplacementFolder(projectId: string, repositoryId: string, files: FolderImportFile[]): Promise<UploadSnapshotSummary>;
+  uploadFolder(projectId: string, repositoryId: string, files: FolderImportFile[], options?: UploadFolderOptions): Promise<UploadSnapshotSummary>;
+  uploadReplacementFolder(projectId: string, repositoryId: string, files: FolderImportFile[], options?: UploadFolderOptions): Promise<UploadSnapshotSummary>;
   getRepository(): Promise<{ repository: Repository | null }>;
   getRepositoryStatus(): Promise<RepositoryStatus>;
   syncRepository(): Promise<SnapshotSummary>;
@@ -237,9 +241,42 @@ function resumeCreateKey(projectId: string, repositoryId: string, manifestDigest
 async function uploadFolderSession(
   projectId: string,
   repositoryId: string,
-  files: FolderImportFile[]
+  files: FolderImportFile[],
+  options: UploadFolderOptions = {}
 ): Promise<UploadSnapshotSummary> {
   const manifest = await createUploadManifest(files);
+  const sourceFiles = files.filter((file) => file.kind === "source");
+  const totalFiles = sourceFiles.length;
+  const totalBytes = sourceFiles.reduce((sum, file) => sum + file.file.size, 0);
+  const verified = new Set<number>();
+  let processedFiles = 0;
+  let processedBytes = 0;
+  let transferredBytesThisAttempt = 0;
+  const startedAt = Date.now();
+  const reportTransfer = (detail: string) => {
+    const elapsedSeconds = Math.max((Date.now() - startedAt) / 1_000, 0.001);
+    const bytesPerSecond = transferredBytesThisAttempt > 0
+      ? Math.round(transferredBytesThisAttempt / elapsedSeconds)
+      : undefined;
+    const remainingBytes = Math.max(0, totalBytes - processedBytes);
+    const percent = totalBytes > 0
+      ? Math.min(100, Math.floor(processedBytes / totalBytes * 100))
+      : totalFiles > 0 ? Math.min(100, Math.floor(processedFiles / totalFiles * 100)) : 100;
+    options.onProgress?.({
+      phase: "uploading", status: "running", percent,
+      processedFiles, totalFiles, processedBytes, totalBytes,
+      bytesPerSecond,
+      estimatedSeconds: bytesPerSecond ? Math.ceil(remainingBytes / bytesPerSecond) : undefined,
+      detail
+    });
+  };
+  const markVerified = (ordinal: number, byteSize: number, detail?: string) => {
+    if (verified.has(ordinal)) return;
+    verified.add(ordinal);
+    processedFiles += 1;
+    processedBytes += byteSize;
+    reportTransfer(detail ?? `已验证 ${processedFiles}/${totalFiles} 个源码文件`);
+  };
   const resume = resumeCreateKey(projectId, repositoryId, manifest.manifestDigest);
   const base = `/api/projects/${encodeURIComponent(projectId)}/upload-sessions`;
   let session: UploadSessionStart | undefined;
@@ -249,6 +286,7 @@ async function uploadFolderSession(
       headers: { "Idempotency-Key": resume.createKey },
       body: json({ repositoryId, entryCount: manifest.entries.length })
     });
+    reportTransfer(`上传会话保留至 ${new Date(session.expiresAt).toLocaleString("zh-CN")}`);
     for (let offset = 0; offset < manifest.entries.length; offset += UPLOAD_MANIFEST_PAGE_SIZE) {
       const page = Math.floor(offset / UPLOAD_MANIFEST_PAGE_SIZE);
       const response = await request<{ entries: UploadManifestDecision[] }>(
@@ -260,19 +298,40 @@ async function uploadFolderSession(
         }
       );
       for (const decision of response.entries) {
-        if (decision.disposition !== "upload_required" || decision.trust === "server_verified") continue;
         const source = files[decision.ordinal];
-        if (!source || source.kind !== "source") throw new Error("Upload manifest no longer matches selected files");
-        await request(`${base}/${encodeURIComponent(session.id)}/files/${decision.ordinal}`, {
-          method: "PUT",
-          headers: {
-            "Idempotency-Key": `${resume.createKey}:file:${decision.ordinal}`,
-            "content-type": "application/octet-stream"
-          },
-          body: source.file
-        });
+        if (!source || source.kind !== "source") {
+          if (decision.disposition === "upload_required") {
+            throw new Error("Upload manifest no longer matches selected files");
+          }
+          continue;
+        }
+        if (decision.disposition !== "upload_required") {
+          markVerified(
+            decision.ordinal,
+            source.file.size,
+            `服务端已处理 ${processedFiles + 1}/${totalFiles} 个源码文件`
+          );
+          continue;
+        }
+        if (decision.trust !== "server_verified") {
+          await request(`${base}/${encodeURIComponent(session.id)}/files/${decision.ordinal}`, {
+            method: "PUT",
+            headers: {
+              "Idempotency-Key": `${resume.createKey}:file:${decision.ordinal}`,
+              "content-type": "application/octet-stream"
+            },
+            body: source.file
+          });
+          transferredBytesThisAttempt += source.file.size;
+        }
+        markVerified(decision.ordinal, source.file.size);
       }
     }
+    options.onProgress?.({
+      phase: "validating", status: "running", percent: 100,
+      processedFiles, totalFiles, processedBytes, totalBytes,
+      detail: "文件传输完成，正在执行服务端校验"
+    });
     const result = await request<UploadSnapshotSummary>(`${base}/${encodeURIComponent(session.id)}/commit`, {
       method: "POST",
       headers: { "Idempotency-Key": `${resume.createKey}:commit` },

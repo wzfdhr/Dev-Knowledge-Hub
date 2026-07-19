@@ -47,7 +47,8 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   const report = page.getByRole("region", { name: "过滤报告" });
   await expect(report).toBeVisible();
   await expect(report).toContainText("扫描文件5");
-  await expect(report).toContainText("准备上传3");
+  await expect(report).toContainText("源码上传3");
+  await expect(report).toContainText("资源登记0");
   await expect(report).toContainText("自动忽略2");
   await expect(report).toContainText("依赖或构建目录1");
   await expect(report).toContainText("敏感文件1");

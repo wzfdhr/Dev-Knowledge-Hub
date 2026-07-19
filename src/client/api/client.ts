@@ -9,6 +9,7 @@ import type {
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
 import type { FolderImportFile } from "./folder-import";
+import { createUploadManifest } from "./upload-manifest";
 
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly details?: ApiErrorShape["error"]) {
@@ -53,19 +54,34 @@ function csrfToken(): string | undefined {
   return document.cookie.split(";").map((item) => item.trim()).find((item) => item.startsWith("devkh_csrf="))?.slice("devkh_csrf=".length);
 }
 
+function retryAfterMilliseconds(value: string | null): number {
+  if (!value) return 1_000;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.min(60_000, Math.max(0, seconds * 1_000));
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.min(60_000, Math.max(0, timestamp - Date.now())) : 1_000;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const projectId = activeProjectId();
   const csrf = init?.method && !["GET", "HEAD", "OPTIONS"].includes(init.method) ? csrfToken() : undefined;
-  const response = await fetch(path, {
-    credentials: "same-origin",
-    ...init,
-    headers: {
-      ...(projectId ? { "x-devkh-project": projectId } : {}),
-      ...(csrf ? { "x-devkh-csrf": csrf } : {}),
-      ...(typeof init?.body === "string" ? { "content-type": "application/json" } : {}),
-      ...init?.headers
-    }
-  });
+  const retryRateLimit = path.includes("/upload-sessions");
+  const fetchAttempt = async (rateLimitRetries = 0): Promise<Response> => {
+    const response = await fetch(path, {
+      credentials: "same-origin",
+      ...init,
+      headers: {
+        ...(projectId ? { "x-devkh-project": projectId } : {}),
+        ...(csrf ? { "x-devkh-csrf": csrf } : {}),
+        ...(typeof init?.body === "string" ? { "content-type": "application/json" } : {}),
+        ...init?.headers
+      }
+    });
+    if (!retryRateLimit || response.status !== 429 || rateLimitRetries >= 5) return response;
+    await new Promise((resolve) => setTimeout(resolve, retryAfterMilliseconds(response.headers.get("retry-after"))));
+    return fetchAttempt(rateLimitRetries + 1);
+  };
+  const response = await fetchAttempt();
   if (!response.ok) {
     const body = await response.json().catch(() => null) as ApiErrorShape | null;
     throw new ApiError(response.status, body?.error.code ?? "REQUEST_FAILED", body?.error.message ?? "Request failed", body?.error);
@@ -99,8 +115,8 @@ export interface ApiClient {
   connectRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository }>;
   replaceRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository; pendingUpload?: boolean }>;
   listArchivedRepositories(): Promise<{ repositories: ArchivedRepository[] }>;
-  uploadFolder(projectId: string, files: FolderImportFile[]): Promise<UploadSnapshotSummary>;
-  uploadReplacementFolder(repositoryId: string, files: FolderImportFile[]): Promise<UploadSnapshotSummary>;
+  uploadFolder(projectId: string, repositoryId: string, files: FolderImportFile[]): Promise<UploadSnapshotSummary>;
+  uploadReplacementFolder(projectId: string, repositoryId: string, files: FolderImportFile[]): Promise<UploadSnapshotSummary>;
   getRepository(): Promise<{ repository: Repository | null }>;
   getRepositoryStatus(): Promise<RepositoryStatus>;
   syncRepository(): Promise<SnapshotSummary>;
@@ -166,6 +182,122 @@ function listPath(path: string, pagination: PaginationParams, values: Record<str
   return `${path}?${params}`;
 }
 
+const UPLOAD_MANIFEST_PAGE_SIZE = 500;
+const UPLOAD_RESUME_PREFIX = "devkh:upload-session:";
+
+interface UploadSessionStart {
+  id: string;
+  status: "open" | "committing" | "committed" | "cancelled";
+  entryCount: number;
+  expiresAt: string;
+}
+
+interface UploadManifestDecision {
+  ordinal: number;
+  disposition: "upload_required" | "metadata_only" | "ignored";
+  trust: "pending" | "server_verified" | "client_unverified";
+}
+
+function browserStorage(): Storage | undefined {
+  try {
+    return typeof localStorage === "undefined" ? undefined : localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
+function resumeCreateKey(projectId: string, repositoryId: string, manifestDigest: string): {
+  storage: Storage | undefined;
+  key: string;
+  createKey: string;
+} {
+  const storage = browserStorage();
+  const key = `${UPLOAD_RESUME_PREFIX}${projectId}:${repositoryId}:${manifestDigest}`;
+  const now = Date.now();
+  try {
+    const saved = storage?.getItem(key);
+    if (saved) {
+      const value = JSON.parse(saved) as { createKey?: string; createdAt?: number };
+      if (value.createKey && value.createdAt && now - value.createdAt < 23 * 60 * 60 * 1_000) {
+        return { storage, key, createKey: value.createKey };
+      }
+    }
+  } catch {
+    // A corrupt resume hint must not prevent a new upload.
+  }
+  const createKey = crypto.randomUUID();
+  try {
+    storage?.setItem(key, JSON.stringify({ createKey, createdAt: now }));
+  } catch {
+    // Upload remains usable when browser storage is unavailable.
+  }
+  return { storage, key, createKey };
+}
+
+async function uploadFolderSession(
+  projectId: string,
+  repositoryId: string,
+  files: FolderImportFile[]
+): Promise<UploadSnapshotSummary> {
+  const manifest = await createUploadManifest(files);
+  const resume = resumeCreateKey(projectId, repositoryId, manifest.manifestDigest);
+  const base = `/api/projects/${encodeURIComponent(projectId)}/upload-sessions`;
+  let session: UploadSessionStart | undefined;
+  try {
+    session = await request<UploadSessionStart>(base, {
+      method: "POST",
+      headers: { "Idempotency-Key": resume.createKey },
+      body: json({ repositoryId, entryCount: manifest.entries.length })
+    });
+    for (let offset = 0; offset < manifest.entries.length; offset += UPLOAD_MANIFEST_PAGE_SIZE) {
+      const page = Math.floor(offset / UPLOAD_MANIFEST_PAGE_SIZE);
+      const response = await request<{ entries: UploadManifestDecision[] }>(
+        `${base}/${encodeURIComponent(session.id)}/manifest-pages/${page}`,
+        {
+          method: "PUT",
+          headers: { "Idempotency-Key": `${resume.createKey}:manifest:${page}` },
+          body: json({ entries: manifest.entries.slice(offset, offset + UPLOAD_MANIFEST_PAGE_SIZE) })
+        }
+      );
+      for (const decision of response.entries) {
+        if (decision.disposition !== "upload_required" || decision.trust === "server_verified") continue;
+        const source = files[decision.ordinal];
+        if (!source || source.kind !== "source") throw new Error("Upload manifest no longer matches selected files");
+        await request(`${base}/${encodeURIComponent(session.id)}/files/${decision.ordinal}`, {
+          method: "PUT",
+          headers: {
+            "Idempotency-Key": `${resume.createKey}:file:${decision.ordinal}`,
+            "content-type": "application/octet-stream"
+          },
+          body: source.file
+        });
+      }
+    }
+    const result = await request<UploadSnapshotSummary>(`${base}/${encodeURIComponent(session.id)}/commit`, {
+      method: "POST",
+      headers: { "Idempotency-Key": `${resume.createKey}:commit` },
+      body: json({ manifestDigest: manifest.manifestDigest })
+    });
+    try { resume.storage?.removeItem(resume.key); } catch { /* best-effort browser cleanup */ }
+    return result;
+  } catch (error) {
+    const terminal = error instanceof ApiError && [
+      "IDEMPOTENCY_KEY_REUSED", "UPLOAD_SESSION_EXPIRED", "UPLOAD_SESSION_INVALIDATED",
+      "UPLOAD_SESSION_NOT_FOUND", "UPLOAD_SESSION_STATE"
+    ].includes(error.code);
+    if (terminal) {
+      try { resume.storage?.removeItem(resume.key); } catch { /* best-effort browser cleanup */ }
+      if (session) {
+        await request(`${base}/${encodeURIComponent(session.id)}`, {
+          method: "DELETE",
+          headers: { "Idempotency-Key": `${resume.createKey}:cancel-terminal` }
+        }).catch(() => undefined);
+      }
+    }
+    throw error;
+  }
+}
+
 export const api: ApiClient = {
   setupStatus: () => request("/api/setup/status"),
   setup: (input) => request("/api/setup", { method: "POST", body: json(input) }),
@@ -209,16 +341,8 @@ export const api: ApiClient = {
   },
   replaceRepository: (input) => request("/api/repositories/current/replace", { method: "POST", body: json(input) }),
   listArchivedRepositories: () => request("/api/repositories/archived"),
-  uploadFolder: (projectId, files) => {
-    const data = new FormData();
-    for (const item of files) data.append("files", item.file, item.path);
-    return request(`/api/projects/${encodeURIComponent(projectId)}/folder-import`, { method: "POST", body: data });
-  },
-  uploadReplacementFolder: (repositoryId, files) => {
-    const data = new FormData();
-    for (const item of files) data.append("files", item.file, item.path);
-    return request(`/api/repositories/${encodeURIComponent(repositoryId)}/folder-import`, { method: "POST", body: data });
-  },
+  uploadFolder: uploadFolderSession,
+  uploadReplacementFolder: uploadFolderSession,
   getRepository: () => request("/api/repositories/current"),
   getRepositoryStatus: () => request("/api/repositories/current/status"),
   syncRepository: () => request("/api/repositories/current/sync", { method: "POST" }),

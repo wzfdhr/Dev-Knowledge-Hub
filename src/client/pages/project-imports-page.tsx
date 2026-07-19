@@ -39,6 +39,7 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
   const currentRepository = repository.data?.repository ?? null;
   const [sourceKind, setSourceKind] = useState<SourceKind>("upload");
   const [report, setReport] = useState<FolderImportReport | null>(null);
+  const [completedFilter, setCompletedFilter] = useState<FolderImportReport["ignored"] | null>(null);
   const [progress, setProgress] = useState<ImportProgressValue>(idleProgress());
   const [result, setResult] = useState<UploadSnapshotSummary | null>(null);
   const [replaceOpen, setReplaceOpen] = useState(false);
@@ -47,7 +48,7 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
 
   useEffect(() => { folderInput.current?.setAttribute("webkitdirectory", ""); }, []);
 
-  const rememberSnapshot = async (upload: UploadSnapshotSummary) => {
+  const rememberSnapshot = async (upload: UploadSnapshotSummary, localReport: FolderImportReport | null) => {
     sessionStorage.setItem("devkh:last-snapshot", JSON.stringify({
       snapshotId: upload.snapshotId,
       commitSha: upload.sourceVersion,
@@ -56,6 +57,7 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
       unchanged: upload.unchanged
     }));
     setResult(upload);
+    setCompletedFilter(localReport?.ignored ?? null);
     setReport(null);
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: keys.repository }),
@@ -74,28 +76,31 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
       return { repository: value.repository, replacement: Boolean(value.pendingUpload) };
     }
     const value = await api.connectRepository({ kind: "upload", name });
+    queryClient.setQueryData(projectKeys.repository(projectId), { repository: value.repository });
     return { repository: value.repository, replacement: false };
   };
 
   const upload = useMutation({
     mutationFn: async (files: FolderImportReport["acceptedFiles"]) => {
       const source = await ensureUploadSource();
-      setProgress({ phase: "uploading", status: "running", percent: 0, processedFiles: 0, totalFiles: files.length, detail: `正在直传 ${files.length} 个已过滤文件` });
+      const sourceCount = files.filter((file) => file.kind === "source").length;
+      setProgress({ phase: "uploading", status: "running", percent: 0, processedFiles: 0, totalFiles: sourceCount, detail: `正在上传 ${sourceCount} 个源码文件` });
       const summary = source.replacement
-        ? await api.uploadReplacementFolder(source.repository.id, files)
-        : await api.uploadFolder(source.repository.projectId || projectId, files);
-      setProgress({ phase: "validating", status: "running", percent: 100, processedFiles: files.length, totalFiles: files.length, detail: "服务端已完成安全校验" });
+        ? await api.uploadReplacementFolder(projectId, source.repository.id, files)
+        : await api.uploadFolder(source.repository.projectId || projectId, source.repository.id, files);
+      setProgress({ phase: "validating", status: "running", percent: 100, processedFiles: sourceCount, totalFiles: sourceCount, detail: "服务端已完成安全校验" });
       return summary;
     },
     onSuccess: (value) => {
       setProgress((current) => ({ ...current, phase: "snapshot", status: "completed", percent: 100, detail: value.unchanged ? "内容没有变化" : "已创建新的内容版本" }));
-      void rememberSnapshot(value);
+      void rememberSnapshot(value, report);
     },
     onError: () => { setProgress((value) => ({ ...value, status: "failed" })); }
   });
 
   const inspect = async (action: () => Promise<FolderImportReport>) => {
     setResult(null);
+    setCompletedFilter(null);
     setReport(null);
     try {
       const value = await action();
@@ -114,7 +119,7 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
     }
   };
 
-  const uploadFolder = () => { if (report) upload.mutate(report.acceptedFiles); };
+  const uploadFolder = () => { if (report) upload.mutate([...report.acceptedFiles, ...report.assetFiles]); };
 
   const connectAlternative = useMutation({
     mutationFn: () => {
@@ -131,7 +136,7 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
   if (repository.error && !missingRepository) return <div className="page"><ErrorState message={errorMessage(repository.error)} retry={() => void repository.refetch()} /></div>;
 
   return <div className="page project-imports-page">
-    <header className="page-header"><div><p className="eyebrow">项目资料</p><h1>资料上传</h1><p>直接选择原始项目文件夹。系统会在本机自动过滤依赖、构建产物、二进制文件和敏感文件，再安全上传到服务器。</p></div>{currentRepository && <Button icon={<FolderOpen aria-hidden="true" />} onClick={() => setReplaceOpen(true)}>更换资料来源</Button>}</header>
+    <header className="page-header"><div><p className="eyebrow">项目资料</p><h1>资料上传</h1><p>直接选择原始项目文件夹。系统会在本机过滤依赖、构建产物和敏感文件；图片、字体等资源只登记元数据，不读取或上传内容。</p></div>{currentRepository && <Button icon={<FolderOpen aria-hidden="true" />} onClick={() => setReplaceOpen(true)}>更换资料来源</Button>}</header>
     <div className="import-workspace">
       <section className="import-dropzone">
         <div className="import-dropzone-icon"><FolderOpen aria-hidden="true" /></div>
@@ -148,11 +153,11 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
       <ImportProgress progress={progress} />
     </div>
     {report && <div className="import-report-row"><FolderFilterReport report={report} /><div className="import-confirm-panel"><h2>确认上传这些资料</h2><p>{currentRepository && currentRepository.kind !== "upload" ? "当前资料来源会保留为只读归档，完成上传后切换到新内容版本。" : "上传完成后仍需人工构建并发布，当前线上知识不会自动变化。"}</p><Button type="primary" loading={upload.isPending} disabled={!report.acceptedFiles.length} onClick={uploadFolder}>确认并开始上传</Button></div></div>}
-    {result && <ImportResultReport upload={result} />}
+    {result && <ImportResultReport upload={result} localIgnored={completedFilter} />}
     {upload.error && <ErrorState message={errorMessage(upload.error)} />}
     <section className="import-history" aria-labelledby="import-history-title">
       <header><div><p className="eyebrow">服务端记录</p><h2 id="import-history-title">导入历史</h2></div></header>
-      {importHistory.isLoading ? <Loading label="正在加载导入历史" /> : importHistory.error ? <ErrorState message={errorMessage(importHistory.error)} retry={() => void importHistory.refetch()} /> : importHistory.data?.reports.length ? <div className="import-history-list">{importHistory.data.reports.map((item) => <div className="import-history-item" key={item.id}><div><strong>{item.sourceKind === "upload" ? "文件夹上传" : item.sourceKind}</strong><small>{new Date(item.startedAt).toLocaleString("zh-CN")}</small></div><div><span>{item.collectedFileCount} 个文件 · {formatBytes(item.collectedTextBytes)}</span>{item.ignored.total > 0 && <small>过滤 {item.ignored.total} 项</small>}</div><div>{item.status === "succeeded" ? <Tag color="green">成功</Tag> : item.status === "failed" ? <Tag color="red">失败</Tag> : <Tag>{item.status === "running" ? "进行中" : "已取消"}</Tag>}{item.failureCode && <small>{item.failureCode}</small>}</div></div>)}</div> : <div className="document-empty"><h2>暂无服务端导入记录</h2><p>完成一次资料上传后，这里会显示实际采集结果和过滤原因。</p></div>}
+      {importHistory.isLoading ? <Loading label="正在加载导入历史" /> : importHistory.error ? <ErrorState message={errorMessage(importHistory.error)} retry={() => void importHistory.refetch()} /> : importHistory.data?.reports.length ? <div className="import-history-list">{importHistory.data.reports.map((item) => <div className="import-history-item" key={item.id}><div><strong>{item.sourceKind === "upload" ? "文件夹上传" : item.sourceKind}</strong><small>{new Date(item.startedAt).toLocaleString("zh-CN")}</small></div><div><span>{item.collectedFileCount} 个文件 · {formatBytes(item.collectedTextBytes)}</span>{item.ignored.total > 0 && <small>服务端过滤 {item.ignored.total} 项</small>}</div><div>{item.status === "succeeded" ? <Tag color="green">成功</Tag> : item.status === "failed" ? <Tag color="red">失败</Tag> : <Tag>{item.status === "running" ? "进行中" : "已取消"}</Tag>}{item.failureCode && <small>{item.failureCode}</small>}</div></div>)}</div> : <div className="document-empty"><h2>暂无服务端导入记录</h2><p>完成一次资料上传后，这里会显示服务端实际采集结果和二次过滤原因。</p></div>}
     </section>
     <section className="source-options"><div><p className="eyebrow">其他来源</p><h2>服务器目录或 Git 仓库</h2><p>本地路径只适用于服务器自身可以读取的目录；电脑上的项目优先使用文件夹上传。</p></div><Button onClick={() => setReplaceOpen(true)}>配置其他来源</Button></section>
     <Modal title="更换资料来源" open={replaceOpen} onCancel={() => setReplaceOpen(false)} footer={null} destroyOnHidden>

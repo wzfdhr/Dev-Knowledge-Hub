@@ -16,6 +16,7 @@ export interface RateLimitPolicy {
   mcp: number;
   feedback: number;
   upload?: number;
+  uploadOperation?: number;
   windowMs: number;
   maxEntries: number;
   sweepIntervalMs: number;
@@ -27,6 +28,7 @@ export const DEFAULT_RATE_LIMITS: RateLimitPolicy = {
   mcp: 120,
   feedback: 30,
   upload: 5,
+  uploadOperation: 1_000,
   windowMs: 60_000,
   maxEntries: 10_000,
   sweepIntervalMs: 60_000
@@ -43,7 +45,7 @@ export function redactSensitive(value: unknown): unknown {
   ]));
 }
 
-type BucketName = "setup" | "login" | "mcp" | "feedback" | "upload";
+type BucketName = "setup" | "login" | "mcp" | "feedback" | "upload" | "uploadOperation";
 
 interface RateLimitEntry {
   count: number;
@@ -103,13 +105,52 @@ export class RateLimitState {
   }
 }
 
+export class UploadBodyConcurrencyState {
+  private active = 0;
+  private readonly byClient = new Map<string, number>();
+  private readonly bySession = new Map<string, number>();
+
+  constructor(private readonly limits = { global: 4, client: 2, session: 1 }) {}
+
+  acquire(client: string, session: string): (() => void) | null {
+    if (this.active >= this.limits.global
+      || (this.byClient.get(client) ?? 0) >= this.limits.client
+      || (this.bySession.get(session) ?? 0) >= this.limits.session) return null;
+    this.active += 1;
+    this.byClient.set(client, (this.byClient.get(client) ?? 0) + 1);
+    this.bySession.set(session, (this.bySession.get(session) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.active -= 1;
+      decrement(this.byClient, client);
+      decrement(this.bySession, session);
+    };
+  }
+}
+
+function decrement(values: Map<string, number>, key: string): void {
+  const next = (values.get(key) ?? 1) - 1;
+  if (next <= 0) values.delete(key);
+  else values.set(key, next);
+}
+
 function bucketFor(request: FastifyRequest): BucketName | undefined {
   const pathname = request.url.split("?", 1)[0];
   if (request.method === "POST" && pathname === "/api/setup") return "setup";
   if (request.method === "POST" && pathname === "/api/session") return "login";
   if (pathname === "/mcp") return "mcp";
-  if (request.method === "POST" && pathname === "/api/repositories/current/uploads") {
+  if (request.method === "POST" && (
+    /^\/api\/projects\/[^/]+\/folder-import$/u.test(pathname ?? "")
+    || /^\/api\/repositories\/[^/]+\/folder-import$/u.test(pathname ?? "")
+    || /^\/api\/projects\/[^/]+\/upload-sessions$/u.test(pathname ?? "")
+  )) {
     return "upload";
+  }
+  if (["PUT", "POST", "DELETE"].includes(request.method)
+    && /^\/api\/projects\/[^/]+\/upload-sessions\/[^/]+(?:\/|$)/u.test(pathname ?? "")) {
+    return "uploadOperation";
   }
   if ((request.method === "POST" || request.method === "PATCH") && pathname.startsWith("/api/feedback/")) {
     return "feedback";
@@ -126,7 +167,6 @@ export function registerHttpSecurity(
     maxEntries: policy.maxEntries,
     sweepIntervalMs: policy.sweepIntervalMs
   });
-
   server.decorateRequest("cspNonce", "");
   server.addHook("onRequest", async (request, reply) => {
     request.cspNonce = randomBytes(32).toString("base64");
@@ -145,7 +185,9 @@ export function registerHttpSecurity(
     const timestamp = now();
     const limit = bucket === "upload"
       ? policy.upload ?? DEFAULT_RATE_LIMITS.upload ?? 5
-      : policy[bucket];
+      : bucket === "uploadOperation"
+        ? policy.uploadOperation ?? DEFAULT_RATE_LIMITS.uploadOperation ?? 1_000
+        : policy[bucket];
     const entry = counters.consume(key, limit, timestamp, policy.windowMs);
     if (!entry.limited) return;
 

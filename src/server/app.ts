@@ -99,14 +99,23 @@ import {
   DEFAULT_RATE_LIMITS,
   MAX_REQUEST_BODY_BYTES,
   registerHttpSecurity,
+  UploadBodyConcurrencyState,
   type RateLimitPolicy
 } from "./security/http.js";
 import {
   FolderUploadError,
   importFolderFiles,
   MAX_FOLDER_SCAN_FILES,
+  removePendingSnapshotMarker,
+  removeReadOnlyTree,
   type FolderUploadFile
 } from "./uploads/folder-import.js";
+import {
+  UploadSessionError,
+  UploadSessionService,
+  UPLOAD_MANIFEST_PAGE_SIZE,
+  type ClientUploadManifestEntry
+} from "./uploads/upload-session.js";
 
 const SESSION_COOKIE = "devkh_session";
 const CSRF_COOKIE = "devkh_csrf";
@@ -178,6 +187,32 @@ const projectSchema = z.object({
   name: z.string().trim().min(1).max(120),
   slug: z.string().trim().toLowerCase().regex(/^[a-z0-9][a-z0-9-]{0,79}$/)
 });
+const uploadSessionCreateSchema = z.object({
+  repositoryId: z.uuid(),
+  entryCount: z.number().int().min(1).max(100_000)
+}).strict();
+const uploadManifestEntryBaseSchema = z.object({
+  ordinal: z.number().int().nonnegative(),
+  path: z.string().min(1).max(4096),
+  byteSize: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  mediaType: z.string().trim().min(1).max(255).nullable().optional()
+});
+const uploadManifestEntrySchema = z.discriminatedUnion("kind", [
+  uploadManifestEntryBaseSchema.extend({
+    kind: z.literal("source"),
+    contentHash: z.string().regex(/^[a-f0-9]{64}$/u)
+  }).strict(),
+  uploadManifestEntryBaseSchema.extend({
+    kind: z.literal("asset"),
+    contentHash: z.null()
+  }).strict()
+]);
+const uploadManifestPageSchema = z.object({
+  entries: z.array(uploadManifestEntrySchema).min(1).max(UPLOAD_MANIFEST_PAGE_SIZE)
+}).strict();
+const uploadCommitSchema = z.object({
+  manifestDigest: z.string().regex(/^[a-f0-9]{64}$/u)
+}).strict();
 const memberSchema = z.object({
   email: z.email().transform((value) => value.toLowerCase()),
   password: z.string().min(12),
@@ -407,6 +442,9 @@ async function* directFolderParts(request: FastifyRequest): AsyncGenerator<Folde
 export function buildServer(options: ServerOptions): FastifyInstance {
   const server = Fastify({
     bodyLimit: MAX_REQUEST_BODY_BYTES,
+    connectionTimeout: 10_000,
+    requestTimeout: 10 * 60_000,
+    trustProxy: 1,
     logger: options.nodeEnv === "test" || process.env.NODE_ENV === "test" ? false : {
       redact: {
         paths: [
@@ -425,6 +463,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   const knowledgeKernelMode = options.knowledgeKernelMode ?? "legacy";
   const frontendKnowledgeMode = options.frontendKnowledgeMode ?? "legacy";
   const stageSseConnections = new Map<string, number>();
+  const uploadSessions = new UploadSessionService({ store: options.store, dataDir: options.dataDir });
+  const uploadBodies = new UploadBodyConcurrencyState();
   registerHttpSecurity(server, options.rateLimits ?? DEFAULT_RATE_LIMITS);
   server.addContentTypeParser(
     "application/octet-stream",
@@ -449,6 +489,16 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       parts: MAX_FOLDER_SCAN_FILES,
       fileSize: MAX_IMPORT_TABLE_WORKBOOK_BYTES
     }
+  });
+  const uploadCleanupTimer = setInterval(() => {
+    void uploadSessions.cleanupExpired().catch((error) => server.log.error({ err: error }, "Upload session cleanup failed"));
+  }, 60 * 60 * 1_000);
+  uploadCleanupTimer.unref();
+  server.addHook("onReady", async () => {
+    await uploadSessions.cleanupExpired();
+  });
+  server.addHook("onClose", async () => {
+    clearInterval(uploadCleanupTimer);
   });
   if (options.clientDir) {
     const clientEntrypointPath = path.join(options.clientDir, "index.html");
@@ -545,6 +595,37 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   const requireContributor = (request: FastifyRequest, reply: FastifyReply) =>
     requireRole("member", request, reply);
 
+  async function requireUploadContributor(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    if (!params.success) {
+      sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload request");
+      return;
+    }
+    await requireContributor(request, reply);
+    if (reply.sent) return;
+    await requireProjectRole("member", params.data.projectId, request, reply);
+  }
+
+  async function requireUploadReplacementAdmin(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const params = z.object({ repositoryId: z.uuid() }).safeParse(request.params);
+    if (!params.success) {
+      sendError(reply, 400, "INVALID_UPLOAD", "Invalid replacement folder upload");
+      return;
+    }
+    await requireAdmin(request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repositories = await options.store.listArchivedRepositories(admin.workspaceId);
+    const repository = repositories.find((candidate) =>
+      candidate.id === params.data.repositoryId && candidate.kind === "upload"
+    );
+    if (!repository) {
+      sendError(reply, 404, "UPLOAD_REPLACEMENT_NOT_FOUND", "Folder upload replacement was not found");
+      return;
+    }
+    await requireProjectRole("admin", repository.projectId, request, reply);
+  }
+
   async function requireProjectRole(
     role: TeamRole,
     projectId: string,
@@ -558,6 +639,23 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!access || !access.role || !roleAllows(access.role, role)) {
       sendError(reply, 403, "PROJECT_ACCESS_DENIED", "Insufficient project role");
     }
+  }
+
+  function uploadIdempotencyKey(request: FastifyRequest, reply: FastifyReply): string | null {
+    const key = request.headers["idempotency-key"];
+    if (typeof key !== "string" || key.length < 1 || key.length > 200) {
+      sendError(reply, 400, "IDEMPOTENCY_KEY_REQUIRED", "A bounded Idempotency-Key header is required");
+      return null;
+    }
+    return key;
+  }
+
+  function uploadSessionFailure(request: FastifyRequest, reply: FastifyReply, error: unknown) {
+    if (error instanceof UploadSessionError) {
+      return sendError(reply, error.statusCode, error.code, error.message);
+    }
+    request.log.error({ err: error }, "Upload session request failed");
+    return sendError(reply, 500, "UPLOAD_FAILED", "Unable to process upload session");
   }
 
   async function requireRepositoryRole(
@@ -783,8 +881,187 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
 
   server.post(
-    "/api/projects/:projectId/folder-import",
+    "/api/projects/:projectId/upload-sessions",
     { preHandler: requireContributor },
+    async (request, reply) => {
+      const key = uploadIdempotencyKey(request, reply);
+      if (!key) return;
+      const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+      const body = uploadSessionCreateSchema.safeParse(request.body);
+      if (!params.success || !body.success) {
+        return sendError(reply, 400, "INVALID_UPLOAD_MANIFEST", "Invalid upload session request");
+      }
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      const repository = await options.store.getRepository(admin.workspaceId, body.data.repositoryId);
+      if (!repository || repository.projectId !== params.data.projectId || repository.kind !== "upload") {
+        return sendError(reply, 404, "UPLOAD_REPOSITORY_NOT_FOUND", "Upload repository was not found");
+      }
+      await requireProjectRole(repository.archivedAt ? "admin" : "member", params.data.projectId, request, reply);
+      if (reply.sent) return;
+      try {
+        const session = await uploadSessions.createSession({
+          workspaceId: admin.workspaceId,
+          projectId: params.data.projectId,
+          repositoryId: repository.id,
+          actorId: admin.id,
+          sessionVersion: admin.sessionVersion,
+          entryCount: body.data.entryCount,
+          idempotencyKey: key
+        });
+        return reply.code(201).send(session);
+      } catch (error) {
+        return uploadSessionFailure(request, reply, error);
+      }
+    }
+  );
+
+  server.put(
+    "/api/projects/:projectId/upload-sessions/:sessionId/manifest-pages/:page",
+    { bodyLimit: 4 * 1024 * 1024, preHandler: requireContributor },
+    async (request, reply) => {
+      const key = uploadIdempotencyKey(request, reply);
+      if (!key) return;
+      const params = z.object({
+        projectId: z.uuid(),
+        sessionId: z.uuid(),
+        page: z.coerce.number().int().nonnegative()
+      }).safeParse(request.params);
+      const body = uploadManifestPageSchema.safeParse(request.body);
+      if (!params.success || !body.success) {
+        return sendError(reply, 400, "INVALID_UPLOAD_MANIFEST", "Invalid upload manifest page");
+      }
+      await requireProjectRole("member", params.data.projectId, request, reply);
+      if (reply.sent) return;
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      try {
+        const result = await uploadSessions.putManifestPage({
+          workspaceId: admin.workspaceId,
+          projectId: params.data.projectId,
+          actorId: admin.id,
+          sessionVersion: admin.sessionVersion,
+          sessionId: params.data.sessionId,
+          page: params.data.page,
+          entries: body.data.entries as ClientUploadManifestEntry[],
+          idempotencyKey: key
+        });
+        return reply.send(result);
+      } catch (error) {
+        return uploadSessionFailure(request, reply, error);
+      }
+    }
+  );
+
+  server.put(
+    "/api/projects/:projectId/upload-sessions/:sessionId/files/:ordinal",
+    {
+      onRequest: requireUploadContributor,
+      preParsing: async (request, reply, payload) => {
+        const params = z.object({ sessionId: z.uuid() }).safeParse(request.params);
+        if (!params.success) return payload;
+        const release = uploadBodies.acquire(request.ip, params.data.sessionId);
+        if (!release) {
+          reply.header("retry-after", 1).code(429).send({
+            error: { code: "UPLOAD_CONCURRENCY_LIMIT", message: "Too many concurrent upload bodies" }
+          });
+          return payload;
+        }
+        reply.raw.once("finish", release);
+        reply.raw.once("close", release);
+        return payload;
+      },
+      bodyLimit: MAX_IMPORT_TABLE_WORKBOOK_BYTES
+    },
+    async (request, reply) => {
+      const key = uploadIdempotencyKey(request, reply);
+      if (!key) return;
+      const params = z.object({
+        projectId: z.uuid(),
+        sessionId: z.uuid(),
+        ordinal: z.coerce.number().int().nonnegative()
+      }).safeParse(request.params);
+      if (!params.success || !Buffer.isBuffer(request.body)) {
+        return sendError(reply, 400, "INVALID_UPLOAD", "Upload bytes must use application/octet-stream");
+      }
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      try {
+        const result = await uploadSessions.putFile({
+          workspaceId: admin.workspaceId,
+          projectId: params.data.projectId,
+          actorId: admin.id,
+          sessionVersion: admin.sessionVersion,
+          sessionId: params.data.sessionId,
+          ordinal: params.data.ordinal,
+          bytes: request.body,
+          idempotencyKey: key
+        });
+        return reply.send(result);
+      } catch (error) {
+        return uploadSessionFailure(request, reply, error);
+      }
+    }
+  );
+
+  server.post(
+    "/api/projects/:projectId/upload-sessions/:sessionId/commit",
+    { preHandler: requireContributor },
+    async (request, reply) => {
+      const key = uploadIdempotencyKey(request, reply);
+      if (!key) return;
+      const params = z.object({ projectId: z.uuid(), sessionId: z.uuid() }).safeParse(request.params);
+      const body = uploadCommitSchema.safeParse(request.body);
+      if (!params.success || !body.success) {
+        return sendError(reply, 400, "INVALID_UPLOAD_MANIFEST", "Invalid upload commit request");
+      }
+      await requireProjectRole("member", params.data.projectId, request, reply);
+      if (reply.sent) return;
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      try {
+        const result = await uploadSessions.commit({
+          workspaceId: admin.workspaceId,
+          projectId: params.data.projectId,
+          actorId: admin.id,
+          sessionVersion: admin.sessionVersion,
+          sessionId: params.data.sessionId,
+          manifestDigest: body.data.manifestDigest,
+          idempotencyKey: key
+        });
+        return reply.code(result.unchanged ? 200 : 201).send(result);
+      } catch (error) {
+        return uploadSessionFailure(request, reply, error);
+      }
+    }
+  );
+
+  server.delete(
+    "/api/projects/:projectId/upload-sessions/:sessionId",
+    { preHandler: requireContributor },
+    async (request, reply) => {
+      const key = uploadIdempotencyKey(request, reply);
+      if (!key) return;
+      const params = z.object({ projectId: z.uuid(), sessionId: z.uuid() }).safeParse(request.params);
+      if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload session");
+      await requireProjectRole("member", params.data.projectId, request, reply);
+      if (reply.sent) return;
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      try {
+        await uploadSessions.cancel({
+          workspaceId: admin.workspaceId,
+          projectId: params.data.projectId,
+          actorId: admin.id,
+          sessionVersion: admin.sessionVersion,
+          sessionId: params.data.sessionId,
+          idempotencyKey: key
+        });
+        return reply.code(204).send();
+      } catch (error) {
+        return uploadSessionFailure(request, reply, error);
+      }
+    }
+  );
+
+  server.post(
+    "/api/projects/:projectId/folder-import",
+    { onRequest: requireUploadContributor },
     async (request, reply) => {
       const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
       if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid project folder upload");
@@ -802,6 +1079,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         actorId: admin.id,
         sourceKind: repository.kind
       });
+      let pendingSnapshotId: string | null = null;
       try {
         const summary = await importFolderFiles({
           files: directFolderParts(request),
@@ -809,24 +1087,45 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           workspaceId: admin.workspaceId,
           repositoryId: repository.id,
           actorId: admin.id,
-          store: options.store
+          store: options.store,
+          pendingImportReportId: report.id
         });
-        await options.store.finishImportReport(admin.workspaceId, report.id, {
-          status: "succeeded",
-          collectedFileCount: summary.fileCount,
-          collectedTextBytes: summary.textBytes,
-          ignored: summary.ignored,
-          snapshotId: summary.snapshotId,
-          failureCode: null
+        pendingSnapshotId = summary.snapshotId;
+        const completed = await options.store.completeFolderImport({
+          workspaceId: admin.workspaceId,
+          projectId: params.data.projectId,
+          repositoryId: repository.id,
+          actorId: admin.id,
+          actorSessionVersion: admin.sessionVersion,
+          reportId: report.id,
+          activateReplacement: false,
+          expectedCurrentRepositoryId: repository.id,
+          report: {
+            status: "succeeded",
+            collectedFileCount: summary.fileCount,
+            collectedTextBytes: summary.textBytes,
+            ignored: summary.ignored,
+            snapshotId: summary.snapshotId,
+            failureCode: null
+          }
         });
+        if (!completed) throw new Error("Folder import completion was not persisted");
+        await removePendingSnapshotMarker(summary.storagePath).catch(() => undefined);
         return reply.code(summary.unchanged ? 200 : 201).send({
           snapshotId: summary.snapshotId,
           sourceVersion: summary.sourceVersion,
           fileCount: summary.fileCount,
+          textBytes: summary.textBytes,
           unchanged: summary.unchanged,
           ignored: summary.ignored
         });
       } catch (error) {
+        if (pendingSnapshotId) {
+          const storagePath = await options.store.discardPendingFolderImport(
+            admin.workspaceId, report.id, pendingSnapshotId
+          ).catch(() => null);
+          if (storagePath) await removeReadOnlyTree(path.dirname(storagePath)).catch(() => undefined);
+        }
         const code = error instanceof FolderUploadError ? error.code : "UPLOAD_FAILED";
         await options.store.finishImportReport(admin.workspaceId, report.id, {
           status: "failed",
@@ -848,18 +1147,25 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.post(
     "/api/repositories/:repositoryId/folder-import",
-    { preHandler: requireContributor },
+    { onRequest: requireUploadReplacementAdmin },
     async (request, reply) => {
       const params = z.object({ repositoryId: z.uuid() }).safeParse(request.params);
       if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid replacement folder upload");
       const admin = (request as AuthenticatedRequest).sessionAdmin;
       const candidates = await options.store.listArchivedRepositories(admin.workspaceId);
       const repository = candidates.find((candidate) => candidate.id === params.data.repositoryId && candidate.kind === "upload");
-      if (!repository || await options.store.latestSnapshot(admin.workspaceId, repository.id)) {
+      if (!repository) {
         return sendError(reply, 404, "UPLOAD_REPLACEMENT_NOT_FOUND", "Folder upload replacement was not found");
       }
       await requireProjectRole("admin", repository.projectId, request, reply);
       if (reply.sent) return;
+      if (await options.store.latestSnapshot(admin.workspaceId, repository.id)) {
+        return sendError(reply, 409, "UPLOAD_SESSION_INVALIDATED", "Pending upload replacement was not found");
+      }
+      const expectedCurrentRepository = await options.store.currentRepository(admin.workspaceId, repository.projectId);
+      if (!expectedCurrentRepository) {
+        return sendError(reply, 409, "UPLOAD_SESSION_INVALIDATED", "The current upload source changed");
+      }
       const report = await options.store.createImportReport({
         workspaceId: admin.workspaceId,
         projectId: repository.projectId,
@@ -868,6 +1174,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         sourceKind: repository.kind
       });
       let activated = false;
+      let pendingSnapshotId: string | null = null;
       try {
         const summary = await importFolderFiles({
           files: directFolderParts(request),
@@ -875,27 +1182,46 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           workspaceId: admin.workspaceId,
           repositoryId: repository.id,
           actorId: admin.id,
-          store: options.store
+          store: options.store,
+          pendingImportReportId: report.id
         });
-        const replacement = await options.store.activateUploadReplacementWithAudit(admin.workspaceId, repository.id, admin.id);
-        if (!replacement) return sendError(reply, 409, "UPLOAD_REPLACEMENT_NOT_FOUND", "Folder upload replacement was not found");
+        pendingSnapshotId = summary.snapshotId;
+        const completed = await options.store.completeFolderImport({
+          workspaceId: admin.workspaceId,
+          projectId: repository.projectId,
+          repositoryId: repository.id,
+          actorId: admin.id,
+          actorSessionVersion: admin.sessionVersion,
+          reportId: report.id,
+          activateReplacement: true,
+          expectedCurrentRepositoryId: expectedCurrentRepository.id,
+          report: {
+            status: "succeeded",
+            collectedFileCount: summary.fileCount,
+            collectedTextBytes: summary.textBytes,
+            ignored: summary.ignored,
+            snapshotId: summary.snapshotId,
+            failureCode: null
+          }
+        });
+        if (!completed) throw new Error("Folder replacement completion was not persisted");
+        await removePendingSnapshotMarker(summary.storagePath).catch(() => undefined);
         activated = true;
-        await options.store.finishImportReport(admin.workspaceId, report.id, {
-          status: "succeeded",
-          collectedFileCount: summary.fileCount,
-          collectedTextBytes: summary.textBytes,
-          ignored: summary.ignored,
-          snapshotId: summary.snapshotId,
-          failureCode: null
-        });
         return reply.code(summary.unchanged ? 200 : 201).send({
           snapshotId: summary.snapshotId,
           sourceVersion: summary.sourceVersion,
           fileCount: summary.fileCount,
+          textBytes: summary.textBytes,
           unchanged: summary.unchanged,
           ignored: summary.ignored
         });
       } catch (error) {
+        if (pendingSnapshotId) {
+          const storagePath = await options.store.discardPendingFolderImport(
+            admin.workspaceId, report.id, pendingSnapshotId
+          ).catch(() => null);
+          if (storagePath) await removeReadOnlyTree(path.dirname(storagePath)).catch(() => undefined);
+        }
         const code = error instanceof FolderUploadError ? error.code : "UPLOAD_FAILED";
         await options.store.finishImportReport(admin.workspaceId, report.id, {
           status: "failed",
@@ -1926,6 +2252,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (parsed.data.kind === "upload") {
       const candidate = await options.store.prepareUploadReplacementWithAudit(
         admin.workspaceId,
+        current.projectId,
         parsed.data.name,
         admin.id
       );
@@ -1934,6 +2261,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
     const repository = await options.store.switchRepositoryWithAudit(
       admin.workspaceId,
+      current.projectId,
       repositoryInput(parsed.data, options.masterKey),
       admin.id
     );

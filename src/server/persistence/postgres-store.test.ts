@@ -344,7 +344,7 @@ describe("PostgresAppStore repository reads", () => {
     const client = { query, release: vi.fn() };
     const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
 
-    const switched = await store.switchRepositoryWithAudit("workspace-1", {
+    const switched = await store.switchRepositoryWithAudit("workspace-1", "project-1", {
       kind: "git",
       name: "Replacement",
       url: "https://example.com/replacement.git",
@@ -411,7 +411,7 @@ describe("PostgresAppStore repository reads", () => {
     const client = { query, release: vi.fn() };
     const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
 
-    await expect(store.switchRepositoryWithAudit("workspace-1", {
+    await expect(store.switchRepositoryWithAudit("workspace-1", "project-1", {
       kind: "git",
       name: "Replacement",
       url: "https://example.com/replacement.git",
@@ -470,7 +470,7 @@ describe("PostgresAppStore repository reads", () => {
 
     expect(persisted.id).toBe("snapshot-winner");
     expect(query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO source_snapshots"))?.[0])
-      .toContain("ON CONFLICT (repository_id, commit_sha) DO NOTHING");
+      .toContain("WHERE pending_upload_session_id IS NULL AND pending_import_report_id IS NULL");
     expect(query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO source_files")))
       .toBe(false);
   });

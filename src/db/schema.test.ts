@@ -14,6 +14,10 @@ describe("schema exports", () => {
         "sourceSnapshots",
         "sourceFiles",
         "sourceAnalysisArtifacts",
+        "uploadSessions",
+        "uploadSessionEntries",
+        "uploadIdempotencyKeys",
+        "importReports",
         "codeSymbols",
         "codeEdges",
         "buildJobs",
@@ -29,6 +33,47 @@ describe("schema exports", () => {
         "BUILD_JOB_STATUSES",
         "AGENT_FEEDBACK_STATUSES"
       ])
+    );
+  });
+
+  test("keeps upload sessions workspace scoped with durable manifest and idempotency contracts", () => {
+    const sessions = getTableConfig(schema.uploadSessions);
+    const entries = getTableConfig(schema.uploadSessionEntries);
+    const idempotency = getTableConfig(schema.uploadIdempotencyKeys);
+    const reports = getTableConfig(schema.importReports);
+    const snapshots = getTableConfig(schema.sourceSnapshots);
+
+    expect(sessions.foreignKeys.map((key) => key.getName())).toEqual(expect.arrayContaining([
+      "upload_sessions_project_workspace_fk",
+      "upload_sessions_repository_scope_fk",
+      "upload_sessions_expected_current_repository_scope_fk",
+      "upload_sessions_expected_latest_snapshot_scope_fk",
+      "upload_sessions_actor_workspace_fk",
+      "upload_sessions_snapshot_repository_fk"
+    ]));
+    expect(sessions.checks.map((item) => item.name)).toEqual(expect.arrayContaining([
+      "upload_sessions_status_check",
+      "upload_sessions_entry_count_check",
+      "upload_sessions_manifest_digest_check"
+    ]));
+    expect(sessions.columns.find((column) => column.name === "commit_response")?.notNull).toBe(false);
+    expect(entries.primaryKeys).toHaveLength(1);
+    expect(entries.primaryKeys[0]!.columns.map((column) => column.name)).toEqual(["session_id", "ordinal"]);
+    expect(entries.uniqueConstraints.map((item) => item.name)).toContain("upload_session_entries_path_unique");
+    expect(entries.columns.find((column) => column.name === "metadata_byte_size")?.notNull).toBe(true);
+    expect(entries.checks.map((item) => item.name)).toContain("upload_session_entries_metadata_byte_size_check");
+    expect(idempotency.primaryKeys).toHaveLength(1);
+    expect(idempotency.primaryKeys[0]!.columns.map((column) => column.name)).toEqual([
+      "workspace_id", "actor_id", "idempotency_key"
+    ]);
+    expect(reports.foreignKeys.map((key) => key.getName())).toContain(
+      "import_reports_upload_session_scope_fk"
+    );
+    expect(reports.checks.map((item) => item.name)).toContain("import_reports_status_check");
+    expect(reports.indexes.map((item) => item.config.name)).toContain("import_reports_retention_idx");
+    expect(reports.indexes.map((item) => item.config.name)).toContain("import_reports_id_workspace_repository_idx");
+    expect(snapshots.foreignKeys.map((key) => key.getName())).toContain(
+      "source_snapshots_pending_import_report_scope_fk"
     );
   });
 

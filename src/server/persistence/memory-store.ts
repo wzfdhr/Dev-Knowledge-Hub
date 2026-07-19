@@ -59,6 +59,15 @@ import type {
   SetupResult,
   TeamMemberRecord,
   TeamRole,
+  CreateUploadSessionInput,
+  CompleteUploadSessionInput,
+  CompleteFolderImportInput,
+  CancelUploadSessionInput,
+  UploadIdempotencyRecord,
+  UploadManifestEntryInput,
+  UploadManifestEntryRecord,
+  UploadSessionMutationIdentity,
+  UploadSessionRecord,
   ProjectAccess,
   ProjectMemberRecord,
   ProjectRole,
@@ -74,8 +83,11 @@ import type {
 } from "./store.js";
 import {
   GIT_SYNC_FAILURE_BACKOFF_MS,
-  GIT_SYNC_INTERVAL_MS
+  GIT_SYNC_INTERVAL_MS,
+  MAX_UPLOAD_ACCEPTED_BYTES,
+  MAX_UPLOAD_ACCEPTED_FILES
 } from "./store.js";
+import { MAX_UPLOAD_MANIFEST_METADATA_BYTES } from "../../shared/import-filter.js";
 import type { PipelineStageRunRecord } from "./store.js";
 import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
 import {
@@ -135,6 +147,14 @@ export class MemoryAppStore implements AppStore {
   readonly sourceFiles: SourceFileRecord[] = [];
   readonly sourceAnalysisArtifacts: SourceAnalysisArtifactRecord[] = [];
   readonly importReports: ImportReportRecord[] = [];
+  readonly uploadSessions: UploadSessionRecord[] = [];
+  readonly uploadManifestEntries: UploadManifestEntryRecord[] = [];
+  readonly uploadIdempotencyKeys: UploadIdempotencyRecord[] = [];
+  private readonly uploadSessionImportReports = new Map<string, string>();
+  private readonly pendingSnapshotUploadSessions = new Map<string, string>();
+  private readonly pendingSnapshotImportReports = new Map<string, string>();
+  private readonly uploadSessionLocks = new Map<string, Promise<void>>();
+  private readonly uploadIdempotencyLocks = new Map<string, Promise<void>>();
   readonly builds: BuildRecord[] = [];
   readonly buildEvents: BuildEvent[] = [];
   private nextBuildEventSequence = 1;
@@ -708,6 +728,27 @@ export class MemoryAppStore implements AppStore {
     return report;
   }
 
+  async createUploadSessionImportReport(
+    input: Omit<ImportReportRecord, "id" | "startedAt" | "finishedAt" | "status" | "collectedFileCount" | "collectedTextBytes" | "ignored" | "snapshotId" | "failureCode">,
+    sessionId: string
+  ): Promise<ImportReportRecord> {
+    const existingId = this.uploadSessionImportReports.get(sessionId);
+    const existing = existingId ? this.importReports.find((report) => report.id === existingId) : undefined;
+    if (existing) {
+      if (existing.status !== "running") {
+        Object.assign(existing, {
+          status: "running", startedAt: new Date(), finishedAt: null,
+          collectedFileCount: 0, collectedTextBytes: 0,
+          ignored: { total: 0, reasons: {} }, snapshotId: null, failureCode: null
+        });
+      }
+      return { ...existing };
+    }
+    const report = await this.createImportReport(input);
+    this.uploadSessionImportReports.set(sessionId, report.id);
+    return report;
+  }
+
   async finishImportReport(
     workspaceId: string,
     reportId: string,
@@ -717,6 +758,70 @@ export class MemoryAppStore implements AppStore {
     if (!report || report.status !== "running") return null;
     Object.assign(report, input, { finishedAt: new Date() });
     return report;
+  }
+
+  async completeFolderImport(input: CompleteFolderImportInput): Promise<ImportReportRecord | null> {
+    const repositorySnapshot = this.repositories.map((repository) => ({ ...repository }));
+    const reportSnapshot = this.importReports.map((report) => ({ ...report }));
+    const pendingImportSnapshot = new Map(this.pendingSnapshotImportReports);
+    const auditLength = this.auditEvents.length;
+    try {
+      const report = this.importReports.find((candidate) =>
+        candidate.workspaceId === input.workspaceId && candidate.id === input.reportId
+        && candidate.projectId === input.projectId && candidate.repositoryId === input.repositoryId
+        && candidate.actorId === input.actorId && candidate.status === "running"
+      );
+      if (!report) return null;
+      const actor = await this.findAdminById(input.actorId, input.workspaceId);
+      const access = actor ? await this.projectAccess(input.workspaceId, input.projectId, input.actorId) : null;
+      const current = await this.currentRepository(input.workspaceId, input.projectId);
+      if (!actor || actor.disabledAt || actor.sessionVersion !== input.actorSessionVersion
+        || !access || current?.id !== input.expectedCurrentRepositoryId
+        || (input.activateReplacement ? access.role !== "admin" : access.role === "reader")) return null;
+      if (input.activateReplacement) {
+        if (current?.id !== input.repositoryId) {
+          const activated = await this.activateUploadReplacementWithAudit(
+            input.workspaceId, input.projectId, input.repositoryId, input.actorId
+          );
+          if (!activated) return null;
+        }
+      } else if (current.id !== input.repositoryId) {
+        return null;
+      }
+      const snapshot = input.report.snapshotId
+        ? this.sourceSnapshots.find((candidate) =>
+            candidate.id === input.report.snapshotId
+            && candidate.workspaceId === input.workspaceId
+            && candidate.repositoryId === input.repositoryId)
+        : null;
+      if (input.report.snapshotId && !snapshot) throw new Error("Folder import snapshot activation failed");
+      const wasPending = snapshot
+        ? this.pendingSnapshotImportReports.get(snapshot.id) === input.reportId
+        : false;
+      if (snapshot && this.pendingSnapshotImportReports.has(snapshot.id) && !wasPending) return null;
+      if (snapshot) this.pendingSnapshotImportReports.delete(snapshot.id);
+      if (snapshot) {
+        await this.recordAudit({
+          workspaceId: input.workspaceId,
+          actorId: input.actorId,
+          action: "repository.sync_succeeded",
+          resourceType: "repository",
+          resourceId: input.repositoryId,
+          metadata: { commitSha: snapshot.commitSha, unchanged: !wasPending }
+        });
+      }
+      Object.assign(report, input.report, { finishedAt: new Date() });
+      return { ...report };
+    } catch (error) {
+      this.repositories.splice(0, this.repositories.length, ...repositorySnapshot);
+      this.importReports.splice(0, this.importReports.length, ...reportSnapshot);
+      this.pendingSnapshotImportReports.clear();
+      for (const [snapshotId, reportId] of pendingImportSnapshot) {
+        this.pendingSnapshotImportReports.set(snapshotId, reportId);
+      }
+      this.auditEvents.splice(auditLength);
+      throw error;
+    }
   }
 
   async listImportReports(workspaceId: string, projectId: string, pagination?: Pagination): Promise<ImportReportRecord[]> {
@@ -738,6 +843,465 @@ export class MemoryAppStore implements AppStore {
       || report.finishedAt >= cutoff);
     this.importReports.splice(0, this.importReports.length, ...retained);
     return before - retained.length;
+  }
+
+  async failStaleRunningImportReports(cutoff: Date): Promise<number> {
+    let updated = 0;
+    for (const report of this.importReports) {
+      if (report.sourceKind !== "upload" || report.status !== "running" || report.startedAt >= cutoff) continue;
+      Object.assign(report, {
+        status: "failed",
+        finishedAt: new Date(),
+        snapshotId: null,
+        failureCode: "UPLOAD_INTERRUPTED"
+      });
+      updated += 1;
+    }
+    return updated;
+  }
+
+  async createUploadSession(input: CreateUploadSessionInput): Promise<UploadSessionRecord> {
+    const existing = this.uploadSessions.find((item) => item.workspaceId === input.workspaceId && item.id === input.id);
+    if (existing) {
+      if (existing.projectId !== input.projectId || existing.repositoryId !== input.repositoryId
+        || existing.actorId !== input.actorId || existing.sessionVersion !== input.sessionVersion
+        || existing.isReplacement !== input.isReplacement
+        || existing.expectedCurrentRepositoryId !== input.expectedCurrentRepositoryId
+        || existing.entryCount !== input.entryCount) {
+        throw new Error("Upload session identity conflicts with an existing record");
+      }
+      return { ...existing };
+    }
+    const repository = this.repositories.find((candidate) => candidate.workspaceId === input.workspaceId
+      && candidate.id === input.repositoryId);
+    const current = this.repositories.find((candidate) => candidate.workspaceId === input.workspaceId
+      && candidate.projectId === input.projectId && candidate.archivedAt === null);
+    if (!repository || repository.projectId !== input.projectId
+      || current?.id !== input.expectedCurrentRepositoryId) throw new Error("UPLOAD_SESSION_INVALIDATED");
+    const actor = await this.findAdminById(input.actorId, input.workspaceId);
+    const access = actor ? await this.projectAccess(input.workspaceId, input.projectId, input.actorId) : null;
+    if (!actor || actor.disabledAt || actor.sessionVersion !== input.sessionVersion || !access
+      || (input.isReplacement ? access.role !== "admin" : access.role === "reader")) {
+      throw new Error("UPLOAD_SESSION_INVALIDATED");
+    }
+    const latest = this.sourceSnapshots.filter((snapshot) =>
+      snapshot.workspaceId === input.workspaceId && snapshot.repositoryId === input.repositoryId
+      && !this.pendingSnapshotUploadSessions.has(snapshot.id)
+      && !this.pendingSnapshotImportReports.has(snapshot.id)
+    ).sort((left, right) => right.commitTimestamp.getTime() - left.commitTimestamp.getTime())[0] ?? null;
+    const now = new Date();
+    const session: UploadSessionRecord = {
+      ...input,
+      expectedLatestSnapshotId: latest?.id ?? null,
+      status: "open",
+      manifestDigest: null,
+      snapshotId: null,
+      commitResponse: null,
+      committedAt: null,
+      cancelledAt: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    this.uploadSessions.push(session);
+    return { ...session };
+  }
+
+  async getUploadSession(workspaceId: string, sessionId: string): Promise<UploadSessionRecord | null> {
+    const session = this.uploadSessions.find((item) => item.workspaceId === workspaceId && item.id === sessionId);
+    return session ? { ...session } : null;
+  }
+
+  async repositoryHasActiveUploadSession(workspaceId: string, repositoryId: string): Promise<boolean> {
+    return this.uploadSessions.some((session) => session.workspaceId === workspaceId
+      && session.repositoryId === repositoryId && ["open", "committing"].includes(session.status));
+  }
+
+  async getUploadSessionStagingOwner(sessionId: string) {
+    const session = this.uploadSessions.find((candidate) => candidate.id === sessionId);
+    return session ? {
+      workspaceId: session.workspaceId,
+      active: ["open", "committing"].includes(session.status)
+    } : null;
+  }
+
+  async saveUploadManifestPage(
+    identity: UploadSessionMutationIdentity,
+    entries: UploadManifestEntryInput[]
+  ): Promise<UploadManifestEntryRecord[]> {
+    const { workspaceId, sessionId } = identity;
+    const session = this.uploadSessions.find((item) => item.workspaceId === workspaceId && item.id === sessionId);
+    if (!session || session.status !== "open") return [];
+    const actor = await this.findAdminById(identity.actorId, workspaceId);
+    const access = actor ? await this.projectAccess(workspaceId, identity.projectId, identity.actorId) : null;
+    if (session.projectId !== identity.projectId || session.actorId !== identity.actorId
+      || session.sessionVersion !== identity.sessionVersion || !actor || actor.disabledAt
+      || actor.sessionVersion !== identity.sessionVersion || !access
+      || (session.isReplacement ? access.role !== "admin" : access.role === "reader")) return [];
+    const originalLength = this.uploadManifestEntries.length;
+    const now = new Date();
+    try {
+      const manifest = this.uploadManifestEntries.filter((item) =>
+        item.workspaceId === workspaceId && item.sessionId === sessionId
+      );
+      const byOrdinal = new Map(manifest.map((item) => [item.ordinal, item]));
+      const byPath = new Map(manifest.map((item) => [item.path, item]));
+      for (const input of entries) {
+        const ordinalEntry = byOrdinal.get(input.ordinal);
+        const pathEntry = byPath.get(input.path);
+        if (ordinalEntry || pathEntry) {
+          if ((ordinalEntry && ordinalEntry.path !== input.path) || (pathEntry && pathEntry.ordinal !== input.ordinal)) {
+            throw new Error("UPLOAD_MANIFEST_CONFLICT");
+          }
+          const existing = ordinalEntry ?? pathEntry!;
+          if (existing.path !== input.path || existing.kind !== input.kind
+            || existing.byteSize !== input.byteSize || existing.contentHash !== input.contentHash
+            || existing.mediaType !== input.mediaType) throw new Error("UPLOAD_MANIFEST_CONFLICT");
+          continue;
+        }
+        const record: UploadManifestEntryRecord = {
+          ...input,
+          sessionId,
+          workspaceId,
+          uploadedAt: null,
+          createdAt: now,
+          updatedAt: now
+        };
+        this.uploadManifestEntries.push(record);
+        byOrdinal.set(record.ordinal, record);
+        byPath.set(record.path, record);
+      }
+      const accepted = this.uploadManifestEntries.filter((item) => item.workspaceId === workspaceId
+        && item.sessionId === sessionId && item.disposition === "upload_required");
+      const persistedManifest = this.uploadManifestEntries.filter((item) => item.workspaceId === workspaceId
+        && item.sessionId === sessionId);
+      if (accepted.length > MAX_UPLOAD_ACCEPTED_FILES
+        || accepted.reduce((total, item) => total + item.byteSize, 0) > MAX_UPLOAD_ACCEPTED_BYTES) {
+        throw new Error(accepted.length > MAX_UPLOAD_ACCEPTED_FILES ? "TOO_MANY_FILES" : "FOLDER_SIZE_LIMIT");
+      }
+      if (persistedManifest.reduce((total, item) => total + item.metadataByteSize, 0) + persistedManifest.length + 1
+        > MAX_UPLOAD_MANIFEST_METADATA_BYTES) throw new Error("MANIFEST_METADATA_LIMIT");
+    } catch (error) {
+      this.uploadManifestEntries.splice(originalLength);
+      throw error;
+    }
+    const ordinals = new Set(entries.map((entry) => entry.ordinal));
+    return this.uploadManifestEntries.filter((item) => item.workspaceId === workspaceId
+      && item.sessionId === sessionId && ordinals.has(item.ordinal)).sort((left, right) => left.ordinal - right.ordinal)
+      .map((item) => ({ ...item }));
+  }
+
+  async listUploadManifestEntries(workspaceId: string, sessionId: string, pagination?: Pagination): Promise<UploadManifestEntryRecord[]> {
+    const limit = Math.min(500, Math.max(1, pagination?.limit ?? 500));
+    const offset = Math.max(0, pagination?.offset ?? 0);
+    return this.uploadManifestEntries
+      .filter((item) => item.workspaceId === workspaceId && item.sessionId === sessionId
+        && item.ordinal >= offset && item.ordinal < offset + limit)
+      .sort((left, right) => left.ordinal - right.ordinal)
+      .map((item) => ({ ...item }));
+  }
+
+  async getUploadManifestEntry(workspaceId: string, sessionId: string, ordinal: number) {
+    const entry = this.uploadManifestEntries.find((item) => item.workspaceId === workspaceId
+      && item.sessionId === sessionId && item.ordinal === ordinal);
+    return entry ? { ...entry } : null;
+  }
+
+  async verifyUploadManifestEntry(
+    identity: UploadSessionMutationIdentity,
+    ordinal: number,
+    input: { disposition: "upload_required" | "ignored"; trust: "server_verified"; ignoreReason: string | null }
+  ): Promise<UploadManifestEntryRecord | null> {
+    const { workspaceId, sessionId } = identity;
+    const session = this.uploadSessions.find((item) => item.workspaceId === workspaceId && item.id === sessionId);
+    const actor = await this.findAdminById(identity.actorId, workspaceId);
+    const access = actor ? await this.projectAccess(workspaceId, identity.projectId, identity.actorId) : null;
+    if (!session || session.status !== "open" || session.projectId !== identity.projectId
+      || session.actorId !== identity.actorId || session.sessionVersion !== identity.sessionVersion
+      || !actor || actor.disabledAt || actor.sessionVersion !== identity.sessionVersion || !access
+      || (session.isReplacement ? access.role !== "admin" : access.role === "reader")) return null;
+    const entry = this.uploadManifestEntries.find((item) =>
+      item.workspaceId === workspaceId && item.sessionId === sessionId && item.ordinal === ordinal
+    );
+    if (!entry || entry.kind !== "source" || entry.disposition === "metadata_only") return null;
+    Object.assign(entry, input, { uploadedAt: new Date(), updatedAt: new Date() });
+    return { ...entry };
+  }
+
+  async acquireUploadSessionLock(workspaceId: string, sessionId: string): Promise<() => Promise<void>> {
+    const key = `${workspaceId}:${sessionId}`;
+    const previous = this.uploadSessionLocks.get(key) ?? Promise.resolve();
+    let resolveCurrent!: () => void;
+    const current = new Promise<void>((resolve) => { resolveCurrent = resolve; });
+    const tail = previous.then(() => current);
+    this.uploadSessionLocks.set(key, tail);
+    await previous;
+    let released = false;
+    return async () => {
+      if (released) return;
+      released = true;
+      resolveCurrent();
+      if (this.uploadSessionLocks.get(key) === tail) this.uploadSessionLocks.delete(key);
+    };
+  }
+
+  async acquireUploadIdempotencyLock(workspaceId: string, actorId: string, idempotencyKey: string) {
+    const key = `${workspaceId}:${actorId}:${idempotencyKey}`;
+    const previous = this.uploadIdempotencyLocks.get(key) ?? Promise.resolve();
+    let resolveCurrent!: () => void;
+    const current = new Promise<void>((resolve) => { resolveCurrent = resolve; });
+    const tail = previous.then(() => current);
+    this.uploadIdempotencyLocks.set(key, tail);
+    await previous;
+    let released = false;
+    return async () => {
+      if (released) return;
+      released = true;
+      resolveCurrent();
+      if (this.uploadIdempotencyLocks.get(key) === tail) this.uploadIdempotencyLocks.delete(key);
+    };
+  }
+
+  async acquireUploadMutationLock(
+    workspaceId: string,
+    sessionId: string,
+    actorId: string,
+    idempotencyKey: string
+  ) {
+    const releaseIdempotency = await this.acquireUploadIdempotencyLock(workspaceId, actorId, idempotencyKey);
+    try {
+      const releaseSession = await this.acquireUploadSessionLock(workspaceId, sessionId);
+      return async () => {
+        await releaseSession();
+        await releaseIdempotency();
+      };
+    } catch (error) {
+      await releaseIdempotency();
+      throw error;
+    }
+  }
+
+  async markUploadSessionCommitting(workspaceId: string, sessionId: string): Promise<UploadSessionRecord | null> {
+    const session = this.uploadSessions.find((item) => item.workspaceId === workspaceId && item.id === sessionId);
+    if (!session || !["open", "committing"].includes(session.status)) return session ? { ...session } : null;
+    session.status = "committing";
+    session.updatedAt = new Date();
+    return { ...session };
+  }
+
+  async completeUploadSessionCommit(input: CompleteUploadSessionInput): Promise<UploadSessionRecord | null> {
+    const repositorySnapshot = this.repositories.map((repository) => ({ ...repository }));
+    const reportSnapshot = this.importReports.map((report) => ({ ...report }));
+    const sessionSnapshot = this.uploadSessions.map((session) => ({ ...session }));
+    const sourceSnapshot = this.sourceSnapshots.map((snapshot) => ({ ...snapshot }));
+    const sourceFileSnapshot = this.sourceFiles.map((file) => ({ ...file }));
+    const pendingSnapshot = new Map(this.pendingSnapshotUploadSessions);
+    const auditLength = this.auditEvents.length;
+    try {
+      const session = this.uploadSessions.find((item) =>
+        item.workspaceId === input.workspaceId && item.id === input.sessionId
+      );
+      if (!session || session.projectId !== input.projectId || session.repositoryId !== input.repositoryId
+        || session.actorId !== input.actorId || !["committing", "committed"].includes(session.status)) {
+        return null;
+      }
+      if (session.status === "committed") return { ...session };
+      if (session.expiresAt <= new Date()) return null;
+      const actor = await this.findAdminById(input.actorId, input.workspaceId);
+      const access = actor ? await this.projectAccess(input.workspaceId, input.projectId, input.actorId) : null;
+      if (!actor || actor.disabledAt || actor.sessionVersion !== session.sessionVersion
+        || !access || (session.isReplacement ? access.role !== "admin" : access.role === "reader")) return null;
+      const report = this.importReports.find((item) =>
+        item.workspaceId === input.workspaceId && item.id === input.reportId && item.status === "running"
+      );
+      const candidate = this.repositories.find((repository) =>
+        repository.workspaceId === input.workspaceId && repository.projectId === input.projectId
+        && repository.id === input.repositoryId
+      );
+      if (!report || !candidate) return null;
+      const candidateSnapshot = this.sourceSnapshots.find((snapshot) =>
+        snapshot.workspaceId === input.workspaceId && snapshot.repositoryId === input.repositoryId
+        && snapshot.id === input.snapshotId
+        && (!this.pendingSnapshotUploadSessions.has(snapshot.id)
+          || this.pendingSnapshotUploadSessions.get(snapshot.id) === input.sessionId)
+      );
+      if (!candidateSnapshot) return null;
+      const latest = this.sourceSnapshots.filter((snapshot) =>
+        snapshot.workspaceId === input.workspaceId && snapshot.repositoryId === input.repositoryId
+        && !this.pendingSnapshotUploadSessions.has(snapshot.id)
+        && !this.pendingSnapshotImportReports.has(snapshot.id)
+      ).sort((left, right) => right.commitTimestamp.getTime() - left.commitTimestamp.getTime())[0] ?? null;
+      if ((latest?.id ?? null) !== session.expectedLatestSnapshotId
+        && latest?.commitSha !== candidateSnapshot.commitSha) return null;
+      const current = this.repositories.find((repository) =>
+        repository.workspaceId === input.workspaceId && repository.projectId === input.projectId
+        && !repository.archivedAt
+      );
+      if (!current || current.id !== session.expectedCurrentRepositoryId) return null;
+      if (session.isReplacement) {
+        if (!candidate.archivedAt) return null;
+        current.archivedAt = new Date();
+        candidate.archivedAt = null;
+        await this.recordAudit({
+          workspaceId: input.workspaceId, actorId: input.actorId,
+          action: "repository.switched", resourceType: "repository", resourceId: candidate.id,
+          metadata: { oldRepositoryId: current.id, newRepositoryId: candidate.id, projectId: input.projectId }
+        });
+      } else if (candidate.id !== current.id || candidate.archivedAt) {
+        return null;
+      }
+      const duplicate = latest && latest.id !== candidateSnapshot.id
+        && latest.commitSha === candidateSnapshot.commitSha ? latest : null;
+      const effectiveSnapshot = duplicate ?? candidateSnapshot;
+      if (duplicate) {
+        this.sourceFiles.splice(0, this.sourceFiles.length,
+          ...this.sourceFiles.filter((file) => file.snapshotId !== candidateSnapshot.id));
+        this.sourceSnapshots.splice(this.sourceSnapshots.indexOf(candidateSnapshot), 1);
+      }
+      const wasPending = this.pendingSnapshotUploadSessions.get(candidateSnapshot.id) === input.sessionId;
+      this.pendingSnapshotUploadSessions.delete(candidateSnapshot.id);
+      const responseBody = duplicate
+        ? { ...input.responseBody, snapshotId: duplicate.id, unchanged: true }
+        : { ...input.responseBody };
+      Object.assign(report, input.report, { snapshotId: effectiveSnapshot.id, finishedAt: new Date() });
+      await this.recordAudit({
+        workspaceId: input.workspaceId, actorId: input.actorId,
+        action: "repository.sync_succeeded", resourceType: "repository", resourceId: input.repositoryId,
+        metadata: {
+          commitSha: effectiveSnapshot.commitSha,
+          unchanged: Boolean(duplicate) || !wasPending
+        }
+      });
+      Object.assign(session, {
+        status: "committed", manifestDigest: input.manifestDigest,
+        snapshotId: effectiveSnapshot.id, commitResponse: responseBody,
+        committedAt: new Date(), updatedAt: new Date()
+      });
+      return { ...session, commitResponse: { ...responseBody } };
+    } catch (error) {
+      this.repositories.splice(0, this.repositories.length, ...repositorySnapshot);
+      this.importReports.splice(0, this.importReports.length, ...reportSnapshot);
+      this.uploadSessions.splice(0, this.uploadSessions.length, ...sessionSnapshot);
+      this.sourceSnapshots.splice(0, this.sourceSnapshots.length, ...sourceSnapshot);
+      this.sourceFiles.splice(0, this.sourceFiles.length, ...sourceFileSnapshot);
+      this.pendingSnapshotUploadSessions.clear();
+      for (const [snapshotId, sessionId] of pendingSnapshot) {
+        this.pendingSnapshotUploadSessions.set(snapshotId, sessionId);
+      }
+      this.auditEvents.splice(auditLength);
+      throw error;
+    }
+  }
+
+  async cancelUploadSession(input: CancelUploadSessionInput) {
+    const session = this.uploadSessions.find((item) => item.workspaceId === input.workspaceId && item.id === input.sessionId);
+    if (!session || session.status === "committed") {
+      return session ? { session: { ...session }, storagePaths: [] } : null;
+    }
+    const actor = await this.findAdminById(input.actorId, input.workspaceId);
+    const access = actor ? await this.projectAccess(input.workspaceId, input.projectId, input.actorId) : null;
+    if (!actor || actor.disabledAt || actor.sessionVersion !== input.sessionVersion
+      || session.actorId !== input.actorId || session.projectId !== input.projectId
+      || !access || (session.isReplacement ? access.role !== "admin" : access.role === "reader")) return null;
+    const pendingSnapshots = this.sourceSnapshots.filter((snapshot) =>
+      this.pendingSnapshotUploadSessions.get(snapshot.id) === input.sessionId
+    );
+    const pendingIds = new Set(pendingSnapshots.map((snapshot) => snapshot.id));
+    this.sourceSnapshots.splice(0, this.sourceSnapshots.length,
+      ...this.sourceSnapshots.filter((snapshot) => !pendingIds.has(snapshot.id)));
+    this.sourceFiles.splice(0, this.sourceFiles.length,
+      ...this.sourceFiles.filter((file) => !pendingIds.has(file.snapshotId)));
+    for (const id of pendingIds) this.pendingSnapshotUploadSessions.delete(id);
+    if (session.status !== "cancelled") {
+      session.status = "cancelled";
+      session.cancelledAt = new Date();
+      session.updatedAt = new Date();
+      const reportId = this.uploadSessionImportReports.get(input.sessionId);
+      const report = this.importReports.find((candidate) => candidate.id === reportId && candidate.status === "running");
+      if (report) Object.assign(report, { status: "cancelled", finishedAt: new Date(), failureCode: "UPLOAD_CANCELLED" });
+    }
+    return { session: { ...session }, storagePaths: pendingSnapshots.map((snapshot) => snapshot.storagePath) };
+  }
+
+  async uploadSnapshotExists(workspaceId: string, snapshotId: string, sessionId: string): Promise<boolean> {
+    return this.sourceSnapshots.some((snapshot) => snapshot.workspaceId === workspaceId
+      && snapshot.id === snapshotId && (!this.pendingSnapshotUploadSessions.has(snapshot.id)
+        || this.pendingSnapshotUploadSessions.get(snapshot.id) === sessionId));
+  }
+
+  async listExpiredUploadSessions(now: Date) {
+    return this.uploadSessions.filter((item) =>
+      ["open", "committing", "committed", "cancelled"].includes(item.status) && item.expiresAt <= now
+    ).map((item) => ({ id: item.id, workspaceId: item.workspaceId }));
+  }
+
+  async deleteExpiredUploadSession(workspaceId: string, sessionId: string, now: Date): Promise<string[] | null> {
+    const position = this.uploadSessions.findIndex((item) =>
+      item.workspaceId === workspaceId && item.id === sessionId
+      && ["open", "committing", "committed", "cancelled"].includes(item.status) && item.expiresAt <= now
+    );
+    if (position < 0) return null;
+    const repositoryId = this.uploadSessions[position]!.repositoryId;
+    const pendingSnapshots = this.sourceSnapshots.filter((snapshot) =>
+      this.pendingSnapshotUploadSessions.get(snapshot.id) === sessionId
+    );
+    const pendingIds = new Set(pendingSnapshots.map((snapshot) => snapshot.id));
+    this.sourceSnapshots.splice(0, this.sourceSnapshots.length,
+      ...this.sourceSnapshots.filter((snapshot) => !pendingIds.has(snapshot.id)));
+    this.sourceFiles.splice(0, this.sourceFiles.length,
+      ...this.sourceFiles.filter((file) => !pendingIds.has(file.snapshotId)));
+    for (const id of pendingIds) this.pendingSnapshotUploadSessions.delete(id);
+    const reportId = this.uploadSessionImportReports.get(sessionId);
+    const report = this.importReports.find((candidate) => candidate.id === reportId && candidate.status === "running");
+    if (report) Object.assign(report, { status: "failed", finishedAt: now, failureCode: "UPLOAD_SESSION_EXPIRED" });
+    this.uploadSessions.splice(position, 1);
+    this.uploadManifestEntries.splice(0, this.uploadManifestEntries.length,
+      ...this.uploadManifestEntries.filter((item) => item.sessionId !== sessionId));
+    this.uploadIdempotencyKeys.splice(0, this.uploadIdempotencyKeys.length,
+      ...this.uploadIdempotencyKeys.filter((item) => item.sessionId !== sessionId));
+    this.uploadSessionImportReports.delete(sessionId);
+    const repository = this.repositories.find((candidate) => candidate.id === repositoryId);
+    if (repository?.archivedAt
+      && !this.sourceSnapshots.some((snapshot) => snapshot.repositoryId === repository.id)
+      && !this.releases.some((release) => release.repositoryId === repository.id)
+      && !this.uploadSessions.some((session) => session.repositoryId === repository.id
+        && ["open", "committing"].includes(session.status))) {
+      this.repositories.splice(this.repositories.indexOf(repository), 1);
+    }
+    return pendingSnapshots.map((snapshot) => snapshot.storagePath);
+  }
+
+  async findUploadIdempotencyKey(
+    workspaceId: string,
+    actorId: string,
+    idempotencyKey: string,
+    now: Date
+  ): Promise<UploadIdempotencyRecord | null> {
+    const index = this.uploadIdempotencyKeys.findIndex((candidate) => candidate.workspaceId === workspaceId
+      && candidate.actorId === actorId && candidate.idempotencyKey === idempotencyKey);
+    const item = index >= 0 ? this.uploadIdempotencyKeys[index] : undefined;
+    if (item && item.expiresAt <= now) {
+      this.uploadIdempotencyKeys.splice(index, 1);
+      return null;
+    }
+    return item ? { ...item, responseBody: { ...item.responseBody } } : null;
+  }
+
+  async saveUploadIdempotencyKey(
+    input: Omit<UploadIdempotencyRecord, "createdAt">
+  ): Promise<UploadIdempotencyRecord> {
+    const existing = await this.findUploadIdempotencyKey(
+      input.workspaceId, input.actorId, input.idempotencyKey, new Date()
+    );
+    if (existing) return existing;
+    const record = { ...input, responseBody: { ...input.responseBody }, createdAt: new Date() };
+    this.uploadIdempotencyKeys.push(record);
+    return { ...record, responseBody: { ...record.responseBody } };
+  }
+
+  async deleteExpiredUploadIdempotencyKeys(now: Date): Promise<number> {
+    const before = this.uploadIdempotencyKeys.length;
+    this.uploadIdempotencyKeys.splice(0, before, ...this.uploadIdempotencyKeys.filter((item) => item.expiresAt > now));
+    return before - this.uploadIdempotencyKeys.length;
   }
 
   async createMcpToken(input: CreateMcpTokenInput): Promise<McpTokenRecord> {
@@ -1409,6 +1973,7 @@ export class MemoryAppStore implements AppStore {
 
   async switchRepositoryWithAudit(
     workspaceId: string,
+    projectId: string,
     input: RepositoryConnectionInput,
     actorId: string
   ): Promise<RepositoryRecord | null> {
@@ -1416,9 +1981,9 @@ export class MemoryAppStore implements AppStore {
     const credentialLength = this.encryptedCredentials.length;
     const auditLength = this.auditEvents.length;
     try {
-      const current = await this.currentRepository(workspaceId);
+      const current = await this.currentRepository(workspaceId, projectId);
       if (!current) return null;
-      const replacement = await this.insertRepository(workspaceId, input, new Date(), false);
+      const replacement = await this.insertRepository(workspaceId, input, new Date(), false, projectId);
       if (!replacement) return null;
       const archivedCurrent = { ...current, archivedAt: new Date() };
       const promotedReplacement = { ...replacement, archivedAt: null };
@@ -1443,18 +2008,31 @@ export class MemoryAppStore implements AppStore {
 
   async prepareUploadReplacementWithAudit(
     workspaceId: string,
+    projectId: string,
     name: string,
     actorId: string
   ): Promise<RepositoryRecord | null> {
     const repositoryLength = this.repositories.length;
     const auditLength = this.auditEvents.length;
     try {
-      if (!await this.currentRepository(workspaceId)) return null;
+      if (!await this.currentRepository(workspaceId, projectId)) return null;
+      const reusable = this.repositories.filter((repository) => repository.workspaceId === workspaceId
+        && repository.projectId === projectId && repository.kind === "upload" && repository.archivedAt
+        && !this.releases.some((release) => release.repositoryId === repository.id)
+        && !this.builds.some((build) => build.repositoryId === repository.id)
+        && (this.uploadSessions.some((session) => session.repositoryId === repository.id
+          && session.actorId === actorId && ["open", "committing"].includes(session.status))
+          || (!this.uploadSessions.some((session) => session.repositoryId === repository.id
+            && ["open", "committing"].includes(session.status))
+            && !this.sourceSnapshots.some((snapshot) => snapshot.repositoryId === repository.id))))
+        .sort((left, right) => right.archivedAt!.getTime() - left.archivedAt!.getTime())[0];
+      if (reusable) return reusable;
       const candidate = await this.insertRepository(
         workspaceId,
         { kind: "upload", name },
         new Date(),
-        false
+        false,
+        projectId
       );
       if (!candidate) return null;
       await this.recordAudit({
@@ -1475,15 +2053,17 @@ export class MemoryAppStore implements AppStore {
 
   async activateUploadReplacementWithAudit(
     workspaceId: string,
+    projectId: string,
     repositoryId: string,
     actorId: string
   ): Promise<RepositoryRecord | null> {
     const repositorySnapshot = this.repositories.map((repository) => ({ ...repository }));
     const auditLength = this.auditEvents.length;
     try {
-      const current = await this.currentRepository(workspaceId);
+      const current = await this.currentRepository(workspaceId, projectId);
       const candidate = this.repositories.find((repository) =>
         repository.workspaceId === workspaceId
+        && repository.projectId === projectId
         && repository.id === repositoryId
         && repository.kind === "upload"
         && repository.archivedAt !== null
@@ -1516,20 +2096,70 @@ export class MemoryAppStore implements AppStore {
       && repository.kind === "upload"
       && repository.archivedAt !== null
     );
-    if (!candidate || this.sourceSnapshots.some((snapshot) => snapshot.repositoryId === repositoryId)) return;
+    if (!candidate || this.sourceSnapshots.some((snapshot) => snapshot.repositoryId === repositoryId)
+      || this.uploadSessions.some((session) => session.repositoryId === repositoryId
+        && ["open", "committing"].includes(session.status))) return;
     this.repositories.splice(this.repositories.indexOf(candidate), 1);
   }
 
   async findSnapshotByCommit(
     workspaceId: string,
     repositoryId: string,
-    commitSha: string
+    commitSha: string,
+    pendingUploadSessionId?: string,
+    pendingImportReportId?: string
   ): Promise<SourceSnapshotRecord | null> {
     return this.sourceSnapshots.find((snapshot) =>
       snapshot.workspaceId === workspaceId
       && snapshot.repositoryId === repositoryId
       && snapshot.commitSha === commitSha
+      && (!this.pendingSnapshotUploadSessions.has(snapshot.id)
+        || this.pendingSnapshotUploadSessions.get(snapshot.id) === pendingUploadSessionId)
+      && (!this.pendingSnapshotImportReports.has(snapshot.id)
+        || this.pendingSnapshotImportReports.get(snapshot.id) === pendingImportReportId)
     ) ?? null;
+  }
+
+  async discardPendingFolderImport(
+    workspaceId: string,
+    reportId: string,
+    snapshotId: string
+  ): Promise<string | null> {
+    const snapshot = this.sourceSnapshots.find((candidate) =>
+      candidate.workspaceId === workspaceId
+      && candidate.id === snapshotId
+      && this.pendingSnapshotImportReports.get(candidate.id) === reportId
+    );
+    if (!snapshot) return null;
+    this.sourceFiles.splice(0, this.sourceFiles.length,
+      ...this.sourceFiles.filter((file) => file.snapshotId !== snapshot.id));
+    this.sourceSnapshots.splice(this.sourceSnapshots.indexOf(snapshot), 1);
+    this.pendingSnapshotImportReports.delete(snapshot.id);
+    return snapshot.storagePath;
+  }
+
+  async discardStalePendingFolderImport(
+    workspaceId: string,
+    reportId: string,
+    snapshotId: string,
+    cutoff: Date
+  ): Promise<boolean> {
+    const report = this.importReports.find((candidate) =>
+      candidate.workspaceId === workspaceId && candidate.id === reportId
+      && (["failed", "cancelled"].includes(candidate.status)
+        || candidate.status === "running" && candidate.startedAt.getTime() <= cutoff.getTime())
+    );
+    if (!report) return false;
+    await this.discardPendingFolderImport(workspaceId, reportId, snapshotId);
+    if (report.status === "running") {
+      Object.assign(report, {
+        status: "failed",
+        finishedAt: new Date(),
+        snapshotId: null,
+        failureCode: "UPLOAD_INTERRUPTED"
+      });
+    }
+    return true;
   }
 
   async createSnapshot({ snapshot, files }: CreateSnapshotInput): Promise<SourceSnapshotRecord> {
@@ -1558,29 +2188,45 @@ export class MemoryAppStore implements AppStore {
 
   async createSnapshotWithAudit(
     input: CreateSnapshotInput,
-    actorId: string
+    actorId: string,
+    pendingUploadSessionId?: string,
+    pendingImportReportId?: string
   ): Promise<SourceSnapshotRecord> {
     const snapshotLength = this.sourceSnapshots.length;
     const fileLength = this.sourceFiles.length;
     const auditLength = this.auditEvents.length;
     try {
-      const persisted = await this.createSnapshot(input);
-      await this.recordAudit({
-        workspaceId: input.snapshot.workspaceId,
-        actorId,
-        action: "repository.sync_succeeded",
-        resourceType: "repository",
-        resourceId: input.snapshot.repositoryId,
-        metadata: {
-          commitSha: persisted.commitSha,
-          unchanged: persisted.id !== input.snapshot.id
-        }
-      });
+      let persisted = await this.findSnapshotByCommit(
+        input.snapshot.workspaceId, input.snapshot.repositoryId,
+        input.snapshot.commitSha, pendingUploadSessionId, pendingImportReportId
+      );
+      if (!persisted) {
+        this.sourceSnapshots.push(input.snapshot);
+        this.sourceFiles.push(...input.files);
+        persisted = input.snapshot;
+        if (pendingUploadSessionId) this.pendingSnapshotUploadSessions.set(persisted.id, pendingUploadSessionId);
+        if (pendingImportReportId) this.pendingSnapshotImportReports.set(persisted.id, pendingImportReportId);
+      }
+      if (!pendingUploadSessionId && !pendingImportReportId) {
+        await this.recordAudit({
+          workspaceId: input.snapshot.workspaceId,
+          actorId,
+          action: "repository.sync_succeeded",
+          resourceType: "repository",
+          resourceId: input.snapshot.repositoryId,
+          metadata: {
+            commitSha: persisted.commitSha,
+            unchanged: persisted.id !== input.snapshot.id
+          }
+        });
+      }
       return persisted;
     } catch (error) {
       this.sourceSnapshots.splice(snapshotLength);
       this.sourceFiles.splice(fileLength);
       this.auditEvents.splice(auditLength);
+      this.pendingSnapshotUploadSessions.delete(input.snapshot.id);
+      this.pendingSnapshotImportReports.delete(input.snapshot.id);
       throw error;
     }
   }
@@ -1588,6 +2234,8 @@ export class MemoryAppStore implements AppStore {
   async findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null> {
     return this.sourceSnapshots.find((snapshot) =>
       snapshot.workspaceId === workspaceId && snapshot.id === snapshotId
+      && !this.pendingSnapshotUploadSessions.has(snapshot.id)
+      && !this.pendingSnapshotImportReports.has(snapshot.id)
     ) ?? null;
   }
 
@@ -1600,11 +2248,15 @@ export class MemoryAppStore implements AppStore {
   async latestSnapshot(workspaceId: string, repositoryId: string): Promise<SourceSnapshotRecord | null> {
     return this.sourceSnapshots.filter((snapshot) =>
       snapshot.workspaceId === workspaceId && snapshot.repositoryId === repositoryId
+      && !this.pendingSnapshotUploadSessions.has(snapshot.id)
+      && !this.pendingSnapshotImportReports.has(snapshot.id)
     ).sort((left, right) => right.commitTimestamp.getTime() - left.commitTimestamp.getTime())[0] ?? null;
   }
 
   async snapshotChangeSummary(workspaceId: string, repositoryId: string, snapshotId: string) {
-    const snapshots = this.sourceSnapshots.filter((snapshot) => snapshot.workspaceId === workspaceId && snapshot.repositoryId === repositoryId)
+    const snapshots = this.sourceSnapshots.filter((snapshot) => snapshot.workspaceId === workspaceId
+      && snapshot.repositoryId === repositoryId && !this.pendingSnapshotUploadSessions.has(snapshot.id))
+      .filter((snapshot) => !this.pendingSnapshotImportReports.has(snapshot.id))
       .sort((left, right) => left.commitTimestamp.getTime() - right.commitTimestamp.getTime() || left.id.localeCompare(right.id));
     const position = snapshots.findIndex((snapshot) => snapshot.id === snapshotId);
     if (position < 0) return null;

@@ -1194,8 +1194,8 @@ describe("repository replacement", () => {
         id: "upload", projectId: "project", kind: "upload", name: "Uploaded project", defaultBranch: "upload"
       } }),
       uploadFolder: vi.fn().mockResolvedValue({
-        snapshotId: "snapshot", sourceVersion: "a".repeat(40), fileCount: 2, unchanged: false,
-        ignored: { total: 2, reasons: { binary: 1, generated: 1 } }
+        snapshotId: "snapshot", sourceVersion: "a".repeat(40), fileCount: 1, textBytes: 10, unchanged: false,
+        ignored: { total: 0, reasons: {} }, assetCount: 0
       }),
       getModelConfig: vi.fn().mockResolvedValue({ config: null }),
       getMcpConnection: vi.fn().mockResolvedValue({ endpoint: "/mcp", transport: "streamable-http", authorization: "bearer", tools: [] }),
@@ -1204,15 +1204,48 @@ describe("repository replacement", () => {
 
     renderPage(<ProjectImportsPage api={api} projectId="project" />);
     const projectFile = new File(["export {};"], "main.ts", { type: "text/typescript" });
+    const secretFile = new File(["TOKEN=secret"], ".env", { type: "text/plain" });
     const uploadInput = await screen.findByLabelText("项目文件夹") as HTMLInputElement;
-    await user.upload(uploadInput, projectFile);
+    await user.upload(uploadInput, [projectFile, secretFile]);
     await user.click(await screen.findByRole("button", { name: "确认并开始上传" }));
 
     await waitFor(() => expect(api.uploadFolder).toHaveBeenCalledWith(
-      "project", [expect.objectContaining({ path: "main.ts" })]
+      "project", "upload", [expect.objectContaining({ path: "main.ts", kind: "source" })]
     ));
     await waitFor(() => expect(sessionStorage.getItem("devkh:last-snapshot")).toContain("snapshot"));
-    expect(await screen.findByText("已忽略 2 个文件")).toBeVisible();
+    expect(await screen.findByText("本地预过滤 1 个文件")).toBeVisible();
+    expect(screen.getByText("服务端二次过滤 0 个文件")).toBeVisible();
+  });
+
+  test("reuses a newly connected upload repository when the first transfer is interrupted", async () => {
+    const user = userEvent.setup();
+    const connectRepository = vi.fn().mockResolvedValue({ repository: {
+      id: "upload-resume", projectId: "project", kind: "upload", name: "Uploaded project", defaultBranch: "upload"
+    } });
+    const uploadFolder = vi.fn()
+      .mockRejectedValueOnce(new ApiError(500, "TEMPORARY", "interrupted"))
+      .mockResolvedValue({
+        snapshotId: "snapshot-resume", sourceVersion: "b".repeat(40), fileCount: 1, textBytes: 10,
+        unchanged: false, ignored: { total: 0, reasons: {} }, assetCount: 0
+      });
+    const api = {
+      getRepository: vi.fn().mockRejectedValue(new ApiError(404, "REPOSITORY_NOT_FOUND", "missing")),
+      connectRepository,
+      uploadFolder,
+      listImportReports: vi.fn().mockResolvedValue({ reports: [], total: 0, limit: 20, offset: 0 })
+    } as unknown as ApiClient;
+
+    renderPage(<ProjectImportsPage api={api} projectId="project" />);
+    const uploadInput = await screen.findByLabelText("项目文件夹") as HTMLInputElement;
+    await user.upload(uploadInput, new File(["export {};"], "main.ts", { type: "text/typescript" }));
+    const confirm = await screen.findByRole("button", { name: "确认并开始上传" });
+    await user.click(confirm);
+    await waitFor(() => expect(uploadFolder).toHaveBeenCalledTimes(1));
+    await user.click(confirm);
+    await waitFor(() => expect(uploadFolder).toHaveBeenCalledTimes(2));
+
+    expect(connectRepository).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("内容版本已就绪")).toBeVisible();
   });
 });
 

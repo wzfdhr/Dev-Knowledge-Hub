@@ -29,6 +29,7 @@ Changing `DEVKH_MASTER_KEY` without re-encrypting stored credentials makes those
 - The app does not terminate TLS. The production Nginx virtual host terminates HTTPS for `hub.starking.icu`; DNS must resolve to the server and inbound TCP `80`/`443` must be available for certificate issuance and renewal.
 - Remote repository host allowlisting, egress controls, malware scanning, and webhook signature ingestion are not implemented.
 - Security headers are application defaults, not a substitute for proxy/network controls.
+- The application trusts exactly one reverse-proxy hop. Keep the application port private; only Caddy/Nginx may reach it directly, and clients must use the public proxy endpoint.
 
 ## Incident response
 

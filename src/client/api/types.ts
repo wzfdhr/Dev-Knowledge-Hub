@@ -105,8 +105,10 @@ export interface UploadSnapshotSummary {
   snapshotId: string;
   sourceVersion: string;
   fileCount: number;
+  textBytes: number;
   unchanged: boolean;
   ignored: { total: number; reasons: Record<string, number> };
+  assetCount: number;
 }
 export interface ImportReport {
   id: string;

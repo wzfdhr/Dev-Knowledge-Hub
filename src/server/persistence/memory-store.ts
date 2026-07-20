@@ -55,6 +55,8 @@ import type {
   SourceAnalysisArtifactKey,
   SourceAnalysisArtifactRecord,
   SourceSnapshotRecord,
+  SourceBlobRecord,
+  LockedSourceBlobCatalog,
   SaveKnowledgeGraphInput,
   SetupResult,
   TeamMemberRecord,
@@ -145,6 +147,7 @@ export class MemoryAppStore implements AppStore {
   readonly encryptedCredentials: EncryptedCredentialRecord[] = [];
   readonly sourceSnapshots: SourceSnapshotRecord[] = [];
   readonly sourceFiles: SourceFileRecord[] = [];
+  readonly sourceBlobs: SourceBlobRecord[] = [];
   readonly sourceAnalysisArtifacts: SourceAnalysisArtifactRecord[] = [];
   readonly importReports: ImportReportRecord[] = [];
   readonly uploadSessions: UploadSessionRecord[] = [];
@@ -155,6 +158,7 @@ export class MemoryAppStore implements AppStore {
   private readonly pendingSnapshotImportReports = new Map<string, string>();
   private readonly uploadSessionLocks = new Map<string, Promise<void>>();
   private readonly uploadIdempotencyLocks = new Map<string, Promise<void>>();
+  private readonly sourceBlobLocks = new Map<string, Promise<void>>();
   readonly builds: BuildRecord[] = [];
   readonly buildEvents: BuildEvent[] = [];
   private nextBuildEventSequence = 1;
@@ -172,6 +176,59 @@ export class MemoryAppStore implements AppStore {
 
   async isSetupComplete(): Promise<boolean> {
     return this.admin !== null;
+  }
+
+  async withSourceBlobLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    const key = `${workspaceId}:${contentHash}`;
+    const previous = this.sourceBlobLocks.get(key) ?? Promise.resolve();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.then(() => gate);
+    this.sourceBlobLocks.set(key, queued);
+    await previous;
+    try {
+      return await operation({
+        findActive: async () => {
+          const record = this.sourceBlobs.find((candidate) => candidate.workspaceId === workspaceId
+            && candidate.contentHash === contentHash && candidate.status === "active");
+          return record ? { ...record } : null;
+        },
+        nextGeneration: async () => Math.max(0, ...this.sourceBlobs.filter((candidate) =>
+          candidate.workspaceId === workspaceId && candidate.contentHash === contentHash
+        ).map((candidate) => candidate.generation)) + 1,
+        create: async (input) => {
+          if (this.workspace?.id !== workspaceId || input.workspaceId !== workspaceId
+            || input.contentHash !== contentHash
+            || this.sourceBlobs.some((candidate) => candidate.workspaceId === workspaceId
+              && candidate.contentHash === contentHash
+              && (candidate.status === "active" || candidate.status === "tombstoned"))
+            || this.sourceBlobs.some((candidate) => candidate.workspaceId === workspaceId
+              && candidate.contentHash === contentHash && candidate.generation === input.generation)) {
+            throw new Error("SOURCE_BLOB_CONFLICT");
+          }
+          const record: SourceBlobRecord = {
+            id: randomUUID(), ...input, status: "active", fencingToken: null,
+            tombstonedAt: null, trashedAt: null, deletedAt: null
+          };
+          this.sourceBlobs.push(record);
+          return { ...record };
+        }
+      });
+    } finally {
+      release();
+      if (this.sourceBlobLocks.get(key) === queued) this.sourceBlobLocks.delete(key);
+    }
+  }
+
+  async findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null> {
+    const record = this.sourceBlobs.find((candidate) =>
+      candidate.workspaceId === workspaceId && candidate.id === sourceBlobId
+    );
+    return record ? { ...record } : null;
   }
 
   async createInitialSetup(email: string, passwordHash: string): Promise<SetupResult | null> {
@@ -2281,6 +2338,22 @@ export class MemoryAppStore implements AppStore {
     return this.sourceFiles.find((file) =>
       file.workspaceId === workspaceId && file.snapshotId === snapshotId && file.path === filePath
     ) ?? null;
+  }
+
+  async findProjectSourceFile(
+    workspaceId: string,
+    projectId: string,
+    snapshotId: string,
+    filePath: string
+  ): Promise<SourceFileRecord | null> {
+    const snapshot = this.sourceSnapshots.find((candidate) =>
+      candidate.workspaceId === workspaceId && candidate.id === snapshotId
+    );
+    const repository = snapshot
+      ? this.repositories.find((candidate) => candidate.id === snapshot.repositoryId)
+      : null;
+    if (!repository || repository.workspaceId !== workspaceId || repository.projectId !== projectId) return null;
+    return this.findSourceFile(workspaceId, snapshotId, filePath);
   }
 
   async countSnapshotFiles(snapshotId: string): Promise<number> {

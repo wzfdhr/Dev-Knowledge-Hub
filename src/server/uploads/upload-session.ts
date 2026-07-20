@@ -25,6 +25,7 @@ import {
   syncDirectory,
   writeDurableJsonMarker
 } from "./folder-import.js";
+import type { SourceBlobStore } from "./source-blob-store.js";
 
 export const UPLOAD_SESSION_TTL_MS = 24 * 60 * 60 * 1_000;
 export const UPLOAD_MANIFEST_PAGE_SIZE = 500;
@@ -193,6 +194,8 @@ export class UploadSessionService {
     store: AppStore;
     dataDir: string;
     now?: () => Date;
+    sourceStorageMode?: "legacy" | "shadow" | "active";
+    sourceBlobStore?: SourceBlobStore;
   }) {}
 
   private now(): Date {
@@ -624,7 +627,9 @@ export class UploadSessionService {
               actorId: session.actorId,
               store: this.options.store,
               stagingDirectory: path.join(uploadDirectory(this.options.dataDir, session.id), "import"),
-              pendingUploadSessionId: session.id
+              pendingUploadSessionId: session.id,
+              sourceStorageMode: this.options.sourceStorageMode,
+              sourceBlobStore: this.options.sourceBlobStore
             });
             const response = {
               snapshotId: summary.snapshotId,

@@ -4,7 +4,11 @@ import type { BuildRecord } from "../build-service";
 import { knowledgeIrPipelineInputDigest } from "../pipeline/extract-stage";
 import type { ArtifactManifest } from "../pipeline/contracts";
 import type { PipelineStageRunRecord, SourceSnapshotRecord } from "../../persistence/store";
-import { createFrontendModeStageInputPlanner } from "./shadow-stage";
+import {
+  createFrontendModeStageInputPlanner,
+  createKnowledgeV1StoreView,
+  frontendShadowInputDigest
+} from "./shadow-stage";
 
 const snapshot = {
   id: "snapshot-1",
@@ -72,6 +76,63 @@ describe("project frontend mode stage planning", () => {
 
     expect(digest).toBe(knowledgeIrPipelineInputDigest(snapshot, build.purpose, [normalizedManifest.id]));
     expect(modeForProject).toHaveBeenCalledWith("workspace-1", "project-1");
+  });
+
+  test("includes supplemental blob references in frontend-v2 input without changing historical package families", async () => {
+    const referenceManifest = {
+      ...normalizedManifest,
+      id: "normalized-refs-1",
+      kind: "normalized-source-refs",
+      schemaVersion: 2
+    } as ArtifactManifest;
+    const run = {
+      ...convertRun,
+      outputManifestIds: [normalizedManifest.id, referenceManifest.id]
+    };
+    const manifests = new Map([
+      [normalizedManifest.id, normalizedManifest],
+      [referenceManifest.id, referenceManifest]
+    ]);
+    const planner = createFrontendModeStageInputPlanner({
+      findSnapshotById: vi.fn().mockResolvedValue(snapshot),
+      listPipelineStageRuns: vi.fn().mockResolvedValue([run]),
+      findArtifactById: vi.fn((id: string) => Promise.resolve(manifests.get(id) ?? null))
+    } as never, vi.fn().mockResolvedValue("shadow"), "shadow");
+
+    await expect(planner.nextInputDigest({
+      currentRun: run,
+      build,
+      nextStage: "extract",
+      outputManifestIds: run.outputManifestIds
+    })).resolves.toBe(frontendShadowInputDigest({
+      stage: "extract",
+      snapshotId: snapshot.id,
+      build,
+      upstreamManifestIds: [normalizedManifest.id, referenceManifest.id].sort()
+    }));
+  });
+
+  test("selects only source references for an active convert reader", async () => {
+    const referenceManifest = {
+      ...normalizedManifest,
+      id: "normalized-refs-1",
+      kind: "normalized-source-refs",
+      schemaVersion: 2
+    } as ArtifactManifest;
+    const run = { ...convertRun, outputManifestIds: [normalizedManifest.id, referenceManifest.id] };
+    const manifests = new Map([
+      [normalizedManifest.id, normalizedManifest],
+      [referenceManifest.id, referenceManifest]
+    ]);
+    const view = createKnowledgeV1StoreView({
+      listPipelineStageRuns: vi.fn().mockResolvedValue([run]),
+      findArtifactById: vi.fn((id: string) => Promise.resolve(manifests.get(id) ?? null))
+    } as never, "normalized-source-refs") as unknown as {
+      listPipelineStageRuns(workspaceId: string, projectId: string, buildId: string): Promise<PipelineStageRunRecord[]>;
+    };
+
+    await expect(view.listPipelineStageRuns("workspace-1", "project-1", "build-1"))
+      .resolves.toEqual([expect.objectContaining({ outputManifestIds: [referenceManifest.id] })]);
   });
 
   test("continues an existing family without consulting a changed project override", async () => {

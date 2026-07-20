@@ -37,6 +37,7 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://${DEVKH_DOMAIN:?set DEVKH_DOMAIN}}
       DEVKH_KNOWLEDGE_KERNEL_MODE: ${DEVKH_KNOWLEDGE_KERNEL_MODE:-legacy}
       DEVKH_FRONTEND_KNOWLEDGE_MODE: ${DEVKH_FRONTEND_KNOWLEDGE_MODE:-legacy}
+      DEVKH_SOURCE_STORAGE_MODE: ${DEVKH_SOURCE_STORAGE_MODE:-legacy}
       DEVKH_PARSER_SOCKET_PATH: /run/devkh-parser/parser.sock
     volumes:
       - snapshot_data:/var/lib/devkh/snapshots

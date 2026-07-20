@@ -116,6 +116,7 @@ import {
   UPLOAD_MANIFEST_PAGE_SIZE,
   type ClientUploadManifestEntry
 } from "./uploads/upload-session.js";
+import type { SourceBlobStore } from "./uploads/source-blob-store.js";
 
 const SESSION_COOKIE = "devkh_session";
 const CSRF_COOKIE = "devkh_csrf";
@@ -280,6 +281,8 @@ export interface ServerOptions {
   qualityArtifactReader?: { getJson(manifest: ArtifactManifest): Promise<unknown> };
   knowledgeKernelMode?: FrontendKnowledgeMode;
   frontendKnowledgeMode?: FrontendKnowledgeMode;
+  sourceStorageMode?: "legacy" | "shadow" | "active";
+  sourceBlobStore?: SourceBlobStore;
 }
 
 async function loadQualityAssessment(input: {
@@ -463,7 +466,12 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   const knowledgeKernelMode = options.knowledgeKernelMode ?? "legacy";
   const frontendKnowledgeMode = options.frontendKnowledgeMode ?? "legacy";
   const stageSseConnections = new Map<string, number>();
-  const uploadSessions = new UploadSessionService({ store: options.store, dataDir: options.dataDir });
+  const uploadSessions = new UploadSessionService({
+    store: options.store,
+    dataDir: options.dataDir,
+    sourceStorageMode: options.sourceStorageMode,
+    sourceBlobStore: options.sourceBlobStore
+  });
   const uploadBodies = new UploadBodyConcurrencyState();
   registerHttpSecurity(server, options.rateLimits ?? DEFAULT_RATE_LIMITS);
   server.addContentTypeParser(
@@ -1088,7 +1096,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           repositoryId: repository.id,
           actorId: admin.id,
           store: options.store,
-          pendingImportReportId: report.id
+          pendingImportReportId: report.id,
+          sourceStorageMode: options.sourceStorageMode,
+          sourceBlobStore: options.sourceBlobStore
         });
         pendingSnapshotId = summary.snapshotId;
         const completed = await options.store.completeFolderImport({
@@ -1183,7 +1193,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           repositoryId: repository.id,
           actorId: admin.id,
           store: options.store,
-          pendingImportReportId: report.id
+          pendingImportReportId: report.id,
+          sourceStorageMode: options.sourceStorageMode,
+          sourceBlobStore: options.sourceBlobStore
         });
         pendingSnapshotId = summary.snapshotId;
         const completed = await options.store.completeFolderImport({
@@ -2331,6 +2343,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           dataDir: options.dataDir,
           store: options.store,
           actorId: admin.id,
+          sourceStorageMode: options.sourceStorageMode,
+          sourceBlobStore: options.sourceBlobStore,
           ...(encryptedCredential
             ? { token: decryptSecret(encryptedCredential, options.masterKey) }
             : {})

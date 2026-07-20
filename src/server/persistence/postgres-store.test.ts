@@ -2,6 +2,57 @@ import { describe, expect, test, vi } from "vitest";
 
 import { PostgresAppStore } from "./postgres-store";
 
+describe("PostgresAppStore source blob locking", () => {
+  test("keeps the advisory lock and all catalog queries on one transaction client", async () => {
+    const blobRow = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspace_id: "11111111-1111-4111-8111-111111111111",
+      content_hash: "a".repeat(64),
+      generation: 1,
+      byte_size: "12",
+      status: "active",
+      storage_key: "blobs/workspace/aa/hash/1",
+      fencing_token: null,
+      tombstoned_at: null,
+      trashed_at: null,
+      deleted_at: null
+    };
+    const clientQuery = vi.fn(async (sql: string) => {
+      if (sql.includes("COALESCE(MAX(generation)")) return { rows: [{ next_generation: 1 }] };
+      if (sql.includes("INSERT INTO source_blobs")) return { rows: [blobRow] };
+      return { rows: [] };
+    });
+    const client = { query: clientQuery, release: vi.fn() };
+    const poolQuery = vi.fn(async () => { throw new Error("pool query escaped source blob lock"); });
+    const store = new PostgresAppStore({
+      query: poolQuery,
+      connect: vi.fn(async () => client)
+    } as never);
+
+    const created = await store.withSourceBlobLock(
+      blobRow.workspace_id,
+      blobRow.content_hash,
+      async (catalog) => {
+        expect(await catalog.findActive()).toBeNull();
+        const generation = await catalog.nextGeneration();
+        return catalog.create({
+          workspaceId: blobRow.workspace_id,
+          contentHash: blobRow.content_hash,
+          generation,
+          byteSize: 12,
+          storageKey: blobRow.storage_key
+        });
+      }
+    );
+
+    expect(created).toMatchObject({ id: blobRow.id, generation: 1, byteSize: 12 });
+    expect(poolQuery).not.toHaveBeenCalled();
+    expect(clientQuery.mock.calls[0]?.[0]).toBe("BEGIN");
+    expect(clientQuery.mock.calls.some(([sql]) => sql.includes("pg_advisory_xact_lock"))).toBe(true);
+    expect(clientQuery.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+  });
+});
+
 const stageRow = {
   id: "stage-run-1", workspace_id: "workspace-1", project_id: "project-1", snapshot_id: "snapshot-1", build_job_id: "build-1",
   stage: "convert", attempt: 1, status: "queued", input_digest: "a".repeat(64), output_manifest_ids: [],

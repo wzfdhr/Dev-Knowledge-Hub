@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -10,6 +10,8 @@ import { afterEach, describe, expect, test } from "vitest";
 import { MemoryAppStore } from "../persistence/memory-store";
 import type { RepositoryRecord } from "../persistence/store";
 import { DirtyWorktreeError, syncRepository } from "./snapshot";
+import { SourceBlobStore } from "../uploads/source-blob-store";
+import { removeReadOnlyTree } from "../uploads/folder-import";
 
 const exec = promisify(execFile);
 const tempDirectories: string[] = [];
@@ -49,10 +51,43 @@ function localRepository(localPath: string): RepositoryRecord {
 }
 
 afterEach(async () => {
-  await Promise.all(tempDirectories.splice(0).map((directory) => rm(directory, { recursive: true })));
+  await Promise.all(tempDirectories.splice(0).map((directory) => removeReadOnlyTree(directory)));
 });
 
 describe("immutable repository snapshots", () => {
+  test("shadow mode writes Git sources once and materializes a hardlinked snapshot view", async () => {
+    const repositoryPath = await fixtureRepository();
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-git-blobs-"));
+    tempDirectories.push(dataDir);
+    const store = new MemoryAppStore();
+    const setup = await store.createInitialSetup("git-blob@example.com", "hash");
+    const project = (await store.listProjects(setup!.workspace.id))[0]!;
+    const repository = {
+      ...localRepository(repositoryPath),
+      workspaceId: setup!.workspace.id,
+      projectId: project.id
+    };
+    const sourceDataDir = path.join(dataDir, "source-data");
+    const sourceBlobStore = new SourceBlobStore({ dataDir: sourceDataDir, catalog: store });
+    await sourceBlobStore.initialize();
+
+    const summary = await syncRepository({
+      repository,
+      dataDir,
+      store,
+      sourceStorageMode: "shadow",
+      sourceBlobStore
+    });
+
+    const sourceFile = store.sourceFiles.find((file) => file.path === "src/index.ts")!;
+    const blob = store.sourceBlobs.find((candidate) => candidate.id === sourceFile.sourceBlobId)!;
+    const snapshot = store.sourceSnapshots[0]!;
+    expect(blob).toBeDefined();
+    expect((await stat(path.join(snapshot.storagePath, sourceFile.path))).ino)
+      .toBe((await stat(path.join(sourceDataDir, ...blob.storageKey.split("/")))).ino);
+    expect(summary.fileCount).toBe(3);
+  });
+
   test("scans tracked source files and persists immutable content metadata", async () => {
     const repositoryPath = await fixtureRepository();
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-data-"));

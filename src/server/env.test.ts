@@ -13,8 +13,24 @@ describe("loadEnv", () => {
       dataDir: "./data",
       knowledgeKernelMode: "legacy",
       frontendKnowledgeMode: "legacy",
+      sourceStorageMode: "legacy",
       parserSocketPath: "/run/devkh-parser/parser.sock"
     });
+  });
+
+  test("loads only documented source storage rollout modes", () => {
+    expect(loadEnv({
+      mode: "development",
+      env: { DEVKH_SOURCE_STORAGE_MODE: "shadow" }
+    }).sourceStorageMode).toBe("shadow");
+    expect(loadEnv({
+      mode: "development",
+      env: { DEVKH_SOURCE_STORAGE_MODE: "active" }
+    }).sourceStorageMode).toBe("active");
+    expect(() => loadEnv({
+      mode: "development",
+      env: { DEVKH_SOURCE_STORAGE_MODE: "unexpected" }
+    })).toThrow(/DEVKH_SOURCE_STORAGE_MODE/);
   });
 
   test("loads an explicit parser runtime socket path", () => {

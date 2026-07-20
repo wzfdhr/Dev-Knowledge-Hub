@@ -54,6 +54,7 @@ import { hashMcpToken } from "../mcp/auth";
 import { PostgresSessionStore } from "../security/session-store";
 import { importFolderFiles, type FolderUploadFile } from "../uploads/folder-import";
 import { UploadSessionService, canonicalUploadManifestDigest } from "../uploads/upload-session";
+import { SourceBlobStore } from "../uploads/source-blob-store";
 import { LastProjectAdminError } from "./store";
 import { PostgresAppStore } from "./postgres-store";
 
@@ -2595,6 +2596,85 @@ integration("PostgreSQL cited knowledge integration", () => {
     } finally {
       await rm(artifactRoot, { recursive: true, force: true });
     }
+  }, 30_000);
+
+  test("serializes concurrent source blob creation in one PostgreSQL transaction context", async () => {
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const catalog = new PostgresAppStore(pool);
+    const setup = await catalog.createInitialSetup("source-blob@example.com", "hash");
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-postgres-source-blob-"));
+    retrievalFixtureRoots.push(root);
+    const blobs = new SourceBlobStore({ dataDir: root, catalog });
+    await blobs.initialize();
+    const bytes = Buffer.from("postgres source blob");
+
+    const [first, second] = await Promise.all([
+      blobs.put({ workspaceId: setup!.workspace.id, bytes }),
+      blobs.put({ workspaceId: setup!.workspace.id, bytes })
+    ]);
+
+    expect(second.record.id).toBe(first.record.id);
+    await expect(catalog.findSourceBlobById(setup!.workspace.id, first.record.id))
+      .resolves.toEqual(first.record);
+    await expect(catalog.findSourceBlobById(randomUUID(), first.record.id)).resolves.toBeNull();
+    const project = (await catalog.listProjects(setup!.workspace.id))[0]!;
+    const otherProject = await catalog.createProject(
+      setup!.workspace.id,
+      { name: "Other blob project", slug: "other-blob-project" },
+      setup!.admin.id
+    );
+    const repository = await catalog.createRepository(
+      setup!.workspace.id,
+      { kind: "upload", name: "Blob source" },
+      project.id
+    );
+    const snapshotId = randomUUID();
+    await catalog.createSnapshot({
+      snapshot: {
+        id: snapshotId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+        commitSha: "b".repeat(40), ref: "main", remoteUrl: null,
+        commitTimestamp: new Date("2026-07-20T00:00:00.000Z"), storagePath: root
+      },
+      files: [{
+        id: randomUUID(), workspaceId: setup!.workspace.id, snapshotId, path: "src/blob.ts",
+        byteSize: bytes.length, contentHash: first.record.contentHash, language: "typescript",
+        sourceBlobId: first.record.id
+      }]
+    });
+    await expect(catalog.findProjectSourceFile(
+      setup!.workspace.id, project.id, snapshotId, "src/blob.ts"
+    )).resolves.toMatchObject({ sourceBlobId: first.record.id });
+    await expect(catalog.findProjectSourceFile(
+      setup!.workspace.id, otherProject!.id, snapshotId, "src/blob.ts"
+    )).resolves.toBeNull();
+    const persisted = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM source_blobs WHERE workspace_id = $1",
+      [setup!.workspace.id]
+    );
+    expect(persisted.rows[0]?.count).toBe("1");
+
+    await pool.query("UPDATE source_blobs SET status = 'tombstoned' WHERE id = $1", [first.record.id]);
+    await expect(blobs.put({ workspaceId: setup!.workspace.id, bytes })).rejects.toMatchObject({ code: "23505" });
+    await pool.query("UPDATE source_blobs SET status = 'trash' WHERE id = $1", [first.record.id]);
+    await expect(blobs.put({ workspaceId: setup!.workspace.id, bytes })).resolves.toMatchObject({
+      reused: false,
+      record: { generation: 2, status: "active" }
+    });
+
+    const orphanBytes = Buffer.from("postgres recoverable orphan");
+    const orphanHash = createHash("sha256").update(orphanBytes).digest("hex");
+    const orphanPath = path.join(
+      root, "blobs", setup!.workspace.id, orphanHash.slice(0, 2), orphanHash, "1"
+    );
+    await mkdir(path.dirname(orphanPath), { recursive: true });
+    await writeFile(orphanPath, orphanBytes, { mode: 0o600 });
+    await chmod(orphanPath, 0o444);
+    const restartedBlobs = new SourceBlobStore({ dataDir: root, catalog });
+    await restartedBlobs.initialize();
+    await expect(restartedBlobs.put({ workspaceId: setup!.workspace.id, bytes: orphanBytes }))
+      .resolves.toMatchObject({ reused: false, record: { generation: 1, contentHash: orphanHash } });
   }, 30_000);
 });
 

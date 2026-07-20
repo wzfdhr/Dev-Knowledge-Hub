@@ -117,6 +117,13 @@ describe("frontend v2 compatibility contracts", () => {
       { kind: "knowledge-ir", schemaVersion: 1 },
       { kind: "knowledge-ir", schemaVersion: 1 }
     ])).toThrow("exactly one knowledge-ir@1");
+    expect(frontendStageArtifactKinds("convert", ["knowledge-v1", "frontend-v2"], "shadow"))
+      .toEqual(["normalized-source-refs", "normalized-sources"]);
+    expect(frontendStageArtifactKinds("convert", ["knowledge-v1", "frontend-v2"], "active"))
+      .toEqual(["normalized-source-refs"]);
+    expect(() => assertFrontendArtifactFamily("convert", ["knowledge-v1", "frontend-v2"], [
+      { kind: "normalized-source-refs", schemaVersion: 2 }
+    ], "active")).not.toThrow();
   });
 
   test("requires a complete immutable package manifest for every shadow stage", () => {
@@ -134,6 +141,11 @@ describe("frontend v2 compatibility contracts", () => {
       }
     } as const;
     expect(frontendPipelinePackageSchema.parse(value)).toEqual(value);
+    expect(frontendPipelinePackageSchema.parse({
+      ...value,
+      sourceStorageMode: "shadow",
+      artifacts: { ...value.artifacts, convert: ["convert-v1", "convert-v2"] }
+    })).toMatchObject({ sourceStorageMode: "shadow", artifacts: { convert: ["convert-v1", "convert-v2"] } });
     expect(() => frontendPipelinePackageSchema.parse({
       ...value,
       artifacts: { ...value.artifacts, graph: ["graph-v1"] }

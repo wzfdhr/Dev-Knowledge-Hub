@@ -15,9 +15,11 @@ import {
   knowledgeIrPipelineInputDigest,
   type KnowledgeIrStageStore
 } from "./extract-stage";
+import { SourceBlobReader } from "./source-blob-reader";
 import type { ArtifactManifest } from "./contracts";
 import type { PipelineStageRunRecord } from "../../persistence/store";
 import { MemoryAppStore } from "../../persistence/memory-store";
+import { SourceBlobStore } from "../../uploads/source-blob-store";
 
 const directories: string[] = [];
 
@@ -142,6 +144,59 @@ describe("knowledge IR pipeline stage", () => {
     })).rejects.toThrow("input digest does not match the persisted upstream manifests");
   });
 
+  test("reads normalized source references through the workspace blob reader", async () => {
+    const content = "export function answer() { return 42; }\n";
+    const prepared = await fixture({ "src/app.ts": content });
+    const blobRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-extract-stage-blobs-"));
+    directories.push(blobRoot);
+    const blobStore = new SourceBlobStore({ dataDir: blobRoot, catalog: prepared.store });
+    await blobStore.initialize();
+    const blob = await blobStore.put({ workspaceId: prepared.convertRun.workspaceId, bytes: Buffer.from(content) });
+    prepared.store.sourceFiles.find((file) =>
+      file.snapshotId === prepared.snapshot.id && file.path === "src/app.ts"
+    )!.sourceBlobId = blob.record.id;
+    const upstream = await prepared.artifactStore.putJson({
+      manifest: {
+        id: randomUUID(), workspaceId: prepared.convertRun.workspaceId, projectId: prepared.project.id,
+        snapshotId: prepared.snapshot.id, buildId: prepared.build.id, stage: "convert",
+        kind: "normalized-source-refs", schemaVersion: 2, inputDigest: prepared.convertRun.inputDigest,
+        contentDigest: "0".repeat(64), storageKey: "pending", producer: "deterministic",
+        sourceRefs: [{
+          snapshotId: prepared.snapshot.id, path: "src/app.ts", startLine: 1, endLine: 1,
+          blobHash: hash(content)
+        }],
+        createdAt: new Date().toISOString()
+      },
+      value: {
+        schemaVersion: 2,
+        snapshotId: prepared.snapshot.id,
+        sources: [{
+          snapshotId: prepared.snapshot.id, path: "src/app.ts", sourceBlobId: blob.record.id,
+          blobHash: hash(content), byteSize: Buffer.byteLength(content), language: "typescript"
+        }]
+      }
+    });
+    const run: PipelineStageRunRecord = {
+      ...prepared.convertRun,
+      id: "extract-refs-run",
+      stage: "extract",
+      inputDigest: knowledgeIrPipelineInputDigest(prepared.snapshot, prepared.build.purpose, [upstream.manifest.id])
+    };
+    const execute = createKnowledgeIrStageExecutor({
+      store: stageStore(prepared, new Map([[upstream.manifest.id, upstream.manifest]]), [
+        completedConvertRun(prepared, [upstream.manifest.id])
+      ]),
+      artifactStore: prepared.artifactStore,
+      sourceBlobReader: new SourceBlobReader({ catalog: prepared.store, blobStore })
+    });
+
+    const result = await execute(run);
+    const artifact = prepared.store.knowledgeArtifacts.find((candidate) => candidate.id === result.outputManifestIds![0])!;
+    await expect(prepared.artifactStore.getJson(artifact)).resolves.toEqual(expect.objectContaining({
+      symbols: expect.arrayContaining([expect.objectContaining({ name: "answer" })])
+    }));
+  });
+
   test("keeps legacy extraction stable when normalized sources include frontend-v2-only text", async () => {
     const prepared = await fixture({
       "src/app.ts": "export const answer = 42;\n",
@@ -196,6 +251,8 @@ describe("knowledge IR pipeline stage", () => {
     await expect(execute([completedConvertRun(prepared, [])])(run)).rejects.toThrow("requires at least one upstream manifest");
     await expect(execute([completedConvertRun(prepared, ["upstream-manifest", "upstream-manifest"])])(run))
       .rejects.toThrow("requires unique upstream manifests");
+    await expect(execute([completedConvertRun(prepared, ["inline-manifest", "reference-manifest"])])(run))
+      .rejects.toThrow("requires exactly one convert artifact family");
   });
 
   test("rejects snapshot-mismatched and cross-project convert manifests", async () => {

@@ -74,6 +74,8 @@ import type {
   SourceAnalysisArtifactKey,
   SourceAnalysisArtifactRecord,
   SourceFileRecord,
+  SourceBlobRecord,
+  LockedSourceBlobCatalog,
   SourceSnapshotRecord,
   TeamMemberRecord,
   TeamRole,
@@ -135,6 +137,20 @@ interface SnapshotRow extends QueryResultRow {
   remote_url: string | null;
   commit_timestamp: Date;
   storage_path: string;
+}
+
+interface SourceBlobRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  content_hash: string;
+  generation: number;
+  byte_size: string | number;
+  status: SourceBlobRecord["status"];
+  storage_key: string;
+  fencing_token: string | null;
+  tombstoned_at: Date | null;
+  trashed_at: Date | null;
+  deleted_at: Date | null;
 }
 
 interface UploadSessionRow extends QueryResultRow {
@@ -504,6 +520,22 @@ function snapshotRecord(row: SnapshotRow): SourceSnapshotRecord {
     remoteUrl: row.remote_url,
     commitTimestamp: row.commit_timestamp,
     storagePath: row.storage_path
+  };
+}
+
+function sourceBlobRecord(row: SourceBlobRow): SourceBlobRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    contentHash: row.content_hash,
+    generation: Number(row.generation),
+    byteSize: Number(row.byte_size),
+    status: row.status,
+    storageKey: row.storage_key,
+    fencingToken: row.fencing_token,
+    tombstonedAt: row.tombstoned_at,
+    trashedAt: row.trashed_at,
+    deletedAt: row.deleted_at
   };
 }
 
@@ -878,6 +910,61 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     } finally {
       client.release();
     }
+  }
+
+  async withSourceBlobLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    return this.transaction(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [workspaceId, contentHash]);
+      const catalog: LockedSourceBlobCatalog = {
+        findActive: async () => {
+          const result = await client.query<SourceBlobRow>(`
+            SELECT id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                   fencing_token, tombstoned_at, trashed_at, deleted_at
+            FROM source_blobs
+            WHERE workspace_id = $1 AND content_hash = $2 AND status = 'active'
+            FOR UPDATE
+          `, [workspaceId, contentHash]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        nextGeneration: async () => {
+          const result = await client.query<{ next_generation: number }>(`
+            SELECT COALESCE(MAX(generation), 0) + 1 AS next_generation
+            FROM source_blobs
+            WHERE workspace_id = $1 AND content_hash = $2
+          `, [workspaceId, contentHash]);
+          return Number(result.rows[0]?.next_generation ?? 1);
+        },
+        create: async (input) => {
+          if (input.workspaceId !== workspaceId || input.contentHash !== contentHash) {
+            throw new Error("SOURCE_BLOB_SCOPE_MISMATCH");
+          }
+          const result = await client.query<SourceBlobRow>(`
+            INSERT INTO source_blobs (
+              workspace_id, content_hash, generation, byte_size, status, storage_key
+            ) VALUES ($1, $2, $3, $4, 'active', $5)
+            RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                      fencing_token, tombstoned_at, trashed_at, deleted_at
+          `, [workspaceId, contentHash, input.generation, input.byteSize, input.storageKey]);
+          if (!result.rows[0]) throw new Error("Source blob record was not created");
+          return sourceBlobRecord(result.rows[0]);
+        }
+      };
+      return operation(catalog);
+    });
+  }
+
+  async findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null> {
+    const result = await this.pool.query<SourceBlobRow>(`
+      SELECT id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+             fencing_token, tombstoned_at, trashed_at, deleted_at
+      FROM source_blobs
+      WHERE workspace_id = $1 AND id = $2
+    `, [workspaceId, sourceBlobId]);
+    return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
   }
 
   private async acquireUploadMutationPermit(): Promise<() => void> {
@@ -4473,16 +4560,17 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   async listSnapshotFiles(workspaceId: string, snapshotId: string): Promise<SourceFileRecord[]> {
     const { rows } = await this.pool.query<{
       id: string; workspace_id: string; snapshot_id: string; path: string;
-      byte_size: number; content_hash: string; language: string | null;
+      byte_size: number; content_hash: string; language: string | null; source_blob_id: string | null;
     }>(
-      `SELECT id, workspace_id, snapshot_id, path, byte_size, content_hash, language
+      `SELECT id, workspace_id, snapshot_id, path, byte_size, content_hash, language, source_blob_id
        FROM source_files WHERE workspace_id = $1 AND snapshot_id = $2
        ORDER BY path, id`,
       [workspaceId, snapshotId]
     );
     return rows.map((row) => ({
       id: row.id, workspaceId: row.workspace_id, snapshotId: row.snapshot_id,
-      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language
+      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language,
+      sourceBlobId: row.source_blob_id
     }));
   }
 
@@ -4542,16 +4630,44 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   async findSourceFile(workspaceId: string, snapshotId: string, filePath: string) {
     const { rows } = await this.pool.query<{
       id: string; workspace_id: string; snapshot_id: string; path: string;
-      byte_size: number; content_hash: string; language: string | null;
+      byte_size: number; content_hash: string; language: string | null; source_blob_id: string | null;
     }>(
-      `SELECT id, workspace_id, snapshot_id, path, byte_size, content_hash, language
+      `SELECT id, workspace_id, snapshot_id, path, byte_size, content_hash, language, source_blob_id
        FROM source_files WHERE workspace_id = $1 AND snapshot_id = $2 AND path = $3`,
       [workspaceId, snapshotId, filePath]
     );
     const row = rows[0];
     return row ? {
       id: row.id, workspaceId: row.workspace_id, snapshotId: row.snapshot_id,
-      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language
+      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language,
+      sourceBlobId: row.source_blob_id
+    } : null;
+  }
+
+  async findProjectSourceFile(
+    workspaceId: string,
+    projectId: string,
+    snapshotId: string,
+    filePath: string
+  ) {
+    const { rows } = await this.pool.query<{
+      id: string; workspace_id: string; snapshot_id: string; path: string;
+      byte_size: number; content_hash: string; language: string | null; source_blob_id: string | null;
+    }>(`
+      SELECT sf.id, sf.workspace_id, sf.snapshot_id, sf.path, sf.byte_size,
+             sf.content_hash, sf.language, sf.source_blob_id
+      FROM source_files sf
+      JOIN source_snapshots ss
+        ON ss.id = sf.snapshot_id AND ss.workspace_id = sf.workspace_id
+      JOIN repositories r
+        ON r.id = ss.repository_id AND r.workspace_id = ss.workspace_id
+      WHERE sf.workspace_id = $1 AND r.project_id = $2 AND sf.snapshot_id = $3 AND sf.path = $4
+    `, [workspaceId, projectId, snapshotId, filePath]);
+    const row = rows[0];
+    return row ? {
+      id: row.id, workspaceId: row.workspace_id, snapshotId: row.snapshot_id,
+      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language,
+      sourceBlobId: row.source_blob_id
     } : null;
   }
 
@@ -4636,8 +4752,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       for (const file of files) {
         await client.query(
           `INSERT INTO source_files
-           (id, workspace_id, snapshot_id, path, language, content_hash, byte_size)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+           (id, workspace_id, snapshot_id, path, language, content_hash, byte_size, source_blob_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
           [
             file.id,
             file.workspaceId,
@@ -4645,7 +4761,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
             file.path,
             file.language,
             file.contentHash,
-            file.byteSize
+            file.byteSize,
+            file.sourceBlobId ?? null
           ]
         );
       }

@@ -13,6 +13,7 @@ describe("schema exports", () => {
         "encryptedCredentials",
         "sourceSnapshots",
         "sourceFiles",
+        "sourceBlobs",
         "sourceAnalysisArtifacts",
         "uploadSessions",
         "uploadSessionEntries",
@@ -34,6 +35,21 @@ describe("schema exports", () => {
         "AGENT_FEEDBACK_STATUSES"
       ])
     );
+  });
+
+  test("keeps source blobs generation-scoped while source file references remain expandable", () => {
+    const blobs = getTableConfig(schema.sourceBlobs);
+    const files = getTableConfig(schema.sourceFiles);
+
+    expect(blobs.uniqueConstraints.map((item) => item.name)).toContain("source_blobs_workspace_hash_generation_unique");
+    expect(blobs.indexes.map((item) => item.config.name)).toContain("source_blobs_live_workspace_hash_idx");
+    expect(blobs.checks.map((item) => item.name)).toEqual(expect.arrayContaining([
+      "source_blobs_content_hash_check",
+      "source_blobs_generation_check",
+      "source_blobs_status_check"
+    ]));
+    expect(files.columns.find((column) => column.name === "source_blob_id")?.notNull).toBe(false);
+    expect(files.foreignKeys.map((key) => key.getName())).toContain("source_files_source_blob_workspace_fk");
   });
 
   test("keeps upload sessions workspace scoped with durable manifest and idempotency contracts", () => {

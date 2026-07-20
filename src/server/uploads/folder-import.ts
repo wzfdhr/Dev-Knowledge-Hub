@@ -14,6 +14,7 @@ import path from "node:path";
 import { filterImportFile, importLanguageForPath } from "../../shared/import-filter.js";
 
 import type { AppStore, SourceFileRecord, SourceSnapshotRecord } from "../persistence/store.js";
+import type { SourceBlobStore } from "./source-blob-store.js";
 
 export const MAX_FOLDER_UPLOAD_FILES = 50_000;
 export const MAX_FOLDER_SCAN_FILES = 100_000;
@@ -197,7 +198,9 @@ export async function importFolderFiles({
   store,
   stagingDirectory,
   pendingUploadSessionId,
-  pendingImportReportId
+  pendingImportReportId,
+  sourceStorageMode = "legacy",
+  sourceBlobStore
 }: {
   files: AsyncIterable<FolderUploadFile>;
   dataDir: string;
@@ -208,6 +211,8 @@ export async function importFolderFiles({
   stagingDirectory?: string;
   pendingUploadSessionId?: string;
   pendingImportReportId?: string;
+  sourceStorageMode?: "legacy" | "shadow" | "active";
+  sourceBlobStore?: SourceBlobStore;
 }): Promise<FolderUploadSummary> {
   const workDirectory = stagingDirectory ?? path.join(dataDir, "uploads", randomUUID());
   const stagedFiles = path.join(workDirectory, "files");
@@ -290,19 +295,45 @@ export async function importFolderFiles({
     }
 
     const snapshotId = randomUUID();
-    const sourceFiles: SourceFileRecord[] = accepted.map((file) => ({
-      id: randomUUID(),
-      workspaceId,
-      snapshotId,
-      path: file.filePath,
-      byteSize: file.byteSize,
-      contentHash: file.contentHash,
-      language: file.language
-    }));
-    const snapshotsRoot = await ensureDurableSubdirectory(dataDir, ["snapshots"]);
-    promotedSnapshotDirectory = path.join(snapshotsRoot, snapshotId);
-    await mkdir(promotedSnapshotDirectory, { recursive: false, mode: 0o700 });
-    await syncDirectory(snapshotsRoot);
+    let sourceFiles: SourceFileRecord[];
+    let storagePath: string;
+    if (sourceStorageMode !== "legacy") {
+      if (!sourceBlobStore) throw new Error("Source blob storage is unavailable");
+      const linkedFiles: Array<{
+        path: string;
+        blob: Awaited<ReturnType<SourceBlobStore["put"]>>["record"];
+      }> = [];
+      sourceFiles = [];
+      for (const file of accepted) {
+        const bytes = await readFile(path.join(stagedFiles, ...file.filePath.split("/")));
+        const { record } = await sourceBlobStore.put({ workspaceId, bytes });
+        linkedFiles.push({ path: file.filePath, blob: record });
+        sourceFiles.push({
+          id: randomUUID(), workspaceId, snapshotId, path: file.filePath,
+          byteSize: file.byteSize, contentHash: file.contentHash, language: file.language,
+          sourceBlobId: record.id
+        });
+      }
+      storagePath = await sourceBlobStore.materializeSnapshotView({
+        workspaceId, snapshotId, files: linkedFiles
+      });
+      promotedSnapshotDirectory = path.dirname(storagePath);
+      await chmod(promotedSnapshotDirectory, 0o700);
+    } else {
+      sourceFiles = accepted.map((file) => ({
+        id: randomUUID(), workspaceId, snapshotId, path: file.filePath,
+        byteSize: file.byteSize, contentHash: file.contentHash, language: file.language,
+        sourceBlobId: null
+      }));
+      const snapshotsRoot = await ensureDurableSubdirectory(dataDir, ["snapshots"]);
+      promotedSnapshotDirectory = path.join(snapshotsRoot, snapshotId);
+      await mkdir(promotedSnapshotDirectory, { recursive: false, mode: 0o700 });
+      await syncDirectory(snapshotsRoot);
+      storagePath = path.join(promotedSnapshotDirectory, "files");
+      await moveDirectory(stagedFiles, storagePath);
+      await makeReadOnly(storagePath, sourceFiles.map((file) => file.path));
+      await syncTree(storagePath);
+    }
     if (pendingUploadSessionId || pendingImportReportId) {
       await writeDurableJsonMarker(promotedSnapshotDirectory, PENDING_UPLOAD_SNAPSHOT_MARKER, {
         workspaceId,
@@ -311,10 +342,6 @@ export async function importFolderFiles({
         snapshotId
       }, 0o400);
     }
-    const storagePath = path.join(promotedSnapshotDirectory, "files");
-    await moveDirectory(stagedFiles, storagePath);
-    await makeReadOnly(storagePath, sourceFiles.map((file) => file.path));
-    await syncTree(storagePath);
     await syncDirectory(promotedSnapshotDirectory);
     await chmod(promotedSnapshotDirectory, 0o555);
     const snapshot: SourceSnapshotRecord = {

@@ -61,3 +61,16 @@ test("defines durable project upload sessions, manifest entries, and idempotency
   expect(sql).toMatch(/upload_sessions_expected_current_repository_scope_fk/);
   expect(sql).toMatch(/FOREIGN KEY \(upload_session_id, workspace_id, project_id, repository_id, actor_id\)/);
 });
+
+test("expands workspace source blobs without contracting legacy snapshot storage", async () => {
+  const sql = await readFile(path.join(resolveMigrationDirectory(), "0034_source_blobs.sql"), "utf8");
+
+  expect(sql).toMatch(/CREATE TABLE source_blobs/);
+  expect(sql).toMatch(/UNIQUE \(workspace_id, content_hash, generation\)/);
+  expect(sql).toMatch(/source_blobs_active_workspace_hash_idx/);
+  expect(sql).toMatch(/WHERE status = 'active'/);
+  expect(sql).toMatch(/ALTER TABLE source_files ADD COLUMN source_blob_id uuid/);
+  expect(sql).toMatch(/source_files_source_blob_workspace_fk/);
+  expect(sql).not.toMatch(/source_blob_id uuid NOT NULL/);
+  expect(sql).not.toMatch(/DROP COLUMN|DROP TABLE|DELETE FROM source_files/);
+});

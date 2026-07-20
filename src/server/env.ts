@@ -22,6 +22,7 @@ const legacySessionReadUntilSchema = z.string().datetime({ offset: true })
 
 const knowledgeKernelModeSchema = z.enum(["legacy", "shadow", "active"]);
 const frontendKnowledgeModeSchema = z.enum(FRONTEND_KNOWLEDGE_MODES);
+const sourceStorageModeSchema = z.enum(["legacy", "shadow", "active"]);
 
 const sharedEnvSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
@@ -34,6 +35,7 @@ const sharedEnvSchema = z.object({
   DEVKH_LEGACY_SESSION_READ_UNTIL: legacySessionReadUntilSchema.optional(),
   DEVKH_KNOWLEDGE_KERNEL_MODE: knowledgeKernelModeSchema.default("legacy"),
   DEVKH_FRONTEND_KNOWLEDGE_MODE: frontendKnowledgeModeSchema.default("legacy"),
+  DEVKH_SOURCE_STORAGE_MODE: sourceStorageModeSchema.default("legacy"),
   DEVKH_PARSER_SOCKET_PATH: z.string().startsWith("/").default("/run/devkh-parser/parser.sock")
 });
 
@@ -57,6 +59,7 @@ export interface AppEnv {
   legacySessionReadUntil?: Date;
   knowledgeKernelMode: z.infer<typeof knowledgeKernelModeSchema>;
   frontendKnowledgeMode: z.infer<typeof frontendKnowledgeModeSchema>;
+  sourceStorageMode: z.infer<typeof sourceStorageModeSchema>;
   parserSocketPath: string;
 }
 
@@ -85,6 +88,7 @@ export function loadEnv({
       legacySessionReadUntil: parsed.DEVKH_LEGACY_SESSION_READ_UNTIL,
       knowledgeKernelMode: parsed.DEVKH_KNOWLEDGE_KERNEL_MODE,
       frontendKnowledgeMode: parsed.DEVKH_FRONTEND_KNOWLEDGE_MODE,
+      sourceStorageMode: parsed.DEVKH_SOURCE_STORAGE_MODE,
       parserSocketPath: parsed.DEVKH_PARSER_SOCKET_PATH
     };
   }
@@ -106,6 +110,7 @@ export function loadEnv({
     legacySessionReadUntil: parsed.DEVKH_LEGACY_SESSION_READ_UNTIL,
     knowledgeKernelMode: parsed.DEVKH_KNOWLEDGE_KERNEL_MODE,
     frontendKnowledgeMode: parsed.DEVKH_FRONTEND_KNOWLEDGE_MODE,
+    sourceStorageMode: parsed.DEVKH_SOURCE_STORAGE_MODE,
     parserSocketPath: parsed.DEVKH_PARSER_SOCKET_PATH
   };
 }

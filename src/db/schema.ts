@@ -222,6 +222,33 @@ export const sourceSnapshots = pgTable("source_snapshots", {
   }).onDelete("cascade")
 ]);
 
+export const sourceBlobs = pgTable("source_blobs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  contentHash: text("content_hash").notNull(),
+  generation: integer("generation").notNull(),
+  byteSize: bigint("byte_size", { mode: "number" }).notNull(),
+  status: text("status").$type<"active" | "tombstoned" | "trash" | "deleted">().notNull().default("active"),
+  storageKey: text("storage_key").notNull(),
+  fencingToken: uuid("fencing_token"),
+  tombstonedAt: timestamp("tombstoned_at", { withTimezone: true }),
+  trashedAt: timestamp("trashed_at", { withTimezone: true }),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  ...timestamps
+}, (table) => [
+  unique("source_blobs_workspace_hash_generation_unique")
+    .on(table.workspaceId, table.contentHash, table.generation),
+  unique("source_blobs_id_workspace_unique").on(table.id, table.workspaceId),
+  uniqueIndex("source_blobs_active_workspace_hash_idx")
+    .on(table.workspaceId, table.contentHash)
+    .where(sql`${table.status} = 'active'`),
+  index("source_blobs_workspace_status_idx").on(table.workspaceId, table.status, table.updatedAt),
+  check("source_blobs_content_hash_check", sql`${table.contentHash} ~ '^[0-9a-f]{64}$'`),
+  check("source_blobs_generation_check", sql`${table.generation} > 0`),
+  check("source_blobs_byte_size_check", sql`${table.byteSize} >= 0`),
+  check("source_blobs_status_check", sql`${table.status} IN ('active', 'tombstoned', 'trash', 'deleted')`)
+]);
+
 export const sourceFiles = pgTable("source_files", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
@@ -230,6 +257,7 @@ export const sourceFiles = pgTable("source_files", {
   language: text("language"),
   contentHash: text("content_hash").notNull(),
   byteSize: integer("byte_size").notNull(),
+  sourceBlobId: uuid("source_blob_id"),
   ...timestamps
 }, (table) => [
   uniqueIndex("source_files_id_workspace_idx").on(table.id, table.workspaceId),
@@ -238,7 +266,13 @@ export const sourceFiles = pgTable("source_files", {
     columns: [table.snapshotId, table.workspaceId],
     foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId],
     name: "source_files_snapshot_workspace_fk"
-  }).onDelete("cascade")
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.sourceBlobId, table.workspaceId],
+    foreignColumns: [sourceBlobs.id, sourceBlobs.workspaceId],
+    name: "source_files_source_blob_workspace_fk"
+  }).onDelete("restrict"),
+  index("source_files_source_blob_idx").on(table.sourceBlobId)
 ]);
 
 export const uploadSessions = pgTable("upload_sessions", {

@@ -51,6 +51,7 @@ import {
   type FrontendKnowledgeMode
 } from "./knowledge/frontend/rollout-mode.js";
 import { ParserClient } from "./knowledge/frontend/runtime/parser-client.js";
+import { SourceBlobStore } from "./uploads/source-blob-store.js";
 
 const IMPORT_REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 const GIT_SYNC_CLAIM_LIMIT = 10;
@@ -88,6 +89,7 @@ export interface BootstrapDependencies {
     schedulePostBuild: (build: BuildRecord, stage?: PersistedInitialPipelineStage) => Promise<void>
   ) => BuildService;
   createArtifactStore: (directory: string, persistence: PipelineArtifactStore) => ArtifactStoreInitializer;
+  createSourceBlobStore: (directory: string, catalog: AppStore) => SourceBlobStore;
   createParserClient: (socketPath: string) => FrontendParserClient;
   createQualityPipelineWorker: (
     connectionString: string,
@@ -114,6 +116,7 @@ const defaultDependencies: BootstrapDependencies = {
   createBuildService: (store, queue, enhancerForWorkspace, initialPipelineStage, schedulePostBuild) =>
     new BuildService(store, queue, { enhancerForWorkspace, initialPipelineStage, schedulePostBuild }),
   createArtifactStore: (directory, persistence) => new ArtifactStore(directory, persistence),
+  createSourceBlobStore: (directory, catalog) => new SourceBlobStore({ dataDir: directory, catalog }),
   createParserClient: (socketPath) => new ParserClient({ socketPath }),
   createQualityPipelineWorker: (
     connectionString, store, artifactStore, enhancerForWorkspace, frontendModeForProject, frontendParser
@@ -172,6 +175,8 @@ export async function bootstrapServer(
     store as AppStore & PipelineArtifactStore
   );
   await artifactStore.initialize();
+  const sourceBlobStore = dependencies.createSourceBlobStore(path.join(env.dataDir, "snapshots"), store);
+  await sourceBlobStore.initialize();
   const queue = dependencies.createBuildQueue(env.databaseUrl);
   const enhancerForWorkspace = async (workspaceId: string): Promise<KnowledgeEnhancer | undefined> => {
     const config = await store.getModelConfig(workspaceId);
@@ -243,7 +248,9 @@ export async function bootstrapServer(
     sessionStore: new PostgresSessionStore(database.pool),
     qualityArtifactReader: artifactStore as ArtifactStore,
     knowledgeKernelMode: env.knowledgeKernelMode,
-    frontendKnowledgeMode: env.frontendKnowledgeMode
+    frontendKnowledgeMode: env.frontendKnowledgeMode,
+    sourceStorageMode: env.sourceStorageMode,
+    sourceBlobStore
   });
   const reportBackgroundError = dependencies.reportBackgroundError
     ?? ((operation: string, error: unknown) => server.log.error({ err: error }, operation));
@@ -274,6 +281,8 @@ export async function bootstrapServer(
             store,
             gitTimeoutMs: GIT_SYNC_COMMAND_TIMEOUT_MS,
             gitSynchronizationLease: { repositoryId: repository.id, leaseToken },
+            sourceStorageMode: env.sourceStorageMode,
+            sourceBlobStore,
             ...(credential ? { token: decryptSecret(credential, env.masterKey!) } : {})
           });
           const completed = await store.finishGitSynchronization({

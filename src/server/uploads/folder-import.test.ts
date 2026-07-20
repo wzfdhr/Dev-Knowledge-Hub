@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import { MemoryAppStore } from "../persistence/memory-store.js";
 import { FolderUploadError, importFolderFiles, removeReadOnlyTree, type FolderUploadFile } from "./folder-import.js";
+import { SourceBlobStore } from "./source-blob-store.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -34,6 +35,35 @@ afterEach(async () => {
 });
 
 describe("folder snapshot import", () => {
+  test("shadow mode stores workspace blobs and exposes the legacy snapshot path as hardlinks", async () => {
+    const context = await fixture();
+    const setup = await context.store.createInitialSetup("folder-blob@example.com", "hash");
+    const project = (await context.store.listProjects(setup!.workspace.id))[0]!;
+    const repository = await context.store.createRepository(
+      setup!.workspace.id, { kind: "upload", name: "Folder" }, project.id
+    );
+    const sourceDataDir = path.join(context.dataDir, "source-data");
+    const sourceBlobStore = new SourceBlobStore({ dataDir: sourceDataDir, catalog: context.store });
+    await sourceBlobStore.initialize();
+
+    const summary = await importFolderFiles({
+      files: files([["src/index.ts", "export const blob = true;\n"]]),
+      dataDir: context.dataDir,
+      workspaceId: setup!.workspace.id,
+      repositoryId: repository!.id,
+      actorId: setup!.admin.id,
+      store: context.store,
+      sourceStorageMode: "shadow",
+      sourceBlobStore
+    });
+
+    const sourceFile = context.store.sourceFiles[0]!;
+    const blob = context.store.sourceBlobs[0]!;
+    expect(sourceFile.sourceBlobId).toBe(blob.id);
+    expect((await stat(path.join(summary.storagePath, sourceFile.path))).ino)
+      .toBe((await stat(path.join(sourceDataDir, ...blob.storageKey.split("/")))).ino);
+  });
+
   test("uploads only accepted files, filters dependencies before snapshotting, and creates a stable content version", async () => {
     const context = await fixture();
     const summary = await importFolderFiles({

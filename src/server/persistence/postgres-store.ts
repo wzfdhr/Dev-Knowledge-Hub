@@ -4550,16 +4550,17 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   async listSnapshotFiles(workspaceId: string, snapshotId: string): Promise<SourceFileRecord[]> {
     const { rows } = await this.pool.query<{
       id: string; workspace_id: string; snapshot_id: string; path: string;
-      byte_size: number; content_hash: string; language: string | null;
+      byte_size: number; content_hash: string; language: string | null; source_blob_id: string | null;
     }>(
-      `SELECT id, workspace_id, snapshot_id, path, byte_size, content_hash, language
+      `SELECT id, workspace_id, snapshot_id, path, byte_size, content_hash, language, source_blob_id
        FROM source_files WHERE workspace_id = $1 AND snapshot_id = $2
        ORDER BY path, id`,
       [workspaceId, snapshotId]
     );
     return rows.map((row) => ({
       id: row.id, workspaceId: row.workspace_id, snapshotId: row.snapshot_id,
-      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language
+      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language,
+      sourceBlobId: row.source_blob_id
     }));
   }
 
@@ -4619,16 +4620,17 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   async findSourceFile(workspaceId: string, snapshotId: string, filePath: string) {
     const { rows } = await this.pool.query<{
       id: string; workspace_id: string; snapshot_id: string; path: string;
-      byte_size: number; content_hash: string; language: string | null;
+      byte_size: number; content_hash: string; language: string | null; source_blob_id: string | null;
     }>(
-      `SELECT id, workspace_id, snapshot_id, path, byte_size, content_hash, language
+      `SELECT id, workspace_id, snapshot_id, path, byte_size, content_hash, language, source_blob_id
        FROM source_files WHERE workspace_id = $1 AND snapshot_id = $2 AND path = $3`,
       [workspaceId, snapshotId, filePath]
     );
     const row = rows[0];
     return row ? {
       id: row.id, workspaceId: row.workspace_id, snapshotId: row.snapshot_id,
-      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language
+      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language,
+      sourceBlobId: row.source_blob_id
     } : null;
   }
 
@@ -4713,8 +4715,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       for (const file of files) {
         await client.query(
           `INSERT INTO source_files
-           (id, workspace_id, snapshot_id, path, language, content_hash, byte_size)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+           (id, workspace_id, snapshot_id, path, language, content_hash, byte_size, source_blob_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
           [
             file.id,
             file.workspaceId,
@@ -4722,7 +4724,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
             file.path,
             file.language,
             file.contentHash,
-            file.byteSize
+            file.byteSize,
+            file.sourceBlobId ?? null
           ]
         );
       }

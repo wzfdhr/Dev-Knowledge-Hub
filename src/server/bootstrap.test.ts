@@ -21,6 +21,7 @@ function dependencies(): BootstrapDependencies {
     dispatch: vi.fn(async () => {})
   };
   const buildService = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+  const sourceBlobStore = { initialize: vi.fn(async () => {}) };
   const server = { durable: true, addHook: vi.fn() };
   return {
     createDatabase: vi.fn(() => ({ pool } as never)),
@@ -29,6 +30,7 @@ function dependencies(): BootstrapDependencies {
     createBuildQueue: vi.fn(() => queue as never),
     createBuildService: vi.fn(() => buildService as never),
     createArtifactStore: vi.fn(() => ({ initialize: vi.fn(async () => {}) })),
+    createSourceBlobStore: vi.fn(() => sourceBlobStore as never),
     createParserClient: vi.fn(() => ({ analyze: vi.fn(async () => ({ outputs: [] })) })),
     createQualityPipelineWorker: vi.fn(() => qualityWorker),
     buildServer: vi.fn(() => server as never),
@@ -83,6 +85,9 @@ describe("production bootstrap", () => {
       store, queue, expect.any(Function), expect.any(Function), expect.any(Function)
     );
     expect(deps.createArtifactStore).toHaveBeenCalledWith("/var/lib/devkh/artifacts", store);
+    expect(deps.createSourceBlobStore).toHaveBeenCalledWith("/var/lib/devkh/snapshots", store);
+    const sourceBlobStore = vi.mocked(deps.createSourceBlobStore).mock.results[0].value;
+    expect(sourceBlobStore.initialize).toHaveBeenCalledOnce();
     expect(artifactStore.initialize).toHaveBeenCalledOnce();
     expect(buildService.start).toHaveBeenCalledOnce();
     expect(deps.buildServer).toHaveBeenCalledWith(expect.objectContaining({
@@ -94,6 +99,8 @@ describe("production bootstrap", () => {
       nodeEnv: "production",
       knowledgeKernelMode: "shadow",
       frontendKnowledgeMode: "shadow",
+      sourceStorageMode: "legacy",
+      sourceBlobStore,
       clientDir: path.resolve("dist/client"),
       sessionStore: expect.anything()
     }));

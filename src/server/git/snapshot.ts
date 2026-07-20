@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { filterImportFile, importLanguageForPath } from "../../shared/import-filter.js";
@@ -11,6 +11,8 @@ import type {
   SourceFileRecord,
   SourceSnapshotRecord
 } from "../persistence/store.js";
+import type { SourceBlobStore } from "../uploads/source-blob-store.js";
+import { removeReadOnlyTree } from "../uploads/folder-import.js";
 import { prepareRemoteRepository, runGit } from "./remote.js";
 
 const repositorySyncs = new Map<string, Promise<void>>();
@@ -109,7 +111,9 @@ async function syncRepositoryUnlocked({
   actorId,
   prepareRemote = prepareRemoteRepository,
   gitTimeoutMs,
-  gitSynchronizationLease
+  gitSynchronizationLease,
+  sourceStorageMode = "legacy",
+  sourceBlobStore
 }: {
   repository: RepositoryRecord;
   dataDir: string;
@@ -119,6 +123,8 @@ async function syncRepositoryUnlocked({
   prepareRemote?: typeof prepareRemoteRepository;
   gitTimeoutMs?: number;
   gitSynchronizationLease?: GitSynchronizationLease;
+  sourceStorageMode?: "legacy" | "shadow" | "active";
+  sourceBlobStore?: SourceBlobStore;
 }): Promise<SnapshotSummary> {
   const repositoryPath = repository.kind === "local"
     ? repository.localPath
@@ -189,6 +195,10 @@ async function syncRepositoryUnlocked({
   const snapshotId = randomUUID();
   const snapshotDirectory = path.join(dataDir, "snapshots", snapshotId);
   const files: SourceFileRecord[] = [];
+  const linkedFiles: Array<{
+    path: string;
+    blob: Awaited<ReturnType<SourceBlobStore["put"]>>["record"];
+  }> = [];
   const ignoredReasons: Record<string, number> = {};
   for (const filePath of tracked) {
     const byteSize = Number((await runGit({
@@ -217,9 +227,17 @@ async function syncRepositoryUnlocked({
       continue;
     }
 
-    const outputPath = path.join(snapshotDirectory, "files", ...filePath.split("/"));
-    await mkdir(path.dirname(outputPath), { recursive: true });
-    await writeFile(outputPath, content, { flag: "wx" });
+    let sourceBlobId: string | null = null;
+    if (sourceStorageMode === "legacy") {
+      const outputPath = path.join(snapshotDirectory, "files", ...filePath.split("/"));
+      await mkdir(path.dirname(outputPath), { recursive: true });
+      await writeFile(outputPath, content, { flag: "wx" });
+    } else {
+      if (!sourceBlobStore) throw new Error("Source blob storage is unavailable");
+      const { record } = await sourceBlobStore.put({ workspaceId: repository.workspaceId, bytes: content });
+      sourceBlobId = record.id;
+      linkedFiles.push({ path: filePath, blob: record });
+    }
     files.push({
       id: randomUUID(),
       workspaceId: repository.workspaceId,
@@ -227,9 +245,18 @@ async function syncRepositoryUnlocked({
       path: filePath,
       byteSize: content.length,
       contentHash: createHash("sha256").update(content).digest("hex"),
-      language: importLanguageForPath(filePath)
+      language: importLanguageForPath(filePath),
+      sourceBlobId
     });
   }
+
+  const storagePath = sourceStorageMode === "legacy"
+    ? path.join(snapshotDirectory, "files")
+    : await sourceBlobStore!.materializeSnapshotView({
+        workspaceId: repository.workspaceId,
+        snapshotId,
+        files: linkedFiles
+      });
 
   const snapshot: SourceSnapshotRecord = {
     id: snapshotId,
@@ -239,7 +266,7 @@ async function syncRepositoryUnlocked({
     ref,
     remoteUrl,
     commitTimestamp,
-    storagePath: path.join(snapshotDirectory, "files")
+    storagePath
   };
   let persisted: SourceSnapshotRecord;
   try {
@@ -251,11 +278,11 @@ async function syncRepositoryUnlocked({
     if (!written) throw new GitSynchronizationLeaseExpiredError();
     persisted = written;
   } catch (error) {
-    await rm(snapshotDirectory, { recursive: true, force: true });
+    await removeReadOnlyTree(path.dirname(storagePath)).catch(() => undefined);
     throw error;
   }
   if (persisted.id !== snapshot.id) {
-    await rm(snapshotDirectory, { recursive: true, force: true });
+    await removeReadOnlyTree(path.dirname(storagePath)).catch(() => undefined);
     return {
       snapshotId: persisted.id,
       commitSha: persisted.commitSha,

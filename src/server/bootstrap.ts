@@ -127,7 +127,10 @@ const defaultDependencies: BootstrapDependencies = {
   ) => {
     const pipelineStore = store as AppStore & PipelineArtifactStore;
     const pipelineArtifacts = artifactStore as ArtifactStore;
-    const knowledgeV1Store = createKnowledgeV1StoreView(pipelineStore);
+    const knowledgeV1Store = createKnowledgeV1StoreView(
+      pipelineStore,
+      sourceStorageMode === "active" ? "normalized-source-refs" : "normalized-sources"
+    );
     const legacyExecutor = createPipelineStageExecutor({
       convert: createNormalizedSourcesStageExecutor({
         store: knowledgeV1Store, artifactStore: pipelineArtifacts, sourceStorageMode, sourceBlobReader
@@ -152,7 +155,12 @@ const defaultDependencies: BootstrapDependencies = {
       pipelineStore,
       new PgBossPipelineStageJobQueue(connectionString),
       createFrontendShadowStageExecutor({
-        store: pipelineStore, artifactStore: pipelineArtifacts, legacy: legacyExecutor, frontendParser
+        store: pipelineStore,
+        artifactStore: pipelineArtifacts,
+        legacy: legacyExecutor,
+        frontendParser,
+        sourceStorageMode,
+        sourceBlobReader
       }),
       ["convert", "extract", "tables", "graph", "synthesize", "index", "lint", "viz", "validate", "package"],
       5_000,

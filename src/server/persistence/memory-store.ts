@@ -204,7 +204,8 @@ export class MemoryAppStore implements AppStore {
           if (this.workspace?.id !== workspaceId || input.workspaceId !== workspaceId
             || input.contentHash !== contentHash
             || this.sourceBlobs.some((candidate) => candidate.workspaceId === workspaceId
-              && candidate.contentHash === contentHash && candidate.status === "active")
+              && candidate.contentHash === contentHash
+              && (candidate.status === "active" || candidate.status === "tombstoned"))
             || this.sourceBlobs.some((candidate) => candidate.workspaceId === workspaceId
               && candidate.contentHash === contentHash && candidate.generation === input.generation)) {
             throw new Error("SOURCE_BLOB_CONFLICT");

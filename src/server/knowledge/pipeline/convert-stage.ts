@@ -108,6 +108,12 @@ function lineCount(content: string): number {
   return Math.max(1, content.split(/\r?\n/).length - (content.endsWith("\n") ? 1 : 0));
 }
 
+function byteLineCount(bytes: Uint8Array): number {
+  let lines = 0;
+  for (const byte of bytes) if (byte === 0x0a) lines += 1;
+  return Math.max(1, lines + (bytes.at(-1) === 0x0a ? 0 : 1));
+}
+
 export function createNormalizedSourcesStageExecutor(input: {
   store: NormalizedSourcesStageStore;
   artifactStore: ArtifactStore;
@@ -127,52 +133,56 @@ export function createNormalizedSourcesStageExecutor(input: {
     if (run.inputDigest !== inputDigest) {
       throw new Error("Normalized sources stage input digest does not match the persisted snapshot");
     }
-    const sources = await Promise.all(
-      files.filter(isSupportedSourceFile)
-        .sort((left, right) => Buffer.compare(Buffer.from(left.path, "utf8"), Buffer.from(right.path, "utf8")))
-        .map((file) => convertSnapshotSourceFile({ snapshot, file }))
-    );
-    const manifest: ArtifactManifest = {
-      id: randomUUID(),
-      workspaceId: run.workspaceId,
-      projectId: run.projectId,
-      snapshotId: run.snapshotId,
-      buildId: run.buildId,
-      stage: "convert",
-      kind: "normalized-sources",
-      schemaVersion: 1,
-      inputDigest,
-      contentDigest: "0".repeat(64),
-      storageKey: "pending",
-      sourceRefs: sources.map((source) => ({
-        snapshotId: source.snapshotId,
-        path: source.path,
-        startLine: 1,
-        endLine: lineCount(source.content),
-        blobHash: source.blobHash
-      })),
-      producer: "deterministic",
-      createdAt: new Date().toISOString()
-    };
-    const artifact = await input.artifactStore.putJson({
-      manifest,
-      value: { schemaVersion: 1, snapshotId: snapshot.id, sources },
-      actorId: input.actorId
-    });
-    if (input.sourceStorageMode === undefined || input.sourceStorageMode === "legacy") {
-      return { outputManifestIds: [artifact.manifest.id], reused: artifact.reused };
+    const sourceStorageMode = input.sourceStorageMode ?? "legacy";
+    let inlineArtifact: Awaited<ReturnType<ArtifactStore["putJson"]>> | undefined;
+    if (sourceStorageMode !== "active") {
+      const sources = await Promise.all(
+        files.filter(isSupportedSourceFile)
+          .sort((left, right) => Buffer.compare(Buffer.from(left.path, "utf8"), Buffer.from(right.path, "utf8")))
+          .map((file) => convertSnapshotSourceFile({ snapshot, file }))
+      );
+      const manifest: ArtifactManifest = {
+        id: randomUUID(),
+        workspaceId: run.workspaceId,
+        projectId: run.projectId,
+        snapshotId: run.snapshotId,
+        buildId: run.buildId,
+        stage: "convert",
+        kind: "normalized-sources",
+        schemaVersion: 1,
+        inputDigest,
+        contentDigest: "0".repeat(64),
+        storageKey: "pending",
+        sourceRefs: sources.map((source) => ({
+          snapshotId: source.snapshotId,
+          path: source.path,
+          startLine: 1,
+          endLine: lineCount(source.content),
+          blobHash: source.blobHash
+        })),
+        producer: "deterministic",
+        createdAt: new Date().toISOString()
+      };
+      inlineArtifact = await input.artifactStore.putJson({
+        manifest,
+        value: { schemaVersion: 1, snapshotId: snapshot.id, sources },
+        actorId: input.actorId
+      });
+    }
+    if (sourceStorageMode === "legacy") {
+      return { outputManifestIds: [inlineArtifact!.manifest.id], reused: inlineArtifact!.reused };
     }
 
     const referencedFiles = files.filter(isReferencedSourceFile)
       .sort((left, right) => Buffer.compare(Buffer.from(left.path, "utf8"), Buffer.from(right.path, "utf8")));
     if (referencedFiles.some((file) => !file.sourceBlobId)) {
-      if (input.sourceStorageMode === "active") {
+      if (sourceStorageMode === "active") {
         throw new Error("Blob-backed source references require every pipeline source file to have a source blob");
       }
-      return { outputManifestIds: [artifact.manifest.id], reused: artifact.reused };
+      return { outputManifestIds: [inlineArtifact!.manifest.id], reused: inlineArtifact!.reused };
     }
     if (!input.sourceBlobReader) throw new Error("Pipeline source blob reader is unavailable");
-    const references = await Promise.all(referencedFiles.map(async (file) => {
+    const verifiedReferences = await Promise.all(referencedFiles.map(async (file) => {
       const reference = {
         snapshotId: snapshot.id,
         path: file.path,
@@ -181,9 +191,13 @@ export function createNormalizedSourcesStageExecutor(input: {
         byteSize: file.byteSize,
         language: file.language
       };
-      await input.sourceBlobReader!.read(run.workspaceId, reference);
-      return reference;
+      const bytes = await input.sourceBlobReader!.read(run.workspaceId, reference);
+      return {
+        reference,
+        endLine: path.posix.extname(reference.path).toLowerCase() === ".xlsx" ? 1 : byteLineCount(bytes)
+      };
     }));
+    const references = verifiedReferences.map(({ reference }) => reference);
     const referenceArtifact = await input.artifactStore.putJson({
       manifest: {
         id: randomUUID(),
@@ -197,11 +211,11 @@ export function createNormalizedSourcesStageExecutor(input: {
         inputDigest,
         contentDigest: "0".repeat(64),
         storageKey: "pending",
-        sourceRefs: references.map((reference) => ({
+        sourceRefs: verifiedReferences.map(({ reference, endLine }) => ({
           snapshotId: reference.snapshotId,
           path: reference.path,
           startLine: 1,
-          endLine: 1,
+          endLine,
           blobHash: reference.blobHash
         })),
         producer: "deterministic",
@@ -210,9 +224,12 @@ export function createNormalizedSourcesStageExecutor(input: {
       value: { schemaVersion: 2, snapshotId: snapshot.id, sources: references },
       actorId: input.actorId
     });
+    if (sourceStorageMode === "active") {
+      return { outputManifestIds: [referenceArtifact.manifest.id], reused: referenceArtifact.reused };
+    }
     return {
-      outputManifestIds: [artifact.manifest.id, referenceArtifact.manifest.id],
-      reused: artifact.reused && referenceArtifact.reused
+      outputManifestIds: [inlineArtifact!.manifest.id, referenceArtifact.manifest.id],
+      reused: inlineArtifact!.reused && referenceArtifact.reused
     };
   };
 }

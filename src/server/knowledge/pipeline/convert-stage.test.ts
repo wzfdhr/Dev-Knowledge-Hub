@@ -141,7 +141,7 @@ describe("normalized sources pipeline stage", () => {
   });
 
   test("adds source references without inline bytes for a blob-backed shadow snapshot", async () => {
-    const source = "export const answer = 42;\n";
+    const source = "export const answer = 42;\nexport const next = 1;\n";
     const prepared = await fixture({ "src/app.ts": source }, true);
     const execute = createNormalizedSourcesStageExecutor({
       store: prepared.store,
@@ -157,6 +157,9 @@ describe("normalized sources pipeline stage", () => {
       prepared.store.knowledgeArtifacts.find((artifact) => artifact.id === id)!
     );
     expect(manifests.map((manifest) => manifest.kind)).toEqual(["normalized-sources", "normalized-source-refs"]);
+    expect(manifests[1]!.sourceRefs).toEqual([
+      expect.objectContaining({ path: "src/app.ts", startLine: 1, endLine: 2 })
+    ]);
     await expect(prepared.artifactStore.getJson(manifests[1]!)).resolves.toEqual({
       schemaVersion: 2,
       snapshotId: prepared.snapshot.id,
@@ -187,6 +190,26 @@ describe("normalized sources pipeline stage", () => {
       sourceStorageMode: "active",
       sourceBlobReader: prepared.blobReader
     })(prepared.run)).rejects.toThrow("every pipeline source file to have a source blob");
+  });
+
+  test("writes only source references for a fully blob-backed active snapshot", async () => {
+    const source = "export const answer = 42;\n";
+    const prepared = await fixture({ "src/app.ts": source }, true);
+
+    const result = await createNormalizedSourcesStageExecutor({
+      store: prepared.store,
+      artifactStore: prepared.artifactStore,
+      sourceStorageMode: "active",
+      sourceBlobReader: prepared.blobReader
+    })(prepared.run);
+
+    expect(result.outputManifestIds).toHaveLength(1);
+    const artifact = prepared.store.knowledgeArtifacts.find((candidate) =>
+      candidate.id === result.outputManifestIds![0]
+    )!;
+    expect(artifact).toMatchObject({ kind: "normalized-source-refs", schemaVersion: 2 });
+    expect(JSON.stringify(await prepared.artifactStore.getJson(artifact))).not.toContain(source);
+    expect(prepared.store.knowledgeArtifacts.some((candidate) => candidate.kind === "normalized-sources")).toBe(false);
   });
 
   test("reuses the immutable artifact for the same owned run inputs", async () => {

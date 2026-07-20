@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -136,6 +136,41 @@ describe("workspace source blob store", () => {
 
     expect(second.record).toMatchObject({ generation: 2, status: "active" });
     expect(second.record.id).not.toBe(first.record.id);
+  });
+
+  test("adopts a verified orphan left after bytes were committed before the catalog transaction", async () => {
+    const context = await fixture();
+    const workspaceId = randomUUID();
+    const bytes = Buffer.from("recoverable orphan");
+    const contentHash = sha256(bytes);
+    const destination = path.join(
+      context.root, "blobs", workspaceId, contentHash.slice(0, 2), contentHash, "1"
+    );
+    await mkdir(path.dirname(destination), { recursive: true });
+    await writeFile(destination, bytes, { mode: 0o600 });
+    await chmod(destination, 0o444);
+
+    const result = await context.store.put({ workspaceId, bytes });
+
+    expect(result).toMatchObject({ reused: false, record: { generation: 1, storageKey: path.relative(context.root, destination) } });
+    await expect(context.store.read(result.record)).resolves.toEqual(bytes);
+    expect(context.catalog.records).toHaveLength(1);
+  });
+
+  test("rejects a mismatched orphan instead of replacing unowned bytes", async () => {
+    const context = await fixture();
+    const workspaceId = randomUUID();
+    const bytes = Buffer.from("expected orphan");
+    const contentHash = sha256(bytes);
+    const destination = path.join(
+      context.root, "blobs", workspaceId, contentHash.slice(0, 2), contentHash, "1"
+    );
+    await mkdir(path.dirname(destination), { recursive: true });
+    await writeFile(destination, "different bytes", { mode: 0o444 });
+
+    await expect(context.store.put({ workspaceId, bytes }))
+      .rejects.toMatchObject({ code: "SOURCE_BLOB_INTEGRITY_FAILED" });
+    expect(context.catalog.records).toHaveLength(0);
   });
 
   test("rejects a missing or tampered active blob instead of silently replacing it", async () => {

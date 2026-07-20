@@ -2624,6 +2624,14 @@ integration("PostgreSQL cited knowledge integration", () => {
       [setup!.workspace.id]
     );
     expect(persisted.rows[0]?.count).toBe("1");
+
+    await pool.query("UPDATE source_blobs SET status = 'tombstoned' WHERE id = $1", [first.record.id]);
+    await expect(blobs.put({ workspaceId: setup!.workspace.id, bytes })).rejects.toMatchObject({ code: "23505" });
+    await pool.query("UPDATE source_blobs SET status = 'trash' WHERE id = $1", [first.record.id]);
+    await expect(blobs.put({ workspaceId: setup!.workspace.id, bytes })).resolves.toMatchObject({
+      reused: false,
+      record: { generation: 2, status: "active" }
+    });
   }, 30_000);
 });
 

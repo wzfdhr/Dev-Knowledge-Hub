@@ -189,6 +189,9 @@ describe("table schemas pipeline stage", () => {
     const blobStore = new SourceBlobStore({ dataDir: blobRoot, catalog: prepared.store });
     await blobStore.initialize();
     const blob = await blobStore.put({ workspaceId: prepared.tablesRun.workspaceId, bytes: Buffer.from(content) });
+    prepared.store.sourceFiles.find((file) =>
+      file.snapshotId === prepared.snapshot.id && file.path === "data/users.csv"
+    )!.sourceBlobId = blob.record.id;
     const upstream = await prepared.artifactStore.putJson({
       manifest: {
         id: randomUUID(), workspaceId: prepared.tablesRun.workspaceId, projectId: prepared.project.id,

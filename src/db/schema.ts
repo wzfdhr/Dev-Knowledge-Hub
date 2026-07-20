@@ -239,9 +239,9 @@ export const sourceBlobs = pgTable("source_blobs", {
   unique("source_blobs_workspace_hash_generation_unique")
     .on(table.workspaceId, table.contentHash, table.generation),
   unique("source_blobs_id_workspace_unique").on(table.id, table.workspaceId),
-  uniqueIndex("source_blobs_active_workspace_hash_idx")
+  uniqueIndex("source_blobs_live_workspace_hash_idx")
     .on(table.workspaceId, table.contentHash)
-    .where(sql`${table.status} = 'active'`),
+    .where(sql`${table.status} IN ('active', 'tombstoned')`),
   index("source_blobs_workspace_status_idx").on(table.workspaceId, table.status, table.updatedAt),
   check("source_blobs_content_hash_check", sql`${table.contentHash} ~ '^[0-9a-f]{64}$'`),
   check("source_blobs_generation_check", sql`${table.generation} > 0`),

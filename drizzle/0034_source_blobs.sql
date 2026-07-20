@@ -21,8 +21,8 @@ CREATE TABLE source_blobs (
   CONSTRAINT source_blobs_id_workspace_unique UNIQUE (id, workspace_id)
 );
 
-CREATE UNIQUE INDEX source_blobs_active_workspace_hash_idx
-  ON source_blobs (workspace_id, content_hash) WHERE status = 'active';
+CREATE UNIQUE INDEX source_blobs_live_workspace_hash_idx
+  ON source_blobs (workspace_id, content_hash) WHERE status IN ('active', 'tombstoned');
 CREATE INDEX source_blobs_workspace_status_idx
   ON source_blobs (workspace_id, status, updated_at);
 

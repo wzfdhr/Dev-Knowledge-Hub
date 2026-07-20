@@ -67,8 +67,8 @@ test("expands workspace source blobs without contracting legacy snapshot storage
 
   expect(sql).toMatch(/CREATE TABLE source_blobs/);
   expect(sql).toMatch(/UNIQUE \(workspace_id, content_hash, generation\)/);
-  expect(sql).toMatch(/source_blobs_active_workspace_hash_idx/);
-  expect(sql).toMatch(/WHERE status = 'active'/);
+  expect(sql).toMatch(/source_blobs_live_workspace_hash_idx/);
+  expect(sql).toMatch(/WHERE status IN \('active', 'tombstoned'\)/);
   expect(sql).toMatch(/ALTER TABLE source_files ADD COLUMN source_blob_id uuid/);
   expect(sql).toMatch(/source_files_source_blob_workspace_fk/);
   expect(sql).not.toMatch(/source_blob_id uuid NOT NULL/);

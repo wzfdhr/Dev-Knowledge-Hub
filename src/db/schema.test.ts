@@ -42,7 +42,7 @@ describe("schema exports", () => {
     const files = getTableConfig(schema.sourceFiles);
 
     expect(blobs.uniqueConstraints.map((item) => item.name)).toContain("source_blobs_workspace_hash_generation_unique");
-    expect(blobs.indexes.map((item) => item.config.name)).toContain("source_blobs_active_workspace_hash_idx");
+    expect(blobs.indexes.map((item) => item.config.name)).toContain("source_blobs_live_workspace_hash_idx");
     expect(blobs.checks.map((item) => item.name)).toEqual(expect.arrayContaining([
       "source_blobs_content_hash_check",
       "source_blobs_generation_check",

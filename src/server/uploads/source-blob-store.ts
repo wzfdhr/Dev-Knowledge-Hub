@@ -68,6 +68,23 @@ async function makeDirectoriesReadOnly(root: string): Promise<void> {
   await chmod(root, 0o555);
 }
 
+async function assertRecoverableOrphan(destination: string, expectedHash: string, expectedSize: number): Promise<void> {
+  const metadata = await lstat(destination);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o222) !== 0) {
+    throw new SourceBlobIntegrityError(
+      "SOURCE_BLOB_INTEGRITY_FAILED",
+      "Orphaned source blob is not an immutable regular file"
+    );
+  }
+  const bytes = await readFile(destination);
+  if (bytes.length !== expectedSize || digest(bytes) !== expectedHash) {
+    throw new SourceBlobIntegrityError(
+      "SOURCE_BLOB_INTEGRITY_FAILED",
+      "Orphaned source blob does not match the pending generation"
+    );
+  }
+}
+
 export class SourceBlobStore {
   constructor(private readonly options: { dataDir: string; catalog: SourceBlobCatalog }) {}
 
@@ -108,7 +125,12 @@ export class SourceBlobStore {
           throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Written source blob failed verification");
         }
         await chmod(temporary, 0o444);
-        await link(temporary, destination);
+        try {
+          await link(temporary, destination);
+        } catch (error) {
+          if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+          await assertRecoverableOrphan(destination, contentHash, bytes.length);
+        }
         await unlink(temporary);
         await syncDirectory(directory);
         try {

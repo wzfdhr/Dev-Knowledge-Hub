@@ -29,6 +29,25 @@ async function fixture() {
   await blobStore.initialize();
   const bytes = Buffer.from("export const answer = 42;\n");
   const { record } = await blobStore.put({ workspaceId: setup!.workspace.id, bytes });
+  const project = (await store.listProjects(setup!.workspace.id))[0]!;
+  const repository = await store.createRepository(
+    setup!.workspace.id,
+    { kind: "upload", name: "Reader source" },
+    project.id
+  );
+  await store.createSnapshot({
+    snapshot: {
+      id: "snapshot-1", workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+      commitSha: "a".repeat(40), ref: "main", remoteUrl: null,
+      commitTimestamp: new Date("2026-07-20T00:00:00.000Z"),
+      storagePath: path.join(dataDir, "snapshots", "snapshot-1", "files")
+    },
+    files: [{
+      id: "source-file-1", workspaceId: setup!.workspace.id, snapshotId: "snapshot-1",
+      path: "src/answer.ts", byteSize: bytes.length, contentHash: hash(bytes),
+      language: "typescript", sourceBlobId: record.id
+    }]
+  });
   const reader = new SourceBlobReader({ catalog: store, blobStore });
   const reference = {
     snapshotId: "snapshot-1",
@@ -48,6 +67,8 @@ describe("pipeline source blob reader", () => {
     await expect(prepared.reader.read(prepared.workspaceId, prepared.reference)).resolves.toEqual(prepared.bytes);
     await expect(prepared.reader.read("other-workspace", prepared.reference))
       .rejects.toThrow("Source blob reference is outside the pipeline workspace");
+    await expect(prepared.reader.read(prepared.workspaceId, { ...prepared.reference, path: "src/other.ts" }))
+      .rejects.toThrow("Source blob reference is not bound to the declared snapshot path");
     await expect(prepared.reader.read(prepared.workspaceId, { ...prepared.reference, byteSize: 1 }))
       .rejects.toThrow("Source blob reference does not match persisted metadata");
   });

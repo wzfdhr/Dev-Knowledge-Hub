@@ -152,6 +152,9 @@ describe("knowledge IR pipeline stage", () => {
     const blobStore = new SourceBlobStore({ dataDir: blobRoot, catalog: prepared.store });
     await blobStore.initialize();
     const blob = await blobStore.put({ workspaceId: prepared.convertRun.workspaceId, bytes: Buffer.from(content) });
+    prepared.store.sourceFiles.find((file) =>
+      file.snapshotId === prepared.snapshot.id && file.path === "src/app.ts"
+    )!.sourceBlobId = blob.record.id;
     const upstream = await prepared.artifactStore.putJson({
       manifest: {
         id: randomUUID(), workspaceId: prepared.convertRun.workspaceId, projectId: prepared.project.id,

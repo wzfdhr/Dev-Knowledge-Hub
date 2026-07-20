@@ -31,19 +31,27 @@ async function removeReadOnlyTree(directory) {
 }
 
 class FakePool {
-  constructor({ snapshots, files, blobs = [], releases = [] }) {
+  constructor({ snapshots, files, blobs = [], releases = [], tombstoneBeforeBinding = false }) {
     this.snapshots = snapshots;
     this.files = files;
     this.blobs = blobs;
     this.releases = releases;
     this.transactionSnapshot = undefined;
     this.queries = [];
+    this.tombstoneBeforeBinding = tombstoneBeforeBinding;
+    this.transactionCount = 0;
   }
 
   async query(text, values = []) {
     this.queries.push({ text, values });
     if (text === "BEGIN") {
+      this.transactionCount += 1;
       this.transactionSnapshot = clone({ snapshots: this.snapshots, files: this.files, blobs: this.blobs });
+      if (this.tombstoneBeforeBinding && this.transactionCount === this.files.length + 1) {
+        this.blobs.forEach((blob) => { blob.status = "tombstoned"; });
+        this.transactionSnapshot.blobs.forEach((blob) => { blob.status = "tombstoned"; });
+        this.tombstoneBeforeBinding = false;
+      }
       return { rows: [] };
     }
     if (text === "COMMIT") {
@@ -60,7 +68,7 @@ class FakePool {
       const [workspaceCursor, snapshotCursor, viewRoot, limit] = values;
       const rows = this.snapshots
         .filter((snapshot) => {
-          const cursorAfter = snapshot.workspace_id > workspaceCursor
+          const cursorAfter = workspaceCursor === null || snapshot.workspace_id > workspaceCursor
             || (snapshot.workspace_id === workspaceCursor && snapshot.id > snapshotCursor);
           const expected = path.join(viewRoot, "snapshots", snapshot.id, "files");
           return cursorAfter && (snapshot.storage_path !== expected || this.files.some((file) =>
@@ -83,6 +91,13 @@ class FakePool {
       const [workspaceId, contentHash] = values;
       return { rows: this.blobs.filter((blob) => blob.workspace_id === workspaceId
         && blob.content_hash === contentHash && blob.status === "active").map((blob) => ({ ...blob })) };
+    }
+    if (text.includes("jsonb_to_recordset") && text.includes("FROM source_blobs blob")) {
+      const expected = JSON.parse(values[0]);
+      return { rows: expected.flatMap((candidate) => this.blobs.filter((blob) => blob.id === candidate.id
+        && blob.workspace_id === candidate.workspace_id && blob.content_hash === candidate.content_hash
+        && blob.generation === candidate.generation && Number(blob.byte_size) === candidate.byte_size
+      ).map((blob) => ({ ...blob }))) };
     }
     if (text.includes("MAX(generation)")) {
       const [workspaceId, contentHash] = values;
@@ -174,7 +189,13 @@ test("processes snapshots in bounded batches and leaves releases unchanged", asy
   assert.equal(report.created, 2);
   assert.deepEqual(report.lastCursor, { workspaceId: context.snapshots[1].workspace_id, snapshotId: context.snapshots[1].id });
   assert.deepEqual(context.pool.releases, releasesBefore);
-  assert.equal(context.pool.queries.filter(({ text }) => text.includes("FROM source_snapshots snapshot")).length, 3);
+  const snapshotQueries = context.pool.queries.filter(({ text }) => text.includes("FROM source_snapshots snapshot"));
+  assert.equal(snapshotQueries.length, 3);
+  assert.deepEqual(snapshotQueries[0].values.slice(0, 2), [null, null]);
+  assert.match(snapshotQueries[0].text, /\$1::uuid IS NULL/);
+  const lockQueries = context.pool.queries.filter(({ text }) => text.includes("pg_advisory_xact_lock"));
+  assert.ok(lockQueries.length >= 2);
+  assert.ok(lockQueries.every(({ text }) => text === "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))"));
 });
 
 test("is idempotent, reports zero on a repeat run, and atomically switches storage_path", async () => {
@@ -190,6 +211,14 @@ test("is idempotent, reports zero on a repeat run, and atomically switches stora
   assert.ok(context.files.every((file) => file.source_blob_id));
   assert.equal((await lstat(reportPath)).mode & 0o777, 0o600);
   assert.deepEqual(JSON.parse(await readFile(reportPath, "utf8")), first);
+  const bindLockCalls = context.pool.queries
+    .filter(({ text }) => text.includes("pg_advisory_xact_lock"))
+    .slice(-context.files.length)
+    .map(({ values }) => values);
+  assert.deepEqual(bindLockCalls, context.files
+    .map((file) => [file.workspace_id, file.content_hash])
+    .sort(([leftWorkspace, leftHash], [rightWorkspace, rightHash]) => leftWorkspace.localeCompare(rightWorkspace)
+      || leftHash.localeCompare(rightHash)));
   for (const file of context.files) {
     const blob = context.pool.blobs.find((candidate) => candidate.id === file.source_blob_id);
     const [blobStat, viewStat] = await Promise.all([
@@ -259,4 +288,19 @@ test("reuses only a verified active blob and increments the generation after ina
   const created = await runBackfill({ pool: second.pool, dataDir: second.dataDir, batchSize: 500 });
   assert.equal(created.created, 1);
   assert.equal(second.pool.blobs.find((blob) => blob.status === "active").generation, 2);
+});
+
+test("rolls back the complete snapshot binding when GC tombstones a resolved blob", async () => {
+  const context = await fixture({ filesPerSnapshot: 2 });
+  const originalPath = context.snapshots[0].storage_path;
+  context.pool.tombstoneBeforeBinding = true;
+
+  await assert.rejects(
+    runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 500 }),
+    /not active/
+  );
+
+  assert.ok(context.files.every((file) => file.source_blob_id === null));
+  assert.equal(context.snapshots[0].storage_path, originalPath);
+  assert.ok(context.pool.queries.some(({ text }) => text === "ROLLBACK"));
 });

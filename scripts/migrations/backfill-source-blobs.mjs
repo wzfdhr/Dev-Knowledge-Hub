@@ -17,6 +17,7 @@ import { Pool } from "pg";
 
 const DEFAULT_BATCH_SIZE = 500;
 const REPORT_NAME = "source-blob-backfill.json";
+const SOURCE_BLOB_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))";
 
 function digest(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
@@ -171,10 +172,7 @@ async function writeBlobGeneration(snapshotData, input) {
 
 async function resolveBlob(pool, snapshotData, file) {
   return withTransaction(pool, async (client) => {
-    await client.query(
-      "SELECT pg_advisory_xact_lock(hashtextextended($1, 0), hashtextextended($2, 0))",
-      [file.workspace_id, file.content_hash]
-    );
+    await client.query(SOURCE_BLOB_LOCK_SQL, [file.workspace_id, file.content_hash]);
     const active = await client.query(
       `SELECT id, workspace_id, content_hash, generation, byte_size, storage_key, status
        FROM source_blobs
@@ -296,6 +294,45 @@ async function materializeSnapshotView(paths, files) {
 
 async function bindSnapshot(pool, snapshot, paths, files) {
   await withTransaction(pool, async (client) => {
+    const expectedBlobs = [...new Map(files.map((file) => [
+      `${file.blob.workspace_id}:${file.blob.content_hash}`,
+      file.blob
+    ])).values()].sort((left, right) => left.workspace_id.localeCompare(right.workspace_id)
+      || left.content_hash.localeCompare(right.content_hash));
+    for (const blob of expectedBlobs) {
+      await client.query(SOURCE_BLOB_LOCK_SQL, [blob.workspace_id, blob.content_hash]);
+    }
+    const lockedBlobs = await client.query(
+      `SELECT blob.id, blob.workspace_id, blob.content_hash, blob.generation, blob.byte_size, blob.status
+       FROM source_blobs blob
+       JOIN jsonb_to_recordset($1::jsonb)
+         AS expected(id uuid, workspace_id uuid, content_hash text, generation integer, byte_size bigint)
+         ON expected.id = blob.id
+        AND expected.workspace_id = blob.workspace_id
+        AND expected.content_hash = blob.content_hash
+        AND expected.generation = blob.generation
+        AND expected.byte_size = blob.byte_size
+       FOR UPDATE OF blob`,
+      [JSON.stringify(expectedBlobs.map((blob) => ({
+        id: blob.id,
+        workspace_id: blob.workspace_id,
+        content_hash: blob.content_hash,
+        generation: blob.generation,
+        byte_size: blob.byteSize
+      })))]
+    );
+    if (lockedBlobs.rows.length !== expectedBlobs.length) {
+      throw new Error("Expected source blob generation is missing during snapshot binding");
+    }
+    const lockedById = new Map(lockedBlobs.rows.map((blob) => [blob.id, blob]));
+    for (const expected of expectedBlobs) {
+      const actual = lockedById.get(expected.id);
+      if (!actual || actual.workspace_id !== expected.workspace_id || actual.content_hash !== expected.content_hash
+        || Number(actual.generation) !== expected.generation || asSafeSize(actual.byte_size, "Source blob size") !== expected.byteSize
+        || actual.status !== "active") {
+        throw new Error("Expected source blob is not active during snapshot binding");
+      }
+    }
     const current = await client.query(
       `SELECT file.id, file.source_blob_id
        FROM source_files file
@@ -383,7 +420,7 @@ export function createBackfillConfig(env = process.env) {
 export async function runBackfill({ pool, dataDir, batchSize = DEFAULT_BATCH_SIZE, writeReport = true }) {
   if (!Number.isSafeInteger(batchSize) || batchSize < 1) throw new Error("batchSize must be a positive safe integer");
   const snapshotData = path.resolve(dataDir, "snapshots");
-  let cursor = { workspaceId: "", snapshotId: "" };
+  let cursor = null;
   let processed = 0;
   let reused = 0;
   let created = 0;
@@ -391,7 +428,10 @@ export async function runBackfill({ pool, dataDir, batchSize = DEFAULT_BATCH_SIZ
     const batch = await pool.query(
       `SELECT snapshot.id AS snapshot_id, snapshot.workspace_id, snapshot.storage_path
        FROM source_snapshots snapshot
-       WHERE (snapshot.workspace_id, snapshot.id) > ($1, $2)
+       WHERE (
+         ($1::uuid IS NULL AND $2::uuid IS NULL)
+         OR (snapshot.workspace_id, snapshot.id) > ($1::uuid, $2::uuid)
+       )
          AND (
            snapshot.storage_path IS DISTINCT FROM ($3 || '/snapshots/' || snapshot.id || '/files')
            OR EXISTS (
@@ -402,7 +442,7 @@ export async function runBackfill({ pool, dataDir, batchSize = DEFAULT_BATCH_SIZ
          )
        ORDER BY snapshot.workspace_id, snapshot.id
        LIMIT $4`,
-      [cursor.workspaceId, cursor.snapshotId, snapshotData, batchSize]
+      [cursor?.workspaceId ?? null, cursor?.snapshotId ?? null, snapshotData, batchSize]
     );
     if (batch.rows.length === 0) break;
     for (const snapshot of batch.rows) {

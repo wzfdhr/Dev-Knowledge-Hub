@@ -1,7 +1,7 @@
 import { authenticatedCookie, csrfHeaders } from "../test-support/csrf";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { chmod, cp, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -2706,6 +2706,166 @@ integration("PostgreSQL cited knowledge integration", () => {
     await restartedBlobs.initialize();
     await expect(restartedBlobs.put({ workspaceId: setup!.workspace.id, bytes: orphanBytes }))
       .resolves.toMatchObject({ reused: false, record: { generation: 1, contentHash: orphanHash } });
+  }, 30_000);
+
+  test("serializes source_file binding and fenced GC in both PostgreSQL lock orders", async () => {
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const catalog = new PostgresAppStore(pool);
+    const setup = await catalog.createInitialSetup("source-blob-races@example.com", "hash");
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-postgres-source-blob-races-"));
+    retrievalFixtureRoots.push(root);
+    const blobs = new SourceBlobStore({ dataDir: root, catalog });
+    await blobs.initialize();
+    const project = (await catalog.listProjects(setup!.workspace.id))[0]!;
+    const repository = await catalog.createRepository(
+      setup!.workspace.id,
+      { kind: "upload", name: "Blob race source" },
+      project.id
+    );
+    const gc = new SourceBlobGarbageCollector({
+      dataDir: root, catalog, enabled: true, tombstoneGraceMs: 0, trashGraceMs: 0
+    });
+
+    const referencedBytes = Buffer.from("binding lock first");
+    const referenced = await blobs.put({ workspaceId: setup!.workspace.id, bytes: referencedBytes });
+    const referencedSnapshotId = randomUUID();
+    await catalog.createSnapshot({
+      snapshot: {
+        id: referencedSnapshotId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+        commitSha: "d".repeat(40), ref: "main", remoteUrl: null,
+        commitTimestamp: new Date("2026-07-20T01:00:00.000Z"), storagePath: root
+      },
+      files: []
+    });
+    const bindingClient = await pool.connect();
+    try {
+      await bindingClient.query("BEGIN");
+      await bindingClient.query(
+        `SELECT id FROM source_blobs
+         WHERE workspace_id = $1 AND id = $2 AND content_hash = $3 AND byte_size = $4
+           AND status = 'active'
+         FOR SHARE`,
+        [setup!.workspace.id, referenced.record.id, referenced.record.contentHash, referenced.record.byteSize]
+      );
+      await bindingClient.query(
+        `INSERT INTO source_files
+         (id, workspace_id, snapshot_id, path, language, content_hash, byte_size, source_blob_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [randomUUID(), setup!.workspace.id, referencedSnapshotId, "src/referenced.ts", "typescript",
+          referenced.record.contentHash, referenced.record.byteSize, referenced.record.id]
+      );
+      const collectAfterBinding = gc.runOnce();
+      await expect(Promise.race([
+        collectAfterBinding.then(() => "settled"),
+        new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 50))
+      ])).resolves.toBe("blocked");
+      await bindingClient.query("COMMIT");
+      await expect(collectAfterBinding).resolves.toMatchObject({ tombstoned: 0, deleted: 0 });
+    } finally {
+      await bindingClient.query("ROLLBACK").catch(() => undefined);
+      bindingClient.release();
+    }
+    await expect(catalog.findSourceBlobById(setup!.workspace.id, referenced.record.id))
+      .resolves.toMatchObject({ status: "active" });
+
+    const gcFirstBytes = Buffer.from("gc lock first");
+    const gcFirst = await blobs.put({ workspaceId: setup!.workspace.id, bytes: gcFirstBytes });
+    let releaseGc = () => {};
+    const holdGc = new Promise<void>((resolve) => { releaseGc = resolve; });
+    let tombstoned = () => {};
+    const tombstonedInsideLock = new Promise<void>((resolve) => { tombstoned = resolve; });
+    const fence = randomUUID();
+    const gcTransaction = catalog.withSourceBlobLock(
+      setup!.workspace.id,
+      gcFirst.record.contentHash,
+      async (locked) => {
+        await locked.findById(gcFirst.record.id);
+        const changed = await locked.tombstoneIfUnreferenced(gcFirst.record.id, fence, new Date());
+        expect(changed).toMatchObject({ status: "tombstoned", fencingToken: fence });
+        tombstoned();
+        await holdGc;
+      }
+    );
+    await tombstonedInsideLock;
+    const rejectedSnapshotId = randomUUID();
+    const bindAfterGc = catalog.createSnapshot({
+      snapshot: {
+        id: rejectedSnapshotId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+        commitSha: "e".repeat(40), ref: "main", remoteUrl: null,
+        commitTimestamp: new Date("2026-07-20T02:00:00.000Z"), storagePath: root
+      },
+      files: [{
+        id: randomUUID(), workspaceId: setup!.workspace.id, snapshotId: rejectedSnapshotId,
+        path: "src/rejected.ts", language: "typescript", contentHash: gcFirst.record.contentHash,
+        byteSize: gcFirst.record.byteSize, sourceBlobId: gcFirst.record.id
+      }]
+    });
+    await expect(Promise.race([
+      bindAfterGc.then(() => "settled", () => "rejected"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("blocked"), 50))
+    ])).resolves.toBe("blocked");
+    releaseGc();
+    await gcTransaction;
+    await expect(bindAfterGc).rejects.toThrow("SOURCE_BLOB_NOT_ACTIVE");
+    await expect(catalog.findSourceBlobById(setup!.workspace.id, gcFirst.record.id))
+      .resolves.toMatchObject({ status: "tombstoned", fencingToken: fence });
+
+    await expect(gc.runOnce()).resolves.toMatchObject({ trashed: 1 });
+    const replacement = await blobs.put({ workspaceId: setup!.workspace.id, bytes: gcFirstBytes });
+    expect(replacement).toMatchObject({ reused: false, record: { generation: 2, status: "active" } });
+    await catalog.withSourceBlobLock(setup!.workspace.id, gcFirst.record.contentHash, async (locked) => {
+      await expect(locked.markTrash(replacement.record.id, fence, new Date())).resolves.toBeNull();
+      await expect(locked.markDeletedIfUnreferenced(replacement.record.id, fence, new Date())).resolves.toBeNull();
+    });
+    await expect(catalog.findSourceBlobById(setup!.workspace.id, replacement.record.id))
+      .resolves.toMatchObject({ status: "active", generation: 2 });
+
+    const auditedBytes = Buffer.from("committed inconsistency audit");
+    const audited = await blobs.put({ workspaceId: setup!.workspace.id, bytes: auditedBytes });
+    const auditedSnapshotId = randomUUID();
+    await catalog.createSnapshot({
+      snapshot: {
+        id: auditedSnapshotId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+        commitSha: "f".repeat(40), ref: "main", remoteUrl: null,
+        commitTimestamp: new Date("2026-07-20T03:00:00.000Z"), storagePath: root
+      },
+      files: [{
+        id: randomUUID(), workspaceId: setup!.workspace.id, snapshotId: auditedSnapshotId,
+        path: "src/audited.ts", language: "typescript", contentHash: audited.record.contentHash,
+        byteSize: audited.record.byteSize, sourceBlobId: audited.record.id
+      }]
+    });
+    const auditFence = randomUUID();
+    await pool.query(
+      `UPDATE source_blobs
+       SET status = 'tombstoned', fencing_token = $2, tombstoned_at = now()
+       WHERE id = $1`,
+      [audited.record.id, auditFence]
+    );
+    const auditedTrash = path.join(
+      root, ".trash", setup!.workspace.id, audited.record.contentHash, String(audited.record.generation)
+    );
+    await mkdir(path.dirname(auditedTrash), { recursive: true });
+    await rename(path.join(root, audited.record.storageKey), auditedTrash);
+
+    await expect(blobs.put({ workspaceId: setup!.workspace.id, bytes: auditedBytes }))
+      .rejects.toMatchObject({ code: "SOURCE_BLOB_INTEGRITY_FAILED" });
+    const unchanged = await pool.query<{ status: string; fencing_token: string }>(
+      "SELECT status, fencing_token FROM source_blobs WHERE id = $1",
+      [audited.record.id]
+    );
+    expect(unchanged.rows[0]).toEqual({ status: "tombstoned", fencing_token: auditFence });
+    const audit = await pool.query<{ action: string; resource_id: string }>(
+      `SELECT action, resource_id FROM audit_events
+       WHERE workspace_id = $1 AND action = 'source_blob.gc_inconsistent' AND resource_id = $2`,
+      [setup!.workspace.id, audited.record.id]
+    );
+    expect(audit.rows).toEqual([{
+      action: "source_blob.gc_inconsistent",
+      resource_id: audited.record.id
+    }]);
   }, 30_000);
 });
 

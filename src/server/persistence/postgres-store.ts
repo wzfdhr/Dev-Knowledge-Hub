@@ -75,6 +75,8 @@ import type {
   SourceAnalysisArtifactKey,
   SourceAnalysisArtifactRecord,
   SourceFileRecord,
+  SourceBlobGcCursor,
+  SourceBlobGcPageInput,
   SourceBlobRecord,
   LockedSourceBlobCatalog,
   SourceSnapshotRecord,
@@ -913,21 +915,68 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     }
   }
 
-  async listSourceBlobGcCandidates(limit?: number): Promise<SourceBlobRecord[]> {
-    const candidateLimit = normalizeSourceBlobGcCandidateLimit(limit);
-    const result = await this.pool.query<SourceBlobRow>(`
-      SELECT blob.id, blob.workspace_id, blob.content_hash, blob.generation, blob.byte_size,
-             blob.status, blob.storage_key, blob.fencing_token, blob.tombstoned_at,
-             blob.trashed_at, blob.deleted_at
+  async findSourceBlobGcCandidateTail(): Promise<SourceBlobGcCursor | null> {
+    const result = await this.pool.query<Pick<SourceBlobRow,
+      "id" | "workspace_id" | "content_hash" | "generation">>(`
+      SELECT blob.id, blob.workspace_id, blob.content_hash, blob.generation
       FROM source_blobs blob
       WHERE blob.status IN ('tombstoned', 'trash')
          OR (blob.status = 'active' AND NOT EXISTS (
            SELECT 1 FROM source_files file
            WHERE file.workspace_id = blob.workspace_id AND file.source_blob_id = blob.id
          ))
-      ORDER BY blob.workspace_id, blob.content_hash, blob.generation
-      LIMIT $1
-    `, [candidateLimit]);
+      ORDER BY blob.workspace_id DESC, blob.content_hash DESC, blob.generation DESC, blob.id DESC
+      LIMIT 1
+    `);
+    const row = result.rows[0];
+    return row ? {
+      workspaceId: row.workspace_id,
+      contentHash: row.content_hash,
+      generation: Number(row.generation),
+      id: row.id
+    } : null;
+  }
+
+  async listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]> {
+    const candidateLimit = normalizeSourceBlobGcCandidateLimit(input.limit);
+    const values: unknown[] = [
+      input.through.workspaceId,
+      input.through.contentHash,
+      input.through.generation,
+      input.through.id
+    ];
+    let afterClause = "";
+    if (input.after) {
+      afterClause = `
+        AND ROW(blob.workspace_id, blob.content_hash, blob.generation, blob.id)
+          > ROW($5, $6, $7, $8)`;
+      values.push(
+        input.after.workspaceId,
+        input.after.contentHash,
+        input.after.generation,
+        input.after.id
+      );
+    }
+    const limitParameter = values.length + 1;
+    values.push(candidateLimit);
+    const result = await this.pool.query<SourceBlobRow>(`
+      SELECT blob.id, blob.workspace_id, blob.content_hash, blob.generation, blob.byte_size,
+             blob.status, blob.storage_key, blob.fencing_token, blob.tombstoned_at,
+             blob.trashed_at, blob.deleted_at
+      FROM source_blobs blob
+      WHERE (
+        blob.status IN ('tombstoned', 'trash')
+        OR (blob.status = 'active' AND NOT EXISTS (
+          SELECT 1 FROM source_files file
+          WHERE file.workspace_id = blob.workspace_id AND file.source_blob_id = blob.id
+        ))
+      )
+        AND ROW(blob.workspace_id, blob.content_hash, blob.generation, blob.id)
+          <= ROW($1, $2, $3, $4)
+        ${afterClause}
+      ORDER BY blob.workspace_id, blob.content_hash, blob.generation, blob.id
+      LIMIT $${limitParameter}
+    `, values);
     return result.rows.map(sourceBlobRecord);
   }
 

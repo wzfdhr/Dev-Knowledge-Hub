@@ -23,10 +23,23 @@ afterEach(async () => {
 
 class MemorySourceBlobCatalog implements SourceBlobCatalog {
   readonly records: SourceBlobRecord[] = [];
+  readonly audits: Array<{ sourceBlobId: string; reason: string }> = [];
+  readonly referenceCounts = new Map<string, number>();
   private readonly locks = new Map<string, Promise<void>>();
 
-  async listSourceBlobGcCandidates(): Promise<SourceBlobRecord[]> {
-    return this.records.filter((record) => record.status !== "deleted").map((record) => ({ ...record }));
+  async findSourceBlobGcCandidateTail() {
+    const record = this.records.filter((candidate) => candidate.status !== "deleted").at(-1);
+    return record ? {
+      workspaceId: record.workspaceId,
+      contentHash: record.contentHash,
+      generation: record.generation,
+      id: record.id
+    } : null;
+  }
+
+  async listSourceBlobGcCandidates(input: { limit?: number }): Promise<SourceBlobRecord[]> {
+    return this.records.filter((record) => record.status !== "deleted")
+      .slice(0, input.limit).map((record) => ({ ...record }));
   }
 
   async findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null> {
@@ -53,7 +66,7 @@ class MemorySourceBlobCatalog implements SourceBlobCatalog {
           && record.contentHash === contentHash && record.status === "tombstoned") ?? null,
         findById: async (sourceBlobId: string) => this.records.find((record) => record.workspaceId === workspaceId
           && record.contentHash === contentHash && record.id === sourceBlobId) ?? null,
-        countReferences: async () => 0,
+        countReferences: async (sourceBlobId: string) => this.referenceCounts.get(sourceBlobId) ?? 0,
         nextGeneration: async () => Math.max(0, ...this.records.filter((record) =>
           record.workspaceId === workspaceId && record.contentHash === contentHash
         ).map((record) => record.generation)) + 1,
@@ -80,7 +93,9 @@ class MemorySourceBlobCatalog implements SourceBlobCatalog {
         markDeletedIfUnreferenced: async (sourceBlobId: string, fencingToken: string, at: Date) =>
           this.replace(sourceBlobId, (record) => record.status === "trash"
             && record.fencingToken === fencingToken ? { ...record, status: "deleted", deletedAt: at } : null),
-        recordGcInconsistency: async () => undefined
+        recordGcInconsistency: async (sourceBlobId: string, reason: string) => {
+          this.audits.push({ sourceBlobId, reason });
+        }
       });
     } finally {
       release();
@@ -254,6 +269,52 @@ describe("workspace source blob store", () => {
     expect(context.catalog.records[0]).toMatchObject({ status: "trash", fencingToken: expect.any(String) });
     await expect(readFile(trash)).resolves.toEqual(bytes);
     await expect(context.store.read(replacement.record)).resolves.toEqual(bytes);
+  });
+
+  test("audits and stops a moved tombstone with references without trashing it or creating a generation", async () => {
+    const context = await fixture();
+    const workspaceId = randomUUID();
+    const bytes = Buffer.from("referenced moved tombstone");
+    const first = await context.store.put({ workspaceId, bytes });
+    context.catalog.records[0] = {
+      ...first.record, status: "tombstoned", fencingToken: randomUUID(), tombstonedAt: new Date()
+    };
+    context.catalog.referenceCounts.set(first.record.id, 1);
+    const original = path.join(context.root, first.record.storageKey);
+    const trash = path.join(context.root, ".trash", workspaceId, first.record.contentHash, "1");
+    await mkdir(path.dirname(trash), { recursive: true });
+    await rename(original, trash);
+
+    await expect(context.store.put({ workspaceId, bytes }))
+      .rejects.toMatchObject({ code: "SOURCE_BLOB_INTEGRITY_FAILED" });
+
+    expect(context.catalog.records).toHaveLength(1);
+    expect(context.catalog.records[0]).toMatchObject({ status: "tombstoned", generation: 1 });
+    expect(context.catalog.audits).toEqual([{
+      sourceBlobId: first.record.id,
+      reason: "referenced_tombstone_moved"
+    }]);
+    await expect(readFile(trash)).resolves.toEqual(bytes);
+  });
+
+  test("audits and rejects a writable active generation without reusing it", async () => {
+    const context = await fixture();
+    const workspaceId = randomUUID();
+    const bytes = Buffer.from("writable active");
+    const first = await context.store.put({ workspaceId, bytes });
+    await chmod(path.join(context.root, first.record.storageKey), 0o644);
+
+    await expect(context.store.put({ workspaceId, bytes }))
+      .rejects.toMatchObject({ code: "SOURCE_BLOB_INTEGRITY_FAILED" });
+    await expect(context.store.read(first.record))
+      .rejects.toMatchObject({ code: "SOURCE_BLOB_INTEGRITY_FAILED" });
+
+    expect(context.catalog.records).toHaveLength(1);
+    expect(context.catalog.records[0]).toMatchObject({ status: "active" });
+    expect(context.catalog.audits).toEqual([{
+      sourceBlobId: first.record.id,
+      reason: "active_content_inconsistent"
+    }]);
   });
 
   test("rejects a new source_file binding when its blob generation is not active", async () => {

@@ -545,6 +545,35 @@ export interface SourceBlobRecord {
   deletedAt: Date | null;
 }
 
+export interface SourceBlobGcCursor {
+  workspaceId: string;
+  contentHash: string;
+  generation: number;
+  id: string;
+}
+
+export interface SourceBlobGcPageInput {
+  after?: SourceBlobGcCursor;
+  through: SourceBlobGcCursor;
+  limit?: number;
+}
+
+export function sourceBlobGcCursor(record: SourceBlobRecord): SourceBlobGcCursor {
+  return {
+    workspaceId: record.workspaceId,
+    contentHash: record.contentHash,
+    generation: record.generation,
+    id: record.id
+  };
+}
+
+export function compareSourceBlobGcCursors(left: SourceBlobGcCursor, right: SourceBlobGcCursor): number {
+  return left.workspaceId.localeCompare(right.workspaceId)
+    || left.contentHash.localeCompare(right.contentHash)
+    || left.generation - right.generation
+    || left.id.localeCompare(right.id);
+}
+
 export interface CreateSourceBlobRecordInput {
   workspaceId: string;
   contentHash: string;
@@ -577,7 +606,8 @@ export interface LockedSourceBlobCatalog {
 
 export interface SourceBlobCatalog {
   findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null>;
-  listSourceBlobGcCandidates(limit?: number): Promise<SourceBlobRecord[]>;
+  findSourceBlobGcCandidateTail(): Promise<SourceBlobGcCursor | null>;
+  listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]>;
   withSourceBlobLock<T>(
     workspaceId: string,
     contentHash: string,

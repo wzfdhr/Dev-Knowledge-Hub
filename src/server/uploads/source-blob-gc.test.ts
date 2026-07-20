@@ -64,6 +64,7 @@ describe("source blob garbage collection", () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-gc-disabled-"));
     roots.push(root);
     const catalog = {
+      findSourceBlobGcCandidateTail: vi.fn(async () => { throw new Error("tail touched"); }),
       listSourceBlobGcCandidates: vi.fn(async () => { throw new Error("catalog touched"); }),
       withSourceBlobLock: vi.fn(async () => { throw new Error("lock touched"); })
     };
@@ -71,6 +72,7 @@ describe("source blob garbage collection", () => {
     const result = await new SourceBlobGarbageCollector({ dataDir: root, catalog: catalog as never }).runOnce();
 
     expect(result).toEqual({ scanned: 0, tombstoned: 0, restored: 0, trashed: 0, deleted: 0, inconsistent: 0 });
+    expect(catalog.findSourceBlobGcCandidateTail).not.toHaveBeenCalled();
     expect(catalog.listSourceBlobGcCandidates).not.toHaveBeenCalled();
     expect(catalog.withSourceBlobLock).not.toHaveBeenCalled();
     await expect(stat(path.join(root, ".trash"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -79,7 +81,9 @@ describe("source blob garbage collection", () => {
   test("requests the fixed default candidate limit and accepts a smaller explicit batch", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-gc-limit-"));
     roots.push(root);
+    const tail = { workspaceId: "workspace", contentHash: "f".repeat(64), generation: 1, id: randomUUID() };
     const catalog = {
+      findSourceBlobGcCandidateTail: vi.fn(async () => tail),
       listSourceBlobGcCandidates: vi.fn(async () => []),
       withSourceBlobLock: vi.fn(async () => { throw new Error("unexpected candidate"); })
     };
@@ -89,7 +93,10 @@ describe("source blob garbage collection", () => {
       dataDir: root, catalog: catalog as never, enabled: true, candidateLimit: 7
     }).runOnce();
 
-    expect(catalog.listSourceBlobGcCandidates.mock.calls).toEqual([[500], [7]]);
+    expect(catalog.listSourceBlobGcCandidates.mock.calls).toEqual([
+      [{ through: tail, limit: 500 }],
+      [{ through: tail, limit: 7 }]
+    ]);
   });
 
   test("applies the same candidate limit in the memory catalog", async () => {
@@ -104,7 +111,39 @@ describe("source blob garbage collection", () => {
       });
     }
 
-    await expect(context.catalog.listSourceBlobGcCandidates(2)).resolves.toHaveLength(2);
+    const tail = await context.catalog.findSourceBlobGcCandidateTail();
+    await expect(context.catalog.listSourceBlobGcCandidates({ through: tail!, limit: 2 }))
+      .resolves.toHaveLength(2);
+  });
+
+  test("keyset pagination reaches candidates after an inconsistent first page", async () => {
+    const context = await fixture();
+    const created = await Promise.all([
+      context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("page candidate one") }),
+      context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("page candidate two") }),
+      context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("page candidate three") })
+    ]);
+    const ordered = [...context.catalog.sourceBlobs].sort((left, right) =>
+      left.workspaceId.localeCompare(right.workspaceId)
+      || left.contentHash.localeCompare(right.contentHash)
+      || left.generation - right.generation
+      || left.id.localeCompare(right.id)
+    );
+    const inconsistent = ordered[0]!;
+    Object.assign(inconsistent, {
+      status: "tombstoned" as const,
+      fencingToken: randomUUID(),
+      tombstonedAt: new Date("2026-07-20T00:00:00.000Z")
+    });
+    await chmod(sourcePath(context.root, inconsistent), 0o644);
+
+    await expect(context.collector({ candidateLimit: 2 }).runOnce()).resolves.toMatchObject({
+      scanned: 3,
+      inconsistent: 1,
+      tombstoned: 2
+    });
+    expect(context.catalog.sourceBlobs.filter((record) => record.status === "active")).toHaveLength(0);
+    expect(created).toHaveLength(3);
   });
 
   test("tombstones only an unreferenced active blob, then moves and deletes it after separate grace periods", async () => {
@@ -250,6 +289,46 @@ describe("source blob garbage collection", () => {
 
     await expect(context.collector().runOnce()).resolves.toMatchObject({ deleted: 1 });
     expect(context.catalog.sourceBlobs[0]).toMatchObject({ status: "deleted" });
+  });
+
+  test("syncs the missing trash parent before completing the deleted transition", async () => {
+    const context = await fixture();
+    const created = await context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("ordered delete") });
+    await context.collector().runOnce();
+    context.advance(1_000);
+    await context.collector().runOnce();
+    const trash = trashPath(context.root, created.record);
+    await unlink(trash);
+    const order: string[] = [];
+    const baseCatalog = context.catalog;
+    const catalog = {
+      findSourceBlobGcCandidateTail: () => baseCatalog.findSourceBlobGcCandidateTail(),
+      listSourceBlobGcCandidates: (input: Parameters<typeof baseCatalog.listSourceBlobGcCandidates>[0]) =>
+        baseCatalog.listSourceBlobGcCandidates(input),
+      findSourceBlobById: (workspaceId: string, sourceBlobId: string) =>
+        baseCatalog.findSourceBlobById(workspaceId, sourceBlobId),
+      withSourceBlobLock: <T>(
+        workspaceId: string,
+        contentHash: string,
+        operation: Parameters<typeof baseCatalog.withSourceBlobLock<T>>[2]
+      ) => baseCatalog.withSourceBlobLock(workspaceId, contentHash, async (locked) => operation({
+        ...locked,
+        markDeletedIfUnreferenced: async (...args: Parameters<typeof locked.markDeletedIfUnreferenced>) => {
+          order.push("mark-deleted");
+          return locked.markDeletedIfUnreferenced(...args);
+        }
+      }))
+    };
+    const collector = context.collector({
+      catalog: catalog as never,
+      syncDirectory: async (directory) => {
+        expect(directory).toBe(path.dirname(trash));
+        order.push("sync");
+      }
+    });
+
+    await expect(collector.runOnce()).resolves.toMatchObject({ deleted: 1 });
+    expect(order).toEqual(["sync", "mark-deleted"]);
   });
 
   test("stops a tampered generation and audits without recording a sensitive path", async () => {

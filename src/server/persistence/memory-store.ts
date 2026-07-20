@@ -4,6 +4,7 @@ import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledg
 
 import {
   boundedKnowledgePage,
+  compareSourceBlobGcCursors,
   FeedbackNotAcknowledgedError,
   InvalidLegacyReleaseRollbackError,
   InvalidFeedbackTransitionError,
@@ -11,7 +12,8 @@ import {
   LastWorkspaceAdminError,
   knowledgeMatchReason,
   normalizeSourceBlobGcCandidateLimit,
-  normalizePagination
+  normalizePagination,
+  sourceBlobGcCursor
 } from "./store.js";
 
 import type {
@@ -57,6 +59,8 @@ import type {
   SourceAnalysisArtifactRecord,
   SourceSnapshotRecord,
   SourceBlobRecord,
+  SourceBlobGcCursor,
+  SourceBlobGcPageInput,
   LockedSourceBlobCatalog,
   SaveKnowledgeGraphInput,
   SetupResult,
@@ -179,18 +183,39 @@ export class MemoryAppStore implements AppStore {
     return this.admin !== null;
   }
 
-  async listSourceBlobGcCandidates(limit?: number): Promise<SourceBlobRecord[]> {
-    const candidateLimit = normalizeSourceBlobGcCandidateLimit(limit);
-    return this.sourceBlobs.filter((record) =>
-      record.status === "tombstoned"
+  private isSourceBlobGcCandidate(record: SourceBlobRecord): boolean {
+    return record.status === "tombstoned"
       || record.status === "trash"
       || record.status === "active" && !this.sourceFiles.some((file) =>
         file.workspaceId === record.workspaceId && file.sourceBlobId === record.id
-      )
-    ).sort((left, right) => left.workspaceId.localeCompare(right.workspaceId)
-      || left.contentHash.localeCompare(right.contentHash)
-      || left.generation - right.generation
-    ).slice(0, candidateLimit).map((record) => ({ ...record }));
+      );
+  }
+
+  async findSourceBlobGcCandidateTail(): Promise<SourceBlobGcCursor | null> {
+    let tail: SourceBlobGcCursor | null = null;
+    for (const record of this.sourceBlobs) {
+      if (!this.isSourceBlobGcCandidate(record)) continue;
+      const cursor = sourceBlobGcCursor(record);
+      if (!tail || compareSourceBlobGcCursors(cursor, tail) > 0) tail = cursor;
+    }
+    return tail;
+  }
+
+  async listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]> {
+    const candidateLimit = normalizeSourceBlobGcCandidateLimit(input.limit);
+    const page: SourceBlobRecord[] = [];
+    for (const record of this.sourceBlobs) {
+      if (!this.isSourceBlobGcCandidate(record)) continue;
+      const cursor = sourceBlobGcCursor(record);
+      if (input.after && compareSourceBlobGcCursors(cursor, input.after) <= 0
+        || compareSourceBlobGcCursors(cursor, input.through) > 0) continue;
+      page.push(record);
+      page.sort((left, right) => compareSourceBlobGcCursors(
+        sourceBlobGcCursor(left), sourceBlobGcCursor(right)
+      ));
+      if (page.length > candidateLimit) page.pop();
+    }
+    return page.map((record) => ({ ...record }));
   }
 
   async withSourceBlobLock<T>(

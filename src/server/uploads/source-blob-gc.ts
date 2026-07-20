@@ -7,10 +7,15 @@ import {
   sourceBlobFileLocations
 } from "./source-blob-store.js";
 import { syncDirectory } from "./folder-import.js";
-import { normalizeSourceBlobGcCandidateLimit } from "../persistence/store.js";
+import {
+  compareSourceBlobGcCursors,
+  normalizeSourceBlobGcCandidateLimit,
+  sourceBlobGcCursor
+} from "../persistence/store.js";
 import type {
   LockedSourceBlobCatalog,
   SourceBlobCatalog,
+  SourceBlobGcCursor,
   SourceBlobRecord
 } from "../persistence/store.js";
 
@@ -74,21 +79,34 @@ export class SourceBlobGarbageCollector {
 
   async runOnce(): Promise<SourceBlobGcRunResult> {
     if (!this.enabled) return emptyResult();
-    const candidates = await this.options.catalog.listSourceBlobGcCandidates(this.candidateLimit);
     const result = emptyResult();
-    result.scanned = candidates.length;
+    const through = await this.options.catalog.findSourceBlobGcCandidateTail();
+    if (!through) return result;
     const now = this.now();
-    for (const candidate of candidates) {
-      const processed = await this.options.catalog.withSourceBlobLock(
-        candidate.workspaceId,
-        candidate.contentHash,
-        async (catalog) => this.processGeneration(catalog, candidate, now)
-      );
-      result.tombstoned += processed.tombstoned;
-      result.restored += processed.restored;
-      result.trashed += processed.trashed;
-      result.deleted += processed.deleted;
-      result.inconsistent += processed.inconsistent;
+    let after: SourceBlobGcCursor | undefined;
+    while (true) {
+      const candidates = await this.options.catalog.listSourceBlobGcCandidates({
+        ...(after ? { after } : {}),
+        through,
+        limit: this.candidateLimit
+      });
+      if (candidates.length === 0) break;
+      result.scanned += candidates.length;
+      for (const candidate of candidates) {
+        const processed = await this.options.catalog.withSourceBlobLock(
+          candidate.workspaceId,
+          candidate.contentHash,
+          async (catalog) => this.processGeneration(catalog, candidate, now)
+        );
+        result.tombstoned += processed.tombstoned;
+        result.restored += processed.restored;
+        result.trashed += processed.trashed;
+        result.deleted += processed.deleted;
+        result.inconsistent += processed.inconsistent;
+      }
+      after = sourceBlobGcCursor(candidates.at(-1)!);
+      if (candidates.length < this.candidateLimit
+        || compareSourceBlobGcCursors(after, through) >= 0) break;
     }
     return result;
   }
@@ -220,6 +238,7 @@ export class SourceBlobGarbageCollector {
       return;
     }
     if (!trashExists) {
+      await this.syncDir(locations.trashParent);
       const deleted = await catalog.markDeletedIfUnreferenced(record.id, record.fencingToken, now);
       if (deleted) result.deleted = 1;
       else await this.inconsistent(catalog, record, "delete_fence_conflict", result);

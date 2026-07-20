@@ -1,5 +1,11 @@
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
 import { describe, expect, test, vi } from "vitest";
 
+import { SourceBlobStore } from "../uploads/source-blob-store.js";
 import { PostgresAppStore } from "./postgres-store";
 
 describe("PostgresAppStore source blob locking", () => {
@@ -112,23 +118,92 @@ describe("PostgresAppStore source blob locking", () => {
   });
 
   test("lists active zero-reference and non-active GC candidates from source_blobs", async () => {
+    const tailRow = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspace_id: "11111111-1111-4111-8111-111111111111",
+      content_hash: "f".repeat(64),
+      generation: 2
+    };
     const query = vi.fn(async (_sql: string, _values?: unknown[]) => {
-      void _sql;
       void _values;
+      if (_sql.includes("ORDER BY blob.workspace_id DESC")) return { rows: [tailRow] };
       return { rows: [] };
     });
     const store = new PostgresAppStore({ query } as never);
 
-    await expect(store.listSourceBlobGcCandidates()).resolves.toEqual([]);
-    await expect(store.listSourceBlobGcCandidates(7)).resolves.toEqual([]);
+    const tail = await store.findSourceBlobGcCandidateTail();
+    await expect(store.listSourceBlobGcCandidates({ through: tail!, limit: 7 })).resolves.toEqual([]);
 
-    const sql = String(query.mock.calls[0]?.[0]);
+    expect(tail).toEqual({
+      workspaceId: tailRow.workspace_id,
+      contentHash: tailRow.content_hash,
+      generation: tailRow.generation,
+      id: tailRow.id
+    });
+    const sql = String(query.mock.calls[1]?.[0]);
     expect(sql).toContain("FROM source_blobs");
     expect(sql).toContain("status IN ('tombstoned', 'trash')");
     expect(sql).toContain("NOT EXISTS");
     expect(sql).toContain("source_files");
-    expect(sql).toContain("LIMIT $1");
-    expect(query.mock.calls.map(([, values]) => values)).toEqual([[500], [7]]);
+    expect(sql).toContain("ROW(blob.workspace_id, blob.content_hash, blob.generation, blob.id)");
+    expect(sql).toContain("<= ROW($1, $2, $3, $4)");
+    expect(sql).toContain("LIMIT $5");
+    expect(query.mock.calls[1]?.[1]).toEqual([
+      tailRow.workspace_id, tailRow.content_hash, tailRow.generation, tailRow.id, 7
+    ]);
+  });
+
+  test("commits a moved referenced tombstone audit before SourceBlobStore.put throws outside the lock", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-postgres-put-audit-"));
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    const bytes = Buffer.from("postgres referenced tombstone");
+    const contentHash = createHash("sha256").update(bytes).digest("hex");
+    const blobRow = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspace_id: workspaceId,
+      content_hash: contentHash,
+      generation: 1,
+      byte_size: String(bytes.length),
+      status: "tombstoned",
+      storage_key: `blobs/${workspaceId}/${contentHash.slice(0, 2)}/${contentHash}/1`,
+      fencing_token: randomUUID(),
+      tombstoned_at: new Date("2026-07-20T00:00:00.000Z"),
+      trashed_at: null,
+      deleted_at: null
+    };
+    const trash = path.join(root, ".trash", workspaceId, contentHash, "1");
+    await mkdir(path.dirname(path.join(root, blobRow.storage_key)), { recursive: true });
+    await mkdir(path.dirname(trash), { recursive: true });
+    await writeFile(trash, bytes);
+    await chmod(trash, 0o444);
+    const clientQuery = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
+      if (sql.includes("status = 'active'") && sql.includes("FROM source_blobs")) return { rows: [] };
+      if (sql.includes("status = 'tombstoned'") && sql.includes("FROM source_blobs")) return { rows: [blobRow] };
+      if (sql.includes("count(*)::text AS reference_count")) return { rows: [{ reference_count: "1" }] };
+      if (sql.includes("SELECT id, status, generation")) {
+        return { rows: [{ id: blobRow.id, status: blobRow.status, generation: blobRow.generation }] };
+      }
+      return { rows: [] };
+    });
+    const client = { query: clientQuery, release: vi.fn() };
+    const catalog = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+    const blobs = new SourceBlobStore({ dataDir: root, catalog });
+
+    try {
+      await expect(blobs.put({ workspaceId, bytes }))
+        .rejects.toMatchObject({ code: "SOURCE_BLOB_INTEGRITY_FAILED" });
+      const statements = clientQuery.mock.calls.map(([sql]) => String(sql));
+      expect(statements).toContain("COMMIT");
+      expect(statements).not.toContain("ROLLBACK");
+      expect(statements.some((sql) => sql.includes("INSERT INTO audit_events"))).toBe(true);
+      expect(statements.some((sql) => sql.includes("UPDATE source_blobs"))).toBe(false);
+      expect(clientQuery.mock.calls.some(([, values]) =>
+        Array.isArray(values) && values.includes("source_blob.gc_inconsistent")
+      )).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("locks and validates active source blob identity and metadata before inserting a source_file binding", async () => {

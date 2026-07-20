@@ -169,14 +169,26 @@ export class SourceBlobStore {
     record: SourceBlobRecord;
     reused: boolean;
   }> {
+    type PutOutcome =
+      | { ok: true; value: { record: SourceBlobRecord; reused: boolean } }
+      | { ok: false; error: SourceBlobIntegrityError };
     const bytes = Buffer.from(input.bytes);
     const contentHash = digest(bytes);
     safeIdentifier(input.workspaceId, "Workspace identifier");
-    return this.options.catalog.withSourceBlobLock(input.workspaceId, contentHash, async (catalog) => {
+    const outcome = await this.options.catalog.withSourceBlobLock<PutOutcome>(
+      input.workspaceId,
+      contentHash,
+      async (catalog) => {
       const active = await catalog.findActive();
       if (active) {
-        await this.read(active);
-        return { record: active, reused: true };
+        try {
+          await this.read(active);
+          return { ok: true, value: { record: active, reused: true } };
+        } catch (error) {
+          if (!(error instanceof SourceBlobIntegrityError)) throw error;
+          await catalog.recordGcInconsistency(active.id, "active_content_inconsistent");
+          return { ok: false, error };
+        }
       }
 
       const tombstoned = await catalog.findTombstoned();
@@ -207,7 +219,15 @@ export class SourceBlobStore {
               "SOURCE_BLOB_INTEGRITY_FAILED",
               "Tombstoned source blob could not be restored"
             );
-            return { record: restored, reused: true };
+            return { ok: true, value: { record: restored, reused: true } };
+          }
+          if (await catalog.countReferences(tombstoned.id) > 0) {
+            const error = new SourceBlobIntegrityError(
+              "SOURCE_BLOB_INTEGRITY_FAILED",
+              "Referenced tombstoned source blob has already moved"
+            );
+            await catalog.recordGcInconsistency(tombstoned.id, "referenced_tombstone_moved");
+            return { ok: false, error };
           }
           await assertSourceBlobFile(locations.trash, tombstoned);
           await Promise.all([
@@ -222,6 +242,7 @@ export class SourceBlobStore {
         } catch (error) {
           if (error instanceof SourceBlobIntegrityError) {
             await catalog.recordGcInconsistency(tombstoned.id, "tombstone_content_inconsistent");
+            return { ok: false, error };
           }
           throw error;
         }
@@ -261,7 +282,7 @@ export class SourceBlobStore {
             byteSize: bytes.length,
             storageKey: key
           });
-          return { record, reused: false };
+          return { ok: true, value: { record, reused: false } };
         } catch (error) {
           await unlink(destination).catch(() => undefined);
           throw error;
@@ -271,6 +292,8 @@ export class SourceBlobStore {
         throw error;
       }
     });
+    if (!outcome.ok) throw outcome.error;
+    return outcome.value;
   }
 
   async read(record: SourceBlobRecord): Promise<Buffer> {
@@ -288,8 +311,11 @@ export class SourceBlobStore {
       }
       throw error;
     }
-    if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob is not a regular file");
+    if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o222) !== 0) {
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_INTEGRITY_FAILED",
+        "Source blob is not an immutable regular file"
+      );
     }
     const bytes = await readFile(absolutePath);
     if (bytes.length !== record.byteSize || digest(bytes) !== record.contentHash) {

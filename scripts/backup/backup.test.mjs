@@ -87,7 +87,7 @@ function createFixture({
   writableSnapshotView = false,
   deriveSourceBlobIntegrity = true,
   resticSnapshots = [{ id: latestSnapshotId, time: "1970-01-02T03:45:00.000Z" }],
-  integrityResult = '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":0,"orphanedSourceAnalysisArtifacts":0,"invalidSourceBlobReferences":0}',
+  integrityResult = '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":0,"orphanedSourceAnalysisArtifacts":0,"unboundSourceFiles":0,"invalidSourceBlobReferences":0}',
   artifactStorageKey = "33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json",
   artifactContent = '{"fixture":true}',
   sourceBlobManifest = '[{"workspaceId":"11111111-1111-4111-8111-111111111111","snapshotId":"55555555-5555-4555-8555-555555555555","snapshotStoragePath":"/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files","path":"src/one.ts","contentHash":"47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28","byteSize":34,"generation":1,"storageKey":"blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1","status":"active","fencingToken":null,"tombstonedAt":null,"trashedAt":null,"deletedAt":null},{"workspaceId":"11111111-1111-4111-8111-111111111111","snapshotId":"55555555-5555-4555-8555-555555555555","snapshotStoragePath":"/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files","path":"src/two.ts","contentHash":"47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28","byteSize":34,"generation":1,"storageKey":"blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1","status":"active","fencingToken":null,"tombstonedAt":null,"trashedAt":null,"deletedAt":null}]'
@@ -536,7 +536,7 @@ test("restore drill never writes production Docker volumes", () => {
         volumeArchives: ["snapshots.tgz", "repositories.tgz", "sources.tgz", "artifacts.tgz"],
         databaseStats: { workspaceCount: 1, userCount: 1, projectCount: 1, projectMemberCount: 1, snapshotCount: 1, releaseCount: 1, releaseChannelCount: 1, artifactCount: 1, sourceAnalysisArtifactCount: 1, sourceBlobCount: 2, sourceFileBlobReferenceCount: 2, referencedSourceBlobGenerationCount: 1 },
         volumeFileCounts: { snapshots: 3, repositories: 1, sources: 1, artifacts: 1 },
-        integrity: { orphanedReleases: 0, orphanedReleaseChannels: 0, crossWorkspaceProjectMembers: 0, projectMembersWithoutWorkspaceMembership: 0, orphanedArtifacts: 0, orphanedSourceAnalysisArtifacts: 0, invalidSourceBlobReferences: 0 },
+        integrity: { orphanedReleases: 0, orphanedReleaseChannels: 0, crossWorkspaceProjectMembers: 0, projectMembersWithoutWorkspaceMembership: 0, orphanedArtifacts: 0, orphanedSourceAnalysisArtifacts: 0, unboundSourceFiles: 0, invalidSourceBlobReferences: 0 },
         blobReferenceCount: 2,
         blobContentVerifiedCount: 1,
         blobHardlinkVerifiedCount: 2,

@@ -82,7 +82,11 @@ describe("source blob garbage collection", () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-gc-limit-"));
     roots.push(root);
     const tail = { workspaceId: "workspace", contentHash: "f".repeat(64), generation: 1, id: randomUUID() };
-    const boundary = { through: tail, creationCutoff: "2026-07-20T00:00:00.000000Z" };
+    const boundary = {
+      through: tail,
+      creationCutoff: "2026-07-20T00:00:00.000000Z",
+      visibilitySnapshot: null
+    };
     const catalog = {
       findSourceBlobGcRunBoundary: vi.fn(async () => boundary),
       listSourceBlobGcCandidates: vi.fn(async () => []),
@@ -113,6 +117,7 @@ describe("source blob garbage collection", () => {
     }
 
     const boundary = await context.catalog.findSourceBlobGcRunBoundary();
+    expect(boundary?.visibilitySnapshot).toBeNull();
     await expect(context.catalog.listSourceBlobGcCandidates({ ...boundary!, limit: 2 }))
       .resolves.toHaveLength(2);
   });

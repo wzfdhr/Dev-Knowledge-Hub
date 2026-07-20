@@ -39,7 +39,8 @@ class MemorySourceBlobCatalog implements SourceBlobCatalog {
         generation: record.generation,
         id: record.id
       },
-      creationCutoff: "0"
+      creationCutoff: "0",
+      visibilitySnapshot: null
     } : null;
   }
 
@@ -415,6 +416,32 @@ describe("workspace source blob store", () => {
       reason: "active_content_inconsistent"
     }]);
   });
+
+  test.each(["EACCES", "EPERM"] as const)(
+    "preserves the inaccessible audit reason when active reuse fails with %s",
+    async (code) => {
+      const context = await fixture();
+      const workspaceId = randomUUID();
+      const bytes = Buffer.from(`inaccessible active ${code}`);
+      const first = await context.store.put({ workspaceId, bytes });
+      const inaccessiblePath = path.join(context.root, first.record.storageKey);
+      const store = new SourceBlobStore({
+        dataDir: context.root,
+        catalog: context.catalog,
+        openFile: async (candidate, flags) => {
+          if (candidate === inaccessiblePath) throw Object.assign(new Error("permission denied"), { code });
+          return open(candidate, flags);
+        }
+      });
+
+      await expect(store.put({ workspaceId, bytes }))
+        .rejects.toMatchObject({ code: "SOURCE_BLOB_INACCESSIBLE" });
+      expect(context.catalog.audits).toEqual([{
+        sourceBlobId: first.record.id,
+        reason: "active_file_inaccessible"
+      }]);
+    }
+  );
 
   test("rejects a new source_file binding when its blob generation is not active", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-binding-"));

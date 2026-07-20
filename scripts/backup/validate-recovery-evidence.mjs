@@ -29,7 +29,7 @@ const legacyIntegrityNames = [
   "orphanedArtifacts",
   "orphanedSourceAnalysisArtifacts"
 ];
-const sourceBlobIntegrityNames = ["invalidSourceBlobReferences"];
+const sourceBlobIntegrityNames = ["unboundSourceFiles", "invalidSourceBlobReferences"];
 const sha256 = /^[a-f0-9]{64}$/;
 const utcIsoTimestamp = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?Z$/;
 const evidenceFields = [
@@ -132,10 +132,20 @@ function validateSourceBlobRecord(record, summary) {
     summary.logicalBytes += BigInt(record.byteSize);
   }
   const inodeKey = `${record.blobDevice}:${record.blobInode}`;
-  const knownAllocation = summary.inodes.get(inodeKey);
-  requireEvidence(knownAllocation === undefined || knownAllocation === blobAllocatedBytes, "source blob inode allocation records are inconsistent");
-  if (knownAllocation === undefined) {
-    summary.inodes.set(inodeKey, blobAllocatedBytes);
+  const generationIdentity = JSON.stringify([
+    record.workspaceId,
+    record.contentHash,
+    record.generation,
+    record.storageKey,
+    record.byteSize
+  ]);
+  const knownInode = summary.inodes.get(inodeKey);
+  requireEvidence(!knownInode || knownInode.generationIdentity === generationIdentity,
+    "source blob inode is reused across generation identities");
+  requireEvidence(!knownInode || knownInode.allocatedBytes === blobAllocatedBytes,
+    "source blob inode allocation records are inconsistent");
+  if (!knownInode) {
+    summary.inodes.set(inodeKey, { generationIdentity, allocatedBytes: blobAllocatedBytes });
     summary.physicalBytes += blobAllocatedBytes;
   }
 }

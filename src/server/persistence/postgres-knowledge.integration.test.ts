@@ -2767,7 +2767,7 @@ integration("PostgreSQL cited knowledge integration", () => {
     expect(inserted.rows[0]?.count).toBe("2");
   }, 30_000);
 
-  test("excludes an application insert committed after the boundary from an older transaction", async () => {
+  test("excludes a row inserted before the boundary but committed after its visibility snapshot", async () => {
     pool ??= new Pool({ connectionString: databaseUrl });
     await runMigrations(pool);
     await pool.query("TRUNCATE workspaces CASCADE");
@@ -2784,54 +2784,33 @@ integration("PostgreSQL cited knowledge integration", () => {
         storageKey: `blobs/${setup!.workspace.id}/ff/${initialHash}/1`
       })
     );
-    let transactionBegan = () => {};
-    const began = new Promise<void>((resolve) => { transactionBegan = resolve; });
-    let releaseInsert = () => {};
-    const released = new Promise<void>((resolve) => { releaseInsert = resolve; });
-    const delayedStore = new PostgresAppStore({
-      connect: async () => {
-        const client = await pool!.connect();
-        return {
-          query: async (sql: string, values?: unknown[]) => {
-            const result = await client.query(sql, values);
-            if (sql === "BEGIN") {
-              transactionBegan();
-              await released;
-            }
-            return result;
-          },
-          release: () => client.release()
-        };
-      }
-    } as never);
-    const delayedInsert = delayedStore.withSourceBlobLock(
-      setup!.workspace.id,
-      delayedHash,
-      async (locked) => locked.create({
-        workspaceId: setup!.workspace.id,
-        contentHash: delayedHash,
-        generation: 1,
-        byteSize: 1,
-        storageKey: `blobs/${setup!.workspace.id}/bb/${delayedHash}/1`
-      })
-    );
-    await began;
+    const delayedClient = await pool.connect();
+    let delayed: { id: string };
     let boundary: Awaited<ReturnType<typeof catalog.findSourceBlobGcRunBoundary>>;
     try {
+      await delayedClient.query("BEGIN");
+      delayed = (await delayedClient.query<{ id: string }>(
+        `INSERT INTO source_blobs
+           (workspace_id, content_hash, generation, byte_size, status, storage_key)
+         VALUES ($1, $2, 1, 1, 'active', $3)
+         RETURNING id`,
+        [setup!.workspace.id, delayedHash, `blobs/${setup!.workspace.id}/bb/${delayedHash}/1`]
+      )).rows[0]!;
       boundary = await catalog.findSourceBlobGcRunBoundary();
+      await delayedClient.query("COMMIT");
     } finally {
-      releaseInsert();
+      await delayedClient.query("ROLLBACK").catch(() => undefined);
+      delayedClient.release();
     }
     expect(boundary).not.toBeNull();
-    const delayed = await delayedInsert;
 
     await expect(catalog.listSourceBlobGcCandidates({ ...boundary!, limit: 10 }))
       .resolves.toEqual([initial]);
-    const timestamps = await pool.query<{ after_boundary: boolean }>(
-      "SELECT created_at > $2::timestamptz AS after_boundary FROM source_blobs WHERE id = $1",
+    const timestamps = await pool.query<{ within_cutoff: boolean }>(
+      "SELECT created_at <= $2::timestamptz AS within_cutoff FROM source_blobs WHERE id = $1",
       [delayed.id, boundary!.creationCutoff]
     );
-    expect(timestamps.rows[0]?.after_boundary).toBe(true);
+    expect(timestamps.rows[0]?.within_cutoff).toBe(true);
   }, 30_000);
 
   test("serializes source_file binding and fenced GC in both PostgreSQL lock orders", async () => {

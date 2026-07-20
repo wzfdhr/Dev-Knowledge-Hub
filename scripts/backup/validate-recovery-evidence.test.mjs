@@ -106,6 +106,7 @@ function validEvidence() {
       projectMembersWithoutWorkspaceMembership: 0,
       orphanedArtifacts: 0,
       orphanedSourceAnalysisArtifacts: 0,
+      unboundSourceFiles: 0,
       invalidSourceBlobReferences: 0
     }
   };
@@ -122,6 +123,7 @@ function legacyV2Evidence() {
   delete evidence.databaseStats.sourceBlobCount;
   delete evidence.databaseStats.sourceFileBlobReferenceCount;
   delete evidence.databaseStats.referencedSourceBlobGenerationCount;
+  delete evidence.integrity.unboundSourceFiles;
   delete evidence.integrity.invalidSourceBlobReferences;
   return evidence;
 }
@@ -175,6 +177,40 @@ test("requires and semantically validates the retained source blob record manife
   assert.match(unrelated.stderr, /source blob record hardlink relationship is invalid/);
 });
 
+test("rejects physical inode reuse across workspaces or blob generation identities", () => {
+  const crossWorkspace = validSourceBlobRecords();
+  crossWorkspace[1].workspaceId = "22222222-2222-4222-8222-222222222222";
+  crossWorkspace[1].storageKey = `blobs/${crossWorkspace[1].workspaceId}/aa/${digest}/1`;
+  const crossWorkspaceEvidence = validEvidence();
+  const crossWorkspaceManifest = serializeSourceBlobRecords(crossWorkspace);
+  crossWorkspaceEvidence.sourceBlobRecordManifest.sha256 = createHash("sha256")
+    .update(crossWorkspaceManifest).digest("hex");
+  const crossWorkspaceResult = runValidator(crossWorkspaceEvidence, [], crossWorkspace);
+  assert.notEqual(crossWorkspaceResult.status, 0);
+  assert.match(crossWorkspaceResult.stderr, /source blob inode is reused across generation identities/);
+
+  const differentGeneration = validSourceBlobRecords();
+  differentGeneration[1].generation = 2;
+  differentGeneration[1].storageKey = `blobs/${differentGeneration[1].workspaceId}/aa/${digest}/2`;
+  const differentGenerationEvidence = validEvidence();
+  const differentGenerationManifest = serializeSourceBlobRecords(differentGeneration);
+  differentGenerationEvidence.sourceBlobRecordManifest.sha256 = createHash("sha256")
+    .update(differentGenerationManifest).digest("hex");
+  const differentGenerationResult = runValidator(differentGenerationEvidence, [], differentGeneration);
+  assert.notEqual(differentGenerationResult.status, 0);
+  assert.match(differentGenerationResult.stderr, /source blob inode is reused across generation identities/);
+});
+
+test("v3 evidence explicitly rejects unbound source files", () => {
+  const evidence = validEvidence();
+  evidence.integrity.unboundSourceFiles = 1;
+
+  const result = runValidator(evidence);
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /unboundSourceFiles must be zero/);
+});
+
 test("rejects symlink and non-regular evidence or sidecar files", () => {
   const cases = [
     ["evidence symlink", ({ path }) => {
@@ -221,6 +257,7 @@ test("rejects incomplete or inconsistent recovery evidence", () => {
     (value) => { delete value.integrity; },
     (value) => { delete value.integrity.orphanedArtifacts; },
     (value) => { delete value.integrity.orphanedSourceAnalysisArtifacts; },
+    (value) => { delete value.integrity.unboundSourceFiles; },
     (value) => { delete value.integrity.invalidSourceBlobReferences; },
     (value) => { delete value.databaseStats.sourceAnalysisArtifactCount; },
     (value) => { delete value.databaseStats.sourceBlobCount; },
@@ -266,6 +303,11 @@ test("the CI recovery drill uses the strict validator", () => {
   assert.match(script, /validate-recovery-evidence\.mjs" "\$evidence_path" >\/dev\/null/);
   assert.doesNotMatch(script, /--allow-legacy-v2/);
   assert.doesNotMatch(readFileSync(join(scriptDirectory, "devkh-restore-drill.sh"), "utf8"), /--allow-legacy-v2/);
+});
+
+test("the restore drill records unbound source files independently of joined blob references", () => {
+  const script = readFileSync(join(scriptDirectory, "devkh-restore-drill.sh"), "utf8");
+  assert.match(script, /'unboundSourceFiles'.*source_blob_id IS NULL/s);
 });
 
 test("the documented recovery evidence example passes the strict validator", () => {

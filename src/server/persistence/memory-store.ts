@@ -212,11 +212,18 @@ export class MemoryAppStore implements AppStore {
       const cursor = sourceBlobGcCursor(record);
       if (!tail || compareSourceBlobGcCursors(cursor, tail) > 0) tail = cursor;
     }
-    return tail ? { through: tail, creationCutoff: String(creationCutoff) } : null;
+    return tail ? {
+      through: tail,
+      creationCutoff: String(creationCutoff),
+      visibilitySnapshot: null
+    } : null;
   }
 
   async listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]> {
     const candidateLimit = normalizeSourceBlobGcCandidateLimit(input.limit);
+    if (input.visibilitySnapshot !== null) {
+      throw new RangeError("Memory source blob GC visibility snapshot must be null");
+    }
     const creationCutoff = Number(input.creationCutoff);
     if (!Number.isSafeInteger(creationCutoff) || creationCutoff < 0) {
       throw new RangeError("Source blob GC creation cutoff is invalid");

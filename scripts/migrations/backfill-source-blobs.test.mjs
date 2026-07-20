@@ -98,14 +98,42 @@ class FakePool {
           };
         }) };
     }
+    if (text.includes("WITH completion_boundary AS MATERIALIZED")) {
+      const [viewRoot] = values;
+      const candidate = this.snapshots
+        .filter((snapshot) => {
+          const expected = path.join(viewRoot, "snapshots", snapshot.id, "files");
+          return snapshot.storage_path !== expected || this.files.some((file) =>
+            file.workspace_id === snapshot.workspace_id && file.snapshot_id === snapshot.id
+              && file.source_blob_id === null
+          );
+        })
+        .sort((left, right) => right.workspace_id.localeCompare(left.workspace_id)
+          || right.id.localeCompare(left.id))[0];
+      return { rows: [{
+        completion_snapshot: `fake:${this.queries.length}`,
+        completion_checked_at: new Date().toISOString(),
+        workspace_id: candidate?.workspace_id ?? null,
+        snapshot_id: candidate?.id ?? null,
+        candidate_count: String(this.snapshots.filter((snapshot) => {
+          const expected = path.join(viewRoot, "snapshots", snapshot.id, "files");
+          return snapshot.storage_path !== expected || this.files.some((file) =>
+            file.workspace_id === snapshot.workspace_id && file.snapshot_id === snapshot.id
+              && file.source_blob_id === null
+          );
+        }).length)
+      }] };
+    }
     if (text.includes("FROM source_snapshots snapshot") && text.includes("ORDER BY snapshot.workspace_id")) {
-      const [workspaceCursor, snapshotCursor, viewRoot, limit] = values;
+      const [workspaceCursor, snapshotCursor, throughWorkspace, throughSnapshot, viewRoot, limit] = values;
       const rows = this.snapshots
         .filter((snapshot) => {
           const cursorAfter = workspaceCursor === null || snapshot.workspace_id > workspaceCursor
             || (snapshot.workspace_id === workspaceCursor && snapshot.id > snapshotCursor);
+          const withinBoundary = snapshot.workspace_id < throughWorkspace
+            || (snapshot.workspace_id === throughWorkspace && snapshot.id <= throughSnapshot);
           const expected = path.join(viewRoot, "snapshots", snapshot.id, "files");
-          return cursorAfter && (snapshot.storage_path !== expected || this.files.some((file) =>
+          return cursorAfter && withinBoundary && (snapshot.storage_path !== expected || this.files.some((file) =>
             file.workspace_id === snapshot.workspace_id && file.snapshot_id === snapshot.id && file.source_blob_id === null
           ));
         })
@@ -264,6 +292,36 @@ async function fixture({ snapshotCount = 1, filesPerSnapshot = 1, batchSize = 50
   };
 }
 
+async function prepareSnapshot(context, {
+  snapshotSeed,
+  fileSeed,
+  contents = `export const late${snapshotSeed} = true;\n`
+}) {
+  const snapshotId = id(snapshotSeed);
+  const legacy = path.join(context.snapshotData, snapshotId, "files");
+  const relativePath = `src/late-${snapshotSeed}.ts`;
+  const bytes = Buffer.from(contents);
+  await mkdir(path.join(legacy, "src"), { recursive: true });
+  await writeFile(path.join(legacy, relativePath), bytes);
+  const snapshot = {
+    id: snapshotId,
+    workspace_id: context.snapshots[0].workspace_id,
+    storage_path: legacy,
+    repository_id: id(300 + snapshotSeed),
+    project_id: id(400 + snapshotSeed)
+  };
+  const file = {
+    id: id(fileSeed), workspace_id: snapshot.workspace_id, snapshot_id: snapshotId,
+    path: relativePath, content_hash: hash(bytes), byte_size: bytes.length, source_blob_id: null
+  };
+  return { snapshot, file };
+}
+
+function appendPreparedSnapshot(context, prepared) {
+  context.snapshots.push(prepared.snapshot);
+  context.files.push(prepared.file);
+}
+
 async function seedBlobFile(context, source, { generation = 1, location = "source", status = "active" } = {}) {
   const storageKey = path.posix.join("blobs", source.workspace_id, source.content_hash.slice(0, 2), source.content_hash, String(generation));
   const blobPath = location === "trash"
@@ -308,12 +366,64 @@ test("processes snapshots in bounded batches and leaves releases unchanged", asy
   assert.deepEqual(context.pool.releases, releasesBefore);
   const snapshotQueries = context.pool.queries.filter(({ text }) => text.includes("FROM source_snapshots snapshot")
     && text.includes("ORDER BY snapshot.workspace_id"));
-  assert.equal(snapshotQueries.length, 3);
+  assert.equal(snapshotQueries.length, 2);
   assert.deepEqual(snapshotQueries[0].values.slice(0, 2), [null, null]);
   assert.match(snapshotQueries[0].text, /\$1::uuid IS NULL/);
   const lockQueries = context.pool.queries.filter(({ text }) => text.includes("pg_advisory_xact_lock"));
   assert.ok(lockQueries.length >= 2);
   assert.ok(lockQueries.every(({ text }) => text === "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))"));
+});
+
+test("rescans globally when an eligible snapshot is inserted behind the forward cursor", async () => {
+  const context = await fixture({ snapshotCount: 2, batchSize: 1 });
+  const late = await prepareSnapshot(context, { snapshotSeed: 9, fileSeed: 900 });
+  let inserted = false;
+
+  const report = await runBackfill({
+    pool: context.pool,
+    dataDir: context.dataDir,
+    batchSize: 1,
+    observer: (event) => {
+      if (event.type === "snapshot-bound" && !inserted) {
+        appendPreparedSnapshot(context, late);
+        inserted = true;
+      }
+    }
+  });
+
+  assert.equal(report.status, "complete");
+  assert.equal(report.resumeRequired, false);
+  assert.ok(report.completionSnapshot);
+  assert.equal(report.processed, 3);
+  assert.ok(late.file.source_blob_id);
+});
+
+test("reports resume-required when bounded rescans cannot stabilize under continuous writes", async () => {
+  const context = await fixture({ batchSize: 1 });
+  const arrivals = await Promise.all([9, 8, 7, 6].map((snapshotSeed, index) =>
+    prepareSnapshot(context, { snapshotSeed, fileSeed: 900 - index })
+  ));
+
+  const report = await runBackfill({
+    pool: context.pool,
+    dataDir: context.dataDir,
+    batchSize: 1,
+    completionRescanLimit: 2,
+    observer: (event) => {
+      if (event.type === "snapshot-bound" && arrivals.length > 0) {
+        appendPreparedSnapshot(context, arrivals.shift());
+      }
+    }
+  });
+
+  assert.equal(report.status, "incomplete");
+  assert.equal(report.resumeRequired, true);
+  assert.equal(report.completionSnapshot, null);
+  assert.ok(context.files.some((file) => file.source_blob_id === null));
+  assert.deepEqual(
+    JSON.parse(await readFile(path.join(context.dataDir, "reports", "source-blob-backfill.json"), "utf8")),
+    report
+  );
 });
 
 test("is idempotent, preserves cumulative checkpoint state, and atomically switches storage_path", async () => {
@@ -947,6 +1057,93 @@ test("rolls back all bindings when failure follows the first source file update"
   assert.ok(context.pool.files.every((file) => file.source_blob_id === null));
   assert.equal(context.pool.snapshots[0].storage_path, originalStoragePath);
   assert.equal(context.pool.audits.filter((audit) => audit.action === "source_blob.snapshot_backfilled").length, 0);
+});
+
+test("real PostgreSQL rescans a snapshot committed behind the cursor during the run", {
+  skip: !process.env.TEST_DATABASE_URL
+}, async () => {
+  const databaseUrl = process.env.TEST_DATABASE_URL;
+  const parsed = new URL(databaseUrl);
+  assert.equal(parsed.pathname.replace(/^\//, ""), "devkh_test",
+    "TEST_DATABASE_URL must target the dedicated devkh_test database");
+  const pool = new Pool({ connectionString: databaseUrl });
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-rescan-pg-"));
+  roots.push(dataDir);
+  const workspaceId = randomUUID();
+  const projectId = randomUUID();
+  const repositoryId = randomUUID();
+  const snapshotIdentity = randomUUID();
+  const initialSnapshotId = `f${snapshotIdentity.slice(1)}`;
+  const behindSnapshotId = `0${snapshotIdentity.slice(1)}`;
+  const snapshotData = path.join(dataDir, "snapshots");
+  const insertSnapshot = async (snapshotId, marker) => {
+    const legacyView = path.join(snapshotData, snapshotId, "files");
+    const bytes = Buffer.from(`export const ${marker} = true;\n`);
+    await mkdir(path.join(legacyView, "src"), { recursive: true });
+    await writeFile(path.join(legacyView, "src/index.ts"), bytes);
+    await pool.query(
+      `INSERT INTO source_snapshots
+         (id, workspace_id, repository_id, commit_sha, ref, commit_timestamp, storage_path)
+       VALUES ($1, $2, $3, $4, 'main', now(), $5)`,
+      [snapshotId, workspaceId, repositoryId, marker.padEnd(40, "0").slice(0, 40), legacyView]
+    );
+    await pool.query(
+      `INSERT INTO source_files (id, workspace_id, snapshot_id, path, content_hash, byte_size)
+       VALUES ($1, $2, $3, 'src/index.ts', $4, $5)`,
+      [randomUUID(), workspaceId, snapshotId, hash(bytes), bytes.length]
+    );
+  };
+  try {
+    const schema = await pool.query("SELECT to_regclass('source_blobs')::text AS source_blobs");
+    assert.equal(schema.rows[0]?.source_blobs, "source_blobs",
+      "integration schema must be migrated before the backfill test");
+    await pool.query("INSERT INTO workspaces (id, name, slug) VALUES ($1, $2, $3)",
+      [workspaceId, "FK16 final rescan", `fk16-rescan-${workspaceId}`]);
+    await pool.query("INSERT INTO projects (id, workspace_id, name, slug) VALUES ($1, $2, $3, $4)",
+      [projectId, workspaceId, "FK16 final rescan", `fk16-rescan-project-${projectId}`]);
+    await pool.query(
+      `INSERT INTO repositories (id, workspace_id, project_id, name, kind, default_branch)
+       VALUES ($1, $2, $3, $4, 'upload', 'main')`,
+      [repositoryId, workspaceId, projectId, "FK16 final rescan repository"]
+    );
+    await insertSnapshot(initialSnapshotId, "initial");
+
+    let behindInserted = false;
+    let transactionCommits = 0;
+    const racingPool = {
+      options: pool.options,
+      connect: async () => {
+        const client = await pool.connect();
+        return {
+          query: async (text, values) => {
+            const result = await client.query(text, values);
+            if (text === "COMMIT" && ++transactionCommits === 2) {
+              await insertSnapshot(behindSnapshotId, "behind");
+              behindInserted = true;
+            }
+            return result;
+          },
+          release: () => client.release()
+        };
+      },
+      query: (text, values) => pool.query(text, values)
+    };
+
+    const report = await runBackfill({ pool: racingPool, dataDir, batchSize: 1 });
+
+    assert.equal(behindInserted, true);
+    assert.equal(report.status, "complete");
+    assert.equal(report.resumeRequired, false);
+    assert.equal(report.processed, 2);
+    const behindFiles = await pool.query(
+      "SELECT source_blob_id FROM source_files WHERE snapshot_id = $1",
+      [behindSnapshotId]
+    );
+    assert.ok(behindFiles.rows.every((row) => row.source_blob_id));
+  } finally {
+    await pool.query("DELETE FROM workspaces WHERE id = $1", [workspaceId]).catch(() => undefined);
+    await pool.end();
+  }
 });
 
 test("runs the snapshot backfill against PostgreSQL atomically", {

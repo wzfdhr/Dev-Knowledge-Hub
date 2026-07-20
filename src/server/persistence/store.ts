@@ -555,6 +555,7 @@ export interface SourceBlobGcCursor {
 export interface SourceBlobGcRunBoundary {
   through: SourceBlobGcCursor;
   creationCutoff: string;
+  visibilitySnapshot: string | null;
 }
 
 export interface SourceBlobGcPageInput extends SourceBlobGcRunBoundary {

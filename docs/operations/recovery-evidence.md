@@ -64,6 +64,7 @@
     "projectMembersWithoutWorkspaceMembership": 0,
     "orphanedArtifacts": 0,
     "orphanedSourceAnalysisArtifacts": 0,
+    "unboundSourceFiles": 0,
     "invalidSourceBlobReferences": 0
   }
 }

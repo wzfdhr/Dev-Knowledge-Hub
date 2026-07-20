@@ -396,7 +396,10 @@ export class SourceBlobStore {
           return { ok: true, value: { record: active, reused: true } };
         } catch (error) {
           if (!(error instanceof SourceBlobIntegrityError)) throw error;
-          await catalog.recordGcInconsistency(active.id, "active_content_inconsistent");
+          const reason = error.code === "SOURCE_BLOB_INACCESSIBLE"
+            ? "active_file_inaccessible"
+            : "active_content_inconsistent";
+          await catalog.recordGcInconsistency(active.id, reason);
           return { ok: false, error };
         }
       }

@@ -126,7 +126,8 @@ describe("PostgresAppStore source blob locking", () => {
       workspace_id: "11111111-1111-4111-8111-111111111111",
       content_hash: "f".repeat(64),
       generation: 2,
-      creation_cutoff: "2026-07-20 00:00:00.123456+00"
+      creation_cutoff: "2026-07-20 00:00:00.123456+00",
+      visibility_snapshot: "100:200:150"
     };
     const query = vi.fn(async (_sql: string, _values?: unknown[]) => {
       void _values;
@@ -145,9 +146,12 @@ describe("PostgresAppStore source blob locking", () => {
         generation: tailRow.generation,
         id: tailRow.id
       },
-      creationCutoff: tailRow.creation_cutoff
+      creationCutoff: tailRow.creation_cutoff,
+      visibilitySnapshot: tailRow.visibility_snapshot
     });
+    const boundarySql = String(query.mock.calls[0]?.[0]);
     const sql = String(query.mock.calls[1]?.[0]);
+    expect(boundarySql).toContain("pg_current_snapshot()");
     expect(sql).toContain("FROM source_blobs");
     expect(sql).toContain("status IN ('tombstoned', 'trash')");
     expect(sql).toContain("NOT EXISTS");
@@ -155,10 +159,11 @@ describe("PostgresAppStore source blob locking", () => {
     expect(sql).toContain("ROW(blob.workspace_id, blob.content_hash, blob.generation, blob.id)");
     expect(sql).toContain("<= ROW($1, $2, $3, $4)");
     expect(sql).toContain("blob.created_at <= $5::timestamptz");
-    expect(sql).toContain("LIMIT $6");
+    expect(sql).toContain("pg_visible_in_snapshot(blob.xmin::text::xid8, $6::pg_snapshot)");
+    expect(sql).toContain("LIMIT $7");
     expect(query.mock.calls[1]?.[1]).toEqual([
       tailRow.workspace_id, tailRow.content_hash, tailRow.generation, tailRow.id,
-      tailRow.creation_cutoff, 7
+      tailRow.creation_cutoff, tailRow.visibility_snapshot, 7
     ]);
   });
 

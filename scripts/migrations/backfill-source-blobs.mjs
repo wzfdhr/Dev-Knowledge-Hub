@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
 
 const DEFAULT_BATCH_SIZE = 500;
+const DEFAULT_COMPLETION_RESCAN_LIMIT = 3;
 const REPORT_NAME = "source-blob-backfill.json";
 const SOURCE_BLOB_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))";
 const DEFAULT_STREAMS = { createReadStream, createWriteStream };
@@ -848,15 +849,77 @@ function maximumCursor(left, right) {
     || (left.workspaceId === right.workspaceId && left.snapshotId >= right.snapshotId) ? left : right;
 }
 
-function completedReport(state, batchSize) {
+function backfillReport(state, batchSize, {
+  status,
+  completionSnapshot = null,
+  completionCheckedAt = null,
+  nextEligible = null
+}) {
   return {
     schemaVersion: 1,
+    status,
+    resumeRequired: status !== "complete",
     batchSize,
     processed: state.processed,
     reused: state.reused,
     created: state.created,
     lastCursor: state.lastCursor,
-    completedAt: new Date().toISOString()
+    completionSnapshot,
+    completionCheckedAt,
+    nextEligible,
+    completedAt: status === "complete" ? new Date().toISOString() : null
+  };
+}
+
+async function findBackfillPassBoundary(pool, snapshotData) {
+  const result = await pool.query(
+    `WITH completion_boundary AS MATERIALIZED (
+       SELECT pg_current_snapshot()::text AS completion_snapshot,
+              clock_timestamp() AS completion_checked_at
+     ), eligible AS MATERIALIZED (
+       SELECT snapshot.workspace_id, snapshot.id AS snapshot_id
+       FROM source_snapshots snapshot
+       JOIN repositories repository
+         ON repository.id = snapshot.repository_id AND repository.workspace_id = snapshot.workspace_id
+       WHERE snapshot.storage_path IS DISTINCT FROM ($1 || '/snapshots/' || snapshot.id || '/files')
+          OR EXISTS (
+            SELECT 1 FROM source_files file
+            WHERE file.snapshot_id = snapshot.id AND file.workspace_id = snapshot.workspace_id
+              AND file.source_blob_id IS NULL
+          )
+     )
+     SELECT boundary.completion_snapshot, boundary.completion_checked_at,
+            candidate.workspace_id, candidate.snapshot_id,
+            (SELECT count(*)::text FROM eligible) AS candidate_count
+     FROM completion_boundary boundary
+     LEFT JOIN LATERAL (
+       SELECT workspace_id, snapshot_id
+       FROM eligible
+       ORDER BY ROW(workspace_id, snapshot_id) DESC
+       LIMIT 1
+     ) candidate ON true`,
+    [snapshotData]
+  );
+  const row = result.rows[0];
+  if (!row || typeof row.completion_snapshot !== "string") {
+    throw new Error("Backfill completion snapshot could not be captured");
+  }
+  const checkedAt = row.completion_checked_at instanceof Date
+    ? row.completion_checked_at.toISOString()
+    : String(row.completion_checked_at);
+  const candidateCount = Number(row.candidate_count);
+  if (!Number.isSafeInteger(candidateCount) || candidateCount < 0
+    || candidateCount === 0 && (row.workspace_id || row.snapshot_id)
+    || candidateCount > 0 && (!row.workspace_id || !row.snapshot_id)) {
+    throw new Error("Backfill completion candidate count is invalid");
+  }
+  return {
+    completionSnapshot: row.completion_snapshot,
+    completionCheckedAt: checkedAt,
+    candidateCount,
+    through: row.workspace_id && row.snapshot_id
+      ? { workspaceId: row.workspace_id, snapshotId: row.snapshot_id }
+      : null
   };
 }
 
@@ -875,97 +938,136 @@ export async function runBackfill({
   pool,
   dataDir,
   batchSize = DEFAULT_BATCH_SIZE,
+  completionRescanLimit = DEFAULT_COMPLETION_RESCAN_LIMIT,
   writeReport = true,
   observer,
   streams = DEFAULT_STREAMS
 }) {
   if (!Number.isSafeInteger(batchSize) || batchSize < 1) throw new Error("batchSize must be a positive safe integer");
+  if (!Number.isSafeInteger(completionRescanLimit) || completionRescanLimit < 1) {
+    throw new Error("completionRescanLimit must be a positive safe integer");
+  }
   if (typeof streams.createReadStream !== "function" || typeof streams.createWriteStream !== "function") {
     throw new Error("streams must provide createReadStream and createWriteStream");
   }
   const snapshotData = path.resolve(dataDir, "snapshots");
   const state = await rebuildCheckpointState(dataDir, pool);
-  let cursor = null;
+  let completedPasses = 0;
   for (;;) {
-    const batch = await pool.query(
-      `SELECT snapshot.id AS snapshot_id, snapshot.workspace_id, snapshot.storage_path,
-              snapshot.repository_id, repository.project_id
-       FROM source_snapshots snapshot
-       JOIN repositories repository
-         ON repository.id = snapshot.repository_id AND repository.workspace_id = snapshot.workspace_id
-       WHERE (
-         ($1::uuid IS NULL AND $2::uuid IS NULL)
-         OR (snapshot.workspace_id, snapshot.id) > ($1::uuid, $2::uuid)
-       )
-         AND (
-           snapshot.storage_path IS DISTINCT FROM ($3 || '/snapshots/' || snapshot.id || '/files')
-           OR EXISTS (
-             SELECT 1 FROM source_files file
-             WHERE file.snapshot_id = snapshot.id AND file.workspace_id = snapshot.workspace_id
-               AND file.source_blob_id IS NULL
-           )
-         )
-       ORDER BY snapshot.workspace_id, snapshot.id
-       LIMIT $4`,
-      [cursor?.workspaceId ?? null, cursor?.snapshotId ?? null, snapshotData, batchSize]
-    );
-    if (batch.rows.length === 0) break;
-    for (const snapshot of batch.rows) {
-      safeIdentifier(snapshot.workspace_id, "Workspace identifier");
-      const paths = snapshotPaths(dataDir, snapshot.snapshot_id);
-      if (snapshot.storage_path !== paths.legacyView && snapshot.storage_path !== paths.view) {
-        throw new Error("Snapshot storage path is outside the supported snapshot layout");
-      }
-      const sourceFiles = await pool.query(
-        `SELECT file.id, file.workspace_id, file.snapshot_id, file.path, file.content_hash, file.byte_size
-         FROM source_files file
-         WHERE file.snapshot_id = $1 AND file.workspace_id = $2
-         ORDER BY file.path, file.id`,
-        [snapshot.snapshot_id, snapshot.workspace_id]
-      );
-      const sourceViewSegments = path.relative(paths.snapshotData, snapshot.storage_path).split(path.sep);
-      if (sourceViewSegments.some((segment) => !segment || segment === "." || segment === "..")) {
-        throw new Error("Snapshot storage path is outside the supported snapshot layout");
-      }
-      await assertRealDirectoryChain(paths.snapshotData, sourceViewSegments);
-      const preflight = [];
-      const seenPaths = new Set();
-      for (const sourceFile of sourceFiles.rows) {
-        if (sourceFile.workspace_id !== snapshot.workspace_id || sourceFile.snapshot_id !== snapshot.snapshot_id) {
-          throw new Error("Snapshot source file scope is inconsistent");
-        }
-        const file = await preflightSourceFile(snapshot.storage_path, sourceFile, streams);
-        if (seenPaths.has(file.path)) throw new Error("Snapshot contains duplicate source file paths");
-        seenPaths.add(file.path);
-        preflight.push(file);
-      }
-      observe(observer, { type: "snapshot-preflight", files: preflight });
-      const bound = [];
-      let snapshotReused = 0;
-      let snapshotCreated = 0;
-      for (const file of preflight) {
-        await verifySourceFile(file, streams);
-        const blob = await resolveBlob(pool, snapshotData, file, observer, streams);
-        if (blob.reused) snapshotReused += 1;
-        else snapshotCreated += 1;
-        bound.push({ ...file, blob });
-      }
-      const checkpoint = await bindSnapshot(pool, snapshot, paths, bound, {
-        reused: snapshotReused,
-        created: snapshotCreated
-      }, observer, streams);
-      observe(observer, { type: "snapshot-bound", snapshotId: snapshot.snapshot_id });
-      state.processed += 1;
-      state.reused += checkpoint.reused;
-      state.created += checkpoint.created;
-      cursor = { workspaceId: snapshot.workspace_id, snapshotId: snapshot.snapshot_id };
-      state.lastCursor = maximumCursor(state.lastCursor, cursor);
-      if (writeReport) await writePrivateReport(dataDir, completedReport(state, batchSize), observer);
+    const boundary = await findBackfillPassBoundary(pool, snapshotData);
+    if (!boundary.through) {
+      const report = backfillReport(state, batchSize, {
+        status: "complete",
+        completionSnapshot: boundary.completionSnapshot,
+        completionCheckedAt: boundary.completionCheckedAt
+      });
+      if (writeReport) await writePrivateReport(dataDir, report, observer);
+      return report;
     }
+    if (completedPasses >= completionRescanLimit) {
+      const report = backfillReport(state, batchSize, {
+        status: "incomplete",
+        nextEligible: boundary.through
+      });
+      if (writeReport) await writePrivateReport(dataDir, report, observer);
+      return report;
+    }
+
+    let cursor = null;
+    let passProcessed = 0;
+    while (passProcessed < boundary.candidateCount) {
+      const pageLimit = Math.min(batchSize, boundary.candidateCount - passProcessed);
+      const batch = await pool.query(
+        `SELECT snapshot.id AS snapshot_id, snapshot.workspace_id, snapshot.storage_path,
+                snapshot.repository_id, repository.project_id
+         FROM source_snapshots snapshot
+         JOIN repositories repository
+           ON repository.id = snapshot.repository_id AND repository.workspace_id = snapshot.workspace_id
+         WHERE (
+           ($1::uuid IS NULL AND $2::uuid IS NULL)
+           OR (snapshot.workspace_id, snapshot.id) > ($1::uuid, $2::uuid)
+         )
+           AND (snapshot.workspace_id, snapshot.id) <= ($3::uuid, $4::uuid)
+           AND (
+             snapshot.storage_path IS DISTINCT FROM ($5 || '/snapshots/' || snapshot.id || '/files')
+             OR EXISTS (
+               SELECT 1 FROM source_files file
+               WHERE file.snapshot_id = snapshot.id AND file.workspace_id = snapshot.workspace_id
+                 AND file.source_blob_id IS NULL
+             )
+           )
+         ORDER BY snapshot.workspace_id, snapshot.id
+         LIMIT $6`,
+        [
+          cursor?.workspaceId ?? null,
+          cursor?.snapshotId ?? null,
+          boundary.through.workspaceId,
+          boundary.through.snapshotId,
+          snapshotData,
+          pageLimit
+        ]
+      );
+      if (batch.rows.length === 0) break;
+      for (const snapshot of batch.rows) {
+        safeIdentifier(snapshot.workspace_id, "Workspace identifier");
+        const paths = snapshotPaths(dataDir, snapshot.snapshot_id);
+        if (snapshot.storage_path !== paths.legacyView && snapshot.storage_path !== paths.view) {
+          throw new Error("Snapshot storage path is outside the supported snapshot layout");
+        }
+        const sourceFiles = await pool.query(
+          `SELECT file.id, file.workspace_id, file.snapshot_id, file.path, file.content_hash, file.byte_size
+           FROM source_files file
+           WHERE file.snapshot_id = $1 AND file.workspace_id = $2
+           ORDER BY file.path, file.id`,
+          [snapshot.snapshot_id, snapshot.workspace_id]
+        );
+        const sourceViewSegments = path.relative(paths.snapshotData, snapshot.storage_path).split(path.sep);
+        if (sourceViewSegments.some((segment) => !segment || segment === "." || segment === "..")) {
+          throw new Error("Snapshot storage path is outside the supported snapshot layout");
+        }
+        await assertRealDirectoryChain(paths.snapshotData, sourceViewSegments);
+        const preflight = [];
+        const seenPaths = new Set();
+        for (const sourceFile of sourceFiles.rows) {
+          if (sourceFile.workspace_id !== snapshot.workspace_id || sourceFile.snapshot_id !== snapshot.snapshot_id) {
+            throw new Error("Snapshot source file scope is inconsistent");
+          }
+          const file = await preflightSourceFile(snapshot.storage_path, sourceFile, streams);
+          if (seenPaths.has(file.path)) throw new Error("Snapshot contains duplicate source file paths");
+          seenPaths.add(file.path);
+          preflight.push(file);
+        }
+        observe(observer, { type: "snapshot-preflight", files: preflight });
+        const bound = [];
+        let snapshotReused = 0;
+        let snapshotCreated = 0;
+        for (const file of preflight) {
+          await verifySourceFile(file, streams);
+          const blob = await resolveBlob(pool, snapshotData, file, observer, streams);
+          if (blob.reused) snapshotReused += 1;
+          else snapshotCreated += 1;
+          bound.push({ ...file, blob });
+        }
+        const checkpoint = await bindSnapshot(pool, snapshot, paths, bound, {
+          reused: snapshotReused,
+          created: snapshotCreated
+        }, observer, streams);
+        observe(observer, { type: "snapshot-bound", snapshotId: snapshot.snapshot_id });
+        state.processed += 1;
+        state.reused += checkpoint.reused;
+        state.created += checkpoint.created;
+        cursor = { workspaceId: snapshot.workspace_id, snapshotId: snapshot.snapshot_id };
+        state.lastCursor = maximumCursor(state.lastCursor, cursor);
+        if (writeReport) {
+          await writePrivateReport(dataDir, backfillReport(state, batchSize, {
+            status: "in_progress"
+          }), observer);
+        }
+      }
+      passProcessed += batch.rows.length;
+    }
+    completedPasses += 1;
   }
-  const report = completedReport(state, batchSize);
-  if (writeReport) await writePrivateReport(dataDir, report, observer);
-  return report;
 }
 
 async function main() {
@@ -973,7 +1075,12 @@ async function main() {
   const pool = new Pool({ connectionString: config.databaseUrl });
   try {
     const report = await runBackfill({ pool, dataDir: config.dataDir, batchSize: config.batchSize });
-    console.log(`Backfilled ${report.processed} snapshots (${report.reused} reused blobs, ${report.created} created blobs).`);
+    if (report.resumeRequired) {
+      console.error(`Backfill is incomplete after ${report.processed} snapshots; resume is required.`);
+      process.exitCode = 2;
+    } else {
+      console.log(`Backfilled ${report.processed} snapshots (${report.reused} reused blobs, ${report.created} created blobs).`);
+    }
   } finally {
     await pool.end();
   }

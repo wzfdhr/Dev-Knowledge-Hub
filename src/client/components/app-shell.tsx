@@ -13,17 +13,23 @@ const navigation = [
   { to: "/settings", label: "设置", icon: Settings }
 ];
 
-export function AppShell({ email, onLogout }: { email: string; onLogout: () => void }) {
+type WorkspaceRole = "admin" | "member" | "reader";
+const roleLabels: Record<WorkspaceRole, string> = { admin: "管理员", member: "成员", reader: "只读" };
+
+export function AppShell({ email, role, onLogout }: { email: string; role: WorkspaceRole; onLogout: () => void }) {
   const [open, setOpen] = useState(false);
   const location = useLocation();
   const selectedKey = location.pathname.startsWith("/projects/") ? "/projects" : location.pathname;
-  const menuItems: MenuProps["items"] = navigation.map(({ to, label, icon: Icon }) => ({
+  const visibleNavigation = role === "admin"
+    ? navigation
+    : navigation.filter(({ to }) => !["/members", "/settings"].includes(to));
+  const menuItems: MenuProps["items"] = visibleNavigation.map(({ to, label, icon: Icon }) => ({
     key: to,
     icon: <Icon aria-hidden="true" />,
     label: <NavLink to={to} onClick={() => setOpen(false)}>{label}</NavLink>
   }));
   const navigationContent = <nav aria-label="主导航"><Menu theme="dark" mode="inline" selectedKeys={[selectedKey]} items={menuItems} /></nav>;
-  const account = <footer><div className="admin"><span>{email.slice(0, 1).toUpperCase()}</span><div><strong>管理员</strong><small>{email}</small></div></div><Button type="text" aria-label="退出登录" icon={<LogOut aria-hidden="true" />} onClick={onLogout} /></footer>;
+  const account = <footer><div className="admin"><span>{email.slice(0, 1).toUpperCase()}</span><div><strong>{roleLabels[role]}</strong><small>{email}</small></div></div><Button type="text" aria-label="退出登录" icon={<LogOut aria-hidden="true" />} onClick={onLogout} /></footer>;
 
   return <Layout className="app-shell">
     <Button className="mobile-menu" type="default" shape="circle" aria-label="打开导航" icon={<MenuIcon aria-hidden="true" />} onClick={() => setOpen(true)} />

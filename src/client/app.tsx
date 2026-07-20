@@ -51,7 +51,8 @@ export function App({ api = defaultApi }: { api?: ApiClient }) {
   if (setup.data?.setupRequired && !setupFinished) return <AuthScreen mode="setup" api={api} onSetup={() => { setSetupFinished(true); void setup.refetch(); }} onAuthenticated={() => {}} />;
   if (session.isLoading) return <div className="boot"><Loading label="正在检查会话" /></div>;
   if (session.error instanceof ApiError && session.error.status === 401 || !session.data) return <AuthScreen mode="login" api={api} onSetup={() => {}} onAuthenticated={() => void session.refetch()} sessionExpired={session.error instanceof ApiError && session.error.status === 401} />;
-  return <Routes><Route element={<AppShell email={session.data.admin.email} onLogout={() => logout.mutate()} />}>
+  const workspaceRole = session.data.admin.role ?? "admin";
+  return <Routes><Route element={<AppShell email={session.data.admin.email} role={workspaceRole} onLogout={() => logout.mutate()} />}>
     <Route path="/projects" element={<ProjectsPage api={api} />} />
     <Route path="/projects/:projectId" element={<ProjectLayout api={api} />}>
       <Route index element={<Navigate to="overview" replace />} />
@@ -66,8 +67,8 @@ export function App({ api = defaultApi }: { api?: ApiClient }) {
     <Route path="/overview" element={<LegacyProjectRedirect section="overview" />} />
     <Route path="/knowledge" element={<KnowledgePage api={api} />} />
     <Route path="/feedback" element={<FeedbackPage api={api} />} />
-    <Route path="/members" element={<MembersPage api={api} />} />
-    <Route path="/settings" element={<SystemSettingsPage api={api} />} />
+    <Route path="/members" element={workspaceRole === "admin" ? <MembersPage api={api} /> : <Navigate to="/projects" replace />} />
+    <Route path="/settings" element={workspaceRole === "admin" ? <SystemSettingsPage api={api} /> : <Navigate to="/projects" replace />} />
     <Route path="*" element={<Navigate to="/projects" replace />} />
   </Route></Routes>;
 }

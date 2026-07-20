@@ -874,6 +874,11 @@ test("Docker integration stage includes scripts required by test:integration", a
   assert.match(dockerfile, /FROM runtime AS integration[\s\S]*COPY --chown=node:node scripts \.\/scripts/);
 });
 
+test("keeps the Node-runner backfill suite out of Vitest discovery", async () => {
+  const config = await readFile(new URL("../../vitest.config.ts", import.meta.url), "utf8");
+  assert.match(config, /"scripts\/migrations\/backfill-source-blobs\.test\.mjs"/);
+});
+
 test("accepts a private zero-work report written by an earlier run", async () => {
   const context = await fixture();
   const reportRoot = path.join(context.dataDir, "reports");

@@ -162,6 +162,8 @@ function isExtractSourcePath(sourcePath: string): boolean {
 
 async function loadNormalizedSources(input: {
   workspaceId: string;
+  projectId: string;
+  snapshotId: string;
   manifest: ArtifactManifest;
   value: unknown;
   sourceBlobReader?: SourceBlobReader;
@@ -183,7 +185,11 @@ async function loadNormalizedSources(input: {
     if (source.snapshotId !== input.manifest.snapshotId || !sourceRef) {
       throw new Error("Normalized source references artifact contains an invalid source");
     }
-    const bytes = await input.sourceBlobReader!.read(input.workspaceId, source);
+    const bytes = await input.sourceBlobReader!.read({
+      workspaceId: input.workspaceId,
+      projectId: input.projectId,
+      snapshotId: input.snapshotId
+    }, source);
     try {
       return {
         snapshotId: source.snapshotId,
@@ -257,6 +263,8 @@ export function createKnowledgeIrStageExecutor(input: {
     const sources = (await Promise.all(manifests.map(async (manifest) =>
       loadNormalizedSources({
         workspaceId: run.workspaceId,
+        projectId: run.projectId,
+        snapshotId: run.snapshotId,
         manifest,
         value: await input.artifactStore.getJson(manifest),
         sourceBlobReader: input.sourceBlobReader

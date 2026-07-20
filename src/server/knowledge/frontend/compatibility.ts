@@ -11,6 +11,7 @@ import type {
 
 export const RELEASE_ARTIFACT_FAMILIES = ["knowledge-v1", "frontend-v2"] as const;
 export type ReleaseArtifactFamily = (typeof RELEASE_ARTIFACT_FAMILIES)[number];
+export type SourceStorageMode = "legacy" | "shadow" | "active";
 
 export const FRONTEND_V2_IR_SCHEMA_VERSION = 2;
 export const FRONTEND_V2_GRAPH_SCHEMA_VERSION = 2;
@@ -62,6 +63,7 @@ export const ARTIFACT_KINDS: Record<BuildStage, Record<ReleaseArtifactFamily, { 
 export const frontendPipelineEnvelopeSchema = z.object({
   schemaVersion: z.literal(2),
   family: z.literal("frontend-v2"),
+  sourceStorageMode: z.enum(["legacy", "shadow", "active"]).optional(),
   stage: z.enum(["extract", "tables", "graph", "synthesize", "index", "lint", "viz", "validate", "package"]),
   snapshotId: z.string().min(1),
   analyzerManifestDigest: z.string().regex(/^[a-f0-9]{64}$/u),
@@ -124,7 +126,7 @@ export const frontendPipelinePackageSchema = frontendPipelineEnvelopeSchema.exte
   irSchemaVersion: z.literal(FRONTEND_V2_IR_SCHEMA_VERSION),
   graphSchemaVersion: z.literal(FRONTEND_V2_GRAPH_SCHEMA_VERSION),
   artifacts: z.object({
-    convert: z.array(z.string().min(1)).length(1),
+    convert: z.array(z.string().min(1)).min(1).max(2),
     extract: z.array(z.string().min(1)).length(2),
     tables: z.array(z.string().min(1)).length(2),
     graph: z.array(z.string().min(1)).length(2),
@@ -219,7 +221,8 @@ export async function createVerifiedFrontendReleaseDraft(input: {
     assertFrontendArtifactFamily(
       stage,
       stage === "package" ? ["knowledge-v1"] : ["knowledge-v1", "frontend-v2"],
-      artifacts.map((artifact) => artifact.manifest)
+      artifacts.map((artifact) => artifact.manifest),
+      value.sourceStorageMode ?? "legacy"
     );
     if (stage === "validate") {
       const expected = ARTIFACT_KINDS.validate["frontend-v2"];
@@ -261,17 +264,34 @@ export function releaseArtifactFamily(value: { releaseArtifactFamily?: unknown }
   return family;
 }
 
-export function frontendStageArtifactKinds(stage: BuildStage, families: readonly ReleaseArtifactFamily[]): string[] {
-  return [...new Set(families.map((family) => ARTIFACT_KINDS[stage][family].kind))].sort();
+function artifactContract(
+  stage: BuildStage,
+  family: ReleaseArtifactFamily,
+  sourceStorageMode: SourceStorageMode
+): { kind: string; schemaVersion: number } {
+  if (stage !== "convert" || sourceStorageMode === "legacy") return ARTIFACT_KINDS[stage][family];
+  if (sourceStorageMode === "active" || family === "frontend-v2") {
+    return { kind: "normalized-source-refs", schemaVersion: 2 };
+  }
+  return ARTIFACT_KINDS.convert["knowledge-v1"];
+}
+
+export function frontendStageArtifactKinds(
+  stage: BuildStage,
+  families: readonly ReleaseArtifactFamily[],
+  sourceStorageMode: SourceStorageMode = "legacy"
+): string[] {
+  return [...new Set(families.map((family) => artifactContract(stage, family, sourceStorageMode).kind))].sort();
 }
 
 export function assertFrontendArtifactFamily(
   stage: BuildStage,
   families: readonly ReleaseArtifactFamily[],
-  artifacts: ReadonlyArray<{ kind: string; schemaVersion: number }>
+  artifacts: ReadonlyArray<{ kind: string; schemaVersion: number }>,
+  sourceStorageMode: SourceStorageMode = "legacy"
 ): void {
   for (const family of [...new Set(families)].sort()) {
-    const expected = ARTIFACT_KINDS[stage][family];
+    const expected = artifactContract(stage, family, sourceStorageMode);
     const matches = artifacts.filter((artifact) =>
       artifact.kind === expected.kind && artifact.schemaVersion === expected.schemaVersion
     );

@@ -2340,6 +2340,22 @@ export class MemoryAppStore implements AppStore {
     ) ?? null;
   }
 
+  async findProjectSourceFile(
+    workspaceId: string,
+    projectId: string,
+    snapshotId: string,
+    filePath: string
+  ): Promise<SourceFileRecord | null> {
+    const snapshot = this.sourceSnapshots.find((candidate) =>
+      candidate.workspaceId === workspaceId && candidate.id === snapshotId
+    );
+    const repository = snapshot
+      ? this.repositories.find((candidate) => candidate.id === snapshot.repositoryId)
+      : null;
+    if (!repository || repository.workspaceId !== workspaceId || repository.projectId !== projectId) return null;
+    return this.findSourceFile(workspaceId, snapshotId, filePath);
+  }
+
   async countSnapshotFiles(snapshotId: string): Promise<number> {
     return this.sourceFiles.filter((file) => file.snapshotId === snapshotId).length;
   }

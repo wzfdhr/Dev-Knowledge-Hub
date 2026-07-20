@@ -191,7 +191,11 @@ export function createNormalizedSourcesStageExecutor(input: {
         byteSize: file.byteSize,
         language: file.language
       };
-      const bytes = await input.sourceBlobReader!.read(run.workspaceId, reference);
+      const bytes = await input.sourceBlobReader!.read({
+        workspaceId: run.workspaceId,
+        projectId: run.projectId,
+        snapshotId: run.snapshotId
+      }, reference);
       return {
         reference,
         endLine: path.posix.extname(reference.path).toLowerCase() === ".xlsx" ? 1 : byteLineCount(bytes)

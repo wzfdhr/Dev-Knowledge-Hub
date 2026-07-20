@@ -1238,6 +1238,12 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
     snapshotId: string,
     path: string
   ): Promise<SourceFileRecord | null>;
+  findProjectSourceFile(
+    workspaceId: string,
+    projectId: string,
+    snapshotId: string,
+    path: string
+  ): Promise<SourceFileRecord | null>;
   createSnapshot(input: CreateSnapshotInput): Promise<SourceSnapshotRecord>;
   createSnapshotWithGitSynchronizationLease(
     input: CreateSnapshotInput,

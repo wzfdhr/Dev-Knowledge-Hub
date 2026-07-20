@@ -21,7 +21,12 @@ export const normalizedSourceReferencesSchema = z.object({
 export type NormalizedSourceReference = z.infer<typeof normalizedSourceReferenceSchema>;
 
 type SourceBlobReadCatalog = SourceBlobCatalog & {
-  findSourceFile(workspaceId: string, snapshotId: string, path: string): Promise<SourceFileRecord | null>;
+  findProjectSourceFile(
+    workspaceId: string,
+    projectId: string,
+    snapshotId: string,
+    path: string
+  ): Promise<SourceFileRecord | null>;
 };
 
 export class SourceBlobReader {
@@ -30,15 +35,23 @@ export class SourceBlobReader {
     blobStore: SourceBlobStore;
   }) {}
 
-  async read(workspaceId: string, value: NormalizedSourceReference): Promise<Buffer> {
+  async read(scope: {
+    workspaceId: string;
+    projectId: string;
+    snapshotId: string;
+  }, value: NormalizedSourceReference): Promise<Buffer> {
     const reference = normalizedSourceReferenceSchema.parse(value);
-    const record = await this.options.catalog.findSourceBlobById(workspaceId, reference.sourceBlobId);
+    if (reference.snapshotId !== scope.snapshotId) {
+      throw new Error("Source blob reference is outside the pipeline snapshot");
+    }
+    const record = await this.options.catalog.findSourceBlobById(scope.workspaceId, reference.sourceBlobId);
     if (!record) throw new Error("Source blob reference is outside the pipeline workspace");
     if (record.contentHash !== reference.blobHash || record.byteSize !== reference.byteSize) {
       throw new Error("Source blob reference does not match persisted metadata");
     }
-    const sourceFile = await this.options.catalog.findSourceFile(
-      workspaceId,
+    const sourceFile = await this.options.catalog.findProjectSourceFile(
+      scope.workspaceId,
+      scope.projectId,
       reference.snapshotId,
       reference.path
     );

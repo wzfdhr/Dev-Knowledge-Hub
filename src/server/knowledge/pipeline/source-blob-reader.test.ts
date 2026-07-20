@@ -57,19 +57,31 @@ async function fixture() {
     byteSize: bytes.length,
     language: "typescript"
   };
-  return { blobStore, bytes, dataDir, reader, record, reference, workspaceId: setup!.workspace.id };
+  return {
+    blobStore, bytes, dataDir, projectId: project.id, reader, record, reference,
+    workspaceId: setup!.workspace.id
+  };
 }
 
 describe("pipeline source blob reader", () => {
   test("revalidates catalog scope, generation metadata, hash, and size", async () => {
     const prepared = await fixture();
+    const scope = {
+      workspaceId: prepared.workspaceId,
+      projectId: prepared.projectId,
+      snapshotId: prepared.reference.snapshotId
+    };
 
-    await expect(prepared.reader.read(prepared.workspaceId, prepared.reference)).resolves.toEqual(prepared.bytes);
-    await expect(prepared.reader.read("other-workspace", prepared.reference))
+    await expect(prepared.reader.read(scope, prepared.reference)).resolves.toEqual(prepared.bytes);
+    await expect(prepared.reader.read({ ...scope, workspaceId: "other-workspace" }, prepared.reference))
       .rejects.toThrow("Source blob reference is outside the pipeline workspace");
-    await expect(prepared.reader.read(prepared.workspaceId, { ...prepared.reference, path: "src/other.ts" }))
+    await expect(prepared.reader.read({ ...scope, projectId: "other-project" }, prepared.reference))
       .rejects.toThrow("Source blob reference is not bound to the declared snapshot path");
-    await expect(prepared.reader.read(prepared.workspaceId, { ...prepared.reference, byteSize: 1 }))
+    await expect(prepared.reader.read(scope, { ...prepared.reference, snapshotId: "other-snapshot" }))
+      .rejects.toThrow("Source blob reference is outside the pipeline snapshot");
+    await expect(prepared.reader.read(scope, { ...prepared.reference, path: "src/other.ts" }))
+      .rejects.toThrow("Source blob reference is not bound to the declared snapshot path");
+    await expect(prepared.reader.read(scope, { ...prepared.reference, byteSize: 1 }))
       .rejects.toThrow("Source blob reference does not match persisted metadata");
   });
 
@@ -79,7 +91,11 @@ describe("pipeline source blob reader", () => {
     await chmod(blobPath, 0o600);
     await writeFile(blobPath, "tampered");
 
-    await expect(prepared.reader.read(prepared.workspaceId, prepared.reference))
+    await expect(prepared.reader.read({
+      workspaceId: prepared.workspaceId,
+      projectId: prepared.projectId,
+      snapshotId: prepared.reference.snapshotId
+    }, prepared.reference))
       .rejects.toMatchObject({ code: "SOURCE_BLOB_INTEGRITY_FAILED" });
   });
 });

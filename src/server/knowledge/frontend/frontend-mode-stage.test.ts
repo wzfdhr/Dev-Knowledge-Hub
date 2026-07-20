@@ -97,7 +97,7 @@ describe("project frontend mode stage planning", () => {
       findSnapshotById: vi.fn().mockResolvedValue(snapshot),
       listPipelineStageRuns: vi.fn().mockResolvedValue([run]),
       findArtifactById: vi.fn((id: string) => Promise.resolve(manifests.get(id) ?? null))
-    } as never, vi.fn().mockResolvedValue("shadow"));
+    } as never, vi.fn().mockResolvedValue("shadow"), "shadow");
 
     await expect(planner.nextInputDigest({
       currentRun: run,

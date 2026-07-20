@@ -37,8 +37,10 @@ import {
   assertFrontendCandidateValid,
   assertFrontendArtifactFamily,
   assertFrontendValidationProvenance,
+  frontendStageArtifactKinds,
   frontendGraphV2Schema,
-  frontendValidationV2Schema
+  frontendValidationV2Schema,
+  type SourceStorageMode
 } from "./compatibility.js";
 import type { FrontendKnowledgeMode } from "./rollout-mode.js";
 import type { ParserAnalyzeRequest } from "./runtime/parser-protocol.js";
@@ -131,15 +133,13 @@ async function manifestsForRun(store: ShadowStore, run: PipelineStageRunRecord):
 async function assertFamilyOutputs(
   store: ShadowStore,
   run: PipelineStageRunRecord,
-  artifactStore?: ArtifactStore,
-  includeSourceReferences = false
+  sourceStorageMode: SourceStorageMode,
+  artifactStore?: ArtifactStore
 ): Promise<ArtifactManifest[]> {
   const manifests = await manifestsForRun(store, run);
-  const familyManifests = manifests.filter((manifest) => SHADOW_FAMILIES.some((family) => {
-    const expected = ARTIFACT_KINDS[run.stage][family];
-    return manifest.kind === expected.kind && manifest.schemaVersion === expected.schemaVersion;
-  }));
-  assertFrontendArtifactFamily(run.stage, SHADOW_FAMILIES, familyManifests);
+  const expectedKinds = new Set(frontendStageArtifactKinds(run.stage, SHADOW_FAMILIES, sourceStorageMode));
+  const familyManifests = manifests.filter((manifest) => expectedKinds.has(manifest.kind));
+  assertFrontendArtifactFamily(run.stage, SHADOW_FAMILIES, familyManifests, sourceStorageMode);
   for (const manifest of familyManifests) {
     if (manifest.workspaceId !== run.workspaceId || manifest.projectId !== run.projectId
       || manifest.snapshotId !== run.snapshotId || manifest.stage !== run.stage) {
@@ -147,30 +147,19 @@ async function assertFamilyOutputs(
     }
     if (artifactStore) await artifactStore.getJson(manifest);
   }
-  if (!includeSourceReferences || run.stage !== "convert") return familyManifests;
-  const supplemental = manifests.filter((manifest) =>
-    manifest.kind === "normalized-source-refs" && manifest.schemaVersion === 2
-  );
-  if (supplemental.length > 1) throw new Error("Frontend shadow convert has duplicate source reference artifacts");
-  for (const manifest of supplemental) {
-    if (manifest.workspaceId !== run.workspaceId || manifest.projectId !== run.projectId
-      || manifest.snapshotId !== run.snapshotId || manifest.stage !== "convert") {
-      throw new Error("Frontend shadow source references cross their persisted scope");
-    }
-    if (artifactStore) await artifactStore.getJson(manifest);
-  }
-  return [...familyManifests, ...supplemental];
+  return familyManifests;
 }
 
 async function upstreamManifestIds(
   store: ShadowStore,
   run: PipelineStageRunRecord,
   stage: Exclude<BuildStage, "convert">,
+  sourceStorageMode: SourceStorageMode,
   artifactStore?: ArtifactStore
 ): Promise<string[]> {
   const runs = await store.listPipelineStageRuns(run.workspaceId, run.projectId, run.buildId);
   const manifests = await Promise.all(UPSTREAM_STAGES[stage].map(async (upstreamStage) =>
-    assertFamilyOutputs(store, completedRun(runs, upstreamStage), artifactStore, true)
+    assertFamilyOutputs(store, completedRun(runs, upstreamStage), sourceStorageMode, artifactStore)
   ));
   return manifests.flat().map((manifest) => manifest.id).sort();
 }
@@ -269,13 +258,14 @@ export function createKnowledgeV1StoreView<T extends ShadowStore>(
 async function packageArtifacts(
   store: ShadowStore,
   run: PipelineStageRunRecord,
-  legacyPackage: ArtifactManifest
+  legacyPackage: ArtifactManifest,
+  sourceStorageMode: SourceStorageMode
 ): Promise<Record<string, string[]>> {
   const runs = await store.listPipelineStageRuns(run.workspaceId, run.projectId, run.buildId);
   const entries = await Promise.all(BUILD_STAGES.map(async (stage) => {
     const manifests = stage === "package"
       ? [legacyPackage]
-      : await assertFamilyOutputs(store, completedRun(runs, stage));
+      : await assertFamilyOutputs(store, completedRun(runs, stage), sourceStorageMode);
     return [stage, manifests.map((manifest) => manifest.id).sort()] as const;
   }));
   return Object.fromEntries(entries);
@@ -351,7 +341,10 @@ export function createFrontendShadowStageExecutor(input: {
       input.store, run, build, snapshot, input.sourceStorageMode ?? "legacy"
     );
     if (run.inputDigest === persistedLegacyDigest) return input.legacy(run);
-    const upstreamIds = await upstreamManifestIds(input.store, run, run.stage, input.artifactStore);
+    const sourceStorageMode = input.sourceStorageMode ?? "legacy";
+    const upstreamIds = await upstreamManifestIds(
+      input.store, run, run.stage, sourceStorageMode, input.artifactStore
+    );
     const shadowDigest = frontendShadowInputDigest({
       stage: run.stage, snapshotId: snapshot.id, build, upstreamManifestIds: upstreamIds
     });
@@ -378,7 +371,11 @@ export function createFrontendShadowStageExecutor(input: {
         ).map(async (source) => ({
           path: source.path,
           content: new TextDecoder("utf-8", { fatal: true }).decode(
-            await input.sourceBlobReader!.read(run.workspaceId, source)
+            await input.sourceBlobReader!.read({
+              workspaceId: run.workspaceId,
+              projectId: run.projectId,
+              snapshotId: run.snapshotId
+            }, source)
           ),
           blobHash: source.blobHash
         })));
@@ -492,7 +489,8 @@ export function createFrontendShadowStageExecutor(input: {
       snapshotId: run.snapshotId,
       analyzerManifestDigest,
       upstreamManifestIds: upstreamIds,
-      sourceArtifactId: legacyManifest.id
+      sourceArtifactId: legacyManifest.id,
+      sourceStorageMode
     };
     let value: unknown;
     switch (run.stage) {
@@ -605,7 +603,7 @@ export function createFrontendShadowStageExecutor(input: {
             ...baseValue,
             irSchemaVersion: FRONTEND_V2_IR_SCHEMA_VERSION,
             graphSchemaVersion: FRONTEND_V2_GRAPH_SCHEMA_VERSION,
-            artifacts: await packageArtifacts(input.store, run, legacyManifest)
+            artifacts: await packageArtifacts(input.store, run, legacyManifest, sourceStorageMode)
           };
         break;
       }
@@ -631,7 +629,10 @@ export function createFrontendShadowStageExecutor(input: {
   };
 }
 
-export function createFrontendShadowStageInputPlanner(store: ShadowStore): PipelineStageInputPlanner {
+export function createFrontendShadowStageInputPlanner(
+  store: ShadowStore,
+  sourceStorageMode: SourceStorageMode = "legacy"
+): PipelineStageInputPlanner {
   return {
     async nextInputDigest({ currentRun, build, nextStage, outputManifestIds }) {
       if (nextStage === "convert") throw new Error("Convert cannot follow another pipeline stage");
@@ -646,7 +647,7 @@ export function createFrontendShadowStageInputPlanner(store: ShadowStore): Pipel
       const visibleRuns = [...runs.filter((run) => run.id !== currentRun.id), current];
       const ids = (await Promise.all(UPSTREAM_STAGES[nextStage].map(async (stage) => {
         const completed = stage === current.stage ? current : completedRun(visibleRuns, stage);
-        return (await assertFamilyOutputs(store, completed, undefined, true)).map((manifest) => manifest.id);
+        return (await assertFamilyOutputs(store, completed, sourceStorageMode)).map((manifest) => manifest.id);
       }))).flat().sort();
       return frontendShadowInputDigest({ stage: nextStage, snapshotId: snapshot.id, build, upstreamManifestIds: ids });
     }
@@ -655,10 +656,11 @@ export function createFrontendShadowStageInputPlanner(store: ShadowStore): Pipel
 
 export function createFrontendModeStageInputPlanner(
   store: ShadowStore,
-  modeForProject: (workspaceId: string, projectId: string) => Promise<FrontendKnowledgeMode>
+  modeForProject: (workspaceId: string, projectId: string) => Promise<FrontendKnowledgeMode>,
+  sourceStorageMode: SourceStorageMode = "legacy"
 ): PipelineStageInputPlanner {
   const legacy = createB02StageInputPlanner(store);
-  const shadow = createFrontendShadowStageInputPlanner(store);
+  const shadow = createFrontendShadowStageInputPlanner(store, sourceStorageMode);
   return {
     async nextInputDigest(input) {
       if (input.currentRun.stage === "convert") {
@@ -679,7 +681,7 @@ export function createFrontendModeStageInputPlanner(
           ...input.currentRun,
           status: "succeeded",
           outputManifestIds: [...input.outputManifestIds]
-        });
+        }, sourceStorageMode);
       } else {
         const expectedLegacy = ARTIFACT_KINDS[input.currentRun.stage]["knowledge-v1"];
         if (manifests.length !== 1 || manifests[0]?.kind !== expectedLegacy.kind

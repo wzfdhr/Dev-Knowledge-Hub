@@ -29,7 +29,7 @@ import {
   assertFrontendCandidateValid
 } from "../frontend/shadow-stage";
 import {
-  ARTIFACT_KINDS,
+  assertFrontendArtifactFamily,
   createVerifiedFrontendReleaseDraft
 } from "../frontend/compatibility";
 import { analyzeWorkerRequest } from "../frontend/runtime/analyzer-worker";
@@ -76,7 +76,9 @@ describe("B02 shadow pipeline", () => {
     })).not.toThrow();
   });
 
-  test("persists, reuses, and verifies both artifact families without changing v1 graph behavior", async () => {
+  test.each(["shadow", "active"] as const)(
+    "persists, reuses, and verifies source %s artifact families without changing v1 graph behavior",
+    async (sourceStorageMode) => {
     const snapshotRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-b02-snapshot-"));
     const artifactRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-b02-artifacts-"));
     const blobRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-b02-blobs-"));
@@ -114,10 +116,13 @@ describe("B02 shadow pipeline", () => {
     const artifactStore = new ArtifactStore(artifactRoot, store);
     await artifactStore.initialize();
     const queue = new FakeQueue();
-    const knowledgeV1Store = createKnowledgeV1StoreView(store);
+    const knowledgeV1Store = createKnowledgeV1StoreView(
+      store,
+      sourceStorageMode === "active" ? "normalized-source-refs" : "normalized-sources"
+    );
     const legacyExecutor = createPipelineStageExecutor({
       convert: createNormalizedSourcesStageExecutor({
-        store: knowledgeV1Store, artifactStore, sourceStorageMode: "shadow", sourceBlobReader
+        store: knowledgeV1Store, artifactStore, sourceStorageMode, sourceBlobReader
       }),
       extract: createKnowledgeIrStageExecutor({ store: knowledgeV1Store, artifactStore, sourceBlobReader }),
       tables: createTableSchemasStageExecutor({ store: knowledgeV1Store, artifactStore, sourceBlobReader }),
@@ -140,12 +145,12 @@ describe("B02 shadow pipeline", () => {
       createFrontendShadowStageExecutor({
         store, artifactStore, legacy: legacyExecutor,
         frontendParser: { analyze: parserAnalyze },
-        sourceStorageMode: "shadow",
+        sourceStorageMode,
         sourceBlobReader
       }),
       ["convert", "extract", "tables", "graph", "synthesize", "index", "lint", "viz", "validate", "package"],
       5_000,
-      createFrontendShadowStageInputPlanner(store)
+      createFrontendShadowStageInputPlanner(store, sourceStorageMode)
     );
     const files = await store.listSnapshotFiles(workspaceId, snapshot.id);
     await worker.schedule({
@@ -185,14 +190,14 @@ describe("B02 shadow pipeline", () => {
     for (const run of runs) {
       const manifests = await Promise.all(run.outputManifestIds.map((id) => store.findArtifactById(id)));
       expect(manifests).not.toContain(null);
-      const expectedCount = 2;
+      const expectedCount = run.stage === "convert" && sourceStorageMode === "active" ? 1 : 2;
       expect(manifests).toHaveLength(expectedCount);
-      for (const family of ["knowledge-v1", "frontend-v2"] as const) {
-        const expected = ARTIFACT_KINDS[run.stage][family];
-        expect(manifests).toEqual(expect.arrayContaining([
-          expect.objectContaining({ kind: expected.kind, schemaVersion: expected.schemaVersion })
-        ]));
-      }
+      expect(() => assertFrontendArtifactFamily(
+        run.stage,
+        ["knowledge-v1", "frontend-v2"],
+        manifests.filter((manifest): manifest is ArtifactManifest => manifest !== null),
+        sourceStorageMode
+      )).not.toThrow();
     }
     const extractRun = runs.find((run) => run.stage === "extract")!;
     const frontendExtractManifest = (await Promise.all(extractRun.outputManifestIds.map((id) =>
@@ -318,5 +323,6 @@ describe("B02 shadow pipeline", () => {
     expect(await store.listReleases(workspaceId, repository!.id)).toHaveLength(1);
     const reusedArtifactBytes = await directorySize(artifactRoot);
     expect(reusedArtifactBytes - initialArtifactBytes).toBeLessThanOrEqual(Math.ceil(initialArtifactBytes * 0.05));
-  });
+    }
+  );
 });

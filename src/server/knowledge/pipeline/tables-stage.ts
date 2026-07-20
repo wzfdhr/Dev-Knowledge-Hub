@@ -192,7 +192,11 @@ export function createTableSchemasStageExecutor(input: {
           return extractTableSource({
             snapshotId: source.snapshotId,
             path: source.path,
-            content: await input.sourceBlobReader!.read(run.workspaceId, source),
+            content: await input.sourceBlobReader!.read({
+              workspaceId: run.workspaceId,
+              projectId: run.projectId,
+              snapshotId: run.snapshotId
+            }, source),
             blobHash: source.blobHash
           });
         }));

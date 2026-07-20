@@ -4644,6 +4644,33 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     } : null;
   }
 
+  async findProjectSourceFile(
+    workspaceId: string,
+    projectId: string,
+    snapshotId: string,
+    filePath: string
+  ) {
+    const { rows } = await this.pool.query<{
+      id: string; workspace_id: string; snapshot_id: string; path: string;
+      byte_size: number; content_hash: string; language: string | null; source_blob_id: string | null;
+    }>(`
+      SELECT sf.id, sf.workspace_id, sf.snapshot_id, sf.path, sf.byte_size,
+             sf.content_hash, sf.language, sf.source_blob_id
+      FROM source_files sf
+      JOIN source_snapshots ss
+        ON ss.id = sf.snapshot_id AND ss.workspace_id = sf.workspace_id
+      JOIN repositories r
+        ON r.id = ss.repository_id AND r.workspace_id = ss.workspace_id
+      WHERE sf.workspace_id = $1 AND r.project_id = $2 AND sf.snapshot_id = $3 AND sf.path = $4
+    `, [workspaceId, projectId, snapshotId, filePath]);
+    const row = rows[0];
+    return row ? {
+      id: row.id, workspaceId: row.workspace_id, snapshotId: row.snapshot_id,
+      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language,
+      sourceBlobId: row.source_blob_id
+    } : null;
+  }
+
   private async insertSnapshot(
     client: Queryable,
     { snapshot, files }: CreateSnapshotInput,

@@ -164,7 +164,7 @@ const defaultDependencies: BootstrapDependencies = {
       }),
       ["convert", "extract", "tables", "graph", "synthesize", "index", "lint", "viz", "validate", "package"],
       5_000,
-      createFrontendModeStageInputPlanner(pipelineStore, frontendModeForProject)
+      createFrontendModeStageInputPlanner(pipelineStore, frontendModeForProject, sourceStorageMode)
     );
   },
   buildServer

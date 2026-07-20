@@ -57,7 +57,7 @@ case " $* " in
   *" compose "*" exec "*) printf 'fake-pgdump\n' ;;
   *" compose "*" images -q app "*) printf 'devkh-recovery-image\n' ;;
   *" pg_restore "*) printf 'pg_restore %s\n' "$*" >> "$CALL_LOG" ;;
-  *" psql "*"workspaceCount"*) printf '{"workspaceCount":1,"userCount":1,"projectCount":1,"projectMemberCount":1,"snapshotCount":1,"releaseCount":1,"releaseChannelCount":1,"artifactCount":1,"sourceAnalysisArtifactCount":1,"sourceBlobCount":1,"sourceFileBlobReferenceCount":2}\n' ;;
+  *" psql "*"workspaceCount"*) printf '{"workspaceCount":1,"userCount":1,"projectCount":1,"projectMemberCount":1,"snapshotCount":1,"releaseCount":1,"releaseChannelCount":1,"artifactCount":1,"sourceAnalysisArtifactCount":1,"sourceBlobCount":2,"sourceFileBlobReferenceCount":2,"referencedSourceBlobGenerationCount":1}\n' ;;
   *" psql "*"orphanedReleases"*) printf '%s\n' "$FAKE_INTEGRITY_RESULT" ;;
   *" psql "*"artifact_manifests"*) printf '[{"projectId":"33333333-3333-4333-8333-333333333333","snapshotId":"55555555-5555-4555-8555-555555555555","stage":"convert","storageKey":"%s","contentDigest":"218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9"}]\n' "$FAKE_ARTIFACT_STORAGE_KEY" ;;
   *" psql "*"source_blob_manifests"*) printf '%s\n' "$FAKE_SOURCE_BLOB_MANIFEST" ;;
@@ -402,7 +402,7 @@ test("restore drill never writes production Docker volumes", () => {
         blobReferenceCount: evidence.blobReferenceCount,
         blobContentVerifiedCount: evidence.blobContentVerifiedCount,
         blobHardlinkVerifiedCount: evidence.blobHardlinkVerifiedCount,
-        sourceBlobGenerationCount: evidence.sourceBlobGenerationCount,
+        referencedSourceBlobGenerationCount: evidence.referencedSourceBlobGenerationCount,
         sourceBlobLogicalBytes: evidence.sourceBlobLogicalBytes,
         sourceBlobPhysicalBytes: evidence.sourceBlobPhysicalBytes
       },
@@ -414,13 +414,13 @@ test("restore drill never writes production Docker volumes", () => {
         ephemeralDatabaseRestored: true,
         healthCheckPassed: true,
         volumeArchives: ["snapshots.tgz", "repositories.tgz", "sources.tgz", "artifacts.tgz"],
-        databaseStats: { workspaceCount: 1, userCount: 1, projectCount: 1, projectMemberCount: 1, snapshotCount: 1, releaseCount: 1, releaseChannelCount: 1, artifactCount: 1, sourceAnalysisArtifactCount: 1, sourceBlobCount: 1, sourceFileBlobReferenceCount: 2 },
+        databaseStats: { workspaceCount: 1, userCount: 1, projectCount: 1, projectMemberCount: 1, snapshotCount: 1, releaseCount: 1, releaseChannelCount: 1, artifactCount: 1, sourceAnalysisArtifactCount: 1, sourceBlobCount: 2, sourceFileBlobReferenceCount: 2, referencedSourceBlobGenerationCount: 1 },
         volumeFileCounts: { snapshots: 3, repositories: 1, sources: 1, artifacts: 1 },
         integrity: { orphanedReleases: 0, orphanedReleaseChannels: 0, crossWorkspaceProjectMembers: 0, projectMembersWithoutWorkspaceMembership: 0, orphanedArtifacts: 0, orphanedSourceAnalysisArtifacts: 0, invalidSourceBlobReferences: 0 },
         blobReferenceCount: 2,
         blobContentVerifiedCount: 1,
         blobHardlinkVerifiedCount: 2,
-        sourceBlobGenerationCount: 1,
+        referencedSourceBlobGenerationCount: 1,
         sourceBlobLogicalBytes: 34,
         sourceBlobPhysicalBytes: 4096
       }
@@ -569,6 +569,75 @@ test("restore drill rejects source blob references that are not backed by a same
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /snapshot view is unavailable/);
     assert.equal(existsSync(join(fixture.environment.BACKUP_STATE_DIR, "recovery-evidence")), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("restore drill accepts unreferenced deleted source blob generations", () => {
+  const fixture = createFixture();
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
+
+    assert.equal(result.status, 0, result.stderr);
+    const evidenceDirectory = join(fixture.environment.BACKUP_STATE_DIR, "recovery-evidence");
+    const [evidenceFile] = execFileSync("find", [evidenceDirectory, "-type", "f"], { encoding: "utf8" }).trim().split("\n");
+    const evidence = JSON.parse(readFileSync(evidenceFile, "utf8"));
+    assert.equal(evidence.databaseStats.sourceBlobCount, 2);
+    assert.equal(evidence.databaseStats.referencedSourceBlobGenerationCount, 1);
+    assert.equal(evidence.referencedSourceBlobGenerationCount, 1);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("restore drill rejects source-file references to trash or deleted source blobs", () => {
+  for (const status of ["trash", "deleted"]) {
+    const fixture = createFixture({
+      integrityResult: '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":0,"orphanedSourceAnalysisArtifacts":0,"invalidSourceBlobReferences":1}'
+    });
+
+    try {
+      const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
+
+      assert.notEqual(result.status, 0, status);
+      assert.match(result.stderr, /restored database integrity check failed/);
+      assert.match(readFileSync(restoreDrillScript, "utf8"), /sb\.status NOT IN \('active','tombstoned'\)/);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("restore drill rejects a snapshot storage path that only has the expected suffix", () => {
+  const fixture = createFixture();
+  fixture.environment.FAKE_SOURCE_BLOB_MANIFEST = fixture.environment.FAKE_SOURCE_BLOB_MANIFEST.replace(
+    "/var/lib/devkh/snapshots/snapshots/",
+    "/tmp/attacker-controlled/snapshots/"
+  );
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /snapshot storage path does not match manifest/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("restore drill rejects source-file paths containing backslashes", () => {
+  const fixture = createFixture();
+  const sourceBlobManifest = JSON.parse(fixture.environment.FAKE_SOURCE_BLOB_MANIFEST);
+  sourceBlobManifest[0].path = "src\\one.ts";
+  fixture.environment.FAKE_SOURCE_BLOB_MANIFEST = JSON.stringify(sourceBlobManifest);
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /invalid source blob path/);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

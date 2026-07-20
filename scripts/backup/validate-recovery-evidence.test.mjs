@@ -36,7 +36,7 @@ function validEvidence() {
     blobReferenceCount: 2,
     blobContentVerifiedCount: 1,
     blobHardlinkVerifiedCount: 2,
-    sourceBlobGenerationCount: 1,
+    referencedSourceBlobGenerationCount: 1,
     sourceBlobLogicalBytes: 32,
     sourceBlobPhysicalBytes: 4096,
     databaseStats: {
@@ -49,8 +49,9 @@ function validEvidence() {
       releaseChannelCount: 1,
       artifactCount: 1,
       sourceAnalysisArtifactCount: 1,
-      sourceBlobCount: 1,
-      sourceFileBlobReferenceCount: 2
+      sourceBlobCount: 2,
+      sourceFileBlobReferenceCount: 2,
+      referencedSourceBlobGenerationCount: 1
     },
     integrity: {
       orphanedReleases: 0,
@@ -91,12 +92,14 @@ test("rejects incomplete or inconsistent recovery evidence", () => {
     (value) => { delete value.databaseStats.sourceAnalysisArtifactCount; },
     (value) => { delete value.databaseStats.sourceBlobCount; },
     (value) => { delete value.databaseStats.sourceFileBlobReferenceCount; },
+    (value) => { delete value.databaseStats.referencedSourceBlobGenerationCount; },
     (value) => { value.databaseArchiveSha256 = "invalid"; },
     (value) => { value.artifactContentVerifiedCount = 0; },
     (value) => { value.blobReferenceCount = 1; },
     (value) => { value.blobContentVerifiedCount = 0; },
     (value) => { value.blobHardlinkVerifiedCount = 1; },
-    (value) => { value.sourceBlobGenerationCount = 2; },
+    (value) => { value.referencedSourceBlobGenerationCount = 2; },
+    (value) => { value.databaseStats.sourceBlobCount = 0; },
     (value) => { value.sourceBlobLogicalBytes = -1; },
     (value) => { value.sourceBlobPhysicalBytes = value.sourceBlobLogicalBytes; },
     (value) => { value.resticSnapshotId = "abc123ef"; },

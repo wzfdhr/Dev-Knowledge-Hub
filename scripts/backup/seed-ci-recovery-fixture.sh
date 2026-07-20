@@ -35,6 +35,12 @@ VALUES (
   '47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28', 1, 34, 'active',
   'blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1'
 );
+INSERT INTO source_blobs (id, workspace_id, content_hash, generation, byte_size, status, storage_key, deleted_at)
+VALUES (
+  'dddddddd-dddd-4ddd-8ddd-dddddddddddd', '11111111-1111-4111-8111-111111111111',
+  '47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28', 2, 34, 'deleted',
+  'blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/2', now()
+);
 INSERT INTO source_files (id, workspace_id, snapshot_id, path, language, content_hash, byte_size, source_blob_id)
 VALUES
   ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '11111111-1111-4111-8111-111111111111', '55555555-5555-4555-8555-555555555555', 'src/one.ts', 'typescript', '47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28', 34, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'),

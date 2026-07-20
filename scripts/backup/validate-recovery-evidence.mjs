@@ -14,7 +14,9 @@ const legacyDatabaseStatNames = [
   "artifactCount",
   "sourceAnalysisArtifactCount"
 ];
-const sourceBlobDatabaseStatNames = ["sourceBlobCount", "sourceFileBlobReferenceCount"];
+const sourceBlobDatabaseStatNames = [
+  "sourceBlobCount", "sourceFileBlobReferenceCount", "referencedSourceBlobGenerationCount"
+];
 const legacyIntegrityNames = [
   "orphanedReleases",
   "orphanedReleaseChannels",
@@ -32,7 +34,7 @@ const evidenceFields = [
   "productionVolumeTouched", "restoredSnapshotCount", "pgRestoreListValidated",
   "ephemeralDatabaseRestored", "healthCheckPassed", "artifactContentVerifiedCount", "databaseStats",
   "integrity", "blobReferenceCount", "blobContentVerifiedCount", "blobHardlinkVerifiedCount",
-  "sourceBlobGenerationCount", "sourceBlobLogicalBytes", "sourceBlobPhysicalBytes"
+  "referencedSourceBlobGenerationCount", "sourceBlobLogicalBytes", "sourceBlobPhysicalBytes"
 ];
 
 function requireEvidence(condition, message) {
@@ -61,7 +63,7 @@ export function validateRecoveryEvidence(evidence) {
     evidence,
     sourceBlobEvidence ? evidenceFields : evidenceFields.filter((field) => ![
       "blobReferenceCount", "blobContentVerifiedCount", "blobHardlinkVerifiedCount",
-      "sourceBlobGenerationCount", "sourceBlobLogicalBytes", "sourceBlobPhysicalBytes"
+      "referencedSourceBlobGenerationCount", "sourceBlobLogicalBytes", "sourceBlobPhysicalBytes"
     ].includes(field)),
     "document"
   );
@@ -121,14 +123,15 @@ export function validateRecoveryEvidence(evidence) {
     "every source file blob reference must be verified"
   );
   if (sourceBlobEvidence) requireEvidence(
-    Number.isInteger(evidence.sourceBlobGenerationCount)
-      && evidence.sourceBlobGenerationCount === evidence.databaseStats.sourceBlobCount,
-    "every source blob generation must be accounted for"
+    Number.isInteger(evidence.referencedSourceBlobGenerationCount)
+      && evidence.referencedSourceBlobGenerationCount === evidence.databaseStats.referencedSourceBlobGenerationCount
+      && evidence.databaseStats.sourceBlobCount >= evidence.referencedSourceBlobGenerationCount,
+    "every referenced source blob generation must be accounted for"
   );
   if (sourceBlobEvidence) requireEvidence(
     Number.isInteger(evidence.blobContentVerifiedCount)
-      && evidence.blobContentVerifiedCount === evidence.sourceBlobGenerationCount,
-    "every source blob generation must have verified content"
+      && evidence.blobContentVerifiedCount === evidence.referencedSourceBlobGenerationCount,
+    "every referenced source blob generation must have verified content"
   );
   if (sourceBlobEvidence) requireEvidence(
     Number.isInteger(evidence.blobHardlinkVerifiedCount)

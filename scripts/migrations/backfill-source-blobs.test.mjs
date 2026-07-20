@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { Pool } from "pg";
+
 import { createBackfillConfig, runBackfill } from "./backfill-source-blobs.mjs";
 
 const roots = [];
@@ -40,13 +42,14 @@ class FakePool {
     this.queries = [];
     this.tombstoneBeforeBinding = tombstoneBeforeBinding;
     this.transactionCount = 0;
+    this.audits = [];
   }
 
   async query(text, values = []) {
     this.queries.push({ text, values });
     if (text === "BEGIN") {
       this.transactionCount += 1;
-      this.transactionSnapshot = clone({ snapshots: this.snapshots, files: this.files, blobs: this.blobs });
+      this.transactionSnapshot = clone({ snapshots: this.snapshots, files: this.files, blobs: this.blobs, audits: this.audits });
       if (this.tombstoneBeforeBinding && this.transactionCount === this.files.length + 1) {
         this.blobs.forEach((blob) => { blob.status = "tombstoned"; });
         this.transactionSnapshot.blobs.forEach((blob) => { blob.status = "tombstoned"; });
@@ -64,6 +67,14 @@ class FakePool {
       return { rows: [] };
     }
     if (text.includes("pg_advisory_xact_lock")) return { rows: [{ locked: true }] };
+    if (text.includes("AS checkpoint_complete")) {
+      const [workspaceId, snapshotId, storagePath] = values;
+      const snapshot = this.snapshots.find((candidate) => candidate.workspace_id === workspaceId
+        && candidate.id === snapshotId && candidate.storage_path === storagePath);
+      return { rows: [{ checkpoint_complete: Boolean(snapshot) && !this.files.some((file) =>
+        file.workspace_id === workspaceId && file.snapshot_id === snapshotId && file.source_blob_id === null
+      ) }] };
+    }
     if (text.includes("FROM source_snapshots snapshot") && text.includes("ORDER BY snapshot.workspace_id")) {
       const [workspaceCursor, snapshotCursor, viewRoot, limit] = values;
       const rows = this.snapshots
@@ -92,6 +103,11 @@ class FakePool {
       return { rows: this.blobs.filter((blob) => blob.workspace_id === workspaceId
         && blob.content_hash === contentHash && blob.status === "active").map((blob) => ({ ...blob })) };
     }
+    if (text.includes("FROM source_blobs") && text.includes("'tombstoned'")) {
+      const [workspaceId, contentHash] = values;
+      return { rows: this.blobs.filter((blob) => blob.workspace_id === workspaceId
+        && blob.content_hash === contentHash && ["active", "tombstoned"].includes(blob.status)).map((blob) => ({ ...blob })) };
+    }
     if (text.includes("jsonb_to_recordset") && text.includes("FROM source_blobs blob")) {
       const expected = JSON.parse(values[0]);
       return { rows: expected.flatMap((candidate) => this.blobs.filter((blob) => blob.id === candidate.id
@@ -110,6 +126,28 @@ class FakePool {
       const blob = { id: randomUUID(), workspace_id, content_hash, generation, byte_size, storage_key, status: "active" };
       this.blobs.push(blob);
       return { rows: [{ ...blob }] };
+    }
+    if (text.includes("SET status = 'active'") && text.includes("fencing_token")) {
+      const [workspaceId, contentHash, blobId, fencingToken] = values;
+      const blob = this.blobs.find((candidate) => candidate.workspace_id === workspaceId
+        && candidate.content_hash === contentHash && candidate.id === blobId
+        && candidate.status === "tombstoned" && candidate.fencing_token === fencingToken);
+      if (!blob) return { rows: [] };
+      Object.assign(blob, { status: "active", fencing_token: null, tombstoned_at: null, trashed_at: null });
+      return { rows: [{ ...blob }] };
+    }
+    if (text.includes("SET status = 'trash'") && text.includes("fencing_token")) {
+      const [workspaceId, contentHash, blobId, fencingToken] = values;
+      const blob = this.blobs.find((candidate) => candidate.workspace_id === workspaceId
+        && candidate.content_hash === contentHash && candidate.id === blobId
+        && candidate.status === "tombstoned" && candidate.fencing_token === fencingToken);
+      if (!blob) return { rows: [] };
+      Object.assign(blob, { status: "trash", trashed_at: new Date().toISOString() });
+      return { rows: [{ ...blob }] };
+    }
+    if (text.includes("INSERT INTO audit_events")) {
+      this.audits.push({ values });
+      return { rows: [] };
     }
     if (text.includes("SELECT file.id, file.source_blob_id") && text.includes("FROM source_files file")) {
       const [snapshotId, workspaceId] = values;
@@ -166,6 +204,25 @@ async function fixture({ snapshotCount = 1, filesPerSnapshot = 1, batchSize = 50
   };
 }
 
+async function seedBlobFile(context, source, { generation = 1, location = "source", status = "active" } = {}) {
+  const storageKey = path.posix.join("blobs", source.workspace_id, source.content_hash.slice(0, 2), source.content_hash, String(generation));
+  const blobPath = location === "trash"
+    ? path.join(context.snapshotData, ".trash", source.workspace_id, source.content_hash, String(generation))
+    : path.join(context.snapshotData, storageKey);
+  await mkdir(path.dirname(blobPath), { recursive: true });
+  await writeFile(blobPath, await readFile(path.join(context.snapshots[0].storage_path, source.path)));
+  await chmod(blobPath, 0o444);
+  const blob = {
+    id: id(800 + generation), workspace_id: source.workspace_id, content_hash: source.content_hash,
+    generation, byte_size: source.byte_size, storage_key: storageKey, status,
+    fencing_token: status === "active" ? null : id(900 + generation),
+    tombstoned_at: status === "active" ? null : new Date().toISOString(),
+    trashed_at: status === "trash" ? new Date().toISOString() : null
+  };
+  context.pool.blobs.push(blob);
+  return { blob, blobPath };
+}
+
 test.afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => removeReadOnlyTree(root)));
 });
@@ -198,7 +255,7 @@ test("processes snapshots in bounded batches and leaves releases unchanged", asy
   assert.ok(lockQueries.every(({ text }) => text === "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))"));
 });
 
-test("is idempotent, reports zero on a repeat run, and atomically switches storage_path", async () => {
+test("is idempotent, preserves cumulative checkpoint state, and atomically switches storage_path", async () => {
   const context = await fixture({ filesPerSnapshot: 2 });
   const originalPath = context.snapshots[0].storage_path;
   const first = await runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 500 });
@@ -229,9 +286,10 @@ test("is idempotent, reports zero on a repeat run, and atomically switches stora
     assert.equal(viewStat.ino, blobStat.ino);
   }
   const second = await runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 500 });
-  assert.equal(second.processed, 0);
+  assert.equal(second.processed, first.processed);
   assert.equal(second.reused, 0);
-  assert.equal(second.created, 0);
+  assert.equal(second.created, first.created);
+  assert.deepEqual(second.lastCursor, first.lastCursor);
 });
 
 test("rejects an invalid file without partially binding its multi-file snapshot", async () => {
@@ -290,6 +348,196 @@ test("reuses only a verified active blob and increments the generation after ina
   assert.equal(second.pool.blobs.find((blob) => blob.status === "active").generation, 2);
 });
 
+test("restores a verified tombstoned source generation and reuses it", async () => {
+  const context = await fixture();
+  const seeded = await seedBlobFile(context, context.files[0], { status: "tombstoned" });
+
+  const report = await runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 500 });
+
+  assert.equal(report.reused, 1);
+  assert.equal(report.created, 0);
+  assert.equal(seeded.blob.status, "active");
+  assert.equal(context.files[0].source_blob_id, seeded.blob.id);
+});
+
+test("reconciles a tombstoned generation already moved to trash before creating the next generation", async () => {
+  const context = await fixture();
+  const seeded = await seedBlobFile(context, context.files[0], { status: "tombstoned", location: "trash" });
+
+  const report = await runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 500 });
+
+  assert.equal(report.created, 1);
+  assert.equal(seeded.blob.status, "trash");
+  assert.equal(context.pool.blobs.find((blob) => blob.status === "active").generation, 2);
+});
+
+test("creates the next generation when a prior generation is already trash", async () => {
+  const context = await fixture();
+  await seedBlobFile(context, context.files[0], { status: "trash", location: "trash" });
+
+  await runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 500 });
+
+  assert.equal(context.pool.blobs.find((blob) => blob.status === "active").generation, 2);
+});
+
+test("audits and stops on an inconsistent tombstone location", async () => {
+  const context = await fixture();
+  const seeded = await seedBlobFile(context, context.files[0], { status: "tombstoned" });
+  const trashPath = path.join(context.snapshotData, ".trash", seeded.blob.workspace_id,
+    seeded.blob.content_hash, String(seeded.blob.generation));
+  await mkdir(path.dirname(trashPath), { recursive: true });
+  await writeFile(trashPath, await readFile(seeded.blobPath));
+  await chmod(trashPath, 0o444);
+
+  await assert.rejects(
+    runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 500 }),
+    /location is inconsistent/
+  );
+  assert.equal(context.pool.audits.length, 1);
+  assert.equal(context.files[0].source_blob_id, null);
+});
+
+test("replaces only a read-only mismatched orphan view while the database still points at legacy", async () => {
+  const context = await fixture();
+  const seeded = await seedBlobFile(context, context.files[0]);
+  const orphanView = path.join(context.snapshotData, "snapshots", context.snapshots[0].id, "files");
+  const orphanFile = path.join(orphanView, context.files[0].path);
+  await mkdir(path.dirname(orphanFile), { recursive: true });
+  await writeFile(orphanFile, await readFile(seeded.blobPath));
+  await chmod(orphanFile, 0o444);
+  await chmod(path.dirname(orphanFile), 0o555);
+  await chmod(orphanView, 0o555);
+  await chmod(path.dirname(orphanView), 0o555);
+
+  await runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 500 });
+
+  const [blobStat, viewStat] = await Promise.all([lstat(seeded.blobPath), lstat(orphanFile)]);
+  assert.equal(viewStat.ino, blobStat.ino);
+  assert.equal(viewStat.dev, blobStat.dev);
+});
+
+test("never replaces a mismatched view after the database path has switched", async () => {
+  const context = await fixture();
+  const seeded = await seedBlobFile(context, context.files[0]);
+  const newView = path.join(context.snapshotData, "snapshots", context.snapshots[0].id, "files");
+  const viewFile = path.join(newView, context.files[0].path);
+  await mkdir(path.dirname(viewFile), { recursive: true });
+  await writeFile(viewFile, await readFile(seeded.blobPath));
+  await chmod(viewFile, 0o444);
+  context.snapshots[0].storage_path = newView;
+
+  await assert.rejects(
+    runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 500 }),
+    /not a source blob hardlink/
+  );
+});
+
+test("fsyncs immutable blob inodes and snapshot directories before publishing the view", async () => {
+  const context = await fixture();
+  const events = [];
+
+  await runBackfill({
+    pool: context.pool,
+    dataDir: context.dataDir,
+    batchSize: 500,
+    observer: (event) => events.push(event)
+  });
+
+  const blobFileSync = events.findIndex((event) => event.type === "blob-file-fsync" && event.mode === 0o444);
+  const blobLink = events.findIndex((event) => event.type === "blob-link");
+  const blobDirectorySync = events.findIndex((event) => event.type === "blob-directory-fsync");
+  const viewLink = events.findIndex((event) => event.type === "view-link");
+  const viewTreeSync = events.findIndex((event) => event.type === "view-tree-fsync");
+  const viewRename = events.findIndex((event) => event.type === "view-rename");
+  const viewRootSync = events.findIndex((event) => event.type === "view-root-fsync");
+  assert.ok(blobFileSync >= 0 && blobFileSync < blobLink && blobLink < blobDirectorySync);
+  assert.ok(viewLink >= 0 && viewLink < viewTreeSync && viewTreeSync < viewRename && viewRename < viewRootSync);
+});
+
+test("rejects symlinks at the legacy view root and in intermediate directories", async (t) => {
+  await t.test("view root", async () => {
+    const context = await fixture();
+    const view = context.snapshots[0].storage_path;
+    const realView = path.join(context.dataDir, "real-view");
+    await mkdir(realView, { recursive: true });
+    await rm(view, { recursive: true });
+    await symlink(realView, view);
+    await assert.rejects(runBackfill({ pool: context.pool, dataDir: context.dataDir }), /real directory/);
+  });
+  await t.test("intermediate directory", async () => {
+    const context = await fixture();
+    const view = context.snapshots[0].storage_path;
+    const realSource = path.join(context.dataDir, "real-source");
+    await mkdir(realSource, { recursive: true });
+    await writeFile(path.join(realSource, path.basename(context.files[0].path)),
+      await readFile(path.join(view, context.files[0].path)));
+    await rm(path.join(view, "src"), { recursive: true });
+    await symlink(realSource, path.join(view, "src"));
+    await assert.rejects(runBackfill({ pool: context.pool, dataDir: context.dataDir }), /real directory/);
+  });
+});
+
+test("preflights all files without retaining bytes and buffers at most one file during resolution", async () => {
+  const context = await fixture({ filesPerSnapshot: 4 });
+  let buffered = 0;
+  let peak = 0;
+
+  await runBackfill({
+    pool: context.pool,
+    dataDir: context.dataDir,
+    observer: (event) => {
+      if (event.type === "snapshot-preflight") assert.ok(event.files.every((file) => !("bytes" in file)));
+      if (event.type === "file-buffered") peak = Math.max(peak, ++buffered);
+      if (event.type === "file-released") buffered -= 1;
+    }
+  });
+
+  assert.equal(peak, 1);
+  assert.equal(buffered, 0);
+});
+
+test("checkpoints each completed snapshot and preserves cumulative report state on a zero-work rerun", async () => {
+  const context = await fixture({ snapshotCount: 2 });
+  context.files[1].content_hash = "0".repeat(64);
+  const reportPath = path.join(context.dataDir, "reports", "source-blob-backfill.json");
+
+  await assert.rejects(runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 2 }), /hash mismatch/);
+  const checkpoint = JSON.parse(await readFile(reportPath, "utf8"));
+  assert.equal(checkpoint.processed, 1);
+  assert.deepEqual(checkpoint.lastCursor, {
+    workspaceId: context.snapshots[0].workspace_id,
+    snapshotId: context.snapshots[0].id
+  });
+
+  context.files[1].content_hash = hash(await readFile(path.join(context.snapshots[1].storage_path, context.files[1].path)));
+  const resumed = await runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 2 });
+  const repeated = await runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 2 });
+  assert.equal(resumed.processed, 2);
+  assert.equal(repeated.processed, 2);
+  assert.deepEqual(repeated.lastCursor, resumed.lastCursor);
+});
+
+test("accepts a private zero-work report written by an earlier run", async () => {
+  const context = await fixture();
+  const reportRoot = path.join(context.dataDir, "reports");
+  await mkdir(reportRoot, { recursive: true });
+  const reportPath = path.join(reportRoot, "source-blob-backfill.json");
+  await writeFile(reportPath, `${JSON.stringify({
+    schemaVersion: 1,
+    batchSize: 500,
+    processed: 0,
+    reused: 0,
+    created: 0,
+    lastCursor: null,
+    completedAt: new Date().toISOString()
+  })}\n`, { mode: 0o600 });
+
+  const report = await runBackfill({ pool: context.pool, dataDir: context.dataDir });
+
+  assert.equal(report.processed, 1);
+  assert.ok(report.lastCursor);
+});
+
 test("rolls back the complete snapshot binding when GC tombstones a resolved blob", async () => {
   const context = await fixture({ filesPerSnapshot: 2 });
   const originalPath = context.snapshots[0].storage_path;
@@ -303,4 +551,108 @@ test("rolls back the complete snapshot binding when GC tombstones a resolved blo
   assert.ok(context.files.every((file) => file.source_blob_id === null));
   assert.equal(context.snapshots[0].storage_path, originalPath);
   assert.ok(context.pool.queries.some(({ text }) => text === "ROLLBACK"));
+});
+
+test("runs the snapshot backfill against PostgreSQL atomically", {
+  skip: !process.env.TEST_DATABASE_URL
+}, async () => {
+  const databaseUrl = process.env.TEST_DATABASE_URL;
+  const parsed = new URL(databaseUrl);
+  assert.equal(parsed.pathname.replace(/^\//, ""), "devkh_test",
+    "TEST_DATABASE_URL must target the dedicated devkh_test database");
+  const pool = new Pool({ connectionString: databaseUrl });
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-pg-"));
+  roots.push(dataDir);
+  const workspaceId = randomUUID();
+  const projectId = randomUUID();
+  const repositoryId = randomUUID();
+  const snapshotId = randomUUID();
+  const buildId = randomUUID();
+  const releaseId = randomUUID();
+  const snapshotData = path.join(dataDir, "snapshots");
+  const legacyView = path.join(snapshotData, snapshotId, "files");
+  const sourceRows = [
+    { id: randomUUID(), path: "src/index.ts", bytes: Buffer.from("export const pg = true;\n") },
+    { id: randomUUID(), path: "README.md", bytes: Buffer.from("# PostgreSQL backfill\n") }
+  ];
+  try {
+    const schema = await pool.query("SELECT to_regclass('source_blobs')::text AS source_blobs");
+    assert.equal(schema.rows[0]?.source_blobs, "source_blobs",
+      "integration schema must be migrated before the backfill test");
+    await mkdir(path.join(legacyView, "src"), { recursive: true });
+    await Promise.all(sourceRows.map((source) => writeFile(path.join(legacyView, source.path), source.bytes)));
+    await pool.query("INSERT INTO workspaces (id, name, slug) VALUES ($1, $2, $3)",
+      [workspaceId, "FK16.1 integration", `fk16-${workspaceId}`]);
+    await pool.query("INSERT INTO projects (id, workspace_id, name, slug) VALUES ($1, $2, $3, $4)",
+      [projectId, workspaceId, "FK16.1", `fk16-project-${projectId}`]);
+    await pool.query(
+      `INSERT INTO repositories (id, workspace_id, project_id, name, kind, default_branch)
+       VALUES ($1, $2, $3, $4, 'upload', 'main')`,
+      [repositoryId, workspaceId, projectId, "FK16.1 repository"]
+    );
+    await pool.query(
+      `INSERT INTO source_snapshots
+         (id, workspace_id, repository_id, commit_sha, ref, commit_timestamp, storage_path)
+       VALUES ($1, $2, $3, $4, 'main', now(), $5)`,
+      [snapshotId, workspaceId, repositoryId, "a".repeat(40), legacyView]
+    );
+    for (const source of sourceRows) {
+      await pool.query(
+        `INSERT INTO source_files (id, workspace_id, snapshot_id, path, content_hash, byte_size)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [source.id, workspaceId, snapshotId, source.path, hash(source.bytes), source.bytes.length]
+      );
+    }
+    await pool.query(
+      `INSERT INTO build_jobs
+         (id, workspace_id, repository_id, snapshot_id, snapshot_path, commit_sha, status)
+       VALUES ($1, $2, $3, $4, $5, $6, 'ready')`,
+      [buildId, workspaceId, repositoryId, snapshotId, legacyView, "a".repeat(40)]
+    );
+    await pool.query(
+      `INSERT INTO releases
+         (id, workspace_id, repository_id, build_job_id, snapshot_id, version, kernel_mode,
+          release_artifact_family)
+       VALUES ($1, $2, $3, $4, $5, 'fk16.1-integration', 'legacy', 'knowledge-v1')`,
+      [releaseId, workspaceId, repositoryId, buildId, snapshotId]
+    );
+    const releaseBefore = (await pool.query("SELECT to_jsonb(release) AS value FROM releases release WHERE id = $1", [releaseId])).rows[0].value;
+
+    const report = await runBackfill({ pool, dataDir, batchSize: 1 });
+
+    assert.equal(report.processed, 1);
+    const expectedView = path.join(snapshotData, "snapshots", snapshotId, "files");
+    const persistedSnapshot = await pool.query("SELECT storage_path FROM source_snapshots WHERE id = $1", [snapshotId]);
+    assert.equal(persistedSnapshot.rows[0].storage_path, expectedView);
+    const persistedFiles = await pool.query(
+      `SELECT file.id, file.source_blob_id, blob.workspace_id, blob.content_hash, blob.byte_size,
+              blob.generation, blob.status, blob.storage_key
+       FROM source_files file
+       JOIN source_blobs blob ON blob.id = file.source_blob_id AND blob.workspace_id = file.workspace_id
+       WHERE file.snapshot_id = $1
+       ORDER BY file.path`,
+      [snapshotId]
+    );
+    assert.equal(persistedFiles.rows.length, sourceRows.length);
+    assert.ok(persistedFiles.rows.every((row) => row.source_blob_id && row.workspace_id === workspaceId
+      && row.status === "active" && Number(row.generation) === 1));
+    for (const row of persistedFiles.rows) {
+      const source = sourceRows.find((candidate) => candidate.id === row.id);
+      assert.equal(row.content_hash, hash(source.bytes));
+      assert.equal(Number(row.byte_size), source.bytes.length);
+      const [blobStat, viewStat] = await Promise.all([
+        lstat(path.join(snapshotData, row.storage_key)),
+        lstat(path.join(expectedView, source.path))
+      ]);
+      assert.equal(viewStat.dev, blobStat.dev);
+      assert.equal(viewStat.ino, blobStat.ino);
+    }
+    const releaseAfter = (await pool.query("SELECT to_jsonb(release) AS value FROM releases release WHERE id = $1", [releaseId])).rows[0].value;
+    assert.deepEqual(releaseAfter, releaseBefore);
+  } finally {
+    await pool.query("DELETE FROM releases WHERE workspace_id = $1", [workspaceId]).catch(() => undefined);
+    await pool.query("DELETE FROM build_jobs WHERE workspace_id = $1", [workspaceId]).catch(() => undefined);
+    await pool.query("DELETE FROM workspaces WHERE id = $1", [workspaceId]).catch(() => undefined);
+    await pool.end();
+  }
 });

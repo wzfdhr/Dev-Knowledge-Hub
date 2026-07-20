@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
@@ -13,6 +14,7 @@ const backupScript = join(scriptDirectory, "devkh-backup.sh");
 const restoreDrillScript = join(scriptDirectory, "devkh-restore-drill.sh");
 const ciRecoveryDrillScript = join(scriptDirectory, "ci-recovery-drill.sh");
 const seedRecoveryFixtureScript = join(scriptDirectory, "seed-ci-recovery-fixture.sh");
+const validateTarArchiveScript = join(scriptDirectory, "validate-tar-archive.mjs");
 const backupSnapshotId = "a".repeat(64);
 const latestSnapshotId = "b".repeat(64);
 const sourceBlobFence = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -30,7 +32,7 @@ function gzipTar(entries) {
     writeTarOctal(header, 100, 8, entry.mode ?? 0o644);
     writeTarOctal(header, 108, 8, 0);
     writeTarOctal(header, 116, 8, 0);
-    writeTarOctal(header, 124, 12, entry.type === "0" || !entry.type ? contents.length : 0);
+    writeTarOctal(header, 124, 12, [undefined, "0", "x", "g", "L", "K"].includes(entry.type) ? contents.length : 0);
     writeTarOctal(header, 136, 12, 0);
     header.fill(0x20, 148, 156);
     header.write(entry.type ?? "0", 156, 1, "ascii");
@@ -68,6 +70,8 @@ function createFixture({
   requireManifestMode = false,
   snapshotArchiveEntries = null,
   postExtractSymlink = false,
+  writableSourceBlob = false,
+  writableSnapshotView = false,
   deriveSourceBlobIntegrity = true,
   resticSnapshots = [{ id: latestSnapshotId, time: "1970-01-02T03:45:00.000Z" }],
   integrityResult = '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":0,"orphanedSourceAnalysisArtifacts":0,"invalidSourceBlobReferences":0}',
@@ -145,6 +149,15 @@ case "$1" in
     printf 'export const recoveryFixture = 1;\n' > "$blob"
     ln "$blob" "$empty_directory/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files/src/one.ts"
     ln "$blob" "$empty_directory/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files/src/two.ts"
+    chmod 0444 "$blob"
+    if [ "$FAKE_WRITABLE_SOURCE_BLOB" = "true" ]; then chmod 0644 "$blob"; fi
+    if [ "$FAKE_WRITABLE_SNAPSHOT_VIEW" = "true" ]; then
+      writable_view="$empty_directory/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files/src/one.ts"
+      cp "$writable_view" "$writable_view.copy"
+      rm "$writable_view"
+      mv "$writable_view.copy" "$writable_view"
+      chmod 0644 "$writable_view"
+    fi
     tar -C "$empty_directory/snapshots" -czf "$set_directory/snapshots.tgz" .
     if [ -n "$FAKE_SNAPSHOT_ARCHIVE_PATH" ]; then cp "$FAKE_SNAPSHOT_ARCHIVE_PATH" "$set_directory/snapshots.tgz"; fi
     artifact_path="$empty_directory/artifacts/33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert"
@@ -207,6 +220,8 @@ fi
       FAKE_SNAPSHOT_ARCHIVE_PATH: snapshotArchiveEntries ? snapshotArchiveFile : "",
       SYSTEM_TAR: systemTar,
       POST_EXTRACT_SYMLINK: String(postExtractSymlink),
+      FAKE_WRITABLE_SOURCE_BLOB: String(writableSourceBlob),
+      FAKE_WRITABLE_SNAPSHOT_VIEW: String(writableSnapshotView),
       COMPOSE_DIR: root,
       COMPOSE_PROJECT_NAME: "dev-knowledge-hub",
       SNAPSHOT_VOLUME: "devkh_snapshots",
@@ -401,6 +416,12 @@ test("the recovery fixture seeder refuses direct execution outside an isolated C
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
+});
+
+test("the recovery fixture seeder makes the source blob hardlink inode read-only", () => {
+  const seed = readFileSync(seedRecoveryFixtureScript, "utf8");
+
+  assert.match(seed, /ln "\$blob" "\$view\/two\.ts"\n\s+chmod 0444 "\$blob"/);
 });
 
 test("interrupted backup and restore operations are recorded as failures", async () => {
@@ -734,6 +755,59 @@ test("restore drill reads source blob manifests larger than 256 KiB from a mode-
     rmSync(fixture.root, { recursive: true, force: true });
   }
 });
+
+test("tar validation streams a highly compressed regular-file body without buffering it", async () => {
+  const uncompressedBodyBytes = 2 * 1024 * 1024;
+  const compressed = gzipTar([{ name: "large.bin", contents: Buffer.alloc(uncompressedBodyBytes, 0x61) }]);
+  const { validateTarArchive } = await import(validateTarArchiveScript);
+  let maximumBufferedBytes = 0;
+
+  async function* chunks() {
+    for (let offset = 0; offset < compressed.length; offset += 37) {
+      yield compressed.subarray(offset, offset + 37);
+    }
+  }
+
+  await validateTarArchive("unused-by-injected-stream", {
+    createInputStream: () => Readable.from(chunks()),
+    maxMetadataBytes: 1024,
+    onBufferedBytes: (bytes) => { maximumBufferedBytes = Math.max(maximumBufferedBytes, bytes); }
+  });
+
+  assert.ok(compressed.length < 16 * 1024, `expected a small compressed fixture, got ${compressed.length}`);
+  assert.ok(maximumBufferedBytes <= 1024, `buffered ${maximumBufferedBytes} bytes`);
+  assert.doesNotMatch(readFileSync(validateTarArchiveScript, "utf8"), /readFileSync|gunzipSync/);
+});
+
+test("tar validation rejects oversized buffered metadata", async () => {
+  const compressed = gzipTar([{ name: "pax-header", type: "x", contents: Buffer.alloc(2048, 0x61) }]);
+  const { validateTarArchive } = await import(validateTarArchiveScript);
+
+  await assert.rejects(
+    validateTarArchive("unused-by-injected-stream", {
+      createInputStream: () => Readable.from([compressed]),
+      maxMetadataBytes: 1024
+    }),
+    /archive metadata exceeds safe limit/
+  );
+});
+
+for (const [name, options, message] of [
+  ["source blob", { writableSourceBlob: true }, /source blob content must be read-only/],
+  ["snapshot view", { writableSnapshotView: true }, /snapshot view must be read-only/]
+]) {
+  test(`restore drill rejects a writable ${name}`, () => {
+    const fixture = createFixture(options);
+
+    try {
+      const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, message);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("restore drill accepts a strictly formed tombstoned source blob reference", () => {
   const fixture = createFixture();

@@ -16,98 +16,7 @@ application_container=""
 cleanup_failed=0
 
 validate_archive_members() {
-  node - "$1" <<'NODE'
-const fs = require("node:fs");
-const zlib = require("node:zlib");
-const archive = process.argv[2];
-const bytes = zlib.gunzipSync(fs.readFileSync(archive));
-const decode = (buffer) => buffer.toString("utf8").replace(/\0.*$/s, "");
-const number = (buffer) => {
-  const text = decode(buffer).trim();
-  return text ? Number.parseInt(text, 8) : 0;
-};
-const safePath = (value, label) => {
-  if (!value || value.includes("\\") || value.startsWith("/")) throw new Error("unsafe archive " + label + ": " + value);
-  const segments = value.split("/").filter((segment) => segment !== "");
-  while (segments[0] === ".") segments.shift();
-  if (!segments.length || segments.some((segment) => segment === "." || segment === "..")) throw new Error("unsafe archive " + label + ": " + value);
-  return segments.join("/");
-};
-const pax = (body) => {
-  const result = {};
-  let offset = 0;
-  while (offset < body.length) {
-    const space = body.indexOf(0x20, offset);
-    if (space < 0) throw new Error("invalid archive PAX record");
-    const length = Number.parseInt(body.subarray(offset, space).toString("ascii"), 10);
-    if (!Number.isSafeInteger(length) || length <= 0 || offset + length > body.length) throw new Error("invalid archive PAX record");
-    const record = body.subarray(space + 1, offset + length - 1).toString("utf8");
-    const equals = record.indexOf("=");
-    if (equals > 0) result[record.slice(0, equals)] = record.slice(equals + 1);
-    offset += length;
-  }
-  return result;
-};
-const entries = [];
-let offset = 0;
-let localPax = {};
-let globalPax = {};
-let longPath;
-let longLink;
-while (offset + 512 <= bytes.length) {
-  const header = bytes.subarray(offset, offset + 512);
-  if (header.every((byte) => byte === 0)) break;
-  const storedChecksum = number(header.subarray(148, 156));
-  let checksum = 0;
-  for (let index = 0; index < 512; index++) checksum += index >= 148 && index < 156 ? 0x20 : header[index];
-  if (storedChecksum !== checksum) throw new Error("invalid archive header checksum");
-  const size = number(header.subarray(124, 136));
-  if (!Number.isSafeInteger(size) || size < 0) throw new Error("invalid archive member size");
-  const type = String.fromCharCode(header[156] || 0x30);
-  const prefix = decode(header.subarray(345, 500));
-  const rawName = decode(header.subarray(0, 100));
-  const bodyStart = offset + 512;
-  const bodyEnd = bodyStart + size;
-  if (bodyEnd > bytes.length) throw new Error("truncated archive member");
-  const body = bytes.subarray(bodyStart, bodyEnd);
-  offset = bodyStart + Math.ceil(size / 512) * 512;
-  if (type === "x" || type === "g") {
-    const values = pax(body);
-    if (type === "x") localPax = values; else globalPax = { ...globalPax, ...values };
-    continue;
-  }
-  if (type === "L" || type === "K") {
-    const value = decode(body);
-    if (type === "L") longPath = value; else longLink = value;
-    continue;
-  }
-  const metadata = { ...globalPax, ...localPax };
-  const memberPath = metadata.path || longPath || (prefix ? prefix + "/" + rawName : rawName);
-  if ((memberPath === "." || memberPath === "./") && type === "5") { localPax = {}; longPath = undefined; longLink = undefined; continue; }
-  const name = safePath(memberPath, "member path");
-  const linkName = metadata.linkpath || longLink || decode(header.subarray(157, 257));
-  localPax = {}; longPath = undefined; longLink = undefined;
-  if (!["0", "\0", "1", "5"].includes(type)) throw new Error("unsafe archive member type: " + type + " " + name);
-  entries.push({ name, type: type === "\0" ? "0" : type, linkName });
-}
-const byName = new Map();
-for (const entry of entries) {
-  if (byName.has(entry.name)) throw new Error("duplicate archive member: " + entry.name);
-  byName.set(entry.name, entry);
-}
-const resolvesToRegular = (entry, seen = new Set()) => {
-  if (entry.type === "0") return true;
-  if (entry.type !== "1" || seen.has(entry.name)) return false;
-  seen.add(entry.name);
-  let target;
-  try { target = safePath(entry.linkName, "hardlink target"); } catch { return false; }
-  const targetEntry = byName.get(target);
-  return Boolean(targetEntry && resolvesToRegular(targetEntry, seen));
-};
-for (const entry of entries) {
-  if (entry.type === "1" && !resolvesToRegular(entry)) throw new Error("unsafe archive hardlink target: " + entry.linkName);
-}
-NODE
+  node "$script_directory/validate-tar-archive.mjs" "$1"
 }
 
 validate_extracted_tree() {
@@ -281,6 +190,7 @@ source_blob_evidence="$(node -e '
       if(stats.isSymbolicLink()) throw new Error(label+" path contains a symbolic link");
       if(index<segments.length-1&&!stats.isDirectory()) throw new Error(label+" path parent is not a directory");
       if(index===segments.length-1&&!stats.isFile()) throw new Error(label+" is not a regular file");
+      if(index===segments.length-1&&(stats.mode&0o222n)!==0n) throw new Error(label+" must be read-only");
       let canonical; try{canonical=fs.realpathSync(candidate)}catch{throw new Error(label+" canonical path is unavailable")}
       if(!contained(canonical)) throw new Error(label+" escapes snapshot volume");
     }

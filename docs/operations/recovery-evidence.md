@@ -73,7 +73,9 @@ hardlink 计数必须分别覆盖全部 `source_files.source_blob_id` 引用和�
 被引用的唯一 generation/inode，物理字节来自 allocated blocks。被引用的 `active` blob 必须没有 fence、tombstone、
 trash 或 deleted 时间；被引用的 `tombstoned` blob 必须有 UUID fence 和 tombstone 时间、没有 trash/deleted 时间，
 且仍使用规范 source blob 路径。`trash`、`deleted` 或任何不完整状态元组均失败。恢复程序在每个 tgz 提取前
-拒绝 symlink、越界 hardlink 和特殊节点，提取后再次遍历并拒绝 symlink、特殊节点或 canonical 越界路径。
+以流式 tar 状态机拒绝 symlink、越界 hardlink 和特殊节点；普通文件 body 不进入内存缓冲，PAX/GNU long
+metadata 有固定上限。提取后再次遍历并拒绝 symlink、特殊节点或 canonical 越界路径。Blob 与 snapshot view
+还必须是无写位的普通文件；任一 owner/group/other 写位都会使恢复演练失败。
 `integrity` 各项均为 `0`。`resticSnapshotId`
 必须是 restic 返回的完整 64 位快照 ID，并与备份或恢复日志对应；
 `startedAt` 和 `finishedAt` 必须是严格 UTC ISO 时间，且结束时间不得早于开始时间。记录不得包含

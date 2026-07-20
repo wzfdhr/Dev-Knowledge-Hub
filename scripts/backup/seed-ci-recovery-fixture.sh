@@ -92,6 +92,7 @@ docker run --rm \
     printf "export const recoveryFixture = 1;\\n" > "$blob"
     ln "$blob" "$view/one.ts"
     ln "$blob" "$view/two.ts"
+    chmod 0444 "$blob"
   '
 write_volume_file "${COMPOSE_PROJECT_NAME}_repository_mirrors" recovery/HEAD 'ref: refs/heads/main'
 write_volume_file "${COMPOSE_PROJECT_NAME}_uploaded_sources" recovery/source.ts 'export const recoveryFixture = true;'

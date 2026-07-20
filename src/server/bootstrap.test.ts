@@ -21,7 +21,10 @@ function dependencies(): BootstrapDependencies {
     dispatch: vi.fn(async () => {})
   };
   const buildService = { start: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
-  const sourceBlobStore = { initialize: vi.fn(async () => {}) };
+  const sourceBlobStore = {
+    initialize: vi.fn(async () => {}),
+    verifyHardlinkSupport: vi.fn(async () => {})
+  };
   const server = { durable: true, addHook: vi.fn() };
   return {
     createDatabase: vi.fn(() => ({ pool } as never)),
@@ -89,6 +92,7 @@ describe("production bootstrap", () => {
     expect(deps.createSourceBlobStore).toHaveBeenCalledWith("/var/lib/devkh/snapshots", store);
     const sourceBlobStore = vi.mocked(deps.createSourceBlobStore).mock.results[0].value;
     expect(sourceBlobStore.initialize).toHaveBeenCalledOnce();
+    expect(sourceBlobStore.verifyHardlinkSupport).not.toHaveBeenCalled();
     expect(artifactStore.initialize).toHaveBeenCalledOnce();
     expect(buildService.start).toHaveBeenCalledOnce();
     expect(deps.buildServer).toHaveBeenCalledWith(expect.objectContaining({
@@ -107,6 +111,38 @@ describe("production bootstrap", () => {
     }));
     expect(server.addHook).toHaveBeenCalledWith("onClose", expect.any(Function));
     expect(server).toBe(vi.mocked(deps.buildServer).mock.results[0].value);
+  });
+
+  test("requires a successful hardlink probe before source blob shadow mode starts", async () => {
+    const deps = dependencies();
+    const sourceBlobStore = vi.mocked(deps.createSourceBlobStore).mock.results;
+    await bootstrapProductionServer({
+      DATABASE_URL: "postgres://localhost/devkh",
+      DEVKH_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
+      DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars",
+      DEVKH_SOURCE_STORAGE_MODE: "shadow"
+    }, deps);
+
+    expect(sourceBlobStore[0]!.value.verifyHardlinkSupport).toHaveBeenCalledOnce();
+  });
+
+  test("refuses to start source blob shadow mode when the hardlink probe fails", async () => {
+    const deps = dependencies();
+    const sourceBlobStore = {
+      initialize: vi.fn(async () => {}),
+      verifyHardlinkSupport: vi.fn(async () => { throw new Error("hardlinks unavailable"); })
+    };
+    vi.mocked(deps.createSourceBlobStore).mockReturnValue(sourceBlobStore as never);
+
+    await expect(bootstrapProductionServer({
+      DATABASE_URL: "postgres://localhost/devkh",
+      DEVKH_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
+      DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars",
+      DEVKH_SOURCE_STORAGE_MODE: "shadow"
+    }, deps)).rejects.toThrow("hardlinks unavailable");
+
+    expect(sourceBlobStore.verifyHardlinkSupport).toHaveBeenCalledOnce();
+    expect(deps.buildServer).not.toHaveBeenCalled();
   });
 
   test("keeps the staged pipeline worker inactive in the legacy default", async () => {

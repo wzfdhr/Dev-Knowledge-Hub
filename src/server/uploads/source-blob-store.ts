@@ -86,11 +86,51 @@ async function assertRecoverableOrphan(destination: string, expectedHash: string
 }
 
 export class SourceBlobStore {
-  constructor(private readonly options: { dataDir: string; catalog: SourceBlobCatalog }) {}
+  constructor(private readonly options: {
+    dataDir: string;
+    catalog: SourceBlobCatalog;
+    linkFile?: typeof link;
+  }) {}
 
   async initialize(): Promise<void> {
     await mkdir(path.join(this.options.dataDir, "blobs"), { recursive: true, mode: 0o700 });
     await mkdir(path.join(this.options.dataDir, "snapshots"), { recursive: true, mode: 0o700 });
+  }
+
+  async verifyHardlinkSupport(): Promise<void> {
+    const probeId = randomUUID();
+    const blobsRoot = path.join(this.options.dataDir, "blobs");
+    const snapshotsRoot = path.join(this.options.dataDir, "snapshots");
+    const source = path.join(blobsRoot, `.hardlink-probe-${probeId}`);
+    const target = path.join(snapshotsRoot, `.hardlink-probe-${probeId}`);
+    try {
+      const handle = await open(source, "wx", 0o600);
+      try {
+        await handle.writeFile("devkh-hardlink-probe");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await (this.options.linkFile ?? link)(source, target);
+      const [sourceStat, targetStat] = await Promise.all([lstat(source), lstat(target)]);
+      if (!sourceStat.isFile() || !targetStat.isFile() || sourceStat.dev !== targetStat.dev
+        || sourceStat.ino !== targetStat.ino) {
+        throw new SourceBlobIntegrityError(
+          "SNAPSHOT_VIEW_FAILED",
+          "Source blob storage does not preserve same-volume hardlinks"
+        );
+      }
+    } catch (error) {
+      if (error instanceof SourceBlobIntegrityError) throw error;
+      const detail = error instanceof Error && "code" in error ? ` (${String(error.code)})` : "";
+      throw new SourceBlobIntegrityError(
+        "SNAPSHOT_VIEW_FAILED",
+        `Source blob storage does not support required same-volume hardlinks${detail}`
+      );
+    } finally {
+      await Promise.all([unlink(target).catch(() => undefined), unlink(source).catch(() => undefined)]);
+      await Promise.all([syncDirectory(blobsRoot), syncDirectory(snapshotsRoot)]);
+    }
   }
 
   async put(input: { workspaceId: string; bytes: Uint8Array }): Promise<{

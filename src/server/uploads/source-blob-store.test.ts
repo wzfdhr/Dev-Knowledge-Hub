@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -78,6 +78,33 @@ function sha256(bytes: Uint8Array): string {
 }
 
 describe("workspace source blob store", () => {
+  test("verifies same-volume hardlinks at startup and removes every probe file", async () => {
+    const context = await fixture();
+
+    await context.store.verifyHardlinkSupport();
+
+    await expect(readdir(path.join(context.root, "blobs"))).resolves.toEqual([]);
+    await expect(readdir(path.join(context.root, "snapshots"))).resolves.toEqual([]);
+  });
+
+  test.each(["EXDEV", "ENOTSUP"])("rejects startup when hardlinks fail with %s and cleans the probe", async (code) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-probe-"));
+    roots.push(root);
+    const error = Object.assign(new Error("link failed"), { code });
+    const store = new SourceBlobStore({
+      dataDir: root,
+      catalog: new MemorySourceBlobCatalog(),
+      linkFile: async () => { throw error; }
+    });
+    await store.initialize();
+
+    await expect(store.verifyHardlinkSupport()).rejects.toMatchObject({
+      code: "SNAPSHOT_VIEW_FAILED"
+    });
+    await expect(readdir(path.join(root, "blobs"))).resolves.toEqual([]);
+    await expect(readdir(path.join(root, "snapshots"))).resolves.toEqual([]);
+  });
+
   test("uses the application store as the lock-scoped source blob catalog", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blobs-app-store-"));
     roots.push(root);

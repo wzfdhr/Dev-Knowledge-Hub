@@ -195,6 +195,7 @@ export async function bootstrapServer(
   await artifactStore.initialize();
   const sourceBlobStore = dependencies.createSourceBlobStore(path.join(env.dataDir, "snapshots"), store);
   await sourceBlobStore.initialize();
+  if (env.sourceStorageMode !== "legacy") await sourceBlobStore.verifyHardlinkSupport();
   const sourceBlobReader = new SourceBlobReader({ catalog: store, blobStore: sourceBlobStore });
   const queue = dependencies.createBuildQueue(env.databaseUrl);
   const enhancerForWorkspace = async (workspaceId: string): Promise<KnowledgeEnhancer | undefined> => {

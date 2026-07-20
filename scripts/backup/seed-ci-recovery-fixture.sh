@@ -28,7 +28,17 @@ VALUES ('33333333-3333-4333-8333-333333333333', '22222222-2222-4222-8222-2222222
 INSERT INTO repositories (id, workspace_id, project_id, name, clone_url, default_branch)
 VALUES ('44444444-4444-4444-8444-444444444444', '11111111-1111-4111-8111-111111111111', '33333333-3333-4333-8333-333333333333', 'Recovery source', 'https://example.invalid/recovery.git', 'main');
 INSERT INTO source_snapshots (id, workspace_id, repository_id, commit_sha, ref, storage_path)
-VALUES ('55555555-5555-4555-8555-555555555555', '11111111-1111-4111-8111-111111111111', '44444444-4444-4444-8444-444444444444', repeat('5', 40), 'refs/heads/main', 'recovery/snapshot');
+VALUES ('55555555-5555-4555-8555-555555555555', '11111111-1111-4111-8111-111111111111', '44444444-4444-4444-8444-444444444444', repeat('5', 40), 'refs/heads/main', '/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files');
+INSERT INTO source_blobs (id, workspace_id, content_hash, generation, byte_size, status, storage_key)
+VALUES (
+  'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '11111111-1111-4111-8111-111111111111',
+  '47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28', 1, 34, 'active',
+  'blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1'
+);
+INSERT INTO source_files (id, workspace_id, snapshot_id, path, language, content_hash, byte_size, source_blob_id)
+VALUES
+  ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '11111111-1111-4111-8111-111111111111', '55555555-5555-4555-8555-555555555555', 'src/one.ts', 'typescript', '47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28', 34, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'),
+  ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', '11111111-1111-4111-8111-111111111111', '55555555-5555-4555-8555-555555555555', 'src/two.ts', 'typescript', '47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28', 34, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
 INSERT INTO build_jobs (id, workspace_id, repository_id, snapshot_id, status, snapshot_path, commit_sha)
 VALUES ('66666666-6666-4666-8666-666666666666', '11111111-1111-4111-8111-111111111111', '44444444-4444-4444-8444-444444444444', '55555555-5555-4555-8555-555555555555', 'published', 'recovery/snapshot', repeat('5', 40));
 INSERT INTO knowledge_artifacts (
@@ -67,6 +77,16 @@ write_volume_file() {
 }
 
 write_volume_file "${COMPOSE_PROJECT_NAME}_snapshot_data" recovery/snapshot.json '{"fixture":true}'
+docker run --rm \
+  --mount "type=volume,src=${COMPOSE_PROJECT_NAME}_snapshot_data,dst=/data" \
+  alpine:3.20 sh -ceu '
+    blob="/data/blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1"
+    view="/data/snapshots/55555555-5555-4555-8555-555555555555/files/src"
+    mkdir -p "$(dirname "$blob")" "$view"
+    printf "export const recoveryFixture = 1;\\n" > "$blob"
+    ln "$blob" "$view/one.ts"
+    ln "$blob" "$view/two.ts"
+  '
 write_volume_file "${COMPOSE_PROJECT_NAME}_repository_mirrors" recovery/HEAD 'ref: refs/heads/main'
 write_volume_file "${COMPOSE_PROJECT_NAME}_uploaded_sources" recovery/source.ts 'export const recoveryFixture = true;'
 write_volume_file "${COMPOSE_PROJECT_NAME}_artifact_data" \

@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 
 const volumeNames = ["snapshots", "repositories", "sources", "artifacts"];
 const volumeArchives = volumeNames.map((name) => `${name}.tgz`);
-const databaseStatNames = [
+const legacyDatabaseStatNames = [
   "workspaceCount",
   "userCount",
   "projectCount",
@@ -14,7 +14,8 @@ const databaseStatNames = [
   "artifactCount",
   "sourceAnalysisArtifactCount"
 ];
-const integrityNames = [
+const sourceBlobDatabaseStatNames = ["sourceBlobCount", "sourceFileBlobReferenceCount"];
+const legacyIntegrityNames = [
   "orphanedReleases",
   "orphanedReleaseChannels",
   "crossWorkspaceProjectMembers",
@@ -22,6 +23,7 @@ const integrityNames = [
   "orphanedArtifacts",
   "orphanedSourceAnalysisArtifacts"
 ];
+const sourceBlobIntegrityNames = ["invalidSourceBlobReferences"];
 const sha256 = /^[a-f0-9]{64}$/;
 const utcIsoTimestamp = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?Z$/;
 const evidenceFields = [
@@ -29,7 +31,8 @@ const evidenceFields = [
   "databaseArchiveSha256", "volumeArchives", "volumeArchiveSha256", "volumeFileCounts",
   "productionVolumeTouched", "restoredSnapshotCount", "pgRestoreListValidated",
   "ephemeralDatabaseRestored", "healthCheckPassed", "artifactContentVerifiedCount", "databaseStats",
-  "integrity"
+  "integrity", "blobReferenceCount", "blobContentVerifiedCount", "blobHardlinkVerifiedCount",
+  "sourceBlobGenerationCount", "sourceBlobLogicalBytes", "sourceBlobPhysicalBytes"
 ];
 
 function requireEvidence(condition, message) {
@@ -52,8 +55,16 @@ function parseUtcTimestamp(value, name) {
 
 export function validateRecoveryEvidence(evidence) {
   requireEvidence(evidence && typeof evidence === "object" && !Array.isArray(evidence), "document must be an object");
-  requireExactFields(evidence, evidenceFields, "document");
-  requireEvidence(evidence.schemaVersion === 2, "schemaVersion must be 2");
+  requireEvidence(evidence.schemaVersion === 2 || evidence.schemaVersion === 3, "schemaVersion must be 2 or 3");
+  const sourceBlobEvidence = evidence.schemaVersion === 3;
+  requireExactFields(
+    evidence,
+    sourceBlobEvidence ? evidenceFields : evidenceFields.filter((field) => ![
+      "blobReferenceCount", "blobContentVerifiedCount", "blobHardlinkVerifiedCount",
+      "sourceBlobGenerationCount", "sourceBlobLogicalBytes", "sourceBlobPhysicalBytes"
+    ].includes(field)),
+    "document"
+  );
   requireEvidence(evidence.operation === "restore-drill", "operation must be restore-drill");
   requireEvidence(evidence.result === "success", "result must be success");
   const startedAt = parseUtcTimestamp(evidence.startedAt, "startedAt");
@@ -77,6 +88,9 @@ export function validateRecoveryEvidence(evidence) {
       `${name} archive digest is invalid`
     );
   }
+  const databaseStatNames = sourceBlobEvidence
+    ? [...legacyDatabaseStatNames, ...sourceBlobDatabaseStatNames]
+    : legacyDatabaseStatNames;
   requireExactFields(evidence.databaseStats, databaseStatNames, "databaseStats");
   for (const name of databaseStatNames) {
     requireEvidence(
@@ -84,6 +98,9 @@ export function validateRecoveryEvidence(evidence) {
       `${name} must be a positive integer`
     );
   }
+  const integrityNames = sourceBlobEvidence
+    ? [...legacyIntegrityNames, ...sourceBlobIntegrityNames]
+    : legacyIntegrityNames;
   requireExactFields(evidence.integrity, integrityNames, "integrity");
   for (const name of integrityNames) {
     requireEvidence(evidence.integrity?.[name] === 0, `${name} must be zero`);
@@ -97,6 +114,36 @@ export function validateRecoveryEvidence(evidence) {
     Number.isInteger(evidence.artifactContentVerifiedCount)
       && evidence.artifactContentVerifiedCount === evidence.databaseStats.artifactCount,
     "every artifact must have verified content"
+  );
+  if (sourceBlobEvidence) requireEvidence(
+    Number.isInteger(evidence.blobReferenceCount)
+      && evidence.blobReferenceCount === evidence.databaseStats.sourceFileBlobReferenceCount,
+    "every source file blob reference must be verified"
+  );
+  if (sourceBlobEvidence) requireEvidence(
+    Number.isInteger(evidence.sourceBlobGenerationCount)
+      && evidence.sourceBlobGenerationCount === evidence.databaseStats.sourceBlobCount,
+    "every source blob generation must be accounted for"
+  );
+  if (sourceBlobEvidence) requireEvidence(
+    Number.isInteger(evidence.blobContentVerifiedCount)
+      && evidence.blobContentVerifiedCount === evidence.sourceBlobGenerationCount,
+    "every source blob generation must have verified content"
+  );
+  if (sourceBlobEvidence) requireEvidence(
+    Number.isInteger(evidence.blobHardlinkVerifiedCount)
+      && evidence.blobHardlinkVerifiedCount === evidence.blobReferenceCount,
+    "every source file blob reference must preserve its hardlink"
+  );
+  if (sourceBlobEvidence) requireEvidence(
+    Number.isSafeInteger(evidence.sourceBlobLogicalBytes) && evidence.sourceBlobLogicalBytes >= 0,
+    "source blob logical bytes must be a non-negative safe integer"
+  );
+  if (sourceBlobEvidence) requireEvidence(
+    Number.isSafeInteger(evidence.sourceBlobPhysicalBytes)
+      && evidence.sourceBlobPhysicalBytes >= 0
+      && evidence.sourceBlobPhysicalBytes % 512 === 0,
+    "source blob physical bytes must be allocated-block bytes"
   );
   return evidence;
 }

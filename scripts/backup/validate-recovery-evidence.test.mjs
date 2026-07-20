@@ -12,7 +12,7 @@ const digest = "a".repeat(64);
 
 function validEvidence() {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     operation: "restore-drill",
     result: "success",
     startedAt: "2026-07-15T00:00:00.000Z",
@@ -33,6 +33,12 @@ function validEvidence() {
     ephemeralDatabaseRestored: true,
     healthCheckPassed: true,
     artifactContentVerifiedCount: 1,
+    blobReferenceCount: 2,
+    blobContentVerifiedCount: 1,
+    blobHardlinkVerifiedCount: 2,
+    sourceBlobGenerationCount: 1,
+    sourceBlobLogicalBytes: 32,
+    sourceBlobPhysicalBytes: 4096,
     databaseStats: {
       workspaceCount: 1,
       userCount: 1,
@@ -42,7 +48,9 @@ function validEvidence() {
       releaseCount: 1,
       releaseChannelCount: 1,
       artifactCount: 1,
-      sourceAnalysisArtifactCount: 1
+      sourceAnalysisArtifactCount: 1,
+      sourceBlobCount: 1,
+      sourceFileBlobReferenceCount: 2
     },
     integrity: {
       orphanedReleases: 0,
@@ -50,7 +58,8 @@ function validEvidence() {
       crossWorkspaceProjectMembers: 0,
       projectMembersWithoutWorkspaceMembership: 0,
       orphanedArtifacts: 0,
-      orphanedSourceAnalysisArtifacts: 0
+      orphanedSourceAnalysisArtifacts: 0,
+      invalidSourceBlobReferences: 0
     }
   };
 }
@@ -67,7 +76,7 @@ function runValidator(evidence) {
 test("accepts a complete representative recovery evidence document", () => {
   const result = runValidator(validEvidence());
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(JSON.parse(result.stdout).schemaVersion, 2);
+  assert.equal(JSON.parse(result.stdout).schemaVersion, 3);
 });
 
 test("rejects incomplete or inconsistent recovery evidence", () => {
@@ -78,9 +87,18 @@ test("rejects incomplete or inconsistent recovery evidence", () => {
     (value) => { delete value.integrity; },
     (value) => { delete value.integrity.orphanedArtifacts; },
     (value) => { delete value.integrity.orphanedSourceAnalysisArtifacts; },
+    (value) => { delete value.integrity.invalidSourceBlobReferences; },
     (value) => { delete value.databaseStats.sourceAnalysisArtifactCount; },
+    (value) => { delete value.databaseStats.sourceBlobCount; },
+    (value) => { delete value.databaseStats.sourceFileBlobReferenceCount; },
     (value) => { value.databaseArchiveSha256 = "invalid"; },
     (value) => { value.artifactContentVerifiedCount = 0; },
+    (value) => { value.blobReferenceCount = 1; },
+    (value) => { value.blobContentVerifiedCount = 0; },
+    (value) => { value.blobHardlinkVerifiedCount = 1; },
+    (value) => { value.sourceBlobGenerationCount = 2; },
+    (value) => { value.sourceBlobLogicalBytes = -1; },
+    (value) => { value.sourceBlobPhysicalBytes = value.sourceBlobLogicalBytes; },
     (value) => { value.resticSnapshotId = "abc123ef"; },
     (value) => { value.startedAt = 0; },
     (value) => { value.startedAt = "July 15, 2026"; },

@@ -47,3 +47,5 @@ Signals call Fastify close once. Fastify stops accepting connections and closes 
 ## Deployment state
 
 PostgreSQL, snapshots, repository mirrors, durable uploaded sources, and content-addressed artifacts are one consistency set. Compose persists them separately for operational clarity, but backup and restore must capture the database and all four durable file volumes at the same application quiescence point. Retired upload staging is not durable product data and is not backed up.
+
+`snapshot_data` contains both immutable source blobs and snapshot views. A blob is stored at `blobs/<workspace>/<hash-prefix>/<sha256>/<generation>` and a source-file view at `snapshots/<snapshot>/files/<path>` is a same-filesystem hardlink to it. They remain together in the single `snapshots.tgz` archive; backups do not add a blob archive or volume. Recovery verifies database scope/hash/size/generation/status, regular-file SHA-256 and size, and matching device/inode for every referenced view. Evidence records logical bytes separately from physical allocated-block bytes calculated from unique referenced inodes.

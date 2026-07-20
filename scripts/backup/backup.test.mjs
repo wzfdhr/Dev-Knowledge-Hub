@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -34,9 +34,10 @@ function createFixture({
   resticBackupBlock = false,
   resticRestoreBlock = false,
   resticSnapshots = [{ id: latestSnapshotId, time: "1970-01-02T03:45:00.000Z" }],
-  integrityResult = '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":0,"orphanedSourceAnalysisArtifacts":0}',
+  integrityResult = '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":0,"orphanedSourceAnalysisArtifacts":0,"invalidSourceBlobReferences":0}',
   artifactStorageKey = "33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json",
-  artifactContent = '{"fixture":true}'
+  artifactContent = '{"fixture":true}',
+  sourceBlobManifest = '[{"workspaceId":"11111111-1111-4111-8111-111111111111","snapshotId":"55555555-5555-4555-8555-555555555555","snapshotStoragePath":"/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files","path":"src/one.ts","contentHash":"47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28","byteSize":34,"generation":1,"storageKey":"blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1"},{"workspaceId":"11111111-1111-4111-8111-111111111111","snapshotId":"55555555-5555-4555-8555-555555555555","snapshotStoragePath":"/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files","path":"src/two.ts","contentHash":"47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28","byteSize":34,"generation":1,"storageKey":"blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1"}]'
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "devkh-backup-"));
   const bin = join(root, "bin");
@@ -56,9 +57,10 @@ case " $* " in
   *" compose "*" exec "*) printf 'fake-pgdump\n' ;;
   *" compose "*" images -q app "*) printf 'devkh-recovery-image\n' ;;
   *" pg_restore "*) printf 'pg_restore %s\n' "$*" >> "$CALL_LOG" ;;
-  *" psql "*"workspaceCount"*) printf '{"workspaceCount":1,"userCount":1,"projectCount":1,"projectMemberCount":1,"snapshotCount":1,"releaseCount":1,"releaseChannelCount":1,"artifactCount":1,"sourceAnalysisArtifactCount":1}\n' ;;
+  *" psql "*"workspaceCount"*) printf '{"workspaceCount":1,"userCount":1,"projectCount":1,"projectMemberCount":1,"snapshotCount":1,"releaseCount":1,"releaseChannelCount":1,"artifactCount":1,"sourceAnalysisArtifactCount":1,"sourceBlobCount":1,"sourceFileBlobReferenceCount":2}\n' ;;
   *" psql "*"orphanedReleases"*) printf '%s\n' "$FAKE_INTEGRITY_RESULT" ;;
   *" psql "*"artifact_manifests"*) printf '[{"projectId":"33333333-3333-4333-8333-333333333333","snapshotId":"55555555-5555-4555-8555-555555555555","stage":"convert","storageKey":"%s","contentDigest":"218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9"}]\n' "$FAKE_ARTIFACT_STORAGE_KEY" ;;
+  *" psql "*"source_blob_manifests"*) printf '%s\n' "$FAKE_SOURCE_BLOB_MANIFEST" ;;
   *" pg_isready "*) exit 0 ;;
   *" exec "*" node -e "*) exit 0 ;;
   *" run "*" alpine:3.20 tar "*)
@@ -90,11 +92,17 @@ case "$1" in
     empty_directory="$target/empty"
     mkdir -p "$set_directory" "$empty_directory"
     printf 'fake-pgdump\n' > "$set_directory/database.pgdump"
-    for name in snapshots repositories sources; do
+    for name in repositories sources; do
       mkdir -p "$empty_directory/$name/recovery"
       printf '%s\n' "$name" > "$empty_directory/$name/recovery/fixture.txt"
       tar -C "$empty_directory/$name" -czf "$set_directory/$name.tgz" .
     done
+    blob="$empty_directory/snapshots/blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1"
+    mkdir -p "$(dirname "$blob")" "$empty_directory/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files/src"
+    printf 'export const recoveryFixture = 1;\n' > "$blob"
+    ln "$blob" "$empty_directory/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files/src/one.ts"
+    ln "$blob" "$empty_directory/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files/src/two.ts"
+    tar -C "$empty_directory/snapshots" -czf "$set_directory/snapshots.tgz" .
     artifact_path="$empty_directory/artifacts/33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert"
     mkdir -p "$artifact_path"
     printf '%s\n' "$FAKE_ARTIFACT_CONTENT" > "$artifact_path/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json"
@@ -132,6 +140,7 @@ exec /bin/rm "$@"
       FAKE_INTEGRITY_RESULT: integrityResult,
       FAKE_ARTIFACT_STORAGE_KEY: artifactStorageKey,
       FAKE_ARTIFACT_CONTENT: artifactContent,
+      FAKE_SOURCE_BLOB_MANIFEST: sourceBlobManifest,
       COMPOSE_DIR: root,
       COMPOSE_PROJECT_NAME: "dev-knowledge-hub",
       SNAPSHOT_VOLUME: "devkh_snapshots",
@@ -389,7 +398,13 @@ test("restore drill never writes production Docker volumes", () => {
         volumeArchives: evidence.volumeArchives,
         databaseStats: evidence.databaseStats,
         volumeFileCounts: evidence.volumeFileCounts,
-        integrity: evidence.integrity
+        integrity: evidence.integrity,
+        blobReferenceCount: evidence.blobReferenceCount,
+        blobContentVerifiedCount: evidence.blobContentVerifiedCount,
+        blobHardlinkVerifiedCount: evidence.blobHardlinkVerifiedCount,
+        sourceBlobGenerationCount: evidence.sourceBlobGenerationCount,
+        sourceBlobLogicalBytes: evidence.sourceBlobLogicalBytes,
+        sourceBlobPhysicalBytes: evidence.sourceBlobPhysicalBytes
       },
       {
         operation: "restore-drill",
@@ -399,15 +414,22 @@ test("restore drill never writes production Docker volumes", () => {
         ephemeralDatabaseRestored: true,
         healthCheckPassed: true,
         volumeArchives: ["snapshots.tgz", "repositories.tgz", "sources.tgz", "artifacts.tgz"],
-        databaseStats: { workspaceCount: 1, userCount: 1, projectCount: 1, projectMemberCount: 1, snapshotCount: 1, releaseCount: 1, releaseChannelCount: 1, artifactCount: 1, sourceAnalysisArtifactCount: 1 },
-        volumeFileCounts: { snapshots: 1, repositories: 1, sources: 1, artifacts: 1 },
-        integrity: { orphanedReleases: 0, orphanedReleaseChannels: 0, crossWorkspaceProjectMembers: 0, projectMembersWithoutWorkspaceMembership: 0, orphanedArtifacts: 0, orphanedSourceAnalysisArtifacts: 0 }
+        databaseStats: { workspaceCount: 1, userCount: 1, projectCount: 1, projectMemberCount: 1, snapshotCount: 1, releaseCount: 1, releaseChannelCount: 1, artifactCount: 1, sourceAnalysisArtifactCount: 1, sourceBlobCount: 1, sourceFileBlobReferenceCount: 2 },
+        volumeFileCounts: { snapshots: 3, repositories: 1, sources: 1, artifacts: 1 },
+        integrity: { orphanedReleases: 0, orphanedReleaseChannels: 0, crossWorkspaceProjectMembers: 0, projectMembersWithoutWorkspaceMembership: 0, orphanedArtifacts: 0, orphanedSourceAnalysisArtifacts: 0, invalidSourceBlobReferences: 0 },
+        blobReferenceCount: 2,
+        blobContentVerifiedCount: 1,
+        blobHardlinkVerifiedCount: 2,
+        sourceBlobGenerationCount: 1,
+        sourceBlobLogicalBytes: 34,
+        sourceBlobPhysicalBytes: 4096
       }
     );
     for (const archive of ["snapshots", "repositories", "sources", "artifacts"]) {
       assert.match(evidence.volumeArchiveSha256[archive], /^[a-f0-9]{64}$/);
     }
     assert.equal(evidence.artifactContentVerifiedCount, 1);
+    assert.equal(evidence.schemaVersion, 3);
     assert.equal(evidence.resticSnapshotId, latestSnapshotId);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
@@ -536,6 +558,22 @@ test("restore drill rejects invalid cross-record relationships", () => {
   }
 });
 
+test("restore drill rejects source blob references that are not backed by a same-inode snapshot view", () => {
+  const fixture = createFixture({
+    sourceBlobManifest: '[{"workspaceId":"11111111-1111-4111-8111-111111111111","snapshotId":"55555555-5555-4555-8555-555555555555","snapshotStoragePath":"/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files","path":"src/missing.ts","contentHash":"47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28","byteSize":34,"generation":1,"storageKey":"blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1"}]'
+  });
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /snapshot view is unavailable/);
+    assert.equal(existsSync(join(fixture.environment.BACKUP_STATE_DIR, "recovery-evidence")), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("systemd backup timer keeps credentials outside its unit file", () => {
   const timer = readFileSync(join(projectRoot, "deployment/backup/devkh-backup.timer"), "utf8");
   const service = readFileSync(join(projectRoot, "deployment/backup/devkh-backup.service"), "utf8");
@@ -570,4 +608,7 @@ test("backs up durable sources and content-addressed artifacts separately from u
   assert.match(restore, /repo\.project_id<>a\.project_id/);
   assert.match(restore, /s\.repository_id<>b\.repository_id/);
   assert.match(restore, /artifact content digest mismatch/);
+  assert.match(backup, /snapshots:\$SNAPSHOT_VOLUME/);
+  assert.match(restore, /source_blob_manifests/);
+  assert.match(restore, /same-inode hardlink/);
 });

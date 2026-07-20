@@ -673,29 +673,34 @@ async function bindSnapshot(pool, snapshot, paths, files, counts, observer, stre
         throw new Error("Expected source blob is not active during snapshot binding");
       }
     }
+    observe(observer, { type: "before-source-files-lock", snapshotId: snapshot.snapshot_id });
+    const current = await client.query(
+      `SELECT file.id, file.workspace_id, file.snapshot_id, file.path, file.content_hash,
+              file.byte_size, file.source_blob_id
+       FROM source_files file
+       WHERE file.snapshot_id = $1 AND file.workspace_id = $2
+       ORDER BY file.path, file.id
+       FOR UPDATE`,
+      [snapshot.snapshot_id, snapshot.workspace_id]
+    );
+    if (current.rows.length !== files.length) throw new Error("Snapshot source file set changed during backfill");
+    const expectedById = new Map(files.map((file) => [file.id, file]));
+    for (const row of current.rows) {
+      const expected = expectedById.get(row.id);
+      if (!expected || row.workspace_id !== expected.workspace_id || row.snapshot_id !== expected.snapshot_id
+        || row.path !== expected.path || row.content_hash !== expected.content_hash
+        || asSafeSize(row.byte_size, "Source file size") !== expected.byteSize
+        || (row.source_blob_id !== null && row.source_blob_id !== expected.blob.id)) {
+        throw new Error("Snapshot source file tuple changed during backfill");
+      }
+    }
     await materializeSnapshotView(paths, files, {
       allowOrphanReplacement: currentSnapshot.storage_path === paths.legacyView,
       observer,
       streams
     });
-    const current = await client.query(
-      `SELECT file.id, file.source_blob_id
-       FROM source_files file
-       WHERE file.snapshot_id = $1 AND file.workspace_id = $2
-       ORDER BY file.id
-       FOR UPDATE`,
-      [snapshot.snapshot_id, snapshot.workspace_id]
-    );
-    if (current.rows.length !== files.length) throw new Error("Snapshot source file set changed during backfill");
-    const expectedById = new Map(files.map((file) => [file.id, file.blob.id]));
-    for (const row of current.rows) {
-      const expected = expectedById.get(row.file_id ?? row.id);
-      if (!expected || (row.source_blob_id !== null && row.source_blob_id !== expected)) {
-        throw new Error("Snapshot source file has an inconsistent source blob binding");
-      }
-    }
     for (const file of files) {
-      if (current.rows.find((row) => (row.file_id ?? row.id) === file.id)?.source_blob_id !== null) continue;
+      if (current.rows.find((row) => row.id === file.id)?.source_blob_id !== null) continue;
       const updated = await client.query(
         `UPDATE source_files
          SET source_blob_id = $1
@@ -703,6 +708,9 @@ async function bindSnapshot(pool, snapshot, paths, files, counts, observer, stre
          RETURNING source_blob_id`,
         [file.blob.id, file.id, snapshot.workspace_id, snapshot.snapshot_id]
       );
+      if (updated.rows.length === 1) {
+        observe(observer, { type: "source-file-bound", fileId: file.id, sourceBlobId: file.blob.id });
+      }
       if (updated.rows.length === 0) {
         const observed = await client.query(
           `SELECT source_blob_id
@@ -824,9 +832,19 @@ async function rebuildCheckpointState(dataDir, pool) {
     state.processed += 1;
     state.reused += metadata.reused;
     state.created += metadata.created;
-    state.lastCursor = { workspaceId: checkpoint.workspace_id, snapshotId: checkpoint.snapshot_id };
+    state.lastCursor = maximumCursor(state.lastCursor, {
+      workspaceId: checkpoint.workspace_id,
+      snapshotId: checkpoint.snapshot_id
+    });
   }
   return state;
+}
+
+function maximumCursor(left, right) {
+  if (!left) return right;
+  if (!right) return left;
+  return left.workspaceId > right.workspaceId
+    || (left.workspaceId === right.workspaceId && left.snapshotId >= right.snapshotId) ? left : right;
 }
 
 function completedReport(state, batchSize) {
@@ -940,7 +958,7 @@ export async function runBackfill({
       state.reused += checkpoint.reused;
       state.created += checkpoint.created;
       cursor = { workspaceId: snapshot.workspace_id, snapshotId: snapshot.snapshot_id };
-      state.lastCursor = cursor;
+      state.lastCursor = maximumCursor(state.lastCursor, cursor);
       if (writeReport) await writePrivateReport(dataDir, completedReport(state, batchSize), observer);
     }
   }

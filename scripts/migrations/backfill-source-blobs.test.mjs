@@ -45,6 +45,7 @@ class FakePool {
     this.transactionCount = 0;
     this.audits = [];
     this.storageSwitchBeforeSnapshotLock = null;
+    this.sourceFileMutationBeforeLock = null;
   }
 
   async query(text, values = []) {
@@ -115,7 +116,7 @@ class FakePool {
         }));
       return { rows };
     }
-    if (text.includes("FROM source_files file") && text.includes("ORDER BY file.path")) {
+    if (text.includes("FROM source_files file") && text.includes("ORDER BY file.path") && !text.includes("FOR UPDATE")) {
       const [snapshotId, workspaceId] = values;
       return { rows: this.files
         .filter((file) => file.snapshot_id === snapshotId && file.workspace_id === workspaceId)
@@ -199,10 +200,16 @@ class FakePool {
         && candidate.workspace_id === workspaceId);
       return { rows: snapshot ? [{ ...snapshot }] : [] };
     }
-    if (text.includes("SELECT file.id, file.source_blob_id") && text.includes("FROM source_files file")) {
+    if (text.includes("FROM source_files file") && text.includes("FOR UPDATE")) {
       const [snapshotId, workspaceId] = values;
+      if (this.sourceFileMutationBeforeLock) {
+        const file = this.files.find((candidate) => candidate.snapshot_id === snapshotId
+          && candidate.workspace_id === workspaceId);
+        this.sourceFileMutationBeforeLock(file);
+        this.sourceFileMutationBeforeLock = null;
+      }
       return { rows: this.files.filter((file) => file.snapshot_id === snapshotId && file.workspace_id === workspaceId)
-        .map(({ id: file_id, source_blob_id }) => ({ file_id, source_blob_id })) };
+        .map((file) => ({ ...file })) };
     }
     if (text.includes("UPDATE source_files") && text.includes("source_blob_id IS NULL")) {
       const [blobId, fileId, workspaceId, snapshotId] = values;
@@ -571,6 +578,30 @@ test("does not delete an orphan view when a concurrent transaction switches snap
   assert.equal(context.snapshots[0].storage_path, concurrentPath);
 });
 
+test("revalidates the complete source file tuple before canonical view publication", async () => {
+  const context = await fixture({ filesPerSnapshot: 2 });
+  const originalStoragePath = context.snapshots[0].storage_path;
+  const canonicalRoot = path.join(context.snapshotData, "snapshots", context.snapshots[0].id);
+  context.pool.sourceFileMutationBeforeLock = (file) => {
+    file.path = "src/mutated.ts";
+    file.content_hash = "f".repeat(64);
+    file.byte_size += 1;
+  };
+
+  await assert.rejects(
+    runBackfill({ pool: context.pool, dataDir: context.dataDir }),
+    /source file tuple changed/
+  );
+
+  await assert.rejects(lstat(canonicalRoot), { code: "ENOENT" });
+  assert.equal(context.snapshots[0].storage_path, originalStoragePath);
+  assert.ok(context.files.every((file) => file.source_blob_id === null));
+  assert.equal(context.pool.queries.filter(({ text }) => text.includes("UPDATE source_files")
+    && text.includes("SET source_blob_id")).length, 0);
+  assert.equal(context.pool.queries.filter(({ text }) => text.includes("UPDATE source_snapshots")
+    && text.includes("SET storage_path")).length, 0);
+});
+
 test("never replaces a mismatched view after the database path has switched", async () => {
   const context = await fixture();
   const seeded = await seedBlobFile(context, context.files[0]);
@@ -688,11 +719,18 @@ test("rejects symlinks at the legacy view root and in intermediate directories",
   });
 });
 
-test("streams source, blob, temporary, and view bodies without retaining file buffers", async () => {
-  const context = await fixture({ filesPerSnapshot: 4 });
+test("streams source, blob, temporary, and view bodies in bounded chunks", async () => {
+  const context = await fixture();
   const legacyView = context.snapshots[0].storage_path;
+  const largeBody = Buffer.alloc(256 * 1024, "x");
+  await writeFile(path.join(legacyView, context.files[0].path), largeBody);
+  context.files[0].content_hash = hash(largeBody);
+  context.files[0].byte_size = largeBody.length;
   const reads = [];
   const writes = [];
+  let readChunks = 0;
+  let maxReadChunk = 0;
+  let maxWriteChunk = 0;
 
   await runBackfill({
     pool: context.pool,
@@ -700,11 +738,22 @@ test("streams source, blob, temporary, and view bodies without retaining file bu
     streams: {
       createReadStream: (filePath, options) => {
         reads.push(filePath);
-        return createReadStream(filePath, options);
+        const stream = createReadStream(filePath, { ...options, highWaterMark: 1024 });
+        stream.on("data", (chunk) => {
+          readChunks += 1;
+          maxReadChunk = Math.max(maxReadChunk, chunk.length);
+        });
+        return stream;
       },
       createWriteStream: (filePath, options) => {
         writes.push(filePath);
-        return createWriteStream(filePath, options);
+        const stream = createWriteStream(filePath, { ...options, highWaterMark: 1024 });
+        const write = stream.write.bind(stream);
+        stream.write = (chunk, ...args) => {
+          maxWriteChunk = Math.max(maxWriteChunk, chunk.length);
+          return write(chunk, ...args);
+        };
+        return stream;
       }
     },
     observer: (event) => {
@@ -716,6 +765,9 @@ test("streams source, blob, temporary, and view bodies without retaining file bu
   assert.ok(reads.some((filePath) => filePath.startsWith(legacyView)));
   assert.ok(reads.some((filePath) => filePath.includes(`${path.sep}blobs${path.sep}`)));
   assert.ok(reads.some((filePath) => filePath.includes(`${path.sep}snapshots${path.sep}snapshots${path.sep}`)));
+  assert.ok(readChunks > 100);
+  assert.ok(maxReadChunk <= 1024);
+  assert.ok(maxWriteChunk <= 1024);
 });
 
 test("checkpoints each completed snapshot and preserves cumulative report state on a zero-work rerun", async () => {
@@ -737,6 +789,29 @@ test("checkpoints each completed snapshot and preserves cumulative report state 
   assert.equal(resumed.processed, 2);
   assert.equal(repeated.processed, 2);
   assert.deepEqual(repeated.lastCursor, resumed.lastCursor);
+});
+
+test("preserves the maximum audit cursor when repairing an earlier snapshot", async () => {
+  const context = await fixture({ snapshotCount: 2 });
+  await runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 2 });
+  const earlier = context.snapshots[0];
+  const later = context.snapshots[1];
+  context.pool.audits = context.pool.audits
+    .filter((audit) => audit.resource_id !== earlier.id)
+    .reverse();
+  earlier.storage_path = path.join(context.snapshotData, earlier.id, "files");
+  for (const file of context.files.filter((candidate) => candidate.snapshot_id === earlier.id)) {
+    file.source_blob_id = null;
+  }
+
+  const repaired = await runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 2 });
+  const repeated = await runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 2 });
+
+  const maximum = { workspaceId: later.workspace_id, snapshotId: later.id };
+  assert.deepEqual(repaired.lastCursor, maximum);
+  assert.deepEqual(repeated.lastCursor, maximum);
+  assert.equal(repaired.processed, 2);
+  assert.equal(repeated.processed, 2);
 });
 
 test("rebuilds the report checkpoint from committed audit after crashing before report write", async () => {
@@ -835,6 +910,27 @@ test("rolls back the complete snapshot binding when GC tombstones a resolved blo
   assert.ok(context.pool.queries.some(({ text }) => text === "ROLLBACK"));
 });
 
+test("rolls back all bindings when failure follows the first source file update", async () => {
+  const context = await fixture({ filesPerSnapshot: 2 });
+  const originalStoragePath = context.snapshots[0].storage_path;
+  let bindingMutations = 0;
+
+  await assert.rejects(runBackfill({
+    pool: context.pool,
+    dataDir: context.dataDir,
+    observer: (event) => {
+      if (event.type === "source-file-bound" && ++bindingMutations === 1) {
+        throw new Error("fail after first binding mutation");
+      }
+    }
+  }), /fail after first binding mutation/);
+
+  assert.equal(bindingMutations, 1);
+  assert.ok(context.pool.files.every((file) => file.source_blob_id === null));
+  assert.equal(context.pool.snapshots[0].storage_path, originalStoragePath);
+  assert.equal(context.pool.audits.filter((audit) => audit.action === "source_blob.snapshot_backfilled").length, 0);
+});
+
 test("runs the snapshot backfill against PostgreSQL atomically", {
   skip: !process.env.TEST_DATABASE_URL
 }, async () => {
@@ -901,14 +997,56 @@ test("runs the snapshot backfill against PostgreSQL atomically", {
     const releaseBefore = (await pool.query("SELECT to_jsonb(release) AS value FROM releases release WHERE id = $1", [releaseId])).rows[0].value;
     const expectedView = path.join(snapshotData, "snapshots", snapshotId, "files");
 
+    const tupleCompetitor = await pool.connect();
+    let sourceLockSignal;
+    const reachedSourceLock = new Promise((resolve) => { sourceLockSignal = resolve; });
+    try {
+      await tupleCompetitor.query("BEGIN");
+      await tupleCompetitor.query(
+        "UPDATE source_files SET byte_size = byte_size + 1 WHERE id = $1",
+        [sourceRows[0].id]
+      );
+      const tupleRace = runBackfill({
+        pool,
+        dataDir,
+        batchSize: 1,
+        observer: (event) => {
+          if (event.type === "before-source-files-lock") sourceLockSignal();
+        }
+      });
+      await Promise.race([
+        reachedSourceLock,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("backfill did not reach source file lock")), 5_000))
+      ]);
+      let settled = false;
+      void tupleRace.finally(() => { settled = true; }).catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(settled, false);
+      await tupleCompetitor.query("COMMIT");
+      await assert.rejects(tupleRace, /source file tuple changed/);
+    } finally {
+      await tupleCompetitor.query("ROLLBACK").catch(() => undefined);
+      tupleCompetitor.release();
+    }
+    assert.equal((await pool.query("SELECT storage_path FROM source_snapshots WHERE id = $1", [snapshotId])).rows[0].storage_path,
+      legacyView);
+    assert.ok((await pool.query("SELECT source_blob_id FROM source_files WHERE snapshot_id = $1", [snapshotId])).rows
+      .every((row) => row.source_blob_id === null));
+    await assert.rejects(lstat(path.dirname(expectedView)), { code: "ENOENT" });
+    await pool.query("UPDATE source_files SET byte_size = byte_size - 1 WHERE id = $1", [sourceRows[0].id]);
+
+    let rollbackBindingMutations = 0;
     await assert.rejects(runBackfill({
       pool,
       dataDir,
       batchSize: 1,
       observer: (event) => {
-        if (event.type === "view-rename") throw new Error("integration bind rollback");
+        if (event.type === "source-file-bound" && ++rollbackBindingMutations === 1) {
+          throw new Error("integration bind rollback");
+        }
       }
     }), /integration bind rollback/);
+    assert.equal(rollbackBindingMutations, 1);
     const rolledBackSnapshot = await pool.query("SELECT storage_path FROM source_snapshots WHERE id = $1", [snapshotId]);
     assert.equal(rolledBackSnapshot.rows[0].storage_path, legacyView);
     const rolledBackFiles = await pool.query(

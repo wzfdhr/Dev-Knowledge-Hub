@@ -13,6 +13,7 @@ import {
   type SourceBlobRecord
 } from "./source-blob-store.js";
 import { removeReadOnlyTree } from "./folder-import.js";
+import { MemoryAppStore } from "../persistence/memory-store.js";
 
 const roots: string[] = [];
 
@@ -73,6 +74,22 @@ function sha256(bytes: Uint8Array): string {
 }
 
 describe("workspace source blob store", () => {
+  test("uses the application store as the lock-scoped source blob catalog", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blobs-app-store-"));
+    roots.push(root);
+    const catalog = new MemoryAppStore();
+    const setup = await catalog.createInitialSetup("blob-owner@example.com", "hash");
+    const store = new SourceBlobStore({ dataDir: root, catalog });
+    await store.initialize();
+
+    const result = await store.put({
+      workspaceId: setup!.workspace.id,
+      bytes: Buffer.from("application catalog")
+    });
+
+    expect(result.record).toMatchObject({ workspaceId: setup!.workspace.id, generation: 1 });
+  });
+
   test("writes immutable bytes and reuses the active generation in one workspace", async () => {
     const context = await fixture();
     const workspaceId = randomUUID();

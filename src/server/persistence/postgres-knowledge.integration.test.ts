@@ -54,6 +54,7 @@ import { hashMcpToken } from "../mcp/auth";
 import { PostgresSessionStore } from "../security/session-store";
 import { importFolderFiles, type FolderUploadFile } from "../uploads/folder-import";
 import { UploadSessionService, canonicalUploadManifestDigest } from "../uploads/upload-session";
+import { SourceBlobStore } from "../uploads/source-blob-store";
 import { LastProjectAdminError } from "./store";
 import { PostgresAppStore } from "./postgres-store";
 
@@ -2595,6 +2596,31 @@ integration("PostgreSQL cited knowledge integration", () => {
     } finally {
       await rm(artifactRoot, { recursive: true, force: true });
     }
+  }, 30_000);
+
+  test("serializes concurrent source blob creation in one PostgreSQL transaction context", async () => {
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const catalog = new PostgresAppStore(pool);
+    const setup = await catalog.createInitialSetup("source-blob@example.com", "hash");
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-postgres-source-blob-"));
+    retrievalFixtureRoots.push(root);
+    const blobs = new SourceBlobStore({ dataDir: root, catalog });
+    await blobs.initialize();
+    const bytes = Buffer.from("postgres source blob");
+
+    const [first, second] = await Promise.all([
+      blobs.put({ workspaceId: setup!.workspace.id, bytes }),
+      blobs.put({ workspaceId: setup!.workspace.id, bytes })
+    ]);
+
+    expect(second.record.id).toBe(first.record.id);
+    const persisted = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM source_blobs WHERE workspace_id = $1",
+      [setup!.workspace.id]
+    );
+    expect(persisted.rows[0]?.count).toBe("1");
   }, 30_000);
 });
 

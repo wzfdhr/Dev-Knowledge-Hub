@@ -14,44 +14,18 @@ import {
 import path from "node:path";
 
 import { safeFolderUploadPath, syncDirectory } from "./folder-import.js";
+import type {
+  SourceBlobCatalog,
+  SourceBlobRecord
+} from "../persistence/store.js";
 
-export type SourceBlobStatus = "active" | "tombstoned" | "trash" | "deleted";
-
-export interface SourceBlobRecord {
-  id: string;
-  workspaceId: string;
-  contentHash: string;
-  generation: number;
-  byteSize: number;
-  status: SourceBlobStatus;
-  storageKey: string;
-  fencingToken: string | null;
-  tombstonedAt: Date | null;
-  trashedAt: Date | null;
-  deletedAt: Date | null;
-}
-
-export interface CreateSourceBlobRecordInput {
-  workspaceId: string;
-  contentHash: string;
-  generation: number;
-  byteSize: number;
-  storageKey: string;
-}
-
-export interface LockedSourceBlobCatalog {
-  findActive(): Promise<SourceBlobRecord | null>;
-  nextGeneration(): Promise<number>;
-  create(input: CreateSourceBlobRecordInput): Promise<SourceBlobRecord>;
-}
-
-export interface SourceBlobCatalog {
-  withSourceBlobLock<T>(
-    workspaceId: string,
-    contentHash: string,
-    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
-  ): Promise<T>;
-}
+export type {
+  CreateSourceBlobRecordInput,
+  LockedSourceBlobCatalog,
+  SourceBlobCatalog,
+  SourceBlobRecord,
+  SourceBlobStatus
+} from "../persistence/store.js";
 
 export class SourceBlobIntegrityError extends Error {
   constructor(

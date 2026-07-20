@@ -74,6 +74,8 @@ import type {
   SourceAnalysisArtifactKey,
   SourceAnalysisArtifactRecord,
   SourceFileRecord,
+  SourceBlobRecord,
+  LockedSourceBlobCatalog,
   SourceSnapshotRecord,
   TeamMemberRecord,
   TeamRole,
@@ -135,6 +137,20 @@ interface SnapshotRow extends QueryResultRow {
   remote_url: string | null;
   commit_timestamp: Date;
   storage_path: string;
+}
+
+interface SourceBlobRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  content_hash: string;
+  generation: number;
+  byte_size: string | number;
+  status: SourceBlobRecord["status"];
+  storage_key: string;
+  fencing_token: string | null;
+  tombstoned_at: Date | null;
+  trashed_at: Date | null;
+  deleted_at: Date | null;
 }
 
 interface UploadSessionRow extends QueryResultRow {
@@ -504,6 +520,22 @@ function snapshotRecord(row: SnapshotRow): SourceSnapshotRecord {
     remoteUrl: row.remote_url,
     commitTimestamp: row.commit_timestamp,
     storagePath: row.storage_path
+  };
+}
+
+function sourceBlobRecord(row: SourceBlobRow): SourceBlobRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    contentHash: row.content_hash,
+    generation: Number(row.generation),
+    byteSize: Number(row.byte_size),
+    status: row.status,
+    storageKey: row.storage_key,
+    fencingToken: row.fencing_token,
+    tombstonedAt: row.tombstoned_at,
+    trashedAt: row.trashed_at,
+    deletedAt: row.deleted_at
   };
 }
 
@@ -878,6 +910,51 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     } finally {
       client.release();
     }
+  }
+
+  async withSourceBlobLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    return this.transaction(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [workspaceId, contentHash]);
+      const catalog: LockedSourceBlobCatalog = {
+        findActive: async () => {
+          const result = await client.query<SourceBlobRow>(`
+            SELECT id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                   fencing_token, tombstoned_at, trashed_at, deleted_at
+            FROM source_blobs
+            WHERE workspace_id = $1 AND content_hash = $2 AND status = 'active'
+            FOR UPDATE
+          `, [workspaceId, contentHash]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        nextGeneration: async () => {
+          const result = await client.query<{ next_generation: number }>(`
+            SELECT COALESCE(MAX(generation), 0) + 1 AS next_generation
+            FROM source_blobs
+            WHERE workspace_id = $1 AND content_hash = $2
+          `, [workspaceId, contentHash]);
+          return Number(result.rows[0]?.next_generation ?? 1);
+        },
+        create: async (input) => {
+          if (input.workspaceId !== workspaceId || input.contentHash !== contentHash) {
+            throw new Error("SOURCE_BLOB_SCOPE_MISMATCH");
+          }
+          const result = await client.query<SourceBlobRow>(`
+            INSERT INTO source_blobs (
+              workspace_id, content_hash, generation, byte_size, status, storage_key
+            ) VALUES ($1, $2, $3, $4, 'active', $5)
+            RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                      fencing_token, tombstoned_at, trashed_at, deleted_at
+          `, [workspaceId, contentHash, input.generation, input.byteSize, input.storageKey]);
+          if (!result.rows[0]) throw new Error("Source blob record was not created");
+          return sourceBlobRecord(result.rows[0]);
+        }
+      };
+      return operation(catalog);
+    });
   }
 
   private async acquireUploadMutationPermit(): Promise<() => void> {

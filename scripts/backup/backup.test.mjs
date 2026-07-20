@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { gzipSync } from "node:zlib";
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(scriptDirectory, "../..");
@@ -14,6 +15,36 @@ const ciRecoveryDrillScript = join(scriptDirectory, "ci-recovery-drill.sh");
 const seedRecoveryFixtureScript = join(scriptDirectory, "seed-ci-recovery-fixture.sh");
 const backupSnapshotId = "a".repeat(64);
 const latestSnapshotId = "b".repeat(64);
+const sourceBlobFence = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+function writeTarOctal(header, offset, length, value) {
+  header.write(`${value.toString(8).padStart(length - 1, "0")}\0`, offset, length, "ascii");
+}
+
+function gzipTar(entries) {
+  const blocks = [];
+  for (const entry of entries) {
+    const contents = Buffer.from(entry.contents ?? "");
+    const header = Buffer.alloc(512);
+    header.write(entry.name, 0, 100, "utf8");
+    writeTarOctal(header, 100, 8, entry.mode ?? 0o644);
+    writeTarOctal(header, 108, 8, 0);
+    writeTarOctal(header, 116, 8, 0);
+    writeTarOctal(header, 124, 12, entry.type === "0" || !entry.type ? contents.length : 0);
+    writeTarOctal(header, 136, 12, 0);
+    header.fill(0x20, 148, 156);
+    header.write(entry.type ?? "0", 156, 1, "ascii");
+    if (entry.linkName) header.write(entry.linkName, 157, 100, "utf8");
+    header.write("ustar\0", 257, 6, "ascii");
+    header.write("00", 263, 2, "ascii");
+    writeTarOctal(header, 148, 8, [...header].reduce((sum, byte) => sum + byte, 0));
+    blocks.push(header);
+    if (contents.length) {
+      blocks.push(contents, Buffer.alloc((512 - (contents.length % 512)) % 512));
+    }
+  }
+  return gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)]));
+}
 
 test("documents all four durable backup volumes", () => {
   const readme = readFileSync(join(projectRoot, "README.md"), "utf8");
@@ -33,11 +64,16 @@ function createFixture({
   resticRestoreDelay = "0",
   resticBackupBlock = false,
   resticRestoreBlock = false,
+  sourceBlobManifestPaddingBytes = 0,
+  requireManifestMode = false,
+  snapshotArchiveEntries = null,
+  postExtractSymlink = false,
+  deriveSourceBlobIntegrity = true,
   resticSnapshots = [{ id: latestSnapshotId, time: "1970-01-02T03:45:00.000Z" }],
   integrityResult = '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":0,"orphanedSourceAnalysisArtifacts":0,"invalidSourceBlobReferences":0}',
   artifactStorageKey = "33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json",
   artifactContent = '{"fixture":true}',
-  sourceBlobManifest = '[{"workspaceId":"11111111-1111-4111-8111-111111111111","snapshotId":"55555555-5555-4555-8555-555555555555","snapshotStoragePath":"/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files","path":"src/one.ts","contentHash":"47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28","byteSize":34,"generation":1,"storageKey":"blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1"},{"workspaceId":"11111111-1111-4111-8111-111111111111","snapshotId":"55555555-5555-4555-8555-555555555555","snapshotStoragePath":"/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files","path":"src/two.ts","contentHash":"47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28","byteSize":34,"generation":1,"storageKey":"blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1"}]'
+  sourceBlobManifest = '[{"workspaceId":"11111111-1111-4111-8111-111111111111","snapshotId":"55555555-5555-4555-8555-555555555555","snapshotStoragePath":"/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files","path":"src/one.ts","contentHash":"47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28","byteSize":34,"generation":1,"storageKey":"blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1","status":"active","fencingToken":null,"tombstonedAt":null,"trashedAt":null,"deletedAt":null},{"workspaceId":"11111111-1111-4111-8111-111111111111","snapshotId":"55555555-5555-4555-8555-555555555555","snapshotStoragePath":"/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files","path":"src/two.ts","contentHash":"47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28","byteSize":34,"generation":1,"storageKey":"blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1","status":"active","fencingToken":null,"tombstonedAt":null,"trashedAt":null,"deletedAt":null}]'
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "devkh-backup-"));
   const bin = join(root, "bin");
@@ -46,9 +82,14 @@ function createFixture({
   const passwordFile = join(root, "restic-password");
   const backupBlockFile = join(root, "backup.block");
   const restoreBlockFile = join(root, "restore.block");
+  const sourceBlobManifestFile = join(root, "source-blob-manifests.json");
+  const snapshotArchiveFile = join(root, "snapshot-attack.tgz");
+  const systemTar = execFileSync("which", ["tar"], { encoding: "utf8" }).trim();
   execFileSync("mkdir", ["-p", bin]);
   writeFileSync(log, "");
   writeFileSync(passwordFile, "test-only-password\n", { mode: 0o600 });
+  writeFileSync(sourceBlobManifestFile, `${sourceBlobManifest}${" ".repeat(sourceBlobManifestPaddingBytes)}\n`, { mode: 0o600 });
+  if (snapshotArchiveEntries) writeFileSync(snapshotArchiveFile, gzipTar(snapshotArchiveEntries), { mode: 0o600 });
   writeFileSync(join(bin, "docker"), String.raw`#!/usr/bin/env sh
 printf 'docker %s\n' "$*" >> "$CALL_LOG"
 case " $* " in
@@ -58,9 +99,11 @@ case " $* " in
   *" compose "*" images -q app "*) printf 'devkh-recovery-image\n' ;;
   *" pg_restore "*) printf 'pg_restore %s\n' "$*" >> "$CALL_LOG" ;;
   *" psql "*"workspaceCount"*) printf '{"workspaceCount":1,"userCount":1,"projectCount":1,"projectMemberCount":1,"snapshotCount":1,"releaseCount":1,"releaseChannelCount":1,"artifactCount":1,"sourceAnalysisArtifactCount":1,"sourceBlobCount":2,"sourceFileBlobReferenceCount":2,"referencedSourceBlobGenerationCount":1}\n' ;;
-  *" psql "*"orphanedReleases"*) printf '%s\n' "$FAKE_INTEGRITY_RESULT" ;;
+  *" psql "*"orphanedReleases"*)
+    node -e 'const fs=require("node:fs"); const result=JSON.parse(process.env.FAKE_INTEGRITY_RESULT); if(process.env.FAKE_DERIVE_SOURCE_BLOB_INTEGRITY==="true"){const manifests=JSON.parse(fs.readFileSync(process.env.FAKE_SOURCE_BLOB_MANIFEST_PATH,"utf8")); const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i; const valid=(item)=>item.status==="active" ? item.fencingToken===null&&item.tombstonedAt===null&&item.trashedAt===null&&item.deletedAt===null : item.status==="tombstoned"&&uuid.test(item.fencingToken??"")&&typeof item.tombstonedAt==="string"&&item.trashedAt===null&&item.deletedAt===null; result.invalidSourceBlobReferences=manifests.filter((item)=>!valid(item)).length;} process.stdout.write(JSON.stringify(result)+"\n");' ;;
   *" psql "*"artifact_manifests"*) printf '[{"projectId":"33333333-3333-4333-8333-333333333333","snapshotId":"55555555-5555-4555-8555-555555555555","stage":"convert","storageKey":"%s","contentDigest":"218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9"}]\n' "$FAKE_ARTIFACT_STORAGE_KEY" ;;
-  *" psql "*"source_blob_manifests"*) printf '%s\n' "$FAKE_SOURCE_BLOB_MANIFEST" ;;
+  *" psql "*"source_blob_manifests"*)
+    node -e 'const fs=require("node:fs"); if(process.env.FAKE_REQUIRE_MANIFEST_MODE==="true"&&(fs.fstatSync(1).mode&0o777)!==0o600) process.exit(73); fs.createReadStream(process.env.FAKE_SOURCE_BLOB_MANIFEST_PATH).pipe(process.stdout);' ;;
   *" pg_isready "*) exit 0 ;;
   *" exec "*" node -e "*) exit 0 ;;
   *" run "*" alpine:3.20 tar "*)
@@ -103,6 +146,7 @@ case "$1" in
     ln "$blob" "$empty_directory/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files/src/one.ts"
     ln "$blob" "$empty_directory/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files/src/two.ts"
     tar -C "$empty_directory/snapshots" -czf "$set_directory/snapshots.tgz" .
+    if [ -n "$FAKE_SNAPSHOT_ARCHIVE_PATH" ]; then cp "$FAKE_SNAPSHOT_ARCHIVE_PATH" "$set_directory/snapshots.tgz"; fi
     artifact_path="$empty_directory/artifacts/33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert"
     mkdir -p "$artifact_path"
     printf '%s\n' "$FAKE_ARTIFACT_CONTENT" > "$artifact_path/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json"
@@ -116,9 +160,26 @@ esac
 if [ "$RESTORE_CLEANUP_EXIT" != "0" ]; then exit "$RESTORE_CLEANUP_EXIT"; fi
 exec /bin/rm "$@"
 `);
+  writeFileSync(join(bin, "tar"), String.raw`#!/usr/bin/env sh
+extract=false
+destination=
+previous=
+for argument in "$@"; do
+  case "$argument" in -*x*) extract=true ;; esac
+  if [ "$previous" = "-C" ]; then destination="$argument"; fi
+  previous="$argument"
+done
+"$SYSTEM_TAR" "$@"
+status=$?
+if [ "$status" != "0" ]; then exit "$status"; fi
+if [ "$POST_EXTRACT_SYMLINK" = "true" ] && [ "$extract" = "true" ] && [ -n "$destination" ]; then
+  ln -s ../outside "$destination/injected-symlink"
+fi
+`);
   chmodSync(join(bin, "docker"), 0o755);
   chmodSync(join(bin, "restic"), 0o755);
   chmodSync(join(bin, "rm"), 0o755);
+  chmodSync(join(bin, "tar"), 0o755);
 
   return {
     root,
@@ -138,9 +199,14 @@ exec /bin/rm "$@"
       RESTIC_BACKUP_SNAPSHOT_ID: backupSnapshotId,
       RESTIC_SNAPSHOTS_JSON: JSON.stringify(resticSnapshots),
       FAKE_INTEGRITY_RESULT: integrityResult,
+      FAKE_DERIVE_SOURCE_BLOB_INTEGRITY: String(deriveSourceBlobIntegrity),
       FAKE_ARTIFACT_STORAGE_KEY: artifactStorageKey,
       FAKE_ARTIFACT_CONTENT: artifactContent,
-      FAKE_SOURCE_BLOB_MANIFEST: sourceBlobManifest,
+      FAKE_SOURCE_BLOB_MANIFEST_PATH: sourceBlobManifestFile,
+      FAKE_REQUIRE_MANIFEST_MODE: String(requireManifestMode),
+      FAKE_SNAPSHOT_ARCHIVE_PATH: snapshotArchiveEntries ? snapshotArchiveFile : "",
+      SYSTEM_TAR: systemTar,
+      POST_EXTRACT_SYMLINK: String(postExtractSymlink),
       COMPOSE_DIR: root,
       COMPOSE_PROJECT_NAME: "dev-knowledge-hub",
       SNAPSHOT_VOLUME: "devkh_snapshots",
@@ -152,6 +218,13 @@ exec /bin/rm "$@"
       BACKUP_STATE_DIR: stateDirectory
     }
   };
+}
+
+function mutateSourceBlobManifest(fixture, mutate) {
+  const manifestPath = fixture.environment.FAKE_SOURCE_BLOB_MANIFEST_PATH;
+  const manifests = JSON.parse(readFileSync(manifestPath, "utf8"));
+  mutate(manifests);
+  writeFileSync(manifestPath, `${JSON.stringify(manifests)}\n`, { mode: 0o600 });
 }
 
 async function waitForLog(path, pattern, timeoutMs = 10_000) {
@@ -559,9 +632,8 @@ test("restore drill rejects invalid cross-record relationships", () => {
 });
 
 test("restore drill rejects source blob references that are not backed by a same-inode snapshot view", () => {
-  const fixture = createFixture({
-    sourceBlobManifest: '[{"workspaceId":"11111111-1111-4111-8111-111111111111","snapshotId":"55555555-5555-4555-8555-555555555555","snapshotStoragePath":"/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files","path":"src/missing.ts","contentHash":"47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28","byteSize":34,"generation":1,"storageKey":"blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1"}]'
-  });
+  const fixture = createFixture();
+  mutateSourceBlobManifest(fixture, (manifests) => { manifests[0].path = "src/missing.ts"; });
 
   try {
     const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
@@ -594,8 +666,15 @@ test("restore drill accepts unreferenced deleted source blob generations", () =>
 
 test("restore drill rejects source-file references to trash or deleted source blobs", () => {
   for (const status of ["trash", "deleted"]) {
-    const fixture = createFixture({
-      integrityResult: '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":0,"orphanedSourceAnalysisArtifacts":0,"invalidSourceBlobReferences":1}'
+    const fixture = createFixture();
+    mutateSourceBlobManifest(fixture, (manifests) => {
+      for (const manifest of manifests) {
+        manifest.status = status;
+        manifest.fencingToken = sourceBlobFence;
+        manifest.tombstonedAt = "2026-07-20T00:00:00.000Z";
+        manifest.trashedAt = "2026-07-21T00:00:00.000Z";
+        manifest.deletedAt = status === "deleted" ? "2026-07-22T00:00:00.000Z" : null;
+      }
     });
 
     try {
@@ -603,7 +682,6 @@ test("restore drill rejects source-file references to trash or deleted source bl
 
       assert.notEqual(result.status, 0, status);
       assert.match(result.stderr, /restored database integrity check failed/);
-      assert.match(readFileSync(restoreDrillScript, "utf8"), /sb\.status NOT IN \('active','tombstoned'\)/);
     } finally {
       rmSync(fixture.root, { recursive: true, force: true });
     }
@@ -612,10 +690,12 @@ test("restore drill rejects source-file references to trash or deleted source bl
 
 test("restore drill rejects a snapshot storage path that only has the expected suffix", () => {
   const fixture = createFixture();
-  fixture.environment.FAKE_SOURCE_BLOB_MANIFEST = fixture.environment.FAKE_SOURCE_BLOB_MANIFEST.replace(
-    "/var/lib/devkh/snapshots/snapshots/",
-    "/tmp/attacker-controlled/snapshots/"
-  );
+  mutateSourceBlobManifest(fixture, (manifests) => {
+    manifests[0].snapshotStoragePath = manifests[0].snapshotStoragePath.replace(
+      "/var/lib/devkh/snapshots/snapshots/",
+      "/tmp/attacker-controlled/snapshots/"
+    );
+  });
 
   try {
     const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
@@ -629,15 +709,138 @@ test("restore drill rejects a snapshot storage path that only has the expected s
 
 test("restore drill rejects source-file paths containing backslashes", () => {
   const fixture = createFixture();
-  const sourceBlobManifest = JSON.parse(fixture.environment.FAKE_SOURCE_BLOB_MANIFEST);
-  sourceBlobManifest[0].path = "src\\one.ts";
-  fixture.environment.FAKE_SOURCE_BLOB_MANIFEST = JSON.stringify(sourceBlobManifest);
+  mutateSourceBlobManifest(fixture, (manifests) => { manifests[0].path = "src\\one.ts"; });
 
   try {
     const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /invalid source blob path/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("restore drill reads source blob manifests larger than 256 KiB from a mode-0600 file", () => {
+  const fixture = createFixture({ sourceBlobManifestPaddingBytes: 300 * 1024, requireManifestMode: true });
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(readFileSync(restoreDrillScript, "utf8"), /source_blob_manifest_path/);
+    assert.doesNotMatch(readFileSync(restoreDrillScript, "utf8"), /"\$source_blob_manifests"/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("restore drill accepts a strictly formed tombstoned source blob reference", () => {
+  const fixture = createFixture();
+  mutateSourceBlobManifest(fixture, (manifests) => {
+    for (const manifest of manifests) {
+      manifest.status = "tombstoned";
+      manifest.fencingToken = sourceBlobFence;
+      manifest.tombstonedAt = "2026-07-20T00:00:00.000Z";
+    }
+  });
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("restore drill independently rejects invalid active source blob state metadata", () => {
+  const fixture = createFixture({ deriveSourceBlobIntegrity: false });
+  mutateSourceBlobManifest(fixture, (manifests) => { manifests[0].fencingToken = sourceBlobFence; });
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /invalid active source blob state/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+for (const [condition, mutate] of [
+  ["missing fence", (manifest) => { manifest.fencingToken = null; }],
+  ["missing tombstone time", (manifest) => { manifest.tombstonedAt = null; }],
+  ["trash time present", (manifest) => { manifest.trashedAt = "2026-07-21T00:00:00.000Z"; }],
+  ["deleted time present", (manifest) => { manifest.deletedAt = "2026-07-22T00:00:00.000Z"; }]
+]) {
+  test(`restore drill rejects tombstoned source blob state with ${condition}`, () => {
+    const fixture = createFixture({ deriveSourceBlobIntegrity: false });
+    mutateSourceBlobManifest(fixture, (manifests) => {
+      manifests[0].status = "tombstoned";
+      manifests[0].fencingToken = sourceBlobFence;
+      manifests[0].tombstonedAt = "2026-07-20T00:00:00.000Z";
+      mutate(manifests[0]);
+    });
+
+    try {
+      const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /invalid tombstoned source blob state/);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("restore drill rejects an archive with an intermediate-directory symlink escape", () => {
+  const fixture = createFixture({ snapshotArchiveEntries: [
+    { name: "escape", type: "2", linkName: "../outside" },
+    { name: "escape/payload", contents: "owned" }
+  ] });
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /unsafe archive member type/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("restore drill rejects a symlink discovered only after archive extraction", () => {
+  const fixture = createFixture({ postExtractSymlink: true });
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /unsafe symlink in extracted archive/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("restore drill rejects archive hardlinks that escape the extraction root", () => {
+  const fixture = createFixture({ snapshotArchiveEntries: [
+    { name: "inside", type: "1", linkName: "../../outside" }
+  ] });
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /unsafe archive hardlink target/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("restore drill rejects non-regular archive members", () => {
+  const fixture = createFixture({ snapshotArchiveEntries: [
+    { name: "named-pipe", type: "6" }
+  ] });
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /unsafe archive member type/);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

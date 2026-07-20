@@ -55,9 +55,12 @@ function parseUtcTimestamp(value, name) {
   return parsed.getTime();
 }
 
-export function validateRecoveryEvidence(evidence) {
+export function validateRecoveryEvidence(evidence, options = {}) {
   requireEvidence(evidence && typeof evidence === "object" && !Array.isArray(evidence), "document must be an object");
-  requireEvidence(evidence.schemaVersion === 2 || evidence.schemaVersion === 3, "schemaVersion must be 2 or 3");
+  requireEvidence(
+    evidence.schemaVersion === 3 || (options.allowLegacyV2 === true && evidence.schemaVersion === 2),
+    "schemaVersion must be 3"
+  );
   const sourceBlobEvidence = evidence.schemaVersion === 3;
   requireExactFields(
     evidence,
@@ -152,10 +155,19 @@ export function validateRecoveryEvidence(evidence) {
 }
 
 export async function main(args = process.argv.slice(2)) {
-  const [path] = args;
+  let path;
+  let allowLegacyV2 = false;
+  for (const argument of args) {
+    if (argument === "--allow-legacy-v2") {
+      allowLegacyV2 = true;
+    } else {
+      requireEvidence(!path, "exactly one evidence path is required");
+      path = argument;
+    }
+  }
   requireEvidence(Boolean(path), "evidence path is required");
   const evidence = JSON.parse(await readFile(path, "utf8"));
-  process.stdout.write(`${JSON.stringify(validateRecoveryEvidence(evidence))}\n`);
+  process.stdout.write(`${JSON.stringify(validateRecoveryEvidence(evidence, { allowLegacyV2 }))}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

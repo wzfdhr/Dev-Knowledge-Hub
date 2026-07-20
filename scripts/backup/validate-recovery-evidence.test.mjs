@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { validateRecoveryEvidence } from "./validate-recovery-evidence.mjs";
+
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const validatorScript = join(scriptDirectory, "validate-recovery-evidence.mjs");
 const digest = "a".repeat(64);
@@ -65,11 +67,25 @@ function validEvidence() {
   };
 }
 
-function runValidator(evidence) {
+function legacyV2Evidence() {
+  const evidence = validEvidence();
+  evidence.schemaVersion = 2;
+  for (const field of [
+    "blobReferenceCount", "blobContentVerifiedCount", "blobHardlinkVerifiedCount",
+    "referencedSourceBlobGenerationCount", "sourceBlobLogicalBytes", "sourceBlobPhysicalBytes"
+  ]) delete evidence[field];
+  delete evidence.databaseStats.sourceBlobCount;
+  delete evidence.databaseStats.sourceFileBlobReferenceCount;
+  delete evidence.databaseStats.referencedSourceBlobGenerationCount;
+  delete evidence.integrity.invalidSourceBlobReferences;
+  return evidence;
+}
+
+function runValidator(evidence, options = []) {
   const root = mkdtempSync(join(tmpdir(), "devkh-evidence-"));
   const path = join(root, "evidence.json");
   writeFileSync(path, `${JSON.stringify(evidence)}\n`);
-  const result = spawnSync(process.execPath, [validatorScript, path], { encoding: "utf8" });
+  const result = spawnSync(process.execPath, [validatorScript, ...options, path], { encoding: "utf8" });
   rmSync(root, { recursive: true, force: true });
   return result;
 }
@@ -78,6 +94,15 @@ test("accepts a complete representative recovery evidence document", () => {
   const result = runValidator(validEvidence());
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).schemaVersion, 3);
+});
+
+test("rejects legacy v2 evidence by default and accepts it only with explicit compatibility", () => {
+  const evidence = legacyV2Evidence();
+
+  assert.throws(() => validateRecoveryEvidence(evidence), /schemaVersion must be 3/);
+  assert.equal(validateRecoveryEvidence(evidence, { allowLegacyV2: true }).schemaVersion, 2);
+  assert.notEqual(runValidator(evidence).status, 0);
+  assert.equal(runValidator(evidence, ["--allow-legacy-v2"]).status, 0);
 });
 
 test("rejects incomplete or inconsistent recovery evidence", () => {
@@ -128,6 +153,8 @@ test("the CI recovery drill uses the strict validator", () => {
   assert.match(script, /\*\.json\.pending/);
   assert.match(script, /\*\.json\.pending/);
   assert.match(script, /validate-recovery-evidence\.mjs" "\$evidence_path" >\/dev\/null/);
+  assert.doesNotMatch(script, /--allow-legacy-v2/);
+  assert.doesNotMatch(readFileSync(join(scriptDirectory, "devkh-restore-drill.sh"), "utf8"), /--allow-legacy-v2/);
 });
 
 test("the documented recovery evidence example passes the strict validator", () => {
@@ -136,4 +163,5 @@ test("the documented recovery evidence example passes the strict validator", () 
   assert.ok(json);
   const result = runValidator(JSON.parse(json));
   assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(json).schemaVersion, 3);
 });

@@ -15,6 +15,122 @@ database_container=""
 application_container=""
 cleanup_failed=0
 
+validate_archive_members() {
+  node - "$1" <<'NODE'
+const fs = require("node:fs");
+const zlib = require("node:zlib");
+const archive = process.argv[2];
+const bytes = zlib.gunzipSync(fs.readFileSync(archive));
+const decode = (buffer) => buffer.toString("utf8").replace(/\0.*$/s, "");
+const number = (buffer) => {
+  const text = decode(buffer).trim();
+  return text ? Number.parseInt(text, 8) : 0;
+};
+const safePath = (value, label) => {
+  if (!value || value.includes("\\") || value.startsWith("/")) throw new Error("unsafe archive " + label + ": " + value);
+  const segments = value.split("/").filter((segment) => segment !== "");
+  while (segments[0] === ".") segments.shift();
+  if (!segments.length || segments.some((segment) => segment === "." || segment === "..")) throw new Error("unsafe archive " + label + ": " + value);
+  return segments.join("/");
+};
+const pax = (body) => {
+  const result = {};
+  let offset = 0;
+  while (offset < body.length) {
+    const space = body.indexOf(0x20, offset);
+    if (space < 0) throw new Error("invalid archive PAX record");
+    const length = Number.parseInt(body.subarray(offset, space).toString("ascii"), 10);
+    if (!Number.isSafeInteger(length) || length <= 0 || offset + length > body.length) throw new Error("invalid archive PAX record");
+    const record = body.subarray(space + 1, offset + length - 1).toString("utf8");
+    const equals = record.indexOf("=");
+    if (equals > 0) result[record.slice(0, equals)] = record.slice(equals + 1);
+    offset += length;
+  }
+  return result;
+};
+const entries = [];
+let offset = 0;
+let localPax = {};
+let globalPax = {};
+let longPath;
+let longLink;
+while (offset + 512 <= bytes.length) {
+  const header = bytes.subarray(offset, offset + 512);
+  if (header.every((byte) => byte === 0)) break;
+  const storedChecksum = number(header.subarray(148, 156));
+  let checksum = 0;
+  for (let index = 0; index < 512; index++) checksum += index >= 148 && index < 156 ? 0x20 : header[index];
+  if (storedChecksum !== checksum) throw new Error("invalid archive header checksum");
+  const size = number(header.subarray(124, 136));
+  if (!Number.isSafeInteger(size) || size < 0) throw new Error("invalid archive member size");
+  const type = String.fromCharCode(header[156] || 0x30);
+  const prefix = decode(header.subarray(345, 500));
+  const rawName = decode(header.subarray(0, 100));
+  const bodyStart = offset + 512;
+  const bodyEnd = bodyStart + size;
+  if (bodyEnd > bytes.length) throw new Error("truncated archive member");
+  const body = bytes.subarray(bodyStart, bodyEnd);
+  offset = bodyStart + Math.ceil(size / 512) * 512;
+  if (type === "x" || type === "g") {
+    const values = pax(body);
+    if (type === "x") localPax = values; else globalPax = { ...globalPax, ...values };
+    continue;
+  }
+  if (type === "L" || type === "K") {
+    const value = decode(body);
+    if (type === "L") longPath = value; else longLink = value;
+    continue;
+  }
+  const metadata = { ...globalPax, ...localPax };
+  const memberPath = metadata.path || longPath || (prefix ? prefix + "/" + rawName : rawName);
+  if ((memberPath === "." || memberPath === "./") && type === "5") { localPax = {}; longPath = undefined; longLink = undefined; continue; }
+  const name = safePath(memberPath, "member path");
+  const linkName = metadata.linkpath || longLink || decode(header.subarray(157, 257));
+  localPax = {}; longPath = undefined; longLink = undefined;
+  if (!["0", "\0", "1", "5"].includes(type)) throw new Error("unsafe archive member type: " + type + " " + name);
+  entries.push({ name, type: type === "\0" ? "0" : type, linkName });
+}
+const byName = new Map();
+for (const entry of entries) {
+  if (byName.has(entry.name)) throw new Error("duplicate archive member: " + entry.name);
+  byName.set(entry.name, entry);
+}
+const resolvesToRegular = (entry, seen = new Set()) => {
+  if (entry.type === "0") return true;
+  if (entry.type !== "1" || seen.has(entry.name)) return false;
+  seen.add(entry.name);
+  let target;
+  try { target = safePath(entry.linkName, "hardlink target"); } catch { return false; }
+  const targetEntry = byName.get(target);
+  return Boolean(targetEntry && resolvesToRegular(targetEntry, seen));
+};
+for (const entry of entries) {
+  if (entry.type === "1" && !resolvesToRegular(entry)) throw new Error("unsafe archive hardlink target: " + entry.linkName);
+}
+NODE
+}
+
+validate_extracted_tree() {
+  node - "$1" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const root = fs.realpathSync(process.argv[2]);
+const contained = (candidate) => candidate === root || candidate.startsWith(root + path.sep);
+const walk = (directory) => {
+  for (const name of fs.readdirSync(directory)) {
+    const candidate = path.join(directory, name);
+    const stats = fs.lstatSync(candidate, { bigint: true });
+    if (stats.isSymbolicLink()) throw new Error("unsafe symlink in extracted archive: " + candidate);
+    const canonical = fs.realpathSync(candidate);
+    if (!contained(canonical)) throw new Error("extracted archive path escapes root: " + candidate);
+    if (stats.isDirectory()) walk(candidate);
+    else if (!stats.isFile()) throw new Error("unsafe non-regular extracted archive member: " + candidate);
+  }
+};
+walk(root);
+NODE
+}
+
 finish() {
   local exit_code="$1"
 
@@ -91,12 +207,10 @@ set_directory="$(dirname "$(find "$target" -type f -name manifest.json -print -q
 volume_root="$target/volumes"
 mkdir -p "$volume_root"
 for archive in snapshots repositories sources artifacts; do
-  if tar -tzf "$set_directory/$archive.tgz" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
-    printf 'unsafe path in restored archive: %s.tgz\n' "$archive" >&2
-    exit 65
-  fi
+  validate_archive_members "$set_directory/$archive.tgz"
   mkdir -p "$volume_root/$archive"
   tar -xzf "$set_directory/$archive.tgz" -C "$volume_root/$archive"
+  validate_extracted_tree "$volume_root/$archive"
 done
 volume_file_counts="$(node -e 'const fs=require("node:fs"); const path=require("node:path"); const root=process.argv[1]; const count=(directory)=>fs.readdirSync(directory,{withFileTypes:true}).reduce((total,entry)=>total+(entry.isDirectory()?count(path.join(directory,entry.name)):entry.isFile()?1:0),0); process.stdout.write(JSON.stringify(Object.fromEntries(["snapshots","repositories","sources","artifacts"].map((name)=>[name,count(path.join(root,name))]))));' "$volume_root")"
 volume_archive_sha256="$(node -e 'const fs=require("node:fs"); const crypto=require("node:crypto"); const root=process.argv[1]; const digest=(name)=>crypto.createHash("sha256").update(fs.readFileSync(`${root}/${name}.tgz`)).digest("hex"); process.stdout.write(JSON.stringify(Object.fromEntries(["snapshots","repositories","sources","artifacts"].map((name)=>[name,digest(name)]))));' "$set_directory")"
@@ -143,40 +257,60 @@ docker exec -i "$database_container" \
 database_stats="$(docker exec "$database_container" psql -U devkh -d dev_knowledge_hub -At -v ON_ERROR_STOP=1 -c \
   "SELECT json_build_object('workspaceCount',(SELECT count(*) FROM workspaces),'userCount',(SELECT count(*) FROM admin_users),'projectCount',(SELECT count(*) FROM projects),'projectMemberCount',(SELECT count(*) FROM project_members),'snapshotCount',(SELECT count(*) FROM source_snapshots),'releaseCount',(SELECT count(*) FROM releases),'releaseChannelCount',(SELECT count(*) FROM release_channels),'artifactCount',(SELECT count(*) FROM knowledge_artifacts),'sourceAnalysisArtifactCount',(SELECT count(*) FROM source_analysis_artifacts),'sourceBlobCount',(SELECT count(*) FROM source_blobs),'sourceFileBlobReferenceCount',(SELECT count(*) FROM source_files WHERE source_blob_id IS NOT NULL),'referencedSourceBlobGenerationCount',(SELECT count(DISTINCT source_blob_id) FROM source_files WHERE source_blob_id IS NOT NULL))::text;")"
 integrity="$(docker exec "$database_container" psql -U devkh -d dev_knowledge_hub -At -v ON_ERROR_STOP=1 -c \
-  "SELECT json_build_object('orphanedReleases',(SELECT count(*) FROM releases r LEFT JOIN repositories repo ON repo.id=r.repository_id AND repo.workspace_id=r.workspace_id LEFT JOIN build_jobs b ON b.id=r.build_job_id AND b.workspace_id=r.workspace_id LEFT JOIN source_snapshots s ON s.id=r.snapshot_id AND s.workspace_id=r.workspace_id WHERE repo.id IS NULL OR b.id IS NULL OR s.id IS NULL OR b.repository_id<>r.repository_id OR b.snapshot_id<>r.snapshot_id OR s.repository_id<>r.repository_id),'orphanedReleaseChannels',(SELECT count(*) FROM release_channels c LEFT JOIN releases r ON r.id=c.release_id AND r.workspace_id=c.workspace_id LEFT JOIN repositories repo ON repo.id=c.repository_id AND repo.workspace_id=c.workspace_id WHERE (c.release_id IS NOT NULL AND (r.id IS NULL OR r.repository_id<>c.repository_id)) OR repo.id IS NULL),'crossWorkspaceProjectMembers',(SELECT count(*) FROM project_members pm JOIN projects p ON p.id=pm.project_id JOIN admin_users u ON u.id=pm.user_id WHERE p.workspace_id<>u.workspace_id),'projectMembersWithoutWorkspaceMembership',(SELECT count(*) FROM project_members pm JOIN projects p ON p.id=pm.project_id LEFT JOIN workspace_members wm ON wm.workspace_id=p.workspace_id AND wm.user_id=pm.user_id WHERE wm.user_id IS NULL),'orphanedArtifacts',(SELECT count(*) FROM knowledge_artifacts a LEFT JOIN projects p ON p.id=a.project_id AND p.workspace_id=a.workspace_id LEFT JOIN source_snapshots s ON s.id=a.snapshot_id AND s.workspace_id=a.workspace_id LEFT JOIN build_jobs b ON b.id=a.build_job_id AND b.workspace_id=a.workspace_id LEFT JOIN repositories repo ON repo.id=b.repository_id AND repo.workspace_id=b.workspace_id WHERE p.id IS NULL OR s.id IS NULL OR b.id IS NULL OR repo.id IS NULL OR b.snapshot_id<>a.snapshot_id OR s.repository_id<>b.repository_id OR repo.project_id<>a.project_id),'orphanedSourceAnalysisArtifacts',(SELECT count(*) FROM source_analysis_artifacts a LEFT JOIN workspaces w ON w.id=a.workspace_id WHERE w.id IS NULL),'invalidSourceBlobReferences',(SELECT count(*) FROM source_files sf LEFT JOIN source_blobs sb ON sb.id=sf.source_blob_id WHERE sf.source_blob_id IS NOT NULL AND (sb.id IS NULL OR sb.workspace_id<>sf.workspace_id OR sb.content_hash<>sf.content_hash OR sb.byte_size<>sf.byte_size OR sb.generation<1 OR sb.status NOT IN ('active','tombstoned'))))::text;")"
+  "SELECT json_build_object('orphanedReleases',(SELECT count(*) FROM releases r LEFT JOIN repositories repo ON repo.id=r.repository_id AND repo.workspace_id=r.workspace_id LEFT JOIN build_jobs b ON b.id=r.build_job_id AND b.workspace_id=r.workspace_id LEFT JOIN source_snapshots s ON s.id=r.snapshot_id AND s.workspace_id=r.workspace_id WHERE repo.id IS NULL OR b.id IS NULL OR s.id IS NULL OR b.repository_id<>r.repository_id OR b.snapshot_id<>r.snapshot_id OR s.repository_id<>r.repository_id),'orphanedReleaseChannels',(SELECT count(*) FROM release_channels c LEFT JOIN releases r ON r.id=c.release_id AND r.workspace_id=c.workspace_id LEFT JOIN repositories repo ON repo.id=c.repository_id AND repo.workspace_id=c.workspace_id WHERE (c.release_id IS NOT NULL AND (r.id IS NULL OR r.repository_id<>c.repository_id)) OR repo.id IS NULL),'crossWorkspaceProjectMembers',(SELECT count(*) FROM project_members pm JOIN projects p ON p.id=pm.project_id JOIN admin_users u ON u.id=pm.user_id WHERE p.workspace_id<>u.workspace_id),'projectMembersWithoutWorkspaceMembership',(SELECT count(*) FROM project_members pm JOIN projects p ON p.id=pm.project_id LEFT JOIN workspace_members wm ON wm.workspace_id=p.workspace_id AND wm.user_id=pm.user_id WHERE wm.user_id IS NULL),'orphanedArtifacts',(SELECT count(*) FROM knowledge_artifacts a LEFT JOIN projects p ON p.id=a.project_id AND p.workspace_id=a.workspace_id LEFT JOIN source_snapshots s ON s.id=a.snapshot_id AND s.workspace_id=a.workspace_id LEFT JOIN build_jobs b ON b.id=a.build_job_id AND b.workspace_id=a.workspace_id LEFT JOIN repositories repo ON repo.id=b.repository_id AND repo.workspace_id=b.workspace_id WHERE p.id IS NULL OR s.id IS NULL OR b.id IS NULL OR repo.id IS NULL OR b.snapshot_id<>a.snapshot_id OR s.repository_id<>b.repository_id OR repo.project_id<>a.project_id),'orphanedSourceAnalysisArtifacts',(SELECT count(*) FROM source_analysis_artifacts a LEFT JOIN workspaces w ON w.id=a.workspace_id WHERE w.id IS NULL),'invalidSourceBlobReferences',(SELECT count(*) FROM source_files sf LEFT JOIN source_blobs sb ON sb.id=sf.source_blob_id WHERE sf.source_blob_id IS NOT NULL AND (sb.id IS NULL OR sb.workspace_id<>sf.workspace_id OR sb.content_hash<>sf.content_hash OR sb.byte_size<>sf.byte_size OR sb.generation<1 OR sb.status NOT IN ('active','tombstoned') OR (sb.status='active' AND (sb.fencing_token IS NOT NULL OR sb.tombstoned_at IS NOT NULL OR sb.trashed_at IS NOT NULL OR sb.deleted_at IS NOT NULL)) OR (sb.status='tombstoned' AND (sb.fencing_token IS NULL OR sb.tombstoned_at IS NULL OR sb.trashed_at IS NOT NULL OR sb.deleted_at IS NOT NULL)))))::text;")"
 node -e 'const integrity=JSON.parse(process.argv[1]); if(Object.values(integrity).some((value)=>value!==0)){console.error("restored database integrity check failed",integrity);process.exit(1)}' "$integrity"
 
-source_blob_manifests="$(docker exec "$database_container" psql -U devkh -d dev_knowledge_hub -At -v ON_ERROR_STOP=1 -c \
-  "SELECT COALESCE(json_agg(json_build_object('workspaceId',sf.workspace_id,'snapshotId',sf.snapshot_id,'snapshotStoragePath',s.storage_path,'path',sf.path,'contentHash',sf.content_hash,'byteSize',sf.byte_size,'generation',sb.generation,'storageKey',sb.storage_key) ORDER BY sf.workspace_id,sf.snapshot_id,sf.path),'[]'::json)::text AS source_blob_manifests FROM source_files sf JOIN source_blobs sb ON sb.id=sf.source_blob_id AND sb.workspace_id=sf.workspace_id JOIN source_snapshots s ON s.id=sf.snapshot_id AND s.workspace_id=sf.workspace_id WHERE sf.source_blob_id IS NOT NULL;")"
+source_blob_manifest_path="$target/source-blob-manifests.json"
+(
+  umask 077
+  docker exec "$database_container" psql -U devkh -d dev_knowledge_hub -At -v ON_ERROR_STOP=1 -c \
+    "SELECT COALESCE(json_agg(json_build_object('workspaceId',sf.workspace_id,'snapshotId',sf.snapshot_id,'snapshotStoragePath',s.storage_path,'path',sf.path,'contentHash',sf.content_hash,'byteSize',sf.byte_size,'generation',sb.generation,'storageKey',sb.storage_key,'status',sb.status,'fencingToken',sb.fencing_token,'tombstonedAt',sb.tombstoned_at,'trashedAt',sb.trashed_at,'deletedAt',sb.deleted_at) ORDER BY sf.workspace_id,sf.snapshot_id,sf.path),'[]'::json)::text AS source_blob_manifests FROM source_files sf JOIN source_blobs sb ON sb.id=sf.source_blob_id AND sb.workspace_id=sf.workspace_id JOIN source_snapshots s ON s.id=sf.snapshot_id AND s.workspace_id=sf.workspace_id WHERE sf.source_blob_id IS NOT NULL;" \
+    > "$source_blob_manifest_path"
+)
+chmod 600 "$source_blob_manifest_path"
 source_blob_evidence="$(node -e '
   const fs=require("node:fs"); const path=require("node:path"); const crypto=require("node:crypto");
-  const root=path.resolve(process.argv[1]); const manifests=JSON.parse(process.argv[2]);
-  const safeSegment=/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/; const digest=/^[a-f0-9]{64}$/;
-  const checkedGenerations=new Map(); const physicalInodes=new Set(); let blobHardlinkVerifiedCount=0; let sourceBlobLogicalBytes=0; let sourceBlobPhysicalBytes=0;
+  const root=fs.realpathSync(path.resolve(process.argv[1])); const manifests=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));
+  const safeSegment=/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/; const digest=/^[a-f0-9]{64}$/; const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const contained=(candidate)=>candidate===root||candidate.startsWith(root+path.sep);
+  const regularFile=(segments,label)=>{
+    let candidate=root;
+    for(let index=0;index<segments.length;index++){
+      candidate=path.join(candidate,segments[index]);
+      let stats; try{stats=fs.lstatSync(candidate,{bigint:true})}catch{throw new Error(label+" is unavailable")}
+      if(stats.isSymbolicLink()) throw new Error(label+" path contains a symbolic link");
+      if(index<segments.length-1&&!stats.isDirectory()) throw new Error(label+" path parent is not a directory");
+      if(index===segments.length-1&&!stats.isFile()) throw new Error(label+" is not a regular file");
+      let canonical; try{canonical=fs.realpathSync(candidate)}catch{throw new Error(label+" canonical path is unavailable")}
+      if(!contained(canonical)) throw new Error(label+" escapes snapshot volume");
+    }
+    return { path:candidate, stats:fs.lstatSync(candidate,{bigint:true}) };
+  };
+  const checkedGenerations=new Map(); const physicalInodes=new Set(); let blobHardlinkVerifiedCount=0; let sourceBlobLogicalBytes=0n; let sourceBlobPhysicalBytes=0n;
   for(const manifest of manifests){
     if(!safeSegment.test(manifest.workspaceId??"")||!safeSegment.test(manifest.snapshotId??"")||typeof manifest.path!=="string"||!digest.test(manifest.contentHash??"")||!Number.isSafeInteger(manifest.byteSize)||manifest.byteSize<0||!Number.isSafeInteger(manifest.generation)||manifest.generation<1) throw new Error("invalid source blob manifest");
-    const pathSegments=manifest.path.split("/"); if(!pathSegments.length||manifest.path.includes("\\")||pathSegments.some((segment)=>!segment||segment==="."||segment===".."||segment.includes("\\0"))) throw new Error("invalid source blob path");
+    const pathSegments=manifest.path.split("/"); if(!pathSegments.length||manifest.path.includes("\\")||pathSegments.some((segment)=>!segment||segment==="."||segment===".."||segment.includes("\0"))) throw new Error("invalid source blob path");
+    const stateTimes=[manifest.fencingToken,manifest.tombstonedAt,manifest.trashedAt,manifest.deletedAt];
+    if(manifest.status==="active"){if(stateTimes.some((value)=>value!==null)) throw new Error("invalid active source blob state");}
+    else if(manifest.status==="tombstoned"){if(!uuid.test(manifest.fencingToken??"")||typeof manifest.tombstonedAt!=="string"||!Number.isFinite(Date.parse(manifest.tombstonedAt))||manifest.trashedAt!==null||manifest.deletedAt!==null) throw new Error("invalid tombstoned source blob state");}
+    else throw new Error("referenced source blob status is not recoverable");
     const expectedStorageKey=["blobs",manifest.workspaceId,manifest.contentHash.slice(0,2),manifest.contentHash,String(manifest.generation)].join("/");
     if(manifest.storageKey!==expectedStorageKey) throw new Error("source blob storage key does not match manifest");
-    const expectedSnapshotStoragePath=`/var/lib/devkh/snapshots/snapshots/${manifest.snapshotId}/files`;
+    const expectedSnapshotStoragePath="/var/lib/devkh/snapshots/snapshots/"+manifest.snapshotId+"/files";
     if(manifest.snapshotStoragePath!==expectedSnapshotStoragePath) throw new Error("snapshot storage path does not match manifest");
-    const blobPath=path.resolve(root,...manifest.storageKey.split("/"));
-    const viewPath=path.resolve(root,"snapshots",manifest.snapshotId,"files",...pathSegments);
-    if(!blobPath.startsWith(`${root}${path.sep}`)||!viewPath.startsWith(`${root}${path.sep}`)) throw new Error("source blob path escapes snapshot volume");
-    let blob; try{blob=fs.lstatSync(blobPath)}catch{throw new Error("source blob content is unavailable")};
-    if(!blob.isFile()||blob.isSymbolicLink()) throw new Error("source blob is not a regular file");
+    const blobFile=regularFile(manifest.storageKey.split("/"),"source blob content"); const blobPath=blobFile.path; const blob=blobFile.stats;
+    const viewFile=regularFile(["snapshots",manifest.snapshotId,"files",...pathSegments],"snapshot view"); const viewPath=viewFile.path; const view=viewFile.stats;
     const blobBytes=fs.readFileSync(blobPath); if(blobBytes.length!==manifest.byteSize||crypto.createHash("sha256").update(blobBytes).digest("hex")!==manifest.contentHash) throw new Error("source blob content digest mismatch");
     const generationKey=[manifest.workspaceId,manifest.contentHash,manifest.generation].join("/");
     const known=checkedGenerations.get(generationKey); if(known&&known!==manifest.storageKey) throw new Error("source blob generation has inconsistent storage keys");
-    if(!known){ checkedGenerations.set(generationKey,manifest.storageKey); sourceBlobLogicalBytes+=manifest.byteSize; const inodeKey=`${blob.dev}:${blob.ino}`; if(!physicalInodes.has(inodeKey)){physicalInodes.add(inodeKey); sourceBlobPhysicalBytes+=Number(blob.blocks)*512;} }
-    let view; try{view=fs.lstatSync(viewPath)}catch{throw new Error("snapshot view is unavailable")};
-    if(!view.isFile()||view.isSymbolicLink()) throw new Error("snapshot view is not a regular file");
+    if(!known){ checkedGenerations.set(generationKey,manifest.storageKey); sourceBlobLogicalBytes+=BigInt(manifest.byteSize); const inodeKey=blob.dev.toString()+":"+blob.ino.toString(); if(!physicalInodes.has(inodeKey)){physicalInodes.add(inodeKey); sourceBlobPhysicalBytes+=blob.blocks*512n;} }
     const viewBytes=fs.readFileSync(viewPath); if(viewBytes.length!==manifest.byteSize||crypto.createHash("sha256").update(viewBytes).digest("hex")!==manifest.contentHash) throw new Error("snapshot view content digest mismatch");
     if(view.dev!==blob.dev||view.ino!==blob.ino) throw new Error("snapshot view is not a same-inode hardlink");
     blobHardlinkVerifiedCount++;
   }
-  process.stdout.write(JSON.stringify({blobReferenceCount:manifests.length,blobContentVerifiedCount:checkedGenerations.size,blobHardlinkVerifiedCount,referencedSourceBlobGenerationCount:checkedGenerations.size,sourceBlobLogicalBytes,sourceBlobPhysicalBytes}));
-' "$volume_root/snapshots" "$source_blob_manifests")"
+  const maximum=BigInt(Number.MAX_SAFE_INTEGER); if(sourceBlobLogicalBytes>maximum||sourceBlobPhysicalBytes>maximum) throw new Error("source blob byte evidence exceeds safe integer range");
+  process.stdout.write(JSON.stringify({blobReferenceCount:manifests.length,blobContentVerifiedCount:checkedGenerations.size,blobHardlinkVerifiedCount,referencedSourceBlobGenerationCount:checkedGenerations.size,sourceBlobLogicalBytes:Number(sourceBlobLogicalBytes),sourceBlobPhysicalBytes:Number(sourceBlobPhysicalBytes)}));
+' "$volume_root/snapshots" "$source_blob_manifest_path")"
 
 artifact_manifests="$(docker exec "$database_container" psql -U devkh -d dev_knowledge_hub -At -v ON_ERROR_STOP=1 -c \
   "SELECT COALESCE(json_agg(json_build_object('projectId',project_id,'snapshotId',snapshot_id,'stage',stage,'storageKey',storage_key,'contentDigest',content_digest) ORDER BY storage_key),'[]'::json)::text AS artifact_manifests FROM knowledge_artifacts;")"

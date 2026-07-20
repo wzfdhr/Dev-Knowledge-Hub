@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -9,10 +9,30 @@ import {
   CONTAINER_STEPS,
   VERIFY_STEPS,
   assertContainerIsolation,
+  finalizeRecoveryEvidence,
   parseReleaseScope,
   runContainerVerification,
   runReleaseSteps
 } from "./release-verify.mjs";
+
+function createPendingEvidence(root) {
+  const document = readFileSync(join(process.cwd(), "docs/operations/recovery-evidence.md"), "utf8");
+  const evidence = document.match(/```json\n([\s\S]*?)\n```/)?.[1];
+  const sidecar = document.match(/```ndjson\n([\s\S]*?)\n```/)?.[1];
+  if (!evidence || !sidecar) throw new Error("documented evidence fixture is incomplete");
+  const directory = join(root, "run-1", "recovery-evidence");
+  mkdirSync(directory, { recursive: true });
+  const jsonPending = join(directory, "evidence.json.pending");
+  const sidecarPending = join(directory, "evidence.source-blobs.ndjson.pending");
+  writeFileSync(jsonPending, `${evidence}\n`, { mode: 0o600 });
+  writeFileSync(sidecarPending, `${sidecar}\n`, { mode: 0o600 });
+  return {
+    jsonPending,
+    jsonFinal: jsonPending.slice(0, -".pending".length),
+    sidecarPending,
+    sidecarFinal: sidecarPending.slice(0, -".pending".length)
+  };
+}
 
 describe("release verification orchestrator", () => {
   test("keeps the release checks in the approved order", () => {
@@ -137,6 +157,75 @@ describe("release verification orchestrator", () => {
       logger: { error: vi.fn(), log: vi.fn() }
     })).rejects.toThrow("compose-cleanup failed with exit code 1");
     expect(invalidateEvidence).toHaveBeenCalledWith("/tmp/evidence", "compose_cleanup_failed");
+  });
+
+  test("finalizes the sidecar before JSON and strictly validates the final pair", async () => {
+    const root = mkdtempSync(join(tmpdir(), "devkh-release-evidence-"));
+    const paths = createPendingEvidence(root);
+    const renames = [];
+    try {
+      await finalizeRecoveryEvidence(root, {
+        renameFile: async (source, destination) => {
+          renames.push([source, destination]);
+          const { rename } = await import("node:fs/promises");
+          await rename(source, destination);
+        },
+        validateEvidence: async (path) => {
+          expect(path).toBe(paths.jsonFinal);
+          expect(existsSync(paths.sidecarFinal)).toBe(true);
+          expect(existsSync(paths.jsonFinal)).toBe(true);
+          const { validateRecoveryEvidenceFile } = await import("./backup/validate-recovery-evidence.mjs");
+          await validateRecoveryEvidenceFile(path);
+        }
+      });
+
+      expect(renames).toEqual([
+        [paths.sidecarPending, paths.sidecarFinal],
+        [paths.jsonPending, paths.jsonFinal]
+      ]);
+      expect(existsSync(paths.sidecarPending)).toBe(false);
+      expect(existsSync(paths.jsonPending)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("removes both pending and final artifacts when strict final validation fails", async () => {
+    const root = mkdtempSync(join(tmpdir(), "devkh-release-evidence-"));
+    const paths = createPendingEvidence(root);
+    try {
+      await expect(finalizeRecoveryEvidence(root, {
+        validateEvidence: async () => { throw new Error("tampered final pair"); }
+      })).rejects.toThrow("tampered final pair");
+
+      for (const path of [paths.sidecarPending, paths.sidecarFinal, paths.jsonPending, paths.jsonFinal]) {
+        expect(existsSync(path)).toBe(false);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("invalidates both artifacts when deferred final validation fails", async () => {
+    const execute = vi.fn(async () => undefined);
+    const invalidateEvidence = vi.fn(async () => undefined);
+    const finalizeEvidence = vi.fn(async () => { throw new Error("strict final validation failed"); });
+
+    await expect(runContainerVerification({
+      env: {
+        DEVKH_CONTAINER_SMOKE: "true",
+        COMPOSE_PROJECT_NAME: "devkh-ci",
+        RECOVERY_EVIDENCE_DIR: "/tmp/evidence",
+        RECOVERY_EVIDENCE_DEFER_FINALIZATION: "true"
+      },
+      execute,
+      finalizeEvidence,
+      invalidateEvidence,
+      logger: { error: vi.fn(), log: vi.fn() }
+    })).rejects.toThrow("strict final validation failed");
+
+    expect(finalizeEvidence).toHaveBeenCalledWith("/tmp/evidence");
+    expect(invalidateEvidence).toHaveBeenCalledWith("/tmp/evidence", "recovery_evidence_finalization_failed");
   });
 
   test("stops at the first failed step and reports its command and exit code", async () => {

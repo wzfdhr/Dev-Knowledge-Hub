@@ -705,7 +705,7 @@ test("restore drill accepts unreferenced deleted source blob generations", () =>
 
     assert.equal(result.status, 0, result.stderr);
     const evidenceDirectory = join(fixture.environment.BACKUP_STATE_DIR, "recovery-evidence");
-    const [evidenceFile] = execFileSync("find", [evidenceDirectory, "-type", "f"], { encoding: "utf8" }).trim().split("\n");
+    const [evidenceFile] = execFileSync("find", [evidenceDirectory, "-type", "f", "-name", "*.json"], { encoding: "utf8" }).trim().split("\n");
     const evidence = JSON.parse(readFileSync(evidenceFile, "utf8"));
     assert.equal(evidence.databaseStats.sourceBlobCount, 2);
     assert.equal(evidence.databaseStats.referencedSourceBlobGenerationCount, 1);
@@ -859,6 +859,41 @@ test("tar validation rejects malformed size and checksum octal fields", async ()
       validateTarArchive("unused-by-injected-stream", { createInputStream: () => Readable.from([gzipSync(bytes)]) }),
       message
     );
+  }
+});
+
+test("tar validation rejects non-tar whitespace in octal fields", async () => {
+  const { validateTarArchive } = await import(validateTarArchiveScript);
+  const malformedSize = tarBytes([{ name: "one.txt", contents: "x" }]);
+  malformedSize.fill(0, 124, 136);
+  malformedSize.write("0000000001\t", 124, 11, "ascii");
+  refreshTarChecksum(malformedSize);
+  const malformedChecksum = tarBytes([{ name: "one.txt", contents: "x" }]);
+  malformedChecksum.write("00001\n\0 ", 148, 8, "ascii");
+
+  for (const [bytes, message] of [
+    [malformedSize, /invalid archive member size/],
+    [malformedChecksum, /invalid archive header checksum/]
+  ]) {
+    await assert.rejects(
+      validateTarArchive("unused-by-injected-stream", { createInputStream: () => Readable.from([gzipSync(bytes)]) }),
+      message
+    );
+  }
+});
+
+test("tar validation enforces complete bounded PAX length prefixes", async () => {
+  const { validateTarArchive } = await import(validateTarArchiveScript);
+  const validate = (contents) => validateTarArchive("unused-by-injected-stream", {
+    createInputStream: () => Readable.from([gzipTar([
+      { name: "pax", type: "x", contents },
+      { name: "ignored.txt", contents: "" }
+    ])])
+  });
+
+  await validate("10 path=a\n");
+  for (const malformed of ["11x path=a\n", "011 path=a\n", "10 path=aX"]) {
+    await assert.rejects(validate(malformed), /invalid archive PAX record/);
   }
 });
 

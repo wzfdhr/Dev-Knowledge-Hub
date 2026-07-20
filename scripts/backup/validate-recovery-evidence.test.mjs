@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -126,13 +126,14 @@ function legacyV2Evidence() {
   return evidence;
 }
 
-function runValidator(evidence, options = [], records = validSourceBlobRecords(), writeSidecar = true) {
+function runValidator(evidence, options = [], records = validSourceBlobRecords(), writeSidecar = true, setup) {
   const root = mkdtempSync(join(tmpdir(), "devkh-evidence-"));
   const path = join(root, "evidence.json");
   writeFileSync(path, `${JSON.stringify(evidence)}\n`);
   if (evidence.schemaVersion === 3 && writeSidecar && evidence.sourceBlobRecordManifest?.file) {
     writeFileSync(join(root, evidence.sourceBlobRecordManifest.file), serializeSourceBlobRecords(records));
   }
+  setup?.({ root, path, sidecarPath: join(root, evidence.sourceBlobRecordManifest?.file ?? "missing.ndjson") });
   const result = spawnSync(process.execPath, [validatorScript, ...options, path], { encoding: "utf8" });
   rmSync(root, { recursive: true, force: true });
   return result;
@@ -147,7 +148,7 @@ test("accepts a complete representative recovery evidence document", () => {
 test("requires and semantically validates the retained source blob record manifest", () => {
   const missing = runValidator(validEvidence(), [], validSourceBlobRecords(), false);
   assert.notEqual(missing.status, 0);
-  assert.match(missing.stderr, /source blob record manifest is unavailable/);
+  assert.match(missing.stderr, /source blob record manifest must be a regular no-follow file/);
 
   const digestMismatchEvidence = validEvidence();
   digestMismatchEvidence.sourceBlobRecordManifest.sha256 = "b".repeat(64);
@@ -172,6 +173,35 @@ test("requires and semantically validates the retained source blob record manife
   const unrelated = runValidator(unrelatedEvidence, [], unrelatedView);
   assert.notEqual(unrelated.status, 0);
   assert.match(unrelated.stderr, /source blob record hardlink relationship is invalid/);
+});
+
+test("rejects symlink and non-regular evidence or sidecar files", () => {
+  const cases = [
+    ["evidence symlink", ({ path }) => {
+      const target = `${path}.real`;
+      renameSync(path, target);
+      symlinkSync(target, path);
+    }],
+    ["sidecar symlink", ({ sidecarPath }) => {
+      const target = `${sidecarPath}.real`;
+      renameSync(sidecarPath, target);
+      symlinkSync(target, sidecarPath);
+    }],
+    ["evidence directory", ({ path }) => {
+      unlinkSync(path);
+      mkdirSync(path);
+    }],
+    ["sidecar directory", ({ sidecarPath }) => {
+      unlinkSync(sidecarPath);
+      mkdirSync(sidecarPath);
+    }]
+  ];
+
+  for (const [name, setup] of cases) {
+    const result = runValidator(validEvidence(), [], validSourceBlobRecords(), true, setup);
+    assert.notEqual(result.status, 0, name);
+    assert.match(result.stderr, /must be a regular no-follow file/, name);
+  }
 });
 
 test("rejects legacy v2 evidence by default and accepts it only with explicit compatibility", () => {

@@ -10,13 +10,13 @@ function decode(buffer) {
 }
 
 function parseOctal(buffer, label) {
-  const raw = buffer.toString("ascii");
-  const terminator = raw.indexOf("\0");
-  const valuePart = terminator === -1 ? raw : raw.slice(0, terminator);
-  const remainder = terminator === -1 ? "" : raw.slice(terminator + 1);
-  const text = valuePart.trim();
-  if ((text && !/^[0-7]+$/.test(text)) || /[^\0 ]/.test(remainder)) {
-    throw new Error(`invalid archive ${label}`);
+  let offset = 0;
+  while (offset < buffer.length && buffer[offset] === 0x20) offset++;
+  const digitStart = offset;
+  while (offset < buffer.length && buffer[offset] >= 0x30 && buffer[offset] <= 0x37) offset++;
+  const text = buffer.subarray(digitStart, offset).toString("ascii");
+  for (; offset < buffer.length; offset++) {
+    if (buffer[offset] !== 0x00 && buffer[offset] !== 0x20) throw new Error(`invalid archive ${label}`);
   }
   const value = text ? Number.parseInt(text, 8) : 0;
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`invalid archive ${label}`);
@@ -41,14 +41,18 @@ function parsePax(body) {
   while (offset < body.length) {
     const space = body.indexOf(0x20, offset);
     if (space < 0) throw new Error("invalid archive PAX record");
-    const length = Number.parseInt(body.subarray(offset, space).toString("ascii"), 10);
-    if (!Number.isSafeInteger(length) || length <= 0 || offset + length > body.length) {
+    const prefix = body.subarray(offset, space).toString("ascii");
+    if (!/^[1-9][0-9]*$/.test(prefix)) throw new Error("invalid archive PAX record");
+    const length = Number(prefix);
+    const end = offset + length;
+    if (!Number.isSafeInteger(length) || length <= prefix.length + 2 || end > body.length || body[end - 1] !== 0x0a) {
       throw new Error("invalid archive PAX record");
     }
-    const record = body.subarray(space + 1, offset + length - 1).toString("utf8");
+    const record = body.subarray(space + 1, end - 1).toString("utf8");
     const equals = record.indexOf("=");
-    if (equals > 0) result[record.slice(0, equals)] = record.slice(equals + 1);
-    offset += length;
+    if (equals <= 0) throw new Error("invalid archive PAX record");
+    result[record.slice(0, equals)] = record.slice(equals + 1);
+    offset = end;
   }
   return result;
 }

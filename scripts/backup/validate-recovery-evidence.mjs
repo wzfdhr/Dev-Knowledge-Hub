@@ -1,5 +1,5 @@
-import { createReadStream } from "node:fs";
-import { access, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 import { basename, dirname, join } from "node:path";
@@ -276,15 +276,11 @@ async function loadSourceBlobManifestSummary(evidencePath, evidence) {
   validateSourceBlobManifestDescriptor(evidence);
   const finalPath = join(dirname(evidencePath), evidence.sourceBlobRecordManifest.file);
   const manifestPath = evidencePath.endsWith(".pending") ? `${finalPath}.pending` : finalPath;
-  try {
-    await access(manifestPath);
-  } catch {
-    requireEvidence(false, "source blob record manifest is unavailable");
-  }
+  const manifestHandle = await openRegularNoFollow(manifestPath, "source blob record manifest");
 
   const summary = createSourceBlobSummary();
   const digestState = createHash("sha256");
-  const input = createReadStream(manifestPath);
+  const input = manifestHandle.createReadStream({ autoClose: false });
   let lastByte;
   let containsCarriageReturn = false;
   input.on("data", (chunk) => {
@@ -308,10 +304,43 @@ async function loadSourceBlobManifestSummary(evidencePath, evidence) {
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("recovery evidence validation failed:")) throw error;
     requireEvidence(false, "source blob record manifest could not be read");
+  } finally {
+    await manifestHandle.close();
   }
   requireEvidence(lastByte === 0x0a && !containsCarriageReturn, "source blob record manifest must use canonical LF-delimited records");
   requireEvidence(digestState.digest("hex") === evidence.sourceBlobRecordManifest.sha256, "source blob record manifest digest does not match");
   return summary;
+}
+
+async function openRegularNoFollow(path, label) {
+  let handle;
+  try {
+    const flags = constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0);
+    handle = await open(path, flags);
+    const stats = await handle.stat({ bigint: true });
+    if (!stats.isFile()) throw new Error("not a regular file");
+    return handle;
+  } catch {
+    await handle?.close().catch(() => undefined);
+    requireEvidence(false, `${label} must be a regular no-follow file`);
+  }
+}
+
+export async function validateRecoveryEvidenceFile(path, options = {}) {
+  const evidenceHandle = await openRegularNoFollow(path, "recovery evidence");
+  let evidence;
+  try {
+    evidence = JSON.parse(await evidenceHandle.readFile("utf8"));
+  } finally {
+    await evidenceHandle.close();
+  }
+  const sourceBlobManifestSummary = evidence.schemaVersion === 3
+    ? await loadSourceBlobManifestSummary(path, evidence)
+    : undefined;
+  return validateRecoveryEvidence(evidence, {
+    allowLegacyV2: options.allowLegacyV2 === true,
+    sourceBlobManifestSummary
+  });
 }
 
 export async function main(args = process.argv.slice(2)) {
@@ -326,11 +355,8 @@ export async function main(args = process.argv.slice(2)) {
     }
   }
   requireEvidence(Boolean(path), "evidence path is required");
-  const evidence = JSON.parse(await readFile(path, "utf8"));
-  const sourceBlobManifestSummary = evidence.schemaVersion === 3
-    ? await loadSourceBlobManifestSummary(path, evidence)
-    : undefined;
-  process.stdout.write(`${JSON.stringify(validateRecoveryEvidence(evidence, { allowLegacyV2, sourceBlobManifestSummary }))}\n`);
+  const evidence = await validateRecoveryEvidenceFile(path, { allowLegacyV2 });
+  process.stdout.write(`${JSON.stringify(evidence)}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

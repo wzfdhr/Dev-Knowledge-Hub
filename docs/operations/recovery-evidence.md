@@ -109,6 +109,12 @@ FK17 门禁不得传入该兼容标志。
 整份 v3 证据无效。主 JSON 和 sidecar 先以 `.pending` 成对写入，清理成功后 sidecar 先于主 JSON 原子确认；
 任一失败会同时移除两者，不能留下可验收的单边成功证据。
 
+CI 使用 deferred finalization 时，`release:verify --scope container` 必须在外层 Compose 清理成功后先将 NDJSON
+sidecar 从 `.pending` 重命名为最终名，再重命名主 JSON，随后立即对最终文件对执行一次严格验证，成功返回后
+workflow 才能上传 artifact。验证器通过 `O_NOFOLLOW` 的只读文件句柄读取并 `fstat` 主 JSON 和 sidecar；
+symlink、目录及其他非普通文件均拒绝。最终验证或任一重命名失败时，release verification 会删除 final/pending
+两种名称并只留下失败记录，上传目录中不得存在成功证据。
+
 容器门禁会先生成 `.json.pending`，它只用于内部校验，不能作为验收证据。只有最外层 Compose 清理成功后才
 原子确认成正式 `.json`。任何失败 artifact 应查看 `status.json` 的 `result=failed`、`errorClass` 和
 `retentionPath`；失败时不得存在可验收的正式成功 JSON。

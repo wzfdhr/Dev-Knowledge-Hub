@@ -165,6 +165,9 @@ export class MemoryAppStore implements AppStore {
   private readonly uploadSessionLocks = new Map<string, Promise<void>>();
   private readonly uploadIdempotencyLocks = new Map<string, Promise<void>>();
   private readonly sourceBlobLocks = new Map<string, Promise<void>>();
+  private sourceBlobGcLeaseActive = false;
+  private activeSourceBlobWriters = 0;
+  private readonly sourceBlobWriterWaiters: Array<() => void> = [];
   private readonly sourceBlobCreationSequences = new Map<string, number>();
   private nextSourceBlobCreationSequence = 1;
   readonly builds: BuildRecord[] = [];
@@ -214,16 +217,12 @@ export class MemoryAppStore implements AppStore {
     }
     return tail ? {
       through: tail,
-      creationCutoff: String(creationCutoff),
-      visibilitySnapshot: null
+      creationCutoff: String(creationCutoff)
     } : null;
   }
 
   async listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]> {
     const candidateLimit = normalizeSourceBlobGcCandidateLimit(input.limit);
-    if (input.visibilitySnapshot !== null) {
-      throw new RangeError("Memory source blob GC visibility snapshot must be null");
-    }
     const creationCutoff = Number(input.creationCutoff);
     if (!Number.isSafeInteger(creationCutoff) || creationCutoff < 0) {
       throw new RangeError("Source blob GC creation cutoff is invalid");
@@ -244,9 +243,47 @@ export class MemoryAppStore implements AppStore {
     return page.map((record) => ({ ...record }));
   }
 
+  async withSourceBlobGcLease<T>(operation: () => Promise<T>): Promise<
+    { acquired: true; value: T } | { acquired: false }
+  > {
+    if (this.sourceBlobGcLeaseActive || this.activeSourceBlobWriters > 0) return { acquired: false };
+    this.sourceBlobGcLeaseActive = true;
+    try {
+      return { acquired: true, value: await operation() };
+    } finally {
+      this.sourceBlobGcLeaseActive = false;
+      for (const resolve of this.sourceBlobWriterWaiters.splice(0)) resolve();
+    }
+  }
+
+  async withSourceBlobWriterLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    while (this.sourceBlobGcLeaseActive) {
+      await new Promise<void>((resolve) => this.sourceBlobWriterWaiters.push(resolve));
+    }
+    this.activeSourceBlobWriters += 1;
+    try {
+      return await this.withSourceBlobHashLock(workspaceId, contentHash, true, operation);
+    } finally {
+      this.activeSourceBlobWriters -= 1;
+    }
+  }
+
   async withSourceBlobLock<T>(
     workspaceId: string,
     contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    return this.withSourceBlobHashLock(workspaceId, contentHash, false, operation);
+  }
+
+  private async withSourceBlobHashLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    writer: boolean,
     operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
   ): Promise<T> {
     const key = `${workspaceId}:${contentHash}`;
@@ -280,6 +317,7 @@ export class MemoryAppStore implements AppStore {
           candidate.workspaceId === workspaceId && candidate.contentHash === contentHash
         ).map((candidate) => candidate.generation)) + 1,
         create: async (input) => {
+          if (!writer) throw new Error("SOURCE_BLOB_WRITER_LOCK_REQUIRED");
           if (this.workspace?.id !== workspaceId || input.workspaceId !== workspaceId
             || input.contentHash !== contentHash
             || this.sourceBlobs.some((candidate) => candidate.workspaceId === workspaceId

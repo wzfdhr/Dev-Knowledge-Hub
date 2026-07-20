@@ -369,9 +369,12 @@ test("processes snapshots in bounded batches and leaves releases unchanged", asy
   assert.equal(snapshotQueries.length, 2);
   assert.deepEqual(snapshotQueries[0].values.slice(0, 2), [null, null]);
   assert.match(snapshotQueries[0].text, /\$1::uuid IS NULL/);
-  const lockQueries = context.pool.queries.filter(({ text }) => text.includes("pg_advisory_xact_lock"));
+  const lockQueries = context.pool.queries.filter(({ text }) =>
+    text === "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))");
   assert.ok(lockQueries.length >= 2);
-  assert.ok(lockQueries.every(({ text }) => text === "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))"));
+  const writerLocks = context.pool.queries.filter(({ text }) =>
+    text === "SELECT pg_advisory_xact_lock_shared(hashtextextended('devkh.source_blobs.gc.membership', 0))");
+  assert.equal(writerLocks.length, report.created);
 });
 
 test("rescans globally when an eligible snapshot is inserted behind the forward cursor", async () => {
@@ -530,6 +533,15 @@ test("timestamps newly inserted source blobs with the wall clock at insertion", 
     /\(workspace_id, content_hash, generation, byte_size, storage_key, status, created_at, updated_at\)/);
   assert.match(insert.text,
     /VALUES \(\$1, \$2, \$3, \$4, \$5, 'active', clock_timestamp\(\), clock_timestamp\(\)\)/);
+
+  const statements = context.pool.queries.map(({ text }) => text.trim());
+  const sharedLock = "SELECT pg_advisory_xact_lock_shared(hashtextextended('devkh.source_blobs.gc.membership', 0))";
+  const sharedLockIndex = statements.indexOf(sharedLock);
+  const hashLockIndex = statements.indexOf("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))");
+  const insertIndex = statements.findIndex((text) => text.includes("INSERT INTO source_blobs"));
+  assert.ok(sharedLockIndex >= 0);
+  assert.ok(hashLockIndex > sharedLockIndex);
+  assert.ok(insertIndex > hashLockIndex);
 });
 
 test("restores a verified tombstoned source generation and reuses it", async () => {

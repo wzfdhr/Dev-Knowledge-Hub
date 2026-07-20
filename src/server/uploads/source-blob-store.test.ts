@@ -39,8 +39,7 @@ class MemorySourceBlobCatalog implements SourceBlobCatalog {
         generation: record.generation,
         id: record.id
       },
-      creationCutoff: "0",
-      visibilitySnapshot: null
+      creationCutoff: "0"
     } : null;
   }
 
@@ -51,6 +50,18 @@ class MemorySourceBlobCatalog implements SourceBlobCatalog {
 
   async findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null> {
     return this.records.find((record) => record.workspaceId === workspaceId && record.id === sourceBlobId) ?? null;
+  }
+
+  async withSourceBlobGcLease<T>(operation: () => Promise<T>) {
+    return { acquired: true as const, value: await operation() };
+  }
+
+  async withSourceBlobWriterLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    return this.withSourceBlobLock(workspaceId, contentHash, operation);
   }
 
   async withSourceBlobLock<T>(

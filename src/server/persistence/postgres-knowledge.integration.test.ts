@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Pool, type PoolClient } from "pg";
-import { afterAll, describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test, vi } from "vitest";
 
 import { runMigrations } from "../../db/migrate";
 import { requireIsolatedTestDatabase } from "../../test/integration-database";
@@ -2734,6 +2734,8 @@ integration("PostgreSQL cited knowledge integration", () => {
     const last = await insertCandidate("f");
     let pageCount = 0;
     const boundedCatalog = {
+      withSourceBlobGcLease: catalog.withSourceBlobGcLease.bind(catalog),
+      withSourceBlobWriterLock: catalog.withSourceBlobWriterLock.bind(catalog),
       findSourceBlobGcRunBoundary: () => catalog.findSourceBlobGcRunBoundary(),
       listSourceBlobGcCandidates: async (
         input: Parameters<typeof catalog.listSourceBlobGcCandidates>[0]
@@ -2767,50 +2769,62 @@ integration("PostgreSQL cited knowledge integration", () => {
     expect(inserted.rows[0]?.count).toBe("2");
   }, 30_000);
 
-  test("excludes a row inserted before the boundary but committed after its visibility snapshot", async () => {
+  test("serializes GC membership with writers, including a shared lock acquired in a savepoint", async () => {
     pool ??= new Pool({ connectionString: databaseUrl });
     await runMigrations(pool);
     await pool.query("TRUNCATE workspaces CASCADE");
     const catalog = new PostgresAppStore(pool);
     const setup = await catalog.createInitialSetup("source-blob-insert-boundary@example.com", "hash");
-    const initialHash = "f".repeat(64);
-    const delayedHash = "b".repeat(64);
-    const initial = await catalog.withSourceBlobLock(setup!.workspace.id, initialHash, async (locked) =>
-      locked.create({
-        workspaceId: setup!.workspace.id,
-        contentHash: initialHash,
-        generation: 1,
-        byteSize: 1,
-        storageKey: `blobs/${setup!.workspace.id}/ff/${initialHash}/1`
-      })
-    );
-    const delayedClient = await pool.connect();
-    let delayed: { id: string };
-    let boundary: Awaited<ReturnType<typeof catalog.findSourceBlobGcRunBoundary>>;
+    const writerClient = await pool.connect();
     try {
-      await delayedClient.query("BEGIN");
-      delayed = (await delayedClient.query<{ id: string }>(
+      await writerClient.query("BEGIN");
+      await writerClient.query("SAVEPOINT source_blob_writer");
+      await writerClient.query(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended('devkh.source_blobs.gc.membership', 0))"
+      );
+      await writerClient.query(
         `INSERT INTO source_blobs
            (workspace_id, content_hash, generation, byte_size, status, storage_key)
-         VALUES ($1, $2, 1, 1, 'active', $3)
-         RETURNING id`,
-        [setup!.workspace.id, delayedHash, `blobs/${setup!.workspace.id}/bb/${delayedHash}/1`]
-      )).rows[0]!;
-      boundary = await catalog.findSourceBlobGcRunBoundary();
-      await delayedClient.query("COMMIT");
-    } finally {
-      await delayedClient.query("ROLLBACK").catch(() => undefined);
-      delayedClient.release();
-    }
-    expect(boundary).not.toBeNull();
+         VALUES ($1, $2, 1, 1, 'active', $3)`,
+        [setup!.workspace.id, "b".repeat(64), `blobs/${setup!.workspace.id}/bb/${"b".repeat(64)}/1`]
+      );
+      await writerClient.query("RELEASE SAVEPOINT source_blob_writer");
 
-    await expect(catalog.listSourceBlobGcCandidates({ ...boundary!, limit: 10 }))
-      .resolves.toEqual([initial]);
-    const timestamps = await pool.query<{ within_cutoff: boolean }>(
-      "SELECT created_at <= $2::timestamptz AS within_cutoff FROM source_blobs WHERE id = $1",
-      [delayed.id, boundary!.creationCutoff]
-    );
-    expect(timestamps.rows[0]?.within_cutoff).toBe(true);
+      const busyOperation = vi.fn(async () => "unexpected");
+      await expect(catalog.withSourceBlobGcLease(busyOperation)).resolves.toEqual({ acquired: false });
+      expect(busyOperation).not.toHaveBeenCalled();
+      await writerClient.query("COMMIT");
+    } finally {
+      await writerClient.query("ROLLBACK").catch(() => undefined);
+      writerClient.release();
+    }
+
+    await expect(catalog.withSourceBlobGcLease(async () => "acquired"))
+      .resolves.toEqual({ acquired: true, value: "acquired" });
+
+    let enterLease!: () => void;
+    let releaseLease!: () => void;
+    const leaseEntered = new Promise<void>((resolve) => { enterLease = resolve; });
+    const leaseRelease = new Promise<void>((resolve) => { releaseLease = resolve; });
+    const heldLease = catalog.withSourceBlobGcLease(async () => {
+      enterLease();
+      await leaseRelease;
+      return "released";
+    });
+    await leaseEntered;
+
+    let writerEntered = false;
+    const secondHash = "c".repeat(64);
+    const secondWriter = catalog.withSourceBlobWriterLock(setup!.workspace.id, secondHash, async () => {
+      writerEntered = true;
+      return "written";
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(writerEntered).toBe(false);
+    releaseLease();
+    await expect(heldLease).resolves.toEqual({ acquired: true, value: "released" });
+    await expect(secondWriter).resolves.toBe("written");
+    expect(writerEntered).toBe(true);
   }, 30_000);
 
   test("serializes source_file binding and fenced GC in both PostgreSQL lock orders", async () => {

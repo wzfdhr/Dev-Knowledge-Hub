@@ -21,6 +21,7 @@ import type {
 } from "../persistence/store.js";
 
 const DEFAULT_GRACE_MS = 24 * 60 * 60 * 1_000;
+const MAX_CANDIDATES_PER_RUN = 500;
 
 export interface SourceBlobGcRunResult {
   scanned: number;
@@ -29,10 +30,15 @@ export interface SourceBlobGcRunResult {
   trashed: number;
   deleted: number;
   inconsistent: number;
+  lockBusy: boolean;
+  resumeRequired: boolean;
 }
 
 function emptyResult(): SourceBlobGcRunResult {
-  return { scanned: 0, tombstoned: 0, restored: 0, trashed: 0, deleted: 0, inconsistent: 0 };
+  return {
+    scanned: 0, tombstoned: 0, restored: 0, trashed: 0, deleted: 0, inconsistent: 0,
+    lockBusy: false, resumeRequired: false
+  };
 }
 
 async function exists(candidate: string, lstatFile: SourceBlobLstatFile = lstat): Promise<boolean> {
@@ -117,6 +123,12 @@ export class SourceBlobGarbageCollector {
 
   async runOnce(): Promise<SourceBlobGcRunResult> {
     if (!this.enabled) return emptyResult();
+    const lease = await this.options.catalog.withSourceBlobGcLease(() => this.runWithLease());
+    if (!lease.acquired) return { ...emptyResult(), lockBusy: true };
+    return lease.value;
+  }
+
+  private async runWithLease(): Promise<SourceBlobGcRunResult> {
     const result = emptyResult();
     const boundary = await this.options.catalog.findSourceBlobGcRunBoundary();
     if (!boundary) return result;
@@ -124,10 +136,16 @@ export class SourceBlobGarbageCollector {
     const now = this.now();
     let after: SourceBlobGcCursor | undefined;
     while (true) {
+      const remaining = MAX_CANDIDATES_PER_RUN - result.scanned;
+      if (remaining <= 0) {
+        result.resumeRequired = after !== undefined && !cursorsEqual(after, through);
+        break;
+      }
+      const pageLimit = Math.min(this.candidateLimit, remaining);
       const candidates = await this.options.catalog.listSourceBlobGcCandidates({
         ...(after ? { after } : {}),
         ...boundary,
-        limit: this.candidateLimit
+        limit: pageLimit
       });
       if (candidates.length === 0) break;
       result.scanned += candidates.length;
@@ -144,7 +162,12 @@ export class SourceBlobGarbageCollector {
         result.inconsistent += processed.inconsistent;
       }
       after = sourceBlobGcCursor(candidates.at(-1)!);
-      if (candidates.length < this.candidateLimit || cursorsEqual(after, through)) break;
+      if (cursorsEqual(after, through)) break;
+      if (result.scanned >= MAX_CANDIDATES_PER_RUN) {
+        result.resumeRequired = true;
+        break;
+      }
+      if (candidates.length < pageLimit) break;
     }
     return result;
   }

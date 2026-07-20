@@ -385,7 +385,7 @@ export class SourceBlobStore {
     const bytes = Buffer.from(input.bytes);
     const contentHash = digest(bytes);
     safeIdentifier(input.workspaceId, "Workspace identifier");
-    const outcome = await this.options.catalog.withSourceBlobLock<PutOutcome>(
+    const outcome = await this.options.catalog.withSourceBlobWriterLock<PutOutcome>(
       input.workspaceId,
       contentHash,
       async (catalog) => {

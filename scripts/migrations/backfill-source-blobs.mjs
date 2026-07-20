@@ -21,6 +21,8 @@ const DEFAULT_BATCH_SIZE = 500;
 const DEFAULT_COMPLETION_RESCAN_LIMIT = 3;
 const REPORT_NAME = "source-blob-backfill.json";
 const SOURCE_BLOB_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))";
+const SOURCE_BLOB_GC_WRITER_LOCK_SQL =
+  "SELECT pg_advisory_xact_lock_shared(hashtextextended('devkh.source_blobs.gc.membership', 0))";
 const DEFAULT_STREAMS = { createReadStream, createWriteStream };
 
 function safeIdentifier(value, label) {
@@ -353,6 +355,7 @@ async function writeBlobGeneration(snapshotData, input, observer, streams) {
 
 async function resolveBlob(pool, snapshotData, file, observer, streams) {
   const outcome = await withTransaction(pool, async (client) => {
+    await client.query(SOURCE_BLOB_GC_WRITER_LOCK_SQL);
     await client.query(SOURCE_BLOB_LOCK_SQL, [file.workspace_id, file.content_hash]);
     const live = await client.query(
       `SELECT id, workspace_id, content_hash, generation, byte_size, storage_key, status,

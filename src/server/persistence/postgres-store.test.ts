@@ -36,7 +36,7 @@ describe("PostgresAppStore source blob locking", () => {
       connect: vi.fn(async () => client)
     } as never);
 
-    const created = await store.withSourceBlobLock(
+    const created = await store.withSourceBlobWriterLock(
       blobRow.workspace_id,
       blobRow.content_hash,
       async (catalog) => {
@@ -55,7 +55,15 @@ describe("PostgresAppStore source blob locking", () => {
     expect(created).toMatchObject({ id: blobRow.id, generation: 1, byteSize: 12 });
     expect(poolQuery).not.toHaveBeenCalled();
     expect(clientQuery.mock.calls[0]?.[0]).toBe("BEGIN");
-    expect(clientQuery.mock.calls.some(([sql]) => sql.includes("pg_advisory_xact_lock"))).toBe(true);
+    const statements = clientQuery.mock.calls.map(([sql]) => String(sql));
+    const sharedLockIndex = statements.indexOf(
+      "SELECT pg_advisory_xact_lock_shared(hashtextextended('devkh.source_blobs.gc.membership', 0))"
+    );
+    const hashLockIndex = statements.indexOf("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))");
+    const insertIndex = statements.findIndex((sql) => sql.includes("INSERT INTO source_blobs"));
+    expect(sharedLockIndex).toBeGreaterThan(0);
+    expect(hashLockIndex).toBeGreaterThan(sharedLockIndex);
+    expect(insertIndex).toBeGreaterThan(hashLockIndex);
     const insertSql = String(clientQuery.mock.calls.find(([sql]) => sql.includes("INSERT INTO source_blobs"))?.[0]);
     expect(insertSql).toContain("created_at");
     expect(insertSql).toContain("clock_timestamp()");
@@ -99,6 +107,13 @@ describe("PostgresAppStore source blob locking", () => {
     } as never);
 
     await store.withSourceBlobLock(active.workspace_id, active.content_hash, async (catalog) => {
+      await expect(catalog.create({
+        workspaceId: active.workspace_id,
+        contentHash: active.content_hash,
+        generation: 2,
+        byteSize: 12,
+        storageKey: active.storage_key
+      })).rejects.toThrow("SOURCE_BLOB_WRITER_LOCK_REQUIRED");
       await expect(catalog.findById(active.id)).resolves.toMatchObject({ id: active.id, status: "active" });
       await expect(catalog.countReferences(active.id)).resolves.toBe(0);
       await expect(catalog.tombstoneIfUnreferenced(active.id, fence, tombstonedAt))
@@ -110,6 +125,8 @@ describe("PostgresAppStore source blob locking", () => {
     });
 
     const statements = clientQuery.mock.calls.map(([sql]) => String(sql));
+    expect(statements.some((sql) => sql.includes("pg_advisory_xact_lock_shared"))).toBe(false);
+    expect(statements.some((sql) => sql.includes("INSERT INTO source_blobs"))).toBe(false);
     expect(statements.filter((sql) => sql.includes("UPDATE source_blobs"))
       .every((sql) => sql.includes("id =") && sql.includes("fencing_token ="))).toBe(true);
     expect(statements.filter((sql) => sql.includes("SET status = 'tombstoned'") || sql.includes("SET status = 'deleted'"))
@@ -127,7 +144,6 @@ describe("PostgresAppStore source blob locking", () => {
       content_hash: "f".repeat(64),
       generation: 2,
       creation_cutoff: "2026-07-20 00:00:00.123456+00",
-      visibility_snapshot: "100:200:150"
     };
     const query = vi.fn(async (_sql: string, _values?: unknown[]) => {
       void _values;
@@ -147,11 +163,10 @@ describe("PostgresAppStore source blob locking", () => {
         id: tailRow.id
       },
       creationCutoff: tailRow.creation_cutoff,
-      visibilitySnapshot: tailRow.visibility_snapshot
     });
     const boundarySql = String(query.mock.calls[0]?.[0]);
     const sql = String(query.mock.calls[1]?.[0]);
-    expect(boundarySql).toContain("pg_current_snapshot()");
+    expect(boundarySql).not.toContain("pg_current_snapshot()");
     expect(sql).toContain("FROM source_blobs");
     expect(sql).toContain("status IN ('tombstoned', 'trash')");
     expect(sql).toContain("NOT EXISTS");
@@ -159,12 +174,60 @@ describe("PostgresAppStore source blob locking", () => {
     expect(sql).toContain("ROW(blob.workspace_id, blob.content_hash, blob.generation, blob.id)");
     expect(sql).toContain("<= ROW($1, $2, $3, $4)");
     expect(sql).toContain("blob.created_at <= $5::timestamptz");
-    expect(sql).toContain("pg_visible_in_snapshot(blob.xmin::text::xid8, $6::pg_snapshot)");
-    expect(sql).toContain("LIMIT $7");
+    expect(sql).not.toContain("pg_visible_in_snapshot");
+    expect(sql).not.toContain("xmin");
+    expect(sql).toContain("LIMIT $6");
     expect(query.mock.calls[1]?.[1]).toEqual([
       tailRow.workspace_id, tailRow.content_hash, tailRow.generation, tailRow.id,
-      tailRow.creation_cutoff, tailRow.visibility_snapshot, 7
+      tailRow.creation_cutoff, 7
     ]);
+  });
+
+  test("wraps GC work in a dedicated exclusive session lock and destroys the client on unlock failure", async () => {
+    const operation = vi.fn(async () => "done");
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
+      if (sql.includes("pg_advisory_unlock")) return { rows: [{ released: false }] };
+      throw new Error(`unexpected SQL: ${sql}`);
+    });
+    const release = vi.fn();
+    const store = new PostgresAppStore({ connect: vi.fn(async () => ({ query, release })) } as never);
+
+    await expect(store.withSourceBlobGcLease(operation)).rejects.toThrow("SOURCE_BLOB_GC_UNLOCK_FAILED");
+    expect(operation).toHaveBeenCalledOnce();
+    expect(query.mock.calls.map(([sql]) => sql)).toEqual([
+      "SELECT pg_try_advisory_lock(hashtextextended('devkh.source_blobs.gc.membership', 0)) AS acquired",
+      "SELECT pg_advisory_unlock(hashtextextended('devkh.source_blobs.gc.membership', 0)) AS released"
+    ]);
+    expect(release).toHaveBeenCalledOnce();
+    expect(release.mock.calls[0]?.[0]).toBeInstanceOf(Error);
+  });
+
+  test("releases the exclusive GC lease after success, errors, and a busy result", async () => {
+    const makeStore = (acquired: boolean) => {
+      const query = vi.fn(async (sql: string) => sql.includes("pg_try_advisory_lock")
+        ? { rows: [{ acquired }] }
+        : { rows: [{ released: true }] });
+      const release = vi.fn();
+      return { store: new PostgresAppStore({ connect: vi.fn(async () => ({ query, release })) } as never), query, release };
+    };
+    const success = makeStore(true);
+    await expect(success.store.withSourceBlobGcLease(async () => "ok"))
+      .resolves.toEqual({ acquired: true, value: "ok" });
+    expect(success.release).toHaveBeenCalledWith();
+
+    const failure = makeStore(true);
+    await expect(failure.store.withSourceBlobGcLease(async () => { throw new Error("page failed"); }))
+      .rejects.toThrow("page failed");
+    expect(failure.query.mock.calls.some(([sql]) => String(sql).includes("pg_advisory_unlock"))).toBe(true);
+    expect(failure.release).toHaveBeenCalledWith();
+
+    const busy = makeStore(false);
+    const operation = vi.fn();
+    await expect(busy.store.withSourceBlobGcLease(operation)).resolves.toEqual({ acquired: false });
+    expect(operation).not.toHaveBeenCalled();
+    expect(busy.query.mock.calls.some(([sql]) => String(sql).includes("pg_advisory_unlock"))).toBe(false);
+    expect(busy.release).toHaveBeenCalledWith();
   });
 
   test("commits a moved referenced tombstone audit before SourceBlobStore.put throws outside the lock", async () => {

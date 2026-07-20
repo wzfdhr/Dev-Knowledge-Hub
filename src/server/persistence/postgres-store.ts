@@ -919,15 +919,12 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     const result = await this.pool.query<Pick<SourceBlobRow,
       "id" | "workspace_id" | "content_hash" | "generation"> & {
         creation_cutoff: string;
-        visibility_snapshot: string;
       }>(`
       WITH run_boundary AS MATERIALIZED (
-        SELECT clock_timestamp() AS creation_cutoff,
-               pg_current_snapshot() AS visibility_snapshot
+        SELECT clock_timestamp() AS creation_cutoff
       )
       SELECT blob.id, blob.workspace_id, blob.content_hash, blob.generation,
-             boundary.creation_cutoff::text AS creation_cutoff,
-             boundary.visibility_snapshot::text AS visibility_snapshot
+             boundary.creation_cutoff::text AS creation_cutoff
       FROM source_blobs blob
       CROSS JOIN run_boundary boundary
       WHERE blob.created_at <= boundary.creation_cutoff
@@ -947,29 +944,24 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         generation: Number(row.generation),
         id: row.id
       },
-      creationCutoff: row.creation_cutoff,
-      visibilitySnapshot: row.visibility_snapshot
+      creationCutoff: row.creation_cutoff
     } : null;
   }
 
   async listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]> {
     const candidateLimit = normalizeSourceBlobGcCandidateLimit(input.limit);
-    if (typeof input.visibilitySnapshot !== "string" || input.visibilitySnapshot.length === 0) {
-      throw new RangeError("PostgreSQL source blob GC visibility snapshot is invalid");
-    }
     const values: unknown[] = [
       input.through.workspaceId,
       input.through.contentHash,
       input.through.generation,
       input.through.id,
-      input.creationCutoff,
-      input.visibilitySnapshot
+      input.creationCutoff
     ];
     let afterClause = "";
     if (input.after) {
       afterClause = `
         AND ROW(blob.workspace_id, blob.content_hash, blob.generation, blob.id)
-          > ROW($7, $8, $9, $10)`;
+          > ROW($6, $7, $8, $9)`;
       values.push(
         input.after.workspaceId,
         input.after.contentHash,
@@ -992,7 +984,6 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         ))
       )
         AND blob.created_at <= $5::timestamptz
-        AND pg_visible_in_snapshot(blob.xmin::text::xid8, $6::pg_snapshot)
         AND ROW(blob.workspace_id, blob.content_hash, blob.generation, blob.id)
           <= ROW($1, $2, $3, $4)
         ${afterClause}
@@ -1002,12 +993,91 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return result.rows.map(sourceBlobRecord);
   }
 
+  async withSourceBlobGcLease<T>(operation: () => Promise<T>): Promise<
+    { acquired: true; value: T } | { acquired: false }
+  > {
+    const client = await this.pool.connect();
+    let acquired: boolean;
+    try {
+      const lock = await client.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_lock(hashtextextended('devkh.source_blobs.gc.membership', 0)) AS acquired"
+      );
+      acquired = lock.rows[0]?.acquired === true;
+    } catch (error) {
+      client.release();
+      throw error;
+    }
+    if (!acquired) {
+      client.release();
+      return { acquired: false };
+    }
+
+    let value!: T;
+    let operationError: unknown;
+    let unlockError: unknown;
+    try {
+      value = await operation();
+    } catch (error) {
+      operationError = error;
+    } finally {
+      try {
+        const unlock = await client.query<{ released: boolean }>(
+          "SELECT pg_advisory_unlock(hashtextextended('devkh.source_blobs.gc.membership', 0)) AS released"
+        );
+        if (unlock.rows[0]?.released !== true) unlockError = new Error("SOURCE_BLOB_GC_UNLOCK_FAILED");
+      } catch (error) {
+        unlockError = error;
+      }
+      if (unlockError instanceof Error) client.release(unlockError);
+      else if (unlockError !== undefined) {
+        client.release(new Error("SOURCE_BLOB_GC_UNLOCK_FAILED", { cause: unlockError }));
+      } else client.release();
+    }
+    if (unlockError !== undefined) {
+      const failure = unlockError instanceof Error
+        ? unlockError
+        : new Error("SOURCE_BLOB_GC_UNLOCK_FAILED", { cause: unlockError });
+      if (operationError !== undefined) {
+        throw new AggregateError(
+          [operationError, failure],
+          "SOURCE_BLOB_GC_UNLOCK_FAILED",
+          { cause: operationError }
+        );
+      }
+      throw failure;
+    }
+    if (operationError !== undefined) throw operationError;
+    return { acquired: true, value };
+  }
+
+  async withSourceBlobWriterLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    return this.withSourceBlobTransaction(workspaceId, contentHash, true, operation);
+  }
+
   async withSourceBlobLock<T>(
     workspaceId: string,
     contentHash: string,
     operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
   ): Promise<T> {
+    return this.withSourceBlobTransaction(workspaceId, contentHash, false, operation);
+  }
+
+  private async withSourceBlobTransaction<T>(
+    workspaceId: string,
+    contentHash: string,
+    writer: boolean,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
     return this.transaction(async (client) => {
+      if (writer) {
+        await client.query(
+          "SELECT pg_advisory_xact_lock_shared(hashtextextended('devkh.source_blobs.gc.membership', 0))"
+        );
+      }
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [workspaceId, contentHash]);
       const catalog: LockedSourceBlobCatalog = {
         findActive: async () => {
@@ -1057,6 +1127,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           return Number(result.rows[0]?.next_generation ?? 1);
         },
         create: async (input) => {
+          if (!writer) throw new Error("SOURCE_BLOB_WRITER_LOCK_REQUIRED");
           if (input.workspaceId !== workspaceId || input.contentHash !== contentHash) {
             throw new Error("SOURCE_BLOB_SCOPE_MISMATCH");
           }

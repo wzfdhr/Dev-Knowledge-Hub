@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
@@ -23,7 +24,7 @@ function writeTarOctal(header, offset, length, value) {
   header.write(`${value.toString(8).padStart(length - 1, "0")}\0`, offset, length, "ascii");
 }
 
-function gzipTar(entries) {
+function tarBytes(entries, trailerBlocks = 2) {
   const blocks = [];
   for (const entry of entries) {
     const contents = Buffer.from(entry.contents ?? "");
@@ -45,7 +46,17 @@ function gzipTar(entries) {
       blocks.push(contents, Buffer.alloc((512 - (contents.length % 512)) % 512));
     }
   }
-  return gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)]));
+  return Buffer.concat([...blocks, Buffer.alloc(512 * trailerBlocks)]);
+}
+
+function gzipTar(entries, trailerBlocks = 2) {
+  return gzipSync(tarBytes(entries, trailerBlocks));
+}
+
+function refreshTarChecksum(bytes, headerOffset = 0) {
+  const header = bytes.subarray(headerOffset, headerOffset + 512);
+  header.fill(0x20, 148, 156);
+  writeTarOctal(header, 148, 8, [...header].reduce((sum, byte) => sum + byte, 0));
 }
 
 test("documents all four durable backup volumes", () => {
@@ -479,7 +490,7 @@ test("restore drill never writes production Docker volumes", () => {
     assert.doesNotMatch(calls, /type=volume/);
     assert.doesNotMatch(calls, /pg_restore .*--clean/);
     const evidenceDirectory = join(fixture.environment.BACKUP_STATE_DIR, "recovery-evidence");
-    const [evidenceFile] = execFileSync("find", [evidenceDirectory, "-type", "f"], { encoding: "utf8" }).trim().split("\n");
+    const [evidenceFile] = execFileSync("find", [evidenceDirectory, "-type", "f", "-name", "*.json"], { encoding: "utf8" }).trim().split("\n");
     const evidence = JSON.parse(readFileSync(evidenceFile, "utf8"));
     assert.deepEqual(
       {
@@ -525,6 +536,25 @@ test("restore drill never writes production Docker volumes", () => {
     assert.equal(evidence.artifactContentVerifiedCount, 1);
     assert.equal(evidence.schemaVersion, 3);
     assert.equal(evidence.resticSnapshotId, latestSnapshotId);
+    assert.equal(evidence.sourceBlobRecordManifest.recordCount, 2);
+    assert.match(evidence.sourceBlobRecordManifest.file, /\.source-blobs\.ndjson$/);
+    assert.match(evidence.sourceBlobRecordManifest.sha256, /^[a-f0-9]{64}$/);
+    const sourceBlobRecordBytes = readFileSync(join(evidenceDirectory, evidence.sourceBlobRecordManifest.file));
+    assert.equal(createHash("sha256").update(sourceBlobRecordBytes).digest("hex"), evidence.sourceBlobRecordManifest.sha256);
+    const sourceBlobRecords = sourceBlobRecordBytes.toString("utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(sourceBlobRecords.length, 2);
+    assert.deepEqual(sourceBlobRecords.map((record) => record.sourcePath), ["src/one.ts", "src/two.ts"]);
+    for (const record of sourceBlobRecords) {
+      assert.equal(record.relationship, "same-device-inode-hardlink");
+      assert.equal(record.blobDevice, record.viewDevice);
+      assert.equal(record.blobInode, record.viewInode);
+      assert.equal(record.blobContentSha256, record.contentHash);
+      assert.equal(record.viewContentSha256, record.contentHash);
+      assert.equal(BigInt(Number.parseInt(record.blobMode, 8)) & 0o222n, 0n);
+      assert.equal(BigInt(Number.parseInt(record.viewMode, 8)) & 0o222n, 0n);
+      assert.equal(BigInt(record.blobBlocks) * 512n, BigInt(record.blobAllocatedBytes));
+      assert.equal(BigInt(record.viewBlocks) * 512n, BigInt(record.viewAllocatedBytes));
+    }
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -790,6 +820,46 @@ test("tar validation rejects oversized buffered metadata", async () => {
     }),
     /archive metadata exceeds safe limit/
   );
+});
+
+test("tar validation requires two consecutive zero trailer blocks", async () => {
+  const { validateTarArchive } = await import(validateTarArchiveScript);
+  const compressed = gzipTar([{ name: "one.txt", contents: "one" }], 1);
+
+  await assert.rejects(
+    validateTarArchive("unused-by-injected-stream", { createInputStream: () => Readable.from([compressed]) }),
+    /two zero trailer blocks/
+  );
+});
+
+test("tar validation rejects nonzero regular-file body padding", async () => {
+  const { validateTarArchive } = await import(validateTarArchiveScript);
+  const bytes = tarBytes([{ name: "one.txt", contents: "x" }]);
+  bytes[513] = 0x7f;
+
+  await assert.rejects(
+    validateTarArchive("unused-by-injected-stream", { createInputStream: () => Readable.from([gzipSync(bytes)]) }),
+    /non-zero archive body padding/
+  );
+});
+
+test("tar validation rejects malformed size and checksum octal fields", async () => {
+  const { validateTarArchive } = await import(validateTarArchiveScript);
+  const malformedSize = tarBytes([{ name: "one.txt", contents: "x" }]);
+  malformedSize.write("0000000001x\0", 124, 12, "ascii");
+  refreshTarChecksum(malformedSize);
+  const malformedChecksum = tarBytes([{ name: "one.txt", contents: "x" }]);
+  malformedChecksum.write("00000x\0 ", 148, 8, "ascii");
+
+  for (const [bytes, message] of [
+    [malformedSize, /invalid archive member size/],
+    [malformedChecksum, /invalid archive header checksum/]
+  ]) {
+    await assert.rejects(
+      validateTarArchive("unused-by-injected-stream", { createInputStream: () => Readable.from([gzipSync(bytes)]) }),
+      message
+    );
+  }
 });
 
 for (const [name, options, message] of [

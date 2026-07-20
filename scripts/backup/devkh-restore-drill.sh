@@ -10,6 +10,7 @@ started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 target=""
 snapshot_id=""
 evidence_path=""
+evidence_sidecar_path=""
 network_name=""
 database_container=""
 application_container=""
@@ -46,6 +47,8 @@ finish() {
   trap - EXIT INT TERM
 
   if (( exit_code != 0 )); then
+    [[ -z "$evidence_path" ]] || rm -f "$evidence_path" "${evidence_path%.pending}" || true
+    [[ -z "$evidence_sidecar_path" ]] || rm -f "$evidence_sidecar_path" "${evidence_sidecar_path%.pending}" || true
     printf 'recovery drill failed; retained fixture: %s\n' "$target" >&2
   else
     if [[ -n "$application_container" ]] && ! docker rm -f "$application_container" >/dev/null 2>&1; then
@@ -70,14 +73,23 @@ finish() {
 
     if (( cleanup_failed )); then
       if [[ -n "$evidence_path" ]]; then
-        if ! rm -f "$evidence_path"; then
+        if ! rm -f "$evidence_path" "${evidence_path%.pending}"; then
           printf 'recovery cleanup failed to invalidate success evidence: %s\n' "$evidence_path" >&2
+        fi
+      fi
+      if [[ -n "$evidence_sidecar_path" ]]; then
+        if ! rm -f "$evidence_sidecar_path" "${evidence_sidecar_path%.pending}"; then
+          printf 'recovery cleanup failed to invalidate source blob evidence: %s\n' "$evidence_sidecar_path" >&2
         fi
       fi
       printf 'recovery cleanup failed; inspect recovery resources under: %s\n' "$target" >&2
       exit_code=1
     elif [[ -n "$evidence_path" && "${RECOVERY_EVIDENCE_DEFER_FINALIZATION:-false}" != "true" ]]; then
-      mv "$evidence_path" "${evidence_path%.pending}"
+      if ! mv "$evidence_sidecar_path" "${evidence_sidecar_path%.pending}" || ! mv "$evidence_path" "${evidence_path%.pending}"; then
+        rm -f "$evidence_path" "${evidence_path%.pending}" "$evidence_sidecar_path" "${evidence_sidecar_path%.pending}"
+        printf 'recovery evidence finalization failed\n' >&2
+        exit_code=1
+      fi
     fi
   fi
 
@@ -173,13 +185,15 @@ source_blob_manifest_path="$target/source-blob-manifests.json"
 (
   umask 077
   docker exec "$database_container" psql -U devkh -d dev_knowledge_hub -At -v ON_ERROR_STOP=1 -c \
-    "SELECT COALESCE(json_agg(json_build_object('workspaceId',sf.workspace_id,'snapshotId',sf.snapshot_id,'snapshotStoragePath',s.storage_path,'path',sf.path,'contentHash',sf.content_hash,'byteSize',sf.byte_size,'generation',sb.generation,'storageKey',sb.storage_key,'status',sb.status,'fencingToken',sb.fencing_token,'tombstonedAt',sb.tombstoned_at,'trashedAt',sb.trashed_at,'deletedAt',sb.deleted_at) ORDER BY sf.workspace_id,sf.snapshot_id,sf.path),'[]'::json)::text AS source_blob_manifests FROM source_files sf JOIN source_blobs sb ON sb.id=sf.source_blob_id AND sb.workspace_id=sf.workspace_id JOIN source_snapshots s ON s.id=sf.snapshot_id AND s.workspace_id=sf.workspace_id WHERE sf.source_blob_id IS NOT NULL;" \
+    "SELECT COALESCE(json_agg(json_build_object('workspaceId',sf.workspace_id,'snapshotId',sf.snapshot_id,'snapshotStoragePath',s.storage_path,'path',sf.path,'contentHash',sf.content_hash,'byteSize',sf.byte_size,'generation',sb.generation,'storageKey',sb.storage_key,'status',sb.status,'fencingToken',sb.fencing_token,'tombstonedAt',sb.tombstoned_at,'trashedAt',sb.trashed_at,'deletedAt',sb.deleted_at) ORDER BY sf.workspace_id::text COLLATE \"C\",sf.snapshot_id::text COLLATE \"C\",sf.path COLLATE \"C\"),'[]'::json)::text AS source_blob_manifests FROM source_files sf JOIN source_blobs sb ON sb.id=sf.source_blob_id AND sb.workspace_id=sf.workspace_id JOIN source_snapshots s ON s.id=sf.snapshot_id AND s.workspace_id=sf.workspace_id WHERE sf.source_blob_id IS NOT NULL;" \
     > "$source_blob_manifest_path"
 )
 chmod 600 "$source_blob_manifest_path"
+source_blob_record_manifest_path="$target/source-blob-records.ndjson"
 source_blob_evidence="$(node -e '
   const fs=require("node:fs"); const path=require("node:path"); const crypto=require("node:crypto");
   const root=fs.realpathSync(path.resolve(process.argv[1])); const manifests=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));
+  const recordFile=fs.openSync(process.argv[3],"wx",0o600);
   const safeSegment=/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/; const digest=/^[a-f0-9]{64}$/; const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const contained=(candidate)=>candidate===root||candidate.startsWith(root+path.sep);
   const regularFile=(segments,label)=>{
@@ -197,7 +211,7 @@ source_blob_evidence="$(node -e '
     return { path:candidate, stats:fs.lstatSync(candidate,{bigint:true}) };
   };
   const checkedGenerations=new Map(); const physicalInodes=new Set(); let blobHardlinkVerifiedCount=0; let sourceBlobLogicalBytes=0n; let sourceBlobPhysicalBytes=0n;
-  for(const manifest of manifests){
+  try{for(const manifest of manifests){
     if(!safeSegment.test(manifest.workspaceId??"")||!safeSegment.test(manifest.snapshotId??"")||typeof manifest.path!=="string"||!digest.test(manifest.contentHash??"")||!Number.isSafeInteger(manifest.byteSize)||manifest.byteSize<0||!Number.isSafeInteger(manifest.generation)||manifest.generation<1) throw new Error("invalid source blob manifest");
     const pathSegments=manifest.path.split("/"); if(!pathSegments.length||manifest.path.includes("\\")||pathSegments.some((segment)=>!segment||segment==="."||segment===".."||segment.includes("\0"))) throw new Error("invalid source blob path");
     const stateTimes=[manifest.fencingToken,manifest.tombstonedAt,manifest.trashedAt,manifest.deletedAt];
@@ -210,17 +224,20 @@ source_blob_evidence="$(node -e '
     if(manifest.snapshotStoragePath!==expectedSnapshotStoragePath) throw new Error("snapshot storage path does not match manifest");
     const blobFile=regularFile(manifest.storageKey.split("/"),"source blob content"); const blobPath=blobFile.path; const blob=blobFile.stats;
     const viewFile=regularFile(["snapshots",manifest.snapshotId,"files",...pathSegments],"snapshot view"); const viewPath=viewFile.path; const view=viewFile.stats;
-    const blobBytes=fs.readFileSync(blobPath); if(blobBytes.length!==manifest.byteSize||crypto.createHash("sha256").update(blobBytes).digest("hex")!==manifest.contentHash) throw new Error("source blob content digest mismatch");
+    const blobBytes=fs.readFileSync(blobPath); const blobContentSha256=crypto.createHash("sha256").update(blobBytes).digest("hex"); if(blobBytes.length!==manifest.byteSize||blobContentSha256!==manifest.contentHash) throw new Error("source blob content digest mismatch");
     const generationKey=[manifest.workspaceId,manifest.contentHash,manifest.generation].join("/");
     const known=checkedGenerations.get(generationKey); if(known&&known!==manifest.storageKey) throw new Error("source blob generation has inconsistent storage keys");
     if(!known){ checkedGenerations.set(generationKey,manifest.storageKey); sourceBlobLogicalBytes+=BigInt(manifest.byteSize); const inodeKey=blob.dev.toString()+":"+blob.ino.toString(); if(!physicalInodes.has(inodeKey)){physicalInodes.add(inodeKey); sourceBlobPhysicalBytes+=blob.blocks*512n;} }
-    const viewBytes=fs.readFileSync(viewPath); if(viewBytes.length!==manifest.byteSize||crypto.createHash("sha256").update(viewBytes).digest("hex")!==manifest.contentHash) throw new Error("snapshot view content digest mismatch");
+    const viewBytes=fs.readFileSync(viewPath); const viewContentSha256=crypto.createHash("sha256").update(viewBytes).digest("hex"); if(viewBytes.length!==manifest.byteSize||viewContentSha256!==manifest.contentHash) throw new Error("snapshot view content digest mismatch");
     if(view.dev!==blob.dev||view.ino!==blob.ino) throw new Error("snapshot view is not a same-inode hardlink");
+    const mode=(stats)=>(stats.mode&0o7777n).toString(8).padStart(4,"0"); const allocated=(stats)=>(stats.blocks*512n).toString();
+    const record={workspaceId:manifest.workspaceId,snapshotId:manifest.snapshotId,sourcePath:manifest.path,storageKey:manifest.storageKey,snapshotStoragePath:manifest.snapshotStoragePath,contentHash:manifest.contentHash,generation:manifest.generation,byteSize:manifest.byteSize,status:manifest.status,fencingToken:manifest.fencingToken,tombstonedAt:manifest.tombstonedAt,trashedAt:manifest.trashedAt,deletedAt:manifest.deletedAt,blobMode:mode(blob),viewMode:mode(view),blobDevice:blob.dev.toString(),blobInode:blob.ino.toString(),viewDevice:view.dev.toString(),viewInode:view.ino.toString(),blobSize:blob.size.toString(),viewSize:view.size.toString(),blobBlocks:blob.blocks.toString(),viewBlocks:view.blocks.toString(),blobAllocatedBytes:allocated(blob),viewAllocatedBytes:allocated(view),blobContentSha256,viewContentSha256,relationship:"same-device-inode-hardlink"};
+    fs.writeSync(recordFile,JSON.stringify(record)+"\n");
     blobHardlinkVerifiedCount++;
-  }
+  }}finally{fs.closeSync(recordFile)}
   const maximum=BigInt(Number.MAX_SAFE_INTEGER); if(sourceBlobLogicalBytes>maximum||sourceBlobPhysicalBytes>maximum) throw new Error("source blob byte evidence exceeds safe integer range");
   process.stdout.write(JSON.stringify({blobReferenceCount:manifests.length,blobContentVerifiedCount:checkedGenerations.size,blobHardlinkVerifiedCount,referencedSourceBlobGenerationCount:checkedGenerations.size,sourceBlobLogicalBytes:Number(sourceBlobLogicalBytes),sourceBlobPhysicalBytes:Number(sourceBlobPhysicalBytes)}));
-' "$volume_root/snapshots" "$source_blob_manifest_path")"
+' "$volume_root/snapshots" "$source_blob_manifest_path" "$source_blob_record_manifest_path")"
 
 artifact_manifests="$(docker exec "$database_container" psql -U devkh -d dev_knowledge_hub -At -v ON_ERROR_STOP=1 -c \
   "SELECT COALESCE(json_agg(json_build_object('projectId',project_id,'snapshotId',snapshot_id,'stage',stage,'storageKey',storage_key,'contentDigest',content_digest) ORDER BY storage_key),'[]'::json)::text AS artifact_manifests FROM knowledge_artifacts;")"
@@ -288,6 +305,16 @@ evidence_directory="$BACKUP_STATE_DIR/recovery-evidence"
 mkdir -p "$evidence_directory"
 chmod 700 "$evidence_directory"
 database_checksum="$(sha256sum "$set_directory/database.pgdump" | awk '{print $1}')"
-evidence_path="$evidence_directory/$(date -u +%Y%m%dT%H%M%SZ)-$snapshot_id.json.pending"
+evidence_basename="$(date -u +%Y%m%dT%H%M%SZ)-$snapshot_id"
+evidence_path="$evidence_directory/$evidence_basename.json.pending"
+source_blob_record_manifest_file="$evidence_basename.source-blobs.ndjson"
+evidence_sidecar_path="$evidence_directory/$source_blob_record_manifest_file.pending"
+temporary_sidecar_path="$evidence_sidecar_path.tmp.$$"
+cp "$source_blob_record_manifest_path" "$temporary_sidecar_path"
+chmod 600 "$temporary_sidecar_path"
+mv "$temporary_sidecar_path" "$evidence_sidecar_path"
+source_blob_record_manifest_sha256="$(sha256sum "$evidence_sidecar_path" | awk '{print $1}')"
+source_blob_record_manifest_count="$(wc -l < "$evidence_sidecar_path" | tr -d ' ')"
 temporary_evidence_path="$evidence_path.tmp.$$"
-node -e 'const fs=require("node:fs"); const [path,temporaryPath,startedAt,snapshotId,checksum,databaseStats,integrity,volumeArchiveSha256,volumeFileCounts,artifactContentVerifiedCount,sourceBlobEvidence]=process.argv.slice(1); fs.writeFileSync(temporaryPath,JSON.stringify({schemaVersion:3,operation:"restore-drill",result:"success",startedAt,finishedAt:new Date().toISOString(),resticSnapshotId:snapshotId,databaseArchiveSha256:checksum,volumeArchives:["snapshots.tgz","repositories.tgz","sources.tgz","artifacts.tgz"],volumeArchiveSha256:JSON.parse(volumeArchiveSha256),volumeFileCounts:JSON.parse(volumeFileCounts),productionVolumeTouched:false,restoredSnapshotCount:1,pgRestoreListValidated:true,ephemeralDatabaseRestored:true,healthCheckPassed:true,artifactContentVerifiedCount:Number(artifactContentVerifiedCount),databaseStats:JSON.parse(databaseStats),integrity:JSON.parse(integrity),...JSON.parse(sourceBlobEvidence)})+"\n",{mode:0o600}); fs.renameSync(temporaryPath,path);' "$evidence_path" "$temporary_evidence_path" "$started_at" "$snapshot_id" "$database_checksum" "$database_stats" "$integrity" "$volume_archive_sha256" "$volume_file_counts" "$artifact_content_verified_count" "$source_blob_evidence"
+node -e 'const fs=require("node:fs"); const [path,temporaryPath,startedAt,snapshotId,checksum,databaseStats,integrity,volumeArchiveSha256,volumeFileCounts,artifactContentVerifiedCount,sourceBlobEvidence,recordFile,recordSha256,recordCount]=process.argv.slice(1); fs.writeFileSync(temporaryPath,JSON.stringify({schemaVersion:3,operation:"restore-drill",result:"success",startedAt,finishedAt:new Date().toISOString(),resticSnapshotId:snapshotId,databaseArchiveSha256:checksum,volumeArchives:["snapshots.tgz","repositories.tgz","sources.tgz","artifacts.tgz"],volumeArchiveSha256:JSON.parse(volumeArchiveSha256),volumeFileCounts:JSON.parse(volumeFileCounts),productionVolumeTouched:false,restoredSnapshotCount:1,pgRestoreListValidated:true,ephemeralDatabaseRestored:true,healthCheckPassed:true,artifactContentVerifiedCount:Number(artifactContentVerifiedCount),databaseStats:JSON.parse(databaseStats),integrity:JSON.parse(integrity),...JSON.parse(sourceBlobEvidence),sourceBlobRecordManifest:{file:recordFile,sha256:recordSha256,recordCount:Number(recordCount)}})+"\n",{mode:0o600}); fs.renameSync(temporaryPath,path);' "$evidence_path" "$temporary_evidence_path" "$started_at" "$snapshot_id" "$database_checksum" "$database_stats" "$integrity" "$volume_archive_sha256" "$volume_file_counts" "$artifact_content_verified_count" "$source_blob_evidence" "$source_blob_record_manifest_file" "$source_blob_record_manifest_sha256" "$source_blob_record_manifest_count"
+node "$script_directory/validate-recovery-evidence.mjs" "$evidence_path" >/dev/null

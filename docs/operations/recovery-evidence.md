@@ -36,8 +36,13 @@
   "blobContentVerifiedCount": 1,
   "blobHardlinkVerifiedCount": 2,
   "referencedSourceBlobGenerationCount": 1,
-  "sourceBlobLogicalBytes": 34,
+  "sourceBlobLogicalBytes": 32,
   "sourceBlobPhysicalBytes": 4096,
+  "sourceBlobRecordManifest": {
+    "file": "evidence.source-blobs.ndjson",
+    "sha256": "86b2854569ef7b591174a93793d3f8ab40147775050543623326d985590c2958",
+    "recordCount": 2
+  },
   "databaseStats": {
     "workspaceCount": 1,
     "userCount": 1,
@@ -62,6 +67,14 @@
     "invalidSourceBlobReferences": 0
   }
 }
+```
+
+同目录必须保留上述 `sourceBlobRecordManifest.file` 指向的 canonical NDJSON。每行对应一条被引用的
+`source_files` 记录，例如：
+
+```ndjson
+{"workspaceId":"11111111-1111-4111-8111-111111111111","snapshotId":"55555555-5555-4555-8555-555555555555","sourcePath":"src/one.ts","storageKey":"blobs/11111111-1111-4111-8111-111111111111/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/1","snapshotStoragePath":"/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","generation":1,"byteSize":32,"status":"active","fencingToken":null,"tombstonedAt":null,"trashedAt":null,"deletedAt":null,"blobMode":"0444","viewMode":"0444","blobDevice":"2049","blobInode":"1001","viewDevice":"2049","viewInode":"1001","blobSize":"32","viewSize":"32","blobBlocks":"8","viewBlocks":"8","blobAllocatedBytes":"4096","viewAllocatedBytes":"4096","blobContentSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","viewContentSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","relationship":"same-device-inode-hardlink"}
+{"workspaceId":"11111111-1111-4111-8111-111111111111","snapshotId":"55555555-5555-4555-8555-555555555555","sourcePath":"src/two.ts","storageKey":"blobs/11111111-1111-4111-8111-111111111111/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/1","snapshotStoragePath":"/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","generation":1,"byteSize":32,"status":"active","fencingToken":null,"tombstonedAt":null,"trashedAt":null,"deletedAt":null,"blobMode":"0444","viewMode":"0444","blobDevice":"2049","blobInode":"1001","viewDevice":"2049","viewInode":"1001","blobSize":"32","viewSize":"32","blobBlocks":"8","viewBlocks":"8","blobAllocatedBytes":"4096","viewAllocatedBytes":"4096","blobContentSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","viewContentSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","relationship":"same-device-inode-hardlink"}
 ```
 
 验收时必须验证 `result=success`、`productionVolumeTouched=false`，且 `volumeArchives`
@@ -90,6 +103,11 @@ CI 在成功时删除临时仓库、恢复容器和外层 Compose 项目；失�
 
 验证器默认只接受 schema v3。`--allow-legacy-v2` 仅供人工审阅历史 v2 证据时显式使用；CI、恢复演练和
 FK17 门禁不得传入该兼容标志。
+
+严格验证必须同时读取主 JSON 与 sidecar，校验 sidecar 文件名、SHA-256、记录数、canonical 行格式，并从逐对象
+事实重新计算 generation、hardlink、逻辑字节和物理字节聚合。缺失、篡改、未排序或语义不一致的 sidecar 均使
+整份 v3 证据无效。主 JSON 和 sidecar 先以 `.pending` 成对写入，清理成功后 sidecar 先于主 JSON 原子确认；
+任一失败会同时移除两者，不能留下可验收的单边成功证据。
 
 容器门禁会先生成 `.json.pending`，它只用于内部校验，不能作为验收证据。只有最外层 Compose 清理成功后才
 原子确认成正式 `.json`。任何失败 artifact 应查看 `status.json` 的 `result=failed`、`errorClass` 和

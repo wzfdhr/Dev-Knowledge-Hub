@@ -22,7 +22,7 @@ cleanup() {
   local exit_code="$1"
   if (( exit_code == 0 )); then
     if ! rm -rf "$temporary_root"; then
-      if ! rm -f "$evidence_directory"/recovery-evidence/*.json "$evidence_directory"/recovery-evidence/*.json.pending; then
+      if ! rm -f "$evidence_directory"/recovery-evidence/*.json "$evidence_directory"/recovery-evidence/*.json.pending "$evidence_directory"/recovery-evidence/*.ndjson "$evidence_directory"/recovery-evidence/*.ndjson.pending; then
         printf 'CI recovery cleanup failed to invalidate success evidence: %s\n' "$evidence_directory" >&2
       fi
       if ! write_status restore-drill failed "$started_at" "" recovery_cleanup_failed "$temporary_root"; then

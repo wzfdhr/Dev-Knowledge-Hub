@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,7 +13,45 @@ const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const validatorScript = join(scriptDirectory, "validate-recovery-evidence.mjs");
 const digest = "a".repeat(64);
 
+function validSourceBlobRecords() {
+  return ["one.ts", "two.ts"].map((name) => ({
+    workspaceId: "11111111-1111-4111-8111-111111111111",
+    snapshotId: "55555555-5555-4555-8555-555555555555",
+    sourcePath: `src/${name}`,
+    storageKey: `blobs/11111111-1111-4111-8111-111111111111/aa/${digest}/1`,
+    snapshotStoragePath: "/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files",
+    contentHash: digest,
+    generation: 1,
+    byteSize: 32,
+    status: "active",
+    fencingToken: null,
+    tombstonedAt: null,
+    trashedAt: null,
+    deletedAt: null,
+    blobMode: "0444",
+    viewMode: "0444",
+    blobDevice: "2049",
+    blobInode: "1001",
+    viewDevice: "2049",
+    viewInode: "1001",
+    blobSize: "32",
+    viewSize: "32",
+    blobBlocks: "8",
+    viewBlocks: "8",
+    blobAllocatedBytes: "4096",
+    viewAllocatedBytes: "4096",
+    blobContentSha256: digest,
+    viewContentSha256: digest,
+    relationship: "same-device-inode-hardlink"
+  }));
+}
+
+function serializeSourceBlobRecords(records = validSourceBlobRecords()) {
+  return `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
+}
+
 function validEvidence() {
+  const sourceBlobManifest = serializeSourceBlobRecords();
   return {
     schemaVersion: 3,
     operation: "restore-drill",
@@ -41,6 +80,11 @@ function validEvidence() {
     referencedSourceBlobGenerationCount: 1,
     sourceBlobLogicalBytes: 32,
     sourceBlobPhysicalBytes: 4096,
+    sourceBlobRecordManifest: {
+      file: "evidence.source-blobs.ndjson",
+      sha256: createHash("sha256").update(sourceBlobManifest).digest("hex"),
+      recordCount: 2
+    },
     databaseStats: {
       workspaceCount: 1,
       userCount: 1,
@@ -72,7 +116,8 @@ function legacyV2Evidence() {
   evidence.schemaVersion = 2;
   for (const field of [
     "blobReferenceCount", "blobContentVerifiedCount", "blobHardlinkVerifiedCount",
-    "referencedSourceBlobGenerationCount", "sourceBlobLogicalBytes", "sourceBlobPhysicalBytes"
+    "referencedSourceBlobGenerationCount", "sourceBlobLogicalBytes", "sourceBlobPhysicalBytes",
+    "sourceBlobRecordManifest"
   ]) delete evidence[field];
   delete evidence.databaseStats.sourceBlobCount;
   delete evidence.databaseStats.sourceFileBlobReferenceCount;
@@ -81,10 +126,13 @@ function legacyV2Evidence() {
   return evidence;
 }
 
-function runValidator(evidence, options = []) {
+function runValidator(evidence, options = [], records = validSourceBlobRecords(), writeSidecar = true) {
   const root = mkdtempSync(join(tmpdir(), "devkh-evidence-"));
   const path = join(root, "evidence.json");
   writeFileSync(path, `${JSON.stringify(evidence)}\n`);
+  if (evidence.schemaVersion === 3 && writeSidecar && evidence.sourceBlobRecordManifest?.file) {
+    writeFileSync(join(root, evidence.sourceBlobRecordManifest.file), serializeSourceBlobRecords(records));
+  }
   const result = spawnSync(process.execPath, [validatorScript, ...options, path], { encoding: "utf8" });
   rmSync(root, { recursive: true, force: true });
   return result;
@@ -94,6 +142,36 @@ test("accepts a complete representative recovery evidence document", () => {
   const result = runValidator(validEvidence());
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).schemaVersion, 3);
+});
+
+test("requires and semantically validates the retained source blob record manifest", () => {
+  const missing = runValidator(validEvidence(), [], validSourceBlobRecords(), false);
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /source blob record manifest is unavailable/);
+
+  const digestMismatchEvidence = validEvidence();
+  digestMismatchEvidence.sourceBlobRecordManifest.sha256 = "b".repeat(64);
+  const digestMismatch = runValidator(digestMismatchEvidence);
+  assert.notEqual(digestMismatch.status, 0);
+  assert.match(digestMismatch.stderr, /source blob record manifest digest does not match/);
+
+  const records = validSourceBlobRecords();
+  records[0].blobMode = "0644";
+  const evidence = validEvidence();
+  const serialized = serializeSourceBlobRecords(records);
+  evidence.sourceBlobRecordManifest.sha256 = createHash("sha256").update(serialized).digest("hex");
+  const writable = runValidator(evidence, [], records);
+  assert.notEqual(writable.status, 0);
+  assert.match(writable.stderr, /source blob record mode must be read-only/);
+
+  const unrelatedView = validSourceBlobRecords();
+  unrelatedView[0].viewInode = "1002";
+  const unrelatedEvidence = validEvidence();
+  const unrelatedSerialized = serializeSourceBlobRecords(unrelatedView);
+  unrelatedEvidence.sourceBlobRecordManifest.sha256 = createHash("sha256").update(unrelatedSerialized).digest("hex");
+  const unrelated = runValidator(unrelatedEvidence, [], unrelatedView);
+  assert.notEqual(unrelated.status, 0);
+  assert.match(unrelated.stderr, /source blob record hardlink relationship is invalid/);
 });
 
 test("rejects legacy v2 evidence by default and accepts it only with explicit compatibility", () => {
@@ -118,6 +196,9 @@ test("rejects incomplete or inconsistent recovery evidence", () => {
     (value) => { delete value.databaseStats.sourceBlobCount; },
     (value) => { delete value.databaseStats.sourceFileBlobReferenceCount; },
     (value) => { delete value.databaseStats.referencedSourceBlobGenerationCount; },
+    (value) => { delete value.sourceBlobRecordManifest; },
+    (value) => { value.sourceBlobRecordManifest.sha256 = "invalid"; },
+    (value) => { value.sourceBlobRecordManifest.recordCount = 1; },
     (value) => { value.databaseArchiveSha256 = "invalid"; },
     (value) => { value.artifactContentVerifiedCount = 0; },
     (value) => { value.blobReferenceCount = 1; },
@@ -160,8 +241,11 @@ test("the CI recovery drill uses the strict validator", () => {
 test("the documented recovery evidence example passes the strict validator", () => {
   const document = readFileSync(join(scriptDirectory, "../../docs/operations/recovery-evidence.md"), "utf8");
   const json = document.match(/```json\n([\s\S]*?)\n```/)?.[1];
+  const ndjson = document.match(/```ndjson\n([\s\S]*?)\n```/)?.[1];
   assert.ok(json);
-  const result = runValidator(JSON.parse(json));
+  assert.ok(ndjson);
+  const records = ndjson.split("\n").map((line) => JSON.parse(line));
+  const result = runValidator(JSON.parse(json), [], records);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(json).schemaVersion, 3);
 });

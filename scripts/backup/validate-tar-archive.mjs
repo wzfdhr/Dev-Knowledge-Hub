@@ -10,7 +10,14 @@ function decode(buffer) {
 }
 
 function parseOctal(buffer, label) {
-  const text = decode(buffer).trim();
+  const raw = buffer.toString("ascii");
+  const terminator = raw.indexOf("\0");
+  const valuePart = terminator === -1 ? raw : raw.slice(0, terminator);
+  const remainder = terminator === -1 ? "" : raw.slice(terminator + 1);
+  const text = valuePart.trim();
+  if ((text && !/^[0-7]+$/.test(text)) || /[^\0 ]/.test(remainder)) {
+    throw new Error(`invalid archive ${label}`);
+  }
   const value = text ? Number.parseInt(text, 8) : 0;
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`invalid archive ${label}`);
   return value;
@@ -97,6 +104,7 @@ export async function validateTarArchive(archivePath, options = {}) {
   let longPath;
   let longLink;
   let trailer = false;
+  let zeroTrailerBlocks = 0;
 
   const reportBufferedBytes = () => options.onBufferedBytes?.(headerBytes + metadataBytes);
 
@@ -119,9 +127,11 @@ export async function validateTarArchive(archivePath, options = {}) {
 
   const consumeHeader = () => {
     if (header.every((byte) => byte === 0)) {
-      trailer = true;
+      zeroTrailerBlocks++;
+      trailer = zeroTrailerBlocks === 2;
       return;
     }
+    if (zeroTrailerBlocks > 0) throw new Error("non-zero data after archive trailer");
     const storedChecksum = parseOctal(header.subarray(148, 156), "header checksum");
     let checksum = 0;
     for (let index = 0; index < blockSize; index++) {
@@ -181,6 +191,9 @@ export async function validateTarArchive(archivePath, options = {}) {
         if (bodyBytesRemaining === 0) finishMetadata();
       } else if (paddingBytesRemaining > 0) {
         const consumed = Math.min(paddingBytesRemaining, chunk.length - offset);
+        for (let index = offset; index < offset + consumed; index++) {
+          if (chunk[index] !== 0) throw new Error("non-zero archive body padding");
+        }
         paddingBytesRemaining -= consumed;
         offset += consumed;
       } else {
@@ -198,6 +211,7 @@ export async function validateTarArchive(archivePath, options = {}) {
     }
   }
 
+  if (zeroTrailerBlocks < 2) throw new Error("archive requires two zero trailer blocks");
   if (!trailer || headerBytes !== 0 || bodyBytesRemaining !== 0 || paddingBytesRemaining !== 0) {
     throw new Error("truncated archive");
   }

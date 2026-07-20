@@ -1051,8 +1051,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           }
           const result = await client.query<SourceBlobRow>(`
             INSERT INTO source_blobs (
-              workspace_id, content_hash, generation, byte_size, status, storage_key
-            ) VALUES ($1, $2, $3, $4, 'active', $5)
+              workspace_id, content_hash, generation, byte_size, status, storage_key,
+              created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, 'active', $5, clock_timestamp(), clock_timestamp())
             RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
                       fencing_token, tombstoned_at, trashed_at, deleted_at
           `, [workspaceId, contentHash, input.generation, input.byteSize, input.storageKey]);

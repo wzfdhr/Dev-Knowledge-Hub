@@ -38,7 +38,8 @@ export class SourceBlobIntegrityError extends Error {
       | "SOURCE_BLOB_INACCESSIBLE"
       | "SOURCE_BLOB_INTEGRITY_FAILED"
       | "SNAPSHOT_VIEW_FAILED",
-    message: string
+    message: string,
+    readonly auditReason?: string
   ) {
     super(message);
     this.name = "SourceBlobIntegrityError";
@@ -48,9 +49,13 @@ export class SourceBlobIntegrityError extends Error {
 export type SourceBlobLstatFile = (candidate: string) => Promise<Stats>;
 export type SourceBlobOpenFile = (candidate: string, flags: number) => Promise<FileHandle>;
 
-function classifySourceBlobAccessError(error: unknown, message: string): unknown {
+export function classifySourceBlobAccessError(
+  error: unknown,
+  message: string,
+  auditReason?: string
+): unknown {
   if (error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM")) {
-    return new SourceBlobIntegrityError("SOURCE_BLOB_INACCESSIBLE", message);
+    return new SourceBlobIntegrityError("SOURCE_BLOB_INACCESSIBLE", message, auditReason);
   }
   return error;
 }
@@ -111,7 +116,11 @@ export async function ensureSafeDirectoryChain(input: {
     try {
       return await lstatFile(candidate);
     } catch (error) {
-      throw classifySourceBlobAccessError(error, "Source blob directory chain is inaccessible");
+      throw classifySourceBlobAccessError(
+        error,
+        "Source blob directory chain is inaccessible",
+        "directory_access_inaccessible"
+      );
     }
   };
   const assertDirectory = async (candidate: string): Promise<"directory" | "missing"> => {
@@ -145,7 +154,11 @@ export async function ensureSafeDirectoryChain(input: {
       await mkdir(current, { mode: 0o700 });
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) {
-        throw classifySourceBlobAccessError(error, "Source blob directory chain is inaccessible");
+        throw classifySourceBlobAccessError(
+          error,
+          "Source blob directory chain is inaccessible",
+          "directory_access_inaccessible"
+        );
       }
     }
     if (await assertDirectory(current) !== "directory") {
@@ -190,7 +203,11 @@ export async function ensureSafeDirectoryChain(input: {
         await mkdir(child, { mode: 0o700 });
       } catch (error) {
         if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) {
-          throw classifySourceBlobAccessError(error, "Source blob directory chain is inaccessible");
+          throw classifySourceBlobAccessError(
+            error,
+            "Source blob directory chain is inaccessible",
+            "directory_access_inaccessible"
+          );
         }
       }
       if (await assertDirectory(child) !== "directory") {
@@ -231,7 +248,7 @@ export async function assertSourceBlobFile(
   try {
     pathMetadata = await lstatFile(candidate);
   } catch (error) {
-    throw classifySourceBlobAccessError(error, "Source blob final file is inaccessible");
+    throw classifySourceBlobAccessError(error, "Source blob final file is inaccessible", "file_access_inaccessible");
   }
   if (!pathMetadata.isFile() || pathMetadata.isSymbolicLink()) {
     throw new SourceBlobIntegrityError(
@@ -249,7 +266,7 @@ export async function assertSourceBlobFile(
         "Source blob final path must not be a symbolic link"
       );
     }
-    throw classifySourceBlobAccessError(error, "Source blob final file is inaccessible");
+    throw classifySourceBlobAccessError(error, "Source blob final file is inaccessible", "file_access_inaccessible");
   }
   try {
     const metadata = await handle.stat();
@@ -266,7 +283,7 @@ export async function assertSourceBlobFile(
     return bytes;
   } catch (error) {
     if (error instanceof SourceBlobIntegrityError) throw error;
-    throw classifySourceBlobAccessError(error, "Source blob final file is inaccessible");
+    throw classifySourceBlobAccessError(error, "Source blob final file is inaccessible", "file_access_inaccessible");
   } finally {
     await handle.close();
   }
@@ -296,17 +313,20 @@ export class SourceBlobStore {
     dataDir: string;
     catalog: SourceBlobCatalog;
     linkFile?: typeof link;
+    lstatFile?: SourceBlobLstatFile;
+    openFile?: SourceBlobOpenFile;
+    syncDirectory?: typeof syncDirectory;
   }) {}
 
   async initialize(): Promise<void> {
-    await ensureSafeDirectoryChain({
+    await this.ensureDirectoryChain({
       dataDir: this.options.dataDir,
       segments: ["blobs"],
       createMissing: true,
       prepareRoot: true,
       syncFinal: true
     });
-    await ensureSafeDirectoryChain({
+    await this.ensureDirectoryChain({
       dataDir: this.options.dataDir,
       segments: ["snapshots"],
       createMissing: true,
@@ -322,8 +342,8 @@ export class SourceBlobStore {
     const source = path.join(blobsRoot, `.hardlink-probe-${probeId}`);
     const target = path.join(snapshotsRoot, `.hardlink-probe-${probeId}`);
     try {
-      if (!await ensureSafeDirectoryChain({ dataDir: this.options.dataDir, segments: ["blobs"] })
-        || !await ensureSafeDirectoryChain({ dataDir: this.options.dataDir, segments: ["snapshots"] })) {
+      if (!await this.ensureDirectoryChain({ dataDir: this.options.dataDir, segments: ["blobs"] })
+        || !await this.ensureDirectoryChain({ dataDir: this.options.dataDir, segments: ["snapshots"] })) {
         throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob storage roots are missing");
       }
       const handle = await open(source, "wx", 0o600);
@@ -386,22 +406,22 @@ export class SourceBlobStore {
         let locations: ReturnType<typeof sourceBlobFileLocations>;
         try {
           locations = sourceBlobFileLocations(this.options.dataDir, tombstoned);
-          const sourceDirectoryExists = await ensureSafeDirectoryChain({
+          const sourceDirectoryExists = await this.ensureDirectoryChain({
             dataDir: this.options.dataDir,
             segments: sourceBlobDirectorySegments(tombstoned)
           });
           if (!sourceDirectoryExists) {
             throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob directory is missing");
           }
-          const trashDirectoryExists = await ensureSafeDirectoryChain({
+          const trashDirectoryExists = await this.ensureDirectoryChain({
             dataDir: this.options.dataDir,
             segments: sourceBlobTrashDirectorySegments(tombstoned)
           });
-          const sourceExists = await lstat(locations.source).then(() => true, (error) => {
+          const sourceExists = await this.lstatFile(locations.source).then(() => true, (error) => {
             if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
             throw error;
           });
-          const trashExists = trashDirectoryExists && await lstat(locations.trash).then(() => true, (error) => {
+          const trashExists = trashDirectoryExists && await this.lstatFile(locations.trash).then(() => true, (error) => {
             if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
             throw error;
           });
@@ -412,7 +432,7 @@ export class SourceBlobStore {
             );
           }
           if (sourceExists) {
-            await assertSourceBlobFile(locations.source, tombstoned);
+            await this.assertFile(locations.source, tombstoned);
             const restored = await catalog.restoreTombstoned(tombstoned.id, tombstoned.fencingToken);
             if (!restored) throw new SourceBlobIntegrityError(
               "SOURCE_BLOB_INTEGRITY_FAILED",
@@ -428,10 +448,10 @@ export class SourceBlobStore {
             await catalog.recordGcInconsistency(tombstoned.id, "referenced_tombstone_moved");
             return { ok: false, error };
           }
-          await assertSourceBlobFile(locations.trash, tombstoned);
+          await this.assertFile(locations.trash, tombstoned);
           await Promise.all([
-            syncDirectory(locations.sourceParent),
-            syncDirectory(locations.trashParent)
+            this.syncDir(locations.sourceParent),
+            this.syncDir(locations.trashParent)
           ]);
           const trashed = await catalog.markTrash(tombstoned.id, tombstoned.fencingToken, new Date());
           if (!trashed) throw new SourceBlobIntegrityError(
@@ -440,7 +460,12 @@ export class SourceBlobStore {
           );
         } catch (error) {
           if (error instanceof SourceBlobIntegrityError) {
-            await catalog.recordGcInconsistency(tombstoned.id, "tombstone_content_inconsistent");
+            await catalog.recordGcInconsistency(
+              tombstoned.id,
+              error.code === "SOURCE_BLOB_INACCESSIBLE"
+                ? "tombstone_file_inaccessible"
+                : "tombstone_content_inconsistent"
+            );
             return { ok: false, error };
           }
           throw error;
@@ -451,7 +476,7 @@ export class SourceBlobStore {
       const key = sourceBlobStorageKey(input.workspaceId, contentHash, generation);
       const destination = path.join(this.options.dataDir, ...key.split("/"));
       const directory = path.dirname(destination);
-      await ensureSafeDirectoryChain({
+      await this.ensureDirectoryChain({
         dataDir: this.options.dataDir,
         segments: ["blobs", input.workspaceId, contentHash.slice(0, 2), contentHash],
         createMissing: true,
@@ -477,7 +502,7 @@ export class SourceBlobStore {
           await assertRecoverableOrphan(destination, contentHash, bytes.length);
         }
         await unlink(temporary);
-        await syncDirectory(directory);
+        await this.syncDir(directory);
         try {
           const record = await catalog.create({
             workspaceId: input.workspaceId,
@@ -506,14 +531,14 @@ export class SourceBlobStore {
       throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob record is not readable");
     }
     const absolutePath = path.join(this.options.dataDir, ...expectedKey.split("/"));
-    if (!await ensureSafeDirectoryChain({
+    if (!await this.ensureDirectoryChain({
       dataDir: this.options.dataDir,
       segments: sourceBlobDirectorySegments(record)
     })) {
       throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob directory is missing");
     }
     try {
-      return await assertSourceBlobFile(absolutePath, record);
+      return await this.assertFile(absolutePath, record);
     } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") {
         throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob bytes are missing");
@@ -573,6 +598,47 @@ export class SourceBlobStore {
     } catch (error) {
       await rm(temporary, { recursive: true, force: true }).catch(() => undefined);
       throw error;
+    }
+  }
+
+  private ensureDirectoryChain(
+    input: Omit<Parameters<typeof ensureSafeDirectoryChain>[0], "lstatFile" | "syncDirectory">
+  ): Promise<boolean> {
+    return ensureSafeDirectoryChain({
+      ...input,
+      lstatFile: this.options.lstatFile,
+      syncDirectory: (directory) => this.syncDir(directory)
+    });
+  }
+
+  private async lstatFile(candidate: string): Promise<Stats> {
+    try {
+      return await (this.options.lstatFile ?? lstat)(candidate);
+    } catch (error) {
+      throw classifySourceBlobAccessError(
+        error,
+        "Source blob filesystem path is inaccessible",
+        "file_access_inaccessible"
+      );
+    }
+  }
+
+  private assertFile(
+    candidate: string,
+    record: Pick<SourceBlobRecord, "contentHash" | "byteSize">
+  ): Promise<Buffer> {
+    return assertSourceBlobFile(candidate, record, this.options.openFile, this.options.lstatFile);
+  }
+
+  private async syncDir(directory: string): Promise<void> {
+    try {
+      await (this.options.syncDirectory ?? syncDirectory)(directory);
+    } catch (error) {
+      throw classifySourceBlobAccessError(
+        error,
+        "Source blob directory could not be synchronized",
+        "directory_sync_inaccessible"
+      );
     }
   }
 }

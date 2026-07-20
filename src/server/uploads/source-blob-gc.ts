@@ -4,6 +4,7 @@ import { lstat, rename, unlink } from "node:fs/promises";
 import {
   SourceBlobIntegrityError,
   assertSourceBlobFile,
+  classifySourceBlobAccessError,
   ensureSafeDirectoryChain,
   sourceBlobDirectorySegments,
   sourceBlobFileLocations,
@@ -41,7 +42,11 @@ async function exists(candidate: string, lstatFile: SourceBlobLstatFile = lstat)
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
     if (error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM")) {
-      throw new SourceBlobIntegrityError("SOURCE_BLOB_INACCESSIBLE", "Source blob file is inaccessible");
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_INACCESSIBLE",
+        "Source blob file is inaccessible",
+        "file_access_inaccessible"
+      );
     }
     throw error;
   }
@@ -65,6 +70,7 @@ export class SourceBlobGarbageCollector {
   private readonly now: () => Date;
   private readonly syncDir: typeof syncDirectory;
   private readonly renameFile: typeof rename;
+  private readonly unlinkFile: typeof unlink;
   private readonly candidateLimit: number;
 
   constructor(private readonly options: {
@@ -76,6 +82,7 @@ export class SourceBlobGarbageCollector {
     now?: () => Date;
     syncDirectory?: typeof syncDirectory;
     renameFile?: typeof rename;
+    unlinkFile?: typeof unlink;
     lstatFile?: SourceBlobLstatFile;
     openFile?: SourceBlobOpenFile;
     candidateLimit?: number;
@@ -84,8 +91,24 @@ export class SourceBlobGarbageCollector {
     this.tombstoneGraceMs = options.tombstoneGraceMs ?? DEFAULT_GRACE_MS;
     this.trashGraceMs = options.trashGraceMs ?? DEFAULT_GRACE_MS;
     this.now = options.now ?? (() => new Date());
-    this.syncDir = options.syncDirectory ?? syncDirectory;
-    this.renameFile = options.renameFile ?? rename;
+    const syncDir = options.syncDirectory ?? syncDirectory;
+    const renameFile = options.renameFile ?? rename;
+    const unlinkFile = options.unlinkFile ?? unlink;
+    this.syncDir = (directory) => this.filesystemMutation(
+      () => syncDir(directory),
+      "Source blob directory could not be synchronized",
+      "directory_sync_inaccessible"
+    );
+    this.renameFile = (source, destination) => this.filesystemMutation(
+      () => renameFile(source, destination),
+      "Source blob could not be moved to trash",
+      "rename_inaccessible"
+    );
+    this.unlinkFile = (candidate) => this.filesystemMutation(
+      () => unlinkFile(candidate),
+      "Source blob trash file could not be deleted",
+      "unlink_inaccessible"
+    );
     this.candidateLimit = normalizeSourceBlobGcCandidateLimit(options.candidateLimit);
     if (this.tombstoneGraceMs < 0 || this.trashGraceMs < 0) {
       throw new RangeError("Source blob GC grace periods must be non-negative");
@@ -200,7 +223,10 @@ export class SourceBlobGarbageCollector {
     } catch (error) {
       if (error instanceof SourceBlobIntegrityError
         || error instanceof Error && "code" in error && error.code === "ENOENT") {
-        await this.inconsistent(catalog, current, "file_verification_failed", result);
+        const reason = error instanceof SourceBlobIntegrityError && error.auditReason
+          ? error.auditReason
+          : "file_verification_failed";
+        await this.inconsistent(catalog, current, reason, result);
         return result;
       }
       throw error;
@@ -324,7 +350,7 @@ export class SourceBlobGarbageCollector {
     })) {
       throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob trash directory is missing");
     }
-    await unlink(locations.trash);
+    await this.unlinkFile(locations.trash);
     await this.syncDir(locations.trashParent);
     const deleted = await catalog.markDeletedIfUnreferenced(record.id, record.fencingToken, now);
     if (deleted) result.deleted = 1;
@@ -352,5 +378,17 @@ export class SourceBlobGarbageCollector {
     record: Pick<SourceBlobRecord, "contentHash" | "byteSize">
   ): Promise<Buffer> {
     return assertSourceBlobFile(candidate, record, this.options.openFile, this.options.lstatFile);
+  }
+
+  private async filesystemMutation<T>(
+    operation: () => Promise<T>,
+    message: string,
+    auditReason: string
+  ): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      throw classifySourceBlobAccessError(error, message, auditReason);
+    }
   }
 }

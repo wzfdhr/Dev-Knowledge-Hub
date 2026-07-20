@@ -386,36 +386,40 @@ describe("source blob garbage collection", () => {
     }
   );
 
-  test("audits an inaccessible active ancestor and continues the bounded run", async () => {
-    const context = await fixture();
-    const inaccessible = await context.blobs.put({
-      workspaceId: context.workspaceId,
-      bytes: Buffer.from("inaccessible ancestor")
-    });
-    const valid = await context.blobs.put({
-      workspaceId: context.workspaceId,
-      bytes: Buffer.from("valid after ancestor")
-    });
-    const inaccessibleParent = path.dirname(sourcePath(context.root, inaccessible.record));
-    const lstatFile = async (candidate: string) => {
-      if (candidate === inaccessibleParent) {
-        throw Object.assign(new Error("permission denied"), { code: "EACCES" });
-      }
-      return lstat(candidate);
-    };
+  test.each(["ancestor", "final"] as const)(
+    "audits an inaccessible active %s lstat and continues the bounded run",
+    async (location) => {
+      const context = await fixture();
+      const inaccessible = await context.blobs.put({
+        workspaceId: context.workspaceId,
+        bytes: Buffer.from("inaccessible ancestor")
+      });
+      const valid = await context.blobs.put({
+        workspaceId: context.workspaceId,
+        bytes: Buffer.from("valid after ancestor")
+      });
+      const inaccessiblePath = sourcePath(context.root, inaccessible.record);
+      const deniedPath = location === "ancestor" ? path.dirname(inaccessiblePath) : inaccessiblePath;
+      const lstatFile = async (candidate: string) => {
+        if (candidate === deniedPath) {
+          throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+        }
+        return lstat(candidate);
+      };
 
-    await expect(context.collector({ lstatFile }).runOnce()).resolves.toMatchObject({
-      scanned: 2,
-      tombstoned: 1,
-      inconsistent: 1
-    });
-    expect(context.catalog.sourceBlobs.find((record) => record.id === inaccessible.record.id))
-      .toMatchObject({ status: "active", fencingToken: null });
-    expect(context.catalog.sourceBlobs.find((record) => record.id === valid.record.id))
-      .toMatchObject({ status: "tombstoned", fencingToken: expect.any(String) });
-    expect(context.catalog.auditEvents.find((event) => event.resourceId === inaccessible.record.id))
-      .toMatchObject({ metadata: { reason: "active_file_inaccessible" } });
-  });
+      await expect(context.collector({ lstatFile }).runOnce()).resolves.toMatchObject({
+        scanned: 2,
+        tombstoned: 1,
+        inconsistent: 1
+      });
+      expect(context.catalog.sourceBlobs.find((record) => record.id === inaccessible.record.id))
+        .toMatchObject({ status: "active", fencingToken: null });
+      expect(context.catalog.sourceBlobs.find((record) => record.id === valid.record.id))
+        .toMatchObject({ status: "tombstoned", fencingToken: expect.any(String) });
+      expect(context.catalog.auditEvents.find((event) => event.resourceId === inaccessible.record.id))
+        .toMatchObject({ metadata: { reason: "active_file_inaccessible" } });
+    }
+  );
 
   test("propagates an unexpected final open failure without auditing it as inaccessible", async () => {
     const context = await fixture();
@@ -630,6 +634,127 @@ describe("source blob garbage collection", () => {
     expect(syncDirectory).toHaveBeenCalledWith(path.dirname(original));
     expect(syncDirectory).toHaveBeenCalledWith(path.dirname(trash));
     expect(context.catalog.sourceBlobs[0]).toMatchObject({ status: "trash" });
+  });
+
+  test("audits rename access denial, continues later candidates, and retries with the same fence", async () => {
+    const context = await fixture();
+    const inaccessible = await context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("rename denied") });
+    const valid = await context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("rename allowed") });
+    await context.collector().runOnce();
+    const fence = context.catalog.sourceBlobs.find((record) => record.id === inaccessible.record.id)!.fencingToken;
+    context.advance(1_000);
+    const inaccessiblePath = sourcePath(context.root, inaccessible.record);
+
+    await expect(context.collector({
+      renameFile: async (source, destination) => {
+        if (source === inaccessiblePath) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+        await rename(source, destination);
+      }
+    }).runOnce()).resolves.toMatchObject({ scanned: 2, trashed: 1, inconsistent: 1 });
+    expect(context.catalog.sourceBlobs.find((record) => record.id === inaccessible.record.id))
+      .toMatchObject({ status: "tombstoned", fencingToken: fence });
+    expect(context.catalog.sourceBlobs.find((record) => record.id === valid.record.id))
+      .toMatchObject({ status: "trash" });
+    expect(context.catalog.auditEvents.find((event) => event.resourceId === inaccessible.record.id))
+      .toMatchObject({ metadata: { reason: "rename_inaccessible" } });
+
+    await expect(context.collector().runOnce()).resolves.toMatchObject({ trashed: 1 });
+    expect(context.catalog.sourceBlobs.find((record) => record.id === inaccessible.record.id))
+      .toMatchObject({ status: "trash", fencingToken: fence });
+  });
+
+  test("reconciles a moved tombstone after directory fsync access denial without changing its fence", async () => {
+    const context = await fixture();
+    const created = await context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("move sync denied") });
+    await context.collector().runOnce();
+    const fence = context.catalog.sourceBlobs[0]!.fencingToken;
+    const original = sourcePath(context.root, created.record);
+    const trash = trashPath(context.root, created.record);
+    await mkdir(path.dirname(trash), { recursive: true });
+    context.advance(1_000);
+
+    await expect(context.collector({
+      syncDirectory: async (directory) => {
+        if (directory === path.dirname(original)) {
+          throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+        }
+      }
+    }).runOnce()).resolves.toMatchObject({ trashed: 0, inconsistent: 1 });
+    expect(context.catalog.sourceBlobs[0]).toMatchObject({ status: "tombstoned", fencingToken: fence });
+    await expectMissing(original);
+    await expect(stat(trash)).resolves.toBeDefined();
+    expect(context.catalog.auditEvents.at(-1)).toMatchObject({ metadata: { reason: "directory_sync_inaccessible" } });
+
+    await expect(context.collector().runOnce()).resolves.toMatchObject({ trashed: 1 });
+    expect(context.catalog.sourceBlobs[0]).toMatchObject({ status: "trash", fencingToken: fence });
+  });
+
+  test("audits unlink access denial, continues later candidates, and retries deletion with the same fence", async () => {
+    const context = await fixture();
+    const inaccessible = await context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("unlink denied") });
+    const valid = await context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("unlink allowed") });
+    await context.collector().runOnce();
+    context.advance(1_000);
+    await context.collector().runOnce();
+    const fence = context.catalog.sourceBlobs.find((record) => record.id === inaccessible.record.id)!.fencingToken;
+    context.advance(2_000);
+    const inaccessibleTrash = trashPath(context.root, inaccessible.record);
+
+    await expect(context.collector({
+      unlinkFile: async (candidate) => {
+        if (candidate === inaccessibleTrash) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+        await unlink(candidate);
+      }
+    }).runOnce()).resolves.toMatchObject({ scanned: 2, deleted: 1, inconsistent: 1 });
+    expect(context.catalog.sourceBlobs.find((record) => record.id === inaccessible.record.id))
+      .toMatchObject({ status: "trash", fencingToken: fence });
+    expect(context.catalog.sourceBlobs.find((record) => record.id === valid.record.id))
+      .toMatchObject({ status: "deleted" });
+    await expect(stat(inaccessibleTrash)).resolves.toBeDefined();
+    expect(context.catalog.auditEvents.find((event) => event.resourceId === inaccessible.record.id))
+      .toMatchObject({ metadata: { reason: "unlink_inaccessible" } });
+
+    await expect(context.collector().runOnce()).resolves.toMatchObject({ deleted: 1 });
+    expect(context.catalog.sourceBlobs.find((record) => record.id === inaccessible.record.id))
+      .toMatchObject({ status: "deleted", fencingToken: fence });
+  });
+
+  test("reconciles a physically deleted trash file after directory fsync access denial", async () => {
+    const context = await fixture();
+    const created = await context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("delete sync denied") });
+    await context.collector().runOnce();
+    context.advance(1_000);
+    await context.collector().runOnce();
+    const fence = context.catalog.sourceBlobs[0]!.fencingToken;
+    const trash = trashPath(context.root, created.record);
+    context.advance(2_000);
+
+    await expect(context.collector({
+      syncDirectory: async (directory) => {
+        if (directory === path.dirname(trash)) {
+          throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+        }
+      }
+    }).runOnce()).resolves.toMatchObject({ deleted: 0, inconsistent: 1 });
+    expect(context.catalog.sourceBlobs[0]).toMatchObject({ status: "trash", fencingToken: fence });
+    await expectMissing(trash);
+    expect(context.catalog.auditEvents.at(-1)).toMatchObject({ metadata: { reason: "directory_sync_inaccessible" } });
+
+    await expect(context.collector().runOnce()).resolves.toMatchObject({ deleted: 1 });
+    expect(context.catalog.sourceBlobs[0]).toMatchObject({ status: "deleted", fencingToken: fence });
+  });
+
+  test("propagates an unexpected rename error without auditing it", async () => {
+    const context = await fixture();
+    const created = await context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("rename eio") });
+    await context.collector().runOnce();
+    context.advance(1_000);
+    const unexpected = Object.assign(new Error("device failure"), { code: "EIO" });
+
+    await expect(context.collector({ renameFile: async () => { throw unexpected; } }).runOnce())
+      .rejects.toBe(unexpected);
+    expect(context.catalog.sourceBlobs[0]).toMatchObject({ status: "tombstoned" });
+    expect(context.catalog.auditEvents.some((event) => event.resourceId === created.record.id)).toBe(false);
   });
 
   test("recovers a crash after physical deletion by rechecking references before marking deleted", async () => {

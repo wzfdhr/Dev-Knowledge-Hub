@@ -56,6 +56,9 @@ describe("PostgresAppStore source blob locking", () => {
     expect(poolQuery).not.toHaveBeenCalled();
     expect(clientQuery.mock.calls[0]?.[0]).toBe("BEGIN");
     expect(clientQuery.mock.calls.some(([sql]) => sql.includes("pg_advisory_xact_lock"))).toBe(true);
+    const insertSql = String(clientQuery.mock.calls.find(([sql]) => sql.includes("INSERT INTO source_blobs"))?.[0]);
+    expect(insertSql).toContain("created_at");
+    expect(insertSql).toContain("clock_timestamp()");
     expect(clientQuery.mock.calls.at(-1)?.[0]).toBe("COMMIT");
   });
 

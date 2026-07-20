@@ -300,6 +300,40 @@ describe("workspace source blob store", () => {
     });
   });
 
+  test.each(["EACCES", "EPERM"] as const)(
+    "audits tombstone reuse when its final file is inaccessible with %s",
+    async (code) => {
+      const context = await fixture();
+      const workspaceId = randomUUID();
+      const bytes = Buffer.from(`tombstone reuse ${code}`);
+      const first = await context.store.put({ workspaceId, bytes });
+      const fence = randomUUID();
+      context.catalog.records[0] = {
+        ...first.record, status: "tombstoned", fencingToken: fence, tombstonedAt: new Date()
+      };
+      const inaccessiblePath = path.join(context.root, first.record.storageKey);
+      const store = new SourceBlobStore({
+        dataDir: context.root,
+        catalog: context.catalog,
+        openFile: async (candidate, flags) => {
+          if (candidate === inaccessiblePath) throw Object.assign(new Error("permission denied"), { code });
+          return open(candidate, flags);
+        }
+      });
+
+      await expect(store.put({ workspaceId, bytes }))
+        .rejects.toMatchObject({ code: "SOURCE_BLOB_INACCESSIBLE" });
+      expect(context.catalog.records).toHaveLength(1);
+      expect(context.catalog.records[0]).toMatchObject({
+        status: "tombstoned", fencingToken: fence
+      });
+      expect(context.catalog.audits).toEqual([{
+        sourceBlobId: first.record.id,
+        reason: "tombstone_file_inaccessible"
+      }]);
+    }
+  );
+
   test("does not restore a tombstoned generation while its source file is writable", async () => {
     const context = await fixture();
     const workspaceId = randomUUID();

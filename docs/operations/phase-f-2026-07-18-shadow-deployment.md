@@ -52,13 +52,29 @@ release was created. The temporary account's sessions and memberships were
 removed and the account was disabled; its audit history is intentionally
 retained.
 
-Before F04 can be accepted, perform desktop and mobile browser acceptance and
-complete a new 24-hour project-role observation from the `2026-07-18T04:26:54Z`
-restart without a terminal shadow-stage failure. `active` remains forbidden until
-F05 receives separate authorization.
+## 24-hour technical observation
 
-The production monitor intentionally remains failed during this observation:
-`MAX_SHADOW_PIPELINE_FAILURES_24H=0` still counts the two pre-fix `synthesize`
-failures at `2026-07-18T03:57Z` and `2026-07-18T03:59Z`. The post-fix build has
-no failed stages. The threshold and historical records were left intact, so the
-monitor will become green only after those failures age beyond its 24-hour window.
+At `2026-07-19T23:49:56Z`, more than 43 hours after the corrected app restart,
+the production system was checked again without changing data or configuration:
+
+- `/var/lib/devkh-monitor/status.json` reported `result=success` with no
+  failures for the scheduled run completed at `2026-07-19T23:45:08.972Z`;
+- the running app still reported `DEVKH_KNOWLEDGE_KERNEL_MODE=shadow`;
+- both the loopback application health endpoint and the server-local public
+  HTTPS route returned the expected health payload, with the public route
+  returning `200`;
+- the preceding 24-hour window contained zero builds with a failed shadow stage;
+  and
+- post-fix build `19f860a1-e5c9-4536-a073-fa923527f61c` still had ten stage
+  runs, all ten successful or reused, and zero failed stages.
+
+This closes the strict 24-hour shadow technical-observation gate. It does not by
+itself prove the complete F04 role rollout: desktop/mobile browser acceptance
+and evidence from one real project covering administrator, member, and reader
+flows continuously for 24 hours remain required. After that project-level gate
+passes, all non-critical projects must complete a separate 24-hour observation.
+Expansion to the whole workspace requires explicit user confirmation. Any
+permission leak, data corruption, invalid citation, golden-flow failure, or two
+consecutive new-kernel build failures triggers an immediate rollback to `shadow`
+and the last legacy release. `active` therefore remains forbidden until every
+F04 rollout layer is accepted and F05 receives separate authorization.

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -485,6 +486,69 @@ test("replaces only a read-only mismatched orphan view while the database still 
   assert.equal(viewStat.dev, blobStat.dev);
 });
 
+test("recovers a durably quarantined orphan view after a crash", async () => {
+  const context = await fixture();
+  const seeded = await seedBlobFile(context, context.files[0]);
+  const viewRoot = path.join(context.snapshotData, "snapshots");
+  const snapshotRoot = path.join(viewRoot, context.snapshots[0].id);
+  const orphanFile = path.join(snapshotRoot, "files", context.files[0].path);
+  const quarantine = path.join(viewRoot, `.orphan-${context.snapshots[0].id}`);
+  await mkdir(path.dirname(orphanFile), { recursive: true });
+  await writeFile(orphanFile, "stale\n");
+  await chmod(orphanFile, 0o444);
+  await chmod(path.dirname(orphanFile), 0o555);
+  await chmod(path.join(snapshotRoot, "files"), 0o555);
+  await chmod(snapshotRoot, 0o555);
+
+  await assert.rejects(runBackfill({
+    pool: context.pool,
+    dataDir: context.dataDir,
+    observer: (event) => {
+      if (event.type === "view-quarantine-fsync") throw new Error("crash after quarantine");
+    }
+  }), /crash after quarantine/);
+  await assert.rejects(lstat(snapshotRoot), { code: "ENOENT" });
+  assert.ok((await lstat(quarantine)).isDirectory());
+
+  await runBackfill({ pool: context.pool, dataDir: context.dataDir });
+
+  const [blobStat, viewStat] = await Promise.all([lstat(seeded.blobPath), lstat(orphanFile)]);
+  assert.equal(viewStat.dev, blobStat.dev);
+  assert.equal(viewStat.ino, blobStat.ino);
+  await assert.rejects(lstat(quarantine), { code: "ENOENT" });
+});
+
+test("adopts a published view and clears quarantine after a publication crash", async () => {
+  const context = await fixture();
+  const seeded = await seedBlobFile(context, context.files[0]);
+  const viewRoot = path.join(context.snapshotData, "snapshots");
+  const snapshotRoot = path.join(viewRoot, context.snapshots[0].id);
+  const orphanFile = path.join(snapshotRoot, "files", context.files[0].path);
+  const quarantine = path.join(viewRoot, `.orphan-${context.snapshots[0].id}`);
+  await mkdir(path.dirname(orphanFile), { recursive: true });
+  await writeFile(orphanFile, "stale\n");
+  await chmod(orphanFile, 0o444);
+  await chmod(path.dirname(orphanFile), 0o555);
+  await chmod(path.join(snapshotRoot, "files"), 0o555);
+  await chmod(snapshotRoot, 0o555);
+
+  await assert.rejects(runBackfill({
+    pool: context.pool,
+    dataDir: context.dataDir,
+    observer: (event) => {
+      if (event.type === "view-rename") throw new Error("crash during publication");
+    }
+  }), /crash during publication/);
+  assert.ok((await lstat(quarantine)).isDirectory());
+
+  await runBackfill({ pool: context.pool, dataDir: context.dataDir });
+
+  const [blobStat, viewStat] = await Promise.all([lstat(seeded.blobPath), lstat(orphanFile)]);
+  assert.equal(viewStat.dev, blobStat.dev);
+  assert.equal(viewStat.ino, blobStat.ino);
+  await assert.rejects(lstat(quarantine), { code: "ENOENT" });
+});
+
 test("does not delete an orphan view when a concurrent transaction switches snapshot storage", async () => {
   const context = await fixture();
   const orphanRoot = path.join(context.snapshotData, "snapshots", context.snapshots[0].id);
@@ -515,11 +579,64 @@ test("never replaces a mismatched view after the database path has switched", as
   await mkdir(path.dirname(viewFile), { recursive: true });
   await writeFile(viewFile, await readFile(seeded.blobPath));
   await chmod(viewFile, 0o444);
+  await chmod(path.dirname(viewFile), 0o555);
+  await chmod(newView, 0o555);
+  await chmod(path.dirname(newView), 0o555);
   context.snapshots[0].storage_path = newView;
 
   await assert.rejects(
     runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 500 }),
     /not a source blob hardlink/
+  );
+});
+
+test("rejects symlinked blob, trash, and canonical view ancestors", async (t) => {
+  await t.test("blob root", async () => {
+    const context = await fixture();
+    await seedBlobFile(context, context.files[0]);
+    const blobRoot = path.join(context.snapshotData, "blobs");
+    const outside = path.join(context.dataDir, "outside-blobs");
+    await rename(blobRoot, outside);
+    await symlink(outside, blobRoot);
+    await assert.rejects(runBackfill({ pool: context.pool, dataDir: context.dataDir }), /real directory/);
+  });
+  await t.test("trash root", async () => {
+    const context = await fixture();
+    await seedBlobFile(context, context.files[0], { status: "tombstoned", location: "trash" });
+    const trashRoot = path.join(context.snapshotData, ".trash");
+    const outside = path.join(context.dataDir, "outside-trash");
+    await rename(trashRoot, outside);
+    await symlink(outside, trashRoot);
+    await assert.rejects(runBackfill({ pool: context.pool, dataDir: context.dataDir }), /real directory/);
+  });
+  await t.test("canonical snapshot directory", async () => {
+    const context = await fixture();
+    const seeded = await seedBlobFile(context, context.files[0]);
+    const viewRoot = path.join(context.snapshotData, "snapshots");
+    const outside = path.join(context.dataDir, "outside-view");
+    const outsideFile = path.join(outside, "files", context.files[0].path);
+    await mkdir(path.dirname(outsideFile), { recursive: true });
+    await link(seeded.blobPath, outsideFile);
+    await chmod(path.dirname(outsideFile), 0o555);
+    await chmod(path.join(outside, "files"), 0o555);
+    await chmod(outside, 0o555);
+    await mkdir(viewRoot, { recursive: true });
+    await symlink(outside, path.join(viewRoot, context.snapshots[0].id));
+    await assert.rejects(runBackfill({ pool: context.pool, dataDir: context.dataDir }), /real directory/);
+  });
+});
+
+test("rejects writable canonical view directory components", async () => {
+  const context = await fixture();
+  const seeded = await seedBlobFile(context, context.files[0]);
+  const view = path.join(context.snapshotData, "snapshots", context.snapshots[0].id, "files");
+  const viewFile = path.join(view, context.files[0].path);
+  await mkdir(path.dirname(viewFile), { recursive: true });
+  await link(seeded.blobPath, viewFile);
+
+  await assert.rejects(
+    runBackfill({ pool: context.pool, dataDir: context.dataDir }),
+    /read-only real directory/
   );
 });
 
@@ -571,23 +688,34 @@ test("rejects symlinks at the legacy view root and in intermediate directories",
   });
 });
 
-test("preflights all files without retaining bytes and buffers at most one file during resolution", async () => {
+test("streams source, blob, temporary, and view bodies without retaining file buffers", async () => {
   const context = await fixture({ filesPerSnapshot: 4 });
-  let buffered = 0;
-  let peak = 0;
+  const legacyView = context.snapshots[0].storage_path;
+  const reads = [];
+  const writes = [];
 
   await runBackfill({
     pool: context.pool,
     dataDir: context.dataDir,
+    streams: {
+      createReadStream: (filePath, options) => {
+        reads.push(filePath);
+        return createReadStream(filePath, options);
+      },
+      createWriteStream: (filePath, options) => {
+        writes.push(filePath);
+        return createWriteStream(filePath, options);
+      }
+    },
     observer: (event) => {
       if (event.type === "snapshot-preflight") assert.ok(event.files.every((file) => !("bytes" in file)));
-      if (event.type === "file-buffered") peak = Math.max(peak, ++buffered);
-      if (event.type === "file-released") buffered -= 1;
     }
   });
 
-  assert.equal(peak, 1);
-  assert.equal(buffered, 0);
+  assert.ok(writes.length >= context.files.length);
+  assert.ok(reads.some((filePath) => filePath.startsWith(legacyView)));
+  assert.ok(reads.some((filePath) => filePath.includes(`${path.sep}blobs${path.sep}`)));
+  assert.ok(reads.some((filePath) => filePath.includes(`${path.sep}snapshots${path.sep}snapshots${path.sep}`)));
 });
 
 test("checkpoints each completed snapshot and preserves cumulative report state on a zero-work rerun", async () => {
@@ -771,11 +899,78 @@ test("runs the snapshot backfill against PostgreSQL atomically", {
       [releaseId, workspaceId, repositoryId, buildId, snapshotId]
     );
     const releaseBefore = (await pool.query("SELECT to_jsonb(release) AS value FROM releases release WHERE id = $1", [releaseId])).rows[0].value;
+    const expectedView = path.join(snapshotData, "snapshots", snapshotId, "files");
+
+    await assert.rejects(runBackfill({
+      pool,
+      dataDir,
+      batchSize: 1,
+      observer: (event) => {
+        if (event.type === "view-rename") throw new Error("integration bind rollback");
+      }
+    }), /integration bind rollback/);
+    const rolledBackSnapshot = await pool.query("SELECT storage_path FROM source_snapshots WHERE id = $1", [snapshotId]);
+    assert.equal(rolledBackSnapshot.rows[0].storage_path, legacyView);
+    const rolledBackFiles = await pool.query(
+      "SELECT source_blob_id FROM source_files WHERE snapshot_id = $1 ORDER BY id",
+      [snapshotId]
+    );
+    assert.ok(rolledBackFiles.rows.every((row) => row.source_blob_id === null));
+    assert.equal((await pool.query(
+      "SELECT count(*)::int AS count FROM audit_events WHERE action = 'source_blob.snapshot_backfilled' AND resource_id = $1",
+      [snapshotId]
+    )).rows[0].count, 0);
+
+    await removeReadOnlyTree(path.dirname(expectedView));
+    const raceFile = path.join(expectedView, sourceRows[0].path);
+    await mkdir(path.dirname(raceFile), { recursive: true });
+    await writeFile(raceFile, "competing view\n");
+    await chmod(raceFile, 0o444);
+    await chmod(path.dirname(raceFile), 0o555);
+    await chmod(expectedView, 0o555);
+    await chmod(path.dirname(expectedView), 0o555);
+    const competing = await pool.connect();
+    let releaseLockSignal;
+    const reachedSnapshotLock = new Promise((resolve) => { releaseLockSignal = resolve; });
+    try {
+      await competing.query("BEGIN");
+      await competing.query("SELECT id FROM source_snapshots WHERE id = $1 FOR UPDATE", [snapshotId]);
+      await competing.query("UPDATE source_snapshots SET storage_path = $1 WHERE id = $2", [expectedView, snapshotId]);
+      const racedBackfill = runBackfill({
+        pool,
+        dataDir,
+        batchSize: 1,
+        observer: (event) => {
+          if (event.type === "before-snapshot-lock") releaseLockSignal();
+        }
+      });
+      await Promise.race([
+        reachedSnapshotLock,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("backfill did not reach snapshot lock")), 5_000))
+      ]);
+      let settled = false;
+      void racedBackfill.finally(() => { settled = true; }).catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(settled, false);
+      await competing.query("COMMIT");
+      await assert.rejects(racedBackfill, /file set is inconsistent|not a source blob hardlink/);
+    } finally {
+      await competing.query("ROLLBACK").catch(() => undefined);
+      competing.release();
+    }
+    assert.equal((await pool.query("SELECT storage_path FROM source_snapshots WHERE id = $1", [snapshotId])).rows[0].storage_path,
+      expectedView);
+    assert.equal(await readFile(raceFile, "utf8"), "competing view\n");
+    assert.ok((await pool.query("SELECT source_blob_id FROM source_files WHERE snapshot_id = $1", [snapshotId])).rows
+      .every((row) => row.source_blob_id === null));
+    await pool.query("UPDATE source_snapshots SET storage_path = $1 WHERE id = $2", [legacyView, snapshotId]);
+    await removeReadOnlyTree(path.dirname(expectedView));
 
     const report = await runBackfill({ pool, dataDir, batchSize: 1 });
 
     assert.equal(report.processed, 1);
-    const expectedView = path.join(snapshotData, "snapshots", snapshotId, "files");
+    assert.equal(report.reused, sourceRows.length);
+    assert.equal(report.created, 0);
     const persistedSnapshot = await pool.query("SELECT storage_path FROM source_snapshots WHERE id = $1", [snapshotId]);
     assert.equal(persistedSnapshot.rows[0].storage_path, expectedView);
     const persistedFiles = await pool.query(
@@ -813,8 +1008,8 @@ test("runs the snapshot backfill against PostgreSQL atomically", {
     assert.deepEqual(checkpoints.rows[0].metadata, {
       projectId,
       repositoryId,
-      reused: 0,
-      created: sourceRows.length,
+      reused: sourceRows.length,
+      created: 0,
       workspaceId,
       snapshotId
     });

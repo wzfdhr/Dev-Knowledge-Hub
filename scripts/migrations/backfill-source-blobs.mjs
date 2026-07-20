@@ -1,17 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, createWriteStream } from "node:fs";
 import {
   chmod,
   link,
   lstat,
   mkdir,
   open,
-  readFile,
   readdir,
   rename,
   rm
 } from "node:fs/promises";
 import path from "node:path";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 
 import { Pool } from "pg";
@@ -19,10 +20,7 @@ import { Pool } from "pg";
 const DEFAULT_BATCH_SIZE = 500;
 const REPORT_NAME = "source-blob-backfill.json";
 const SOURCE_BLOB_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))";
-
-function digest(bytes) {
-  return createHash("sha256").update(bytes).digest("hex");
-}
+const DEFAULT_STREAMS = { createReadStream, createWriteStream };
 
 function safeIdentifier(value, label) {
   if (typeof value !== "string" || !/^[0-9a-z_-]+$/i.test(value) || value === "." || value === "..") {
@@ -97,6 +95,54 @@ async function assertRealDirectoryChain(root, segments) {
   return current;
 }
 
+function relativeSegments(root, candidate, label) {
+  const relative = path.relative(root, candidate);
+  const segments = relative.split(path.sep);
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
+    || segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error(`${label} is outside its trusted root`);
+  }
+  return segments;
+}
+
+async function assertSafeDirectoryChain(root, segments, { label, readOnly = false, allowMissing = false }) {
+  await assertRealDirectory(root, `${label} root`);
+  let current = root;
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    let metadata;
+    try {
+      metadata = await lstat(current);
+    } catch (error) {
+      if (allowMissing && hasErrorCode(error, "ENOENT")) return false;
+      throw error;
+    }
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new Error(`${label} ancestor must be a real directory`);
+    }
+    if (readOnly && (metadata.mode & 0o222) !== 0) {
+      throw new Error(`${label} ancestor must be a read-only real directory`);
+    }
+  }
+  return true;
+}
+
+async function safePathExists(root, candidate, label) {
+  const segments = relativeSegments(root, candidate, label);
+  const parentsExist = await assertSafeDirectoryChain(root, segments.slice(0, -1), {
+    label,
+    allowMissing: true
+  });
+  if (!parentsExist) return false;
+  try {
+    await lstat(candidate);
+    return true;
+  } catch (error) {
+    if (hasErrorCode(error, "ENOENT")) return false;
+    throw error;
+  }
+}
+
 async function ensureDurableDirectory(root, segments, observer) {
   await mkdir(root, { recursive: true, mode: 0o700 });
   await assertRealDirectory(root, "Storage root");
@@ -154,11 +200,11 @@ async function assertRegularFile(filePath, label) {
   return metadata;
 }
 
-async function hashSourceFile(sourcePath, label) {
+async function hashRegularFile(sourcePath, label, streams) {
   const before = await assertRegularFile(sourcePath, label);
   const hasher = createHash("sha256");
   let byteSize = 0;
-  for await (const chunk of createReadStream(sourcePath)) {
+  for await (const chunk of streams.createReadStream(sourcePath)) {
     byteSize += chunk.length;
     hasher.update(chunk);
   }
@@ -167,7 +213,7 @@ async function hashSourceFile(sourcePath, label) {
   return { byteSize, contentHash: hasher.digest("hex"), dev: after.dev, ino: after.ino };
 }
 
-async function preflightSourceFile(viewPath, file) {
+async function preflightSourceFile(viewPath, file, streams) {
   const relativePath = safeSourcePath(file.path);
   const expectedHash = file.content_hash;
   const expectedSize = asSafeSize(file.byte_size, "Source file size");
@@ -175,7 +221,7 @@ async function preflightSourceFile(viewPath, file) {
   await assertRealDirectoryChain(viewPath, relativePath.split("/").slice(0, -1));
   const sourcePath = path.resolve(viewPath, ...relativePath.split("/"));
   if (!sourcePath.startsWith(`${viewPath}${path.sep}`)) throw new Error("unsafe source file path");
-  const verified = await hashSourceFile(sourcePath, "Snapshot source file");
+  const verified = await hashRegularFile(sourcePath, "Snapshot source file", streams);
   if (verified.byteSize !== expectedSize) throw new Error("Snapshot source file size mismatch");
   if (verified.contentHash !== expectedHash) throw new Error("Snapshot source file hash mismatch");
   return {
@@ -189,35 +235,35 @@ async function preflightSourceFile(viewPath, file) {
   };
 }
 
-async function readVerifiedSourceFile(file) {
+async function verifySourceFile(file, streams) {
   await assertRealDirectoryChain(file.viewPath, file.path.split("/").slice(0, -1));
   const before = await assertRegularFile(file.sourcePath, "Snapshot source file");
   if (before.dev !== file.dev || before.ino !== file.ino) throw new Error("Snapshot source file changed after preflight");
-  const bytes = await readFile(file.sourcePath);
-  const after = await assertRegularFile(file.sourcePath, "Snapshot source file");
-  if (before.dev !== after.dev || before.ino !== after.ino) throw new Error("Snapshot source file changed during verification");
-  if (bytes.length !== file.byteSize) throw new Error("Snapshot source file size mismatch");
-  if (digest(bytes) !== file.content_hash) throw new Error("Snapshot source file hash mismatch");
-  return bytes;
+  const verified = await hashRegularFile(file.sourcePath, "Snapshot source file", streams);
+  if (verified.dev !== file.dev || verified.ino !== file.ino) throw new Error("Snapshot source file changed during verification");
+  if (verified.byteSize !== file.byteSize) throw new Error("Snapshot source file size mismatch");
+  if (verified.contentHash !== file.content_hash) throw new Error("Snapshot source file hash mismatch");
 }
 
-async function verifyBlobAt(snapshotData, blob, candidate) {
+async function verifyBlobAt(snapshotData, blob, candidate, streams) {
   const generation = Number(blob.generation);
   const byteSize = asSafeSize(blob.byte_size, "Source blob size");
   const expectedKey = blobStorageKey(blob.workspace_id, blob.content_hash, generation);
   if (blob.storage_key !== expectedKey) throw new Error("Active source blob storage key is inconsistent");
   const blobPath = candidate ?? path.join(snapshotData, ...expectedKey.split("/"));
+  const segments = relativeSegments(snapshotData, blobPath, "Source blob path");
+  await assertSafeDirectoryChain(snapshotData, segments.slice(0, -1), { label: "Source blob path" });
   const metadata = await assertRegularFile(blobPath, "Source blob");
   if ((metadata.mode & 0o222) !== 0) throw new Error("Source blob is not read-only");
-  const bytes = await readFile(blobPath);
-  if (bytes.length !== byteSize || digest(bytes) !== blob.content_hash) {
+  const verified = await hashRegularFile(blobPath, "Source blob", streams);
+  if (verified.byteSize !== byteSize || verified.contentHash !== blob.content_hash) {
     throw new Error("Source blob physical bytes are inconsistent");
   }
   return { ...blob, generation, byteSize, storageKey: expectedKey, blobPath };
 }
 
-async function verifyBlob(snapshotData, blob) {
-  return verifyBlobAt(snapshotData, blob);
+async function verifyBlob(snapshotData, blob, streams) {
+  return verifyBlobAt(snapshotData, blob, undefined, streams);
 }
 
 function blobLocations(snapshotData, blob) {
@@ -229,16 +275,6 @@ function blobLocations(snapshotData, blob) {
   };
 }
 
-async function pathExists(candidate) {
-  try {
-    await lstat(candidate);
-    return true;
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) return false;
-    throw error;
-  }
-}
-
 async function auditBlobInconsistency(client, blob, reason) {
   await client.query(
     `INSERT INTO audit_events (workspace_id, actor_id, action, resource_type, resource_id, metadata)
@@ -247,21 +283,44 @@ async function auditBlobInconsistency(client, blob, reason) {
   );
 }
 
-async function writeBlobGeneration(snapshotData, input, observer) {
+async function streamSourceToTemporary(input, temporary, streams) {
+  const before = await assertRegularFile(input.sourcePath, "Snapshot source file");
+  if (before.dev !== input.dev || before.ino !== input.ino) {
+    throw new Error("Snapshot source file changed before blob creation");
+  }
+  let byteSize = 0;
+  const hasher = createHash("sha256");
+  const hashingStream = new Transform({
+    transform(chunk, encoding, callback) {
+      byteSize += chunk.length;
+      hasher.update(chunk);
+      callback(null, chunk);
+    }
+  });
+  await pipeline(
+    streams.createReadStream(input.sourcePath),
+    hashingStream,
+    streams.createWriteStream(temporary, { flags: "wx", mode: 0o600 })
+  );
+  const after = await assertRegularFile(input.sourcePath, "Snapshot source file");
+  if (before.dev !== after.dev || before.ino !== after.ino) {
+    throw new Error("Snapshot source file changed during blob creation");
+  }
+  if (byteSize !== input.byteSize || hasher.digest("hex") !== input.contentHash) {
+    throw new Error("Snapshot source file changed during blob creation");
+  }
+}
+
+async function writeBlobGeneration(snapshotData, input, observer, streams) {
   const storageKey = blobStorageKey(input.workspaceId, input.contentHash, input.generation);
   const destination = path.join(snapshotData, ...storageKey.split("/"));
   const directory = await ensureDurableDirectory(snapshotData, storageKey.split("/").slice(0, -1), observer);
   const temporary = path.join(directory, `.${input.generation}.${randomUUID()}.tmp`);
   try {
-    const handle = await open(temporary, "wx", 0o600);
-    try {
-      await handle.writeFile(input.bytes);
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    const written = await readFile(temporary);
-    if (written.length !== input.byteSize || digest(written) !== input.contentHash) {
+    await streamSourceToTemporary(input, temporary, streams);
+    await syncFile(temporary);
+    const written = await hashRegularFile(temporary, "Temporary source blob", streams);
+    if (written.byteSize !== input.byteSize || written.contentHash !== input.contentHash) {
       throw new Error("Written source blob failed verification");
     }
     await chmod(temporary, 0o444);
@@ -279,7 +338,7 @@ async function writeBlobGeneration(snapshotData, input, observer) {
         generation: input.generation,
         byte_size: input.byteSize,
         storage_key: storageKey
-      });
+      }, streams);
     }
     await rm(temporary, { force: true });
     await syncDirectory(directory);
@@ -291,7 +350,7 @@ async function writeBlobGeneration(snapshotData, input, observer) {
   }
 }
 
-async function resolveBlob(pool, snapshotData, file, observer) {
+async function resolveBlob(pool, snapshotData, file, observer, streams) {
   const outcome = await withTransaction(pool, async (client) => {
     await client.query(SOURCE_BLOB_LOCK_SQL, [file.workspace_id, file.content_hash]);
     const live = await client.query(
@@ -312,12 +371,12 @@ async function resolveBlob(pool, snapshotData, file, observer) {
       try {
         const locations = blobLocations(snapshotData, candidate);
         const [sourceExists, trashExists] = await Promise.all([
-          pathExists(locations.source),
-          pathExists(locations.trash)
+          safePathExists(snapshotData, locations.source, "Source blob path"),
+          safePathExists(snapshotData, locations.trash, "Source blob trash path")
         ]);
         if (candidate.status === "active") {
           if (!sourceExists || trashExists) throw new Error("Active source blob location is inconsistent");
-          const blob = await verifyBlobAt(snapshotData, candidate, locations.source);
+          const blob = await verifyBlobAt(snapshotData, candidate, locations.source, streams);
           if (blob.byteSize !== file.byteSize || blob.content_hash !== file.content_hash) {
             throw new Error("Active source blob metadata is inconsistent");
           }
@@ -327,7 +386,7 @@ async function resolveBlob(pool, snapshotData, file, observer) {
           throw new Error("Tombstoned source blob location is inconsistent");
         }
         if (sourceExists) {
-          await verifyBlobAt(snapshotData, candidate, locations.source);
+          await verifyBlobAt(snapshotData, candidate, locations.source, streams);
           const restored = await client.query(
             `UPDATE source_blobs
              SET status = 'active', fencing_token = NULL, tombstoned_at = NULL,
@@ -339,10 +398,10 @@ async function resolveBlob(pool, snapshotData, file, observer) {
             [candidate.workspace_id, candidate.content_hash, candidate.id, candidate.fencing_token]
           );
           if (restored.rows.length !== 1) throw new Error("Tombstoned source blob fence restore failed");
-          const blob = await verifyBlob(snapshotData, restored.rows[0]);
+          const blob = await verifyBlob(snapshotData, restored.rows[0], streams);
           return { blob: { ...blob, reused: true } };
         }
-        await verifyBlobAt(snapshotData, candidate, locations.trash);
+        await verifyBlobAt(snapshotData, candidate, locations.trash, streams);
         const references = await client.query(
           `SELECT COUNT(*)::text AS reference_count
            FROM source_files
@@ -386,8 +445,10 @@ async function resolveBlob(pool, snapshotData, file, observer) {
       contentHash: file.content_hash,
       generation,
       byteSize: file.byteSize,
-      bytes: file.bytes
-    }, observer);
+      sourcePath: file.sourcePath,
+      dev: file.dev,
+      ino: file.ino
+    }, observer, streams);
     const inserted = await client.query(
       `INSERT INTO source_blobs (workspace_id, content_hash, generation, byte_size, storage_key, status)
        VALUES ($1, $2, $3, $4, $5, 'active')
@@ -395,7 +456,7 @@ async function resolveBlob(pool, snapshotData, file, observer) {
       [file.workspace_id, file.content_hash, generation, file.byteSize, written.storageKey]
     );
     if (inserted.rows.length !== 1) throw new Error("Source blob creation did not return one row");
-    const blob = await verifyBlob(snapshotData, inserted.rows[0]);
+    const blob = await verifyBlob(snapshotData, inserted.rows[0], streams);
     return { blob: { ...blob, reused: false } };
   });
   if (outcome.integrityError) throw new Error(outcome.integrityError);
@@ -444,8 +505,12 @@ async function removeReadonlyTree(root) {
   await rm(root, { recursive: true, force: true });
 }
 
-async function listViewFiles(root, current = "") {
+async function listViewFiles(root, current = "", readOnly = false) {
   const directory = current ? path.join(root, ...current.split("/")) : root;
+  const directoryMetadata = await assertRealDirectory(directory, "Snapshot view directory");
+  if (readOnly && (directoryMetadata.mode & 0o222) !== 0) {
+    throw new Error("Snapshot view ancestor must be a read-only real directory");
+  }
   const entries = await readdir(directory, { withFileTypes: true });
   const files = [];
   for (const entry of entries) {
@@ -454,7 +519,7 @@ async function listViewFiles(root, current = "") {
     const metadata = await lstat(entryPath);
     if (metadata.isSymbolicLink()) throw new Error("Snapshot view contains a symbolic link");
     if (metadata.isDirectory()) {
-      files.push(...await listViewFiles(root, relative));
+      files.push(...await listViewFiles(root, relative, readOnly));
     } else if (metadata.isFile()) {
       files.push(relative);
     } else {
@@ -464,14 +529,21 @@ async function listViewFiles(root, current = "") {
   return files;
 }
 
-async function verifySnapshotView(view, files) {
+async function verifySnapshotView(paths, view, files, { readOnly, streams }) {
+  const viewSegments = relativeSegments(paths.viewRoot, view, "Snapshot view");
+  await assertSafeDirectoryChain(paths.viewRoot, viewSegments, {
+    label: "Snapshot view",
+    readOnly
+  });
   const expectedPaths = new Set(files.map((file) => file.path));
-  const actualPaths = new Set(await listViewFiles(view));
+  const actualPaths = new Set(await listViewFiles(view, "", readOnly));
   if (actualPaths.size !== expectedPaths.size || [...actualPaths].some((filePath) => !expectedPaths.has(filePath))) {
     throw new Error("Snapshot view file set is inconsistent");
   }
   for (const file of files) {
     const viewPath = path.join(view, ...file.path.split("/"));
+    const blobSegments = relativeSegments(paths.snapshotData, file.blob.blobPath, "Source blob path");
+    await assertSafeDirectoryChain(paths.snapshotData, blobSegments.slice(0, -1), { label: "Source blob path" });
     const [viewStat, blobStat] = await Promise.all([
       assertRegularFile(viewPath, "Snapshot view file"),
       assertRegularFile(file.blob.blobPath, "Source blob")
@@ -479,30 +551,37 @@ async function verifySnapshotView(view, files) {
     if (viewStat.dev !== blobStat.dev || viewStat.ino !== blobStat.ino) {
       throw new Error("Snapshot view file is not a source blob hardlink");
     }
-    const bytes = await readFile(viewPath);
-    if (bytes.length !== file.byteSize || digest(bytes) !== file.content_hash) {
+    const verified = await hashRegularFile(viewPath, "Snapshot view file", streams);
+    if (verified.byteSize !== file.byteSize || verified.contentHash !== file.content_hash) {
       throw new Error("Snapshot view file is inconsistent");
     }
   }
 }
 
-async function materializeSnapshotView(paths, files, { allowOrphanReplacement, observer }) {
+async function materializeSnapshotView(paths, files, { allowOrphanReplacement, observer, streams }) {
   await ensureDurableDirectory(paths.snapshotData, ["snapshots"], observer);
-  try {
-    await lstat(path.dirname(paths.view));
+  const destination = path.dirname(paths.view);
+  const quarantine = path.join(paths.viewRoot, `.orphan-${path.basename(destination)}`);
+  const destinationExists = await safePathExists(paths.viewRoot, destination, "Canonical snapshot view");
+  const quarantineExists = await safePathExists(paths.viewRoot, quarantine, "Snapshot view quarantine");
+  if (quarantineExists) await assertReadonlyTree(quarantine);
+  if (destinationExists) {
     try {
-      await verifySnapshotView(paths.view, files);
+      await verifySnapshotView(paths, paths.view, files, { readOnly: true, streams });
+      if (quarantineExists) {
+        await removeReadonlyTree(quarantine);
+        await syncDirectory(paths.viewRoot);
+      }
       return;
     } catch (error) {
       if (!allowOrphanReplacement) throw error;
-      await assertReadonlyTree(path.dirname(paths.view));
-      await removeReadonlyTree(path.dirname(paths.view));
-      await syncDirectory(paths.viewRoot);
+      await assertReadonlyTree(destination);
+      if (quarantineExists) {
+        throw new Error("Snapshot view and quarantine are both inconsistent", { cause: error });
+      }
     }
-  } catch (error) {
-    if (!hasErrorCode(error, "ENOENT")) throw error;
   }
-  const temporary = path.join(paths.viewRoot, `.${path.basename(path.dirname(paths.view))}.${randomUUID()}.tmp`);
+  const temporary = path.join(paths.viewRoot, `.${path.basename(destination)}.${randomUUID()}.tmp`);
   const temporaryView = path.join(temporary, "files");
   try {
     await ensureDurableDirectory(paths.viewRoot, [path.basename(temporary), "files"], observer);
@@ -512,22 +591,32 @@ async function materializeSnapshotView(paths, files, { allowOrphanReplacement, o
       await link(file.blob.blobPath, target);
       observe(observer, { type: "view-link", source: file.blob.blobPath, destination: target });
     }
-    await verifySnapshotView(temporaryView, files);
+    await verifySnapshotView(paths, temporaryView, files, { readOnly: false, streams });
     await makeDirectoriesReadOnly(temporary);
     await syncDirectoryTree(temporary);
     observe(observer, { type: "view-tree-fsync", path: temporary });
-    await rename(temporary, path.dirname(paths.view));
-    observe(observer, { type: "view-rename", source: temporary, destination: path.dirname(paths.view) });
+    if (destinationExists) {
+      await rename(destination, quarantine);
+      await syncDirectory(paths.viewRoot);
+      observe(observer, { type: "view-quarantine-fsync", path: quarantine });
+    }
+    await rename(temporary, destination);
+    observe(observer, { type: "view-rename", source: temporary, destination });
     await syncDirectory(paths.viewRoot);
     observe(observer, { type: "view-root-fsync", path: paths.viewRoot });
-    await verifySnapshotView(paths.view, files);
+    await verifySnapshotView(paths, paths.view, files, { readOnly: true, streams });
+    if (await safePathExists(paths.viewRoot, quarantine, "Snapshot view quarantine")) {
+      await assertReadonlyTree(quarantine);
+      await removeReadonlyTree(quarantine);
+      await syncDirectory(paths.viewRoot);
+    }
   } catch (error) {
     await rm(temporary, { recursive: true, force: true }).catch(() => undefined);
     throw error;
   }
 }
 
-async function bindSnapshot(pool, snapshot, paths, files, counts, observer) {
+async function bindSnapshot(pool, snapshot, paths, files, counts, observer, streams) {
   return withTransaction(pool, async (client) => {
     const expectedBlobs = [...new Map(files.map((file) => [
       `${file.blob.workspace_id}:${file.blob.content_hash}`,
@@ -537,6 +626,7 @@ async function bindSnapshot(pool, snapshot, paths, files, counts, observer) {
     for (const blob of expectedBlobs) {
       await client.query(SOURCE_BLOB_LOCK_SQL, [blob.workspace_id, blob.content_hash]);
     }
+    observe(observer, { type: "before-snapshot-lock", snapshotId: snapshot.snapshot_id });
     const lockedSnapshot = await client.query(
       `SELECT snapshot.id, snapshot.workspace_id, snapshot.repository_id, snapshot.storage_path,
               repository.project_id
@@ -585,7 +675,8 @@ async function bindSnapshot(pool, snapshot, paths, files, counts, observer) {
     }
     await materializeSnapshotView(paths, files, {
       allowOrphanReplacement: currentSnapshot.storage_path === paths.legacyView,
-      observer
+      observer,
+      streams
     });
     const current = await client.query(
       `SELECT file.id, file.source_blob_id
@@ -766,9 +857,13 @@ export async function runBackfill({
   dataDir,
   batchSize = DEFAULT_BATCH_SIZE,
   writeReport = true,
-  observer
+  observer,
+  streams = DEFAULT_STREAMS
 }) {
   if (!Number.isSafeInteger(batchSize) || batchSize < 1) throw new Error("batchSize must be a positive safe integer");
+  if (typeof streams.createReadStream !== "function" || typeof streams.createWriteStream !== "function") {
+    throw new Error("streams must provide createReadStream and createWriteStream");
+  }
   const snapshotData = path.resolve(dataDir, "snapshots");
   const state = await rebuildCheckpointState(dataDir, pool);
   let cursor = null;
@@ -820,7 +915,7 @@ export async function runBackfill({
         if (sourceFile.workspace_id !== snapshot.workspace_id || sourceFile.snapshot_id !== snapshot.snapshot_id) {
           throw new Error("Snapshot source file scope is inconsistent");
         }
-        const file = await preflightSourceFile(snapshot.storage_path, sourceFile);
+        const file = await preflightSourceFile(snapshot.storage_path, sourceFile, streams);
         if (seenPaths.has(file.path)) throw new Error("Snapshot contains duplicate source file paths");
         seenPaths.add(file.path);
         preflight.push(file);
@@ -830,10 +925,8 @@ export async function runBackfill({
       let snapshotReused = 0;
       let snapshotCreated = 0;
       for (const file of preflight) {
-        const bytes = await readVerifiedSourceFile(file);
-        observe(observer, { type: "file-buffered", path: file.path, byteSize: bytes.length });
-        const blob = await resolveBlob(pool, snapshotData, { ...file, bytes }, observer);
-        observe(observer, { type: "file-released", path: file.path });
+        await verifySourceFile(file, streams);
+        const blob = await resolveBlob(pool, snapshotData, file, observer, streams);
         if (blob.reused) snapshotReused += 1;
         else snapshotCreated += 1;
         bound.push({ ...file, blob });
@@ -841,7 +934,7 @@ export async function runBackfill({
       const checkpoint = await bindSnapshot(pool, snapshot, paths, bound, {
         reused: snapshotReused,
         created: snapshotCreated
-      }, observer);
+      }, observer, streams);
       observe(observer, { type: "snapshot-bound", snapshotId: snapshot.snapshot_id });
       state.processed += 1;
       state.reused += checkpoint.reused;

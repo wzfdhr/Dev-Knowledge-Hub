@@ -409,6 +409,19 @@ test("reuses only a verified active blob and increments the generation after ina
   assert.equal(second.pool.blobs.find((blob) => blob.status === "active").generation, 2);
 });
 
+test("timestamps newly inserted source blobs with the wall clock at insertion", async () => {
+  const context = await fixture();
+
+  await runBackfill({ pool: context.pool, dataDir: context.dataDir });
+
+  const insert = context.pool.queries.find(({ text }) => text.includes("INSERT INTO source_blobs"));
+  assert.ok(insert);
+  assert.match(insert.text,
+    /\(workspace_id, content_hash, generation, byte_size, storage_key, status, created_at, updated_at\)/);
+  assert.match(insert.text,
+    /VALUES \(\$1, \$2, \$3, \$4, \$5, 'active', clock_timestamp\(\), clock_timestamp\(\)\)/);
+});
+
 test("restores a verified tombstoned source generation and reuses it", async () => {
   const context = await fixture();
   const seeded = await seedBlobFile(context, context.files[0], { status: "tombstoned" });
@@ -1005,6 +1018,30 @@ test("runs the snapshot backfill against PostgreSQL atomically", {
     const tupleCompetitor = await pool.connect();
     let sourceLockSignal;
     const reachedSourceLock = new Promise((resolve) => { sourceLockSignal = resolve; });
+    let blobWriteSignal;
+    const reachedBlobWrite = new Promise((resolve) => { blobWriteSignal = resolve; });
+    let releaseBlobWrite;
+    const blobWriteReleased = new Promise((resolve) => { releaseBlobWrite = resolve; });
+    let gatedBlobWrite = false;
+    const gatedStreams = {
+      createReadStream,
+      createWriteStream: (filePath, options) => {
+        const stream = createWriteStream(filePath, options);
+        if (!gatedBlobWrite) {
+          gatedBlobWrite = true;
+          const write = stream._write.bind(stream);
+          stream._write = (chunk, encoding, callback) => {
+            blobWriteSignal();
+            void blobWriteReleased.then(
+              () => write(chunk, encoding, callback),
+              callback
+            );
+          };
+        }
+        return stream;
+      }
+    };
+    let gcBoundary;
     try {
       await tupleCompetitor.query("BEGIN");
       await tupleCompetitor.query(
@@ -1015,10 +1052,17 @@ test("runs the snapshot backfill against PostgreSQL atomically", {
         pool,
         dataDir,
         batchSize: 1,
+        streams: gatedStreams,
         observer: (event) => {
           if (event.type === "before-source-files-lock") sourceLockSignal();
         }
       });
+      await Promise.race([
+        reachedBlobWrite,
+        new Promise((_, reject) => setTimeout(() => reject(new Error("backfill did not begin blob write")), 5_000))
+      ]);
+      gcBoundary = (await pool.query("SELECT clock_timestamp() AS boundary")).rows[0].boundary;
+      releaseBlobWrite();
       await Promise.race([
         reachedSourceLock,
         new Promise((_, reject) => setTimeout(() => reject(new Error("backfill did not reach source file lock")), 5_000))
@@ -1037,6 +1081,16 @@ test("runs the snapshot backfill against PostgreSQL atomically", {
       legacyView);
     assert.ok((await pool.query("SELECT source_blob_id FROM source_files WHERE snapshot_id = $1", [snapshotId])).rows
       .every((row) => row.source_blob_id === null));
+    const insertedBlobTimes = await pool.query(
+      "SELECT created_at, updated_at FROM source_blobs WHERE workspace_id = $1 ORDER BY generation, id",
+      [workspaceId]
+    );
+    assert.equal(insertedBlobTimes.rows.length, sourceRows.length);
+    assert.ok(insertedBlobTimes.rows.every((row) => row.created_at > gcBoundary && row.updated_at >= row.created_at));
+    assert.equal((await pool.query(
+      "SELECT count(*)::int AS count FROM source_blobs WHERE workspace_id = $1 AND created_at <= $2",
+      [workspaceId, gcBoundary]
+    )).rows[0].count, 0);
     await assert.rejects(lstat(path.dirname(expectedView)), { code: "ENOENT" });
     await pool.query("UPDATE source_files SET byte_size = byte_size - 1 WHERE id = $1", [sourceRows[0].id]);
 

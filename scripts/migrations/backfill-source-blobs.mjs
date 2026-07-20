@@ -450,8 +450,9 @@ async function resolveBlob(pool, snapshotData, file, observer, streams) {
       ino: file.ino
     }, observer, streams);
     const inserted = await client.query(
-      `INSERT INTO source_blobs (workspace_id, content_hash, generation, byte_size, storage_key, status)
-       VALUES ($1, $2, $3, $4, $5, 'active')
+      `INSERT INTO source_blobs
+         (workspace_id, content_hash, generation, byte_size, storage_key, status, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, 'active', clock_timestamp(), clock_timestamp())
        RETURNING id, workspace_id, content_hash, generation, byte_size, storage_key, status`,
       [file.workspace_id, file.content_hash, generation, file.byteSize, written.storageKey]
     );

@@ -117,6 +117,20 @@ async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean):
   throw new Error(`Timed out waiting for PostgreSQL workflow state: ${JSON.stringify(latest)}`);
 }
 
+async function within<T>(promise: Promise<T>, label: string, timeoutMs = 15_000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 integration("PostgreSQL cited knowledge integration", () => {
   test(databaseUrl
     ? "persists and serializes restart-safe upload sessions"
@@ -2771,27 +2785,118 @@ integration("PostgreSQL cited knowledge integration", () => {
     expect(inserted.rows[0]?.count).toBe("2");
   }, 30_000);
 
-  test("runs source blob GC with a PostgreSQL pool capacity of one", async () => {
-    const singlePool = new Pool({ connectionString: databaseUrl, max: 1 });
-    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-postgres-source-blob-single-client-"));
-    retrievalFixtureRoots.push(root);
+  test("runs source blob GC with a saturated PostgreSQL pool", async () => {
+    const saturatedPool = new Pool({
+      connectionString: databaseUrl,
+      max: 4,
+      connectionTimeoutMillis: 5_000,
+      statement_timeout: 10_000
+    });
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-postgres-source-blob-saturated-"));
+    let beginScopedWork = () => {};
+    let releaseLease = () => {};
+    const scopedWorkAllowed = new Promise<void>((resolve) => { beginScopedWork = resolve; });
+    const leaseReleaseAllowed = new Promise<void>((resolve) => { releaseLease = resolve; });
+    let lease: Promise<unknown> | null = null;
+    let writers: Array<Promise<unknown>> = [];
+    let cleanupFailures: unknown[];
     try {
-      await runMigrations(singlePool);
-      await singlePool.query("TRUNCATE workspaces CASCADE");
-      const catalog = new PostgresAppStore(singlePool);
-      const setup = await catalog.createInitialSetup("source-blob-single-client@example.com", "hash");
+      await runMigrations(saturatedPool);
+      await saturatedPool.query("TRUNCATE workspaces CASCADE");
+      const catalog = new PostgresAppStore(saturatedPool);
+      expect(saturatedPool.options.max).toBe(4);
+      const setup = await catalog.createInitialSetup("source-blob-saturated@example.com", "hash");
       const blobs = new SourceBlobStore({ dataDir: root, catalog });
       await blobs.initialize();
-      await blobs.put({ workspaceId: setup!.workspace.id, bytes: Buffer.from("single client GC") });
-      const gc = new SourceBlobGarbageCollector({ dataDir: root, catalog, enabled: true });
-
-      await expect(gc.runOnce()).resolves.toMatchObject({
-        scanned: 1, tombstoned: 1, lockBusy: false, resumeRequired: false
+      const created = await blobs.put({
+        workspaceId: setup!.workspace.id,
+        bytes: Buffer.from("saturated source blob GC")
       });
+      let leaseEntered = () => {};
+      const leaseReady = new Promise<void>((resolve) => { leaseEntered = resolve; });
+      let scopedCompleted!: (value: { pageSize: number; references: number; status: string }) => void;
+      let scopedFailed!: (error: unknown) => void;
+      const scopedResult = new Promise<{ pageSize: number; references: number; status: string }>(
+        (resolve, reject) => { scopedCompleted = resolve; scopedFailed = reject; }
+      );
+
+      lease = catalog.withSourceBlobGcLease(async (scoped) => {
+        leaseEntered();
+        await scopedWorkAllowed;
+        try {
+          const boundary = await scoped.findSourceBlobGcRunBoundary();
+          if (!boundary) throw new Error("GC boundary was unexpectedly empty");
+          const page = await scoped.listSourceBlobGcCandidates({ ...boundary, limit: 1 });
+          const transition = await scoped.withSourceBlobLock(
+            created.record.workspaceId,
+            created.record.contentHash,
+            async (locked) => {
+              const current = await locked.findById(created.record.id);
+              if (!current) throw new Error("GC candidate disappeared before transition");
+              const references = await locked.countReferences(current.id);
+              const changed = await locked.tombstoneIfUnreferenced(current.id, randomUUID(), new Date());
+              if (!changed) throw new Error("GC transition did not tombstone the candidate");
+              return { references, status: changed.status };
+            }
+          );
+          const result = { pageSize: page.length, ...transition };
+          scopedCompleted(result);
+          await leaseReleaseAllowed;
+          return result;
+        } catch (error) {
+          scopedFailed(error);
+          throw error;
+        }
+      });
+      await within(leaseReady, "exclusive GC lease");
+
+      const writerSettled = [false, false, false];
+      writers = writerSettled.map((_settled, index) => catalog.withSourceBlobWriterLock(
+        setup!.workspace.id,
+        (index + 11).toString(16).padStart(64, "0"),
+        async () => index
+      ).finally(() => { writerSettled[index] = true; }));
+
+      await waitFor(async () => ({
+        total: saturatedPool.totalCount,
+        idle: saturatedPool.idleCount,
+        waiting: saturatedPool.waitingCount,
+        writerSettled: [...writerSettled]
+      }), (state) => state.total === 4 && state.idle === 0 && state.waiting === 0
+        && state.writerSettled.every((settled) => !settled));
+
+      beginScopedWork();
+      await expect(within(scopedResult, "lease-scoped GC work", 5_000)).resolves.toEqual({
+        pageSize: 1, references: 0, status: "tombstoned"
+      });
+      expect(writerSettled).toEqual([false, false, false]);
+      expect(saturatedPool.totalCount).toBe(4);
+      expect(saturatedPool.idleCount).toBe(0);
+
+      releaseLease();
+      await expect(within(lease, "GC lease release")).resolves.toEqual({
+        acquired: true,
+        value: { pageSize: 1, references: 0, status: "tombstoned" }
+      });
+      await expect(within(Promise.all(writers), "blocked source blob writers")).resolves.toEqual([0, 1, 2]);
+      expect(writerSettled).toEqual([true, true, true]);
     } finally {
-      await singlePool.end();
+      beginScopedWork();
+      releaseLease();
+      if (lease) await within(lease.catch(() => undefined), "GC lease cleanup").catch(() => undefined);
+      if (writers.length > 0) {
+        await within(Promise.allSettled(writers), "source blob writer cleanup").catch(() => undefined);
+      }
+      const cleanup = await Promise.allSettled([
+        within(saturatedPool.end(), "saturated PostgreSQL pool cleanup"),
+        within(removeReadonlyDirectory(root), "saturated source blob fixture cleanup")
+      ]);
+      cleanupFailures = cleanup.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
     }
-  }, 30_000);
+    if (cleanupFailures.length > 0) {
+      throw new AggregateError(cleanupFailures, "Saturated GC fixture cleanup failed");
+    }
+  }, 45_000);
 
   test("serializes GC membership with writers, including a shared lock acquired in a savepoint", async () => {
     pool ??= new Pool({ connectionString: databaseUrl });

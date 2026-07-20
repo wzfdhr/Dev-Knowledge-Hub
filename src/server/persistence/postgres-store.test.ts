@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -10,6 +10,16 @@ import { SourceBlobGarbageCollector } from "../uploads/source-blob-gc.js";
 import { PostgresAppStore } from "./postgres-store";
 
 describe("PostgresAppStore source blob locking", () => {
+  test("keeps the saturated GC integration fixture at the supported four-connection minimum", async () => {
+    const source = await readFile(new URL("./postgres-knowledge.integration.test.ts", import.meta.url), "utf8");
+    const start = source.indexOf('test("runs source blob GC with a saturated PostgreSQL pool"');
+    const end = source.indexOf("\n  test(", start + 1);
+    expect(start).toBeGreaterThan(0);
+    const fixture = source.slice(start, end);
+    expect(fixture).toContain("max: 4");
+    expect(fixture).not.toMatch(/max:\s*[0-3]\b/);
+  });
+
   test("keeps the advisory lock and all catalog queries on one transaction client", async () => {
     const blobRow = {
       id: "33333333-3333-4333-8333-333333333333",

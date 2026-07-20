@@ -10,8 +10,10 @@ import {
   createNormalizedSourcesStageExecutor,
   normalizedSourcesPipelineInputDigest
 } from "./convert-stage";
+import { SourceBlobReader } from "./source-blob-reader";
 import type { PipelineStageRunRecord } from "../../persistence/store";
 import { MemoryAppStore } from "../../persistence/memory-store";
+import { SourceBlobStore } from "../../uploads/source-blob-store";
 
 const directories: string[] = [];
 
@@ -23,7 +25,7 @@ function hash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-async function fixture(files: Record<string, string>) {
+async function fixture(files: Record<string, string>, withSourceBlobs = false) {
   const snapshotRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-convert-stage-snapshot-"));
   const artifactRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-convert-stage-artifacts-"));
   directories.push(snapshotRoot, artifactRoot);
@@ -35,6 +37,16 @@ async function fixture(files: Record<string, string>) {
   const store = new MemoryAppStore();
   const setup = await store.createInitialSetup("admin@example.com", "hash");
   const workspaceId = setup!.workspace.id;
+  const blobRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-convert-stage-blobs-"));
+  directories.push(blobRoot);
+  const blobStore = new SourceBlobStore({ dataDir: blobRoot, catalog: store });
+  await blobStore.initialize();
+  const sourceBlobs = new Map<string, string>();
+  if (withSourceBlobs) {
+    for (const [filePath, content] of Object.entries(files)) {
+      sourceBlobs.set(filePath, (await blobStore.put({ workspaceId, bytes: Buffer.from(content) })).record.id);
+    }
+  }
   const project = (await store.listProjects(workspaceId))[0]!;
   const repository = await store.createRepository(workspaceId, { kind: "upload", name: "Source" }, project.id);
   const snapshot = await store.createSnapshot({
@@ -44,7 +56,8 @@ async function fixture(files: Record<string, string>) {
     },
     files: Object.entries(files).map(([filePath, content]) => ({
       id: randomUUID(), workspaceId, snapshotId: "snapshot-1", path: filePath,
-      byteSize: Buffer.byteLength(content), contentHash: hash(content), language: null
+      byteSize: Buffer.byteLength(content), contentHash: hash(content), language: null,
+      sourceBlobId: sourceBlobs.get(filePath) ?? null
     }))
   });
   const { build } = await store.createBuild({
@@ -61,7 +74,18 @@ async function fixture(files: Record<string, string>) {
     startedAt: "2026-07-16T00:00:00.000Z", finishedAt: null, errorCode: null, errorDetail: null
   };
 
-  return { artifactStore, build, files: snapshotFiles, project, repository: repository!, run, snapshot, snapshotRoot, store };
+  return {
+    artifactStore,
+    blobReader: new SourceBlobReader({ catalog: store, blobStore }),
+    build,
+    files: snapshotFiles,
+    project,
+    repository: repository!,
+    run,
+    snapshot,
+    snapshotRoot,
+    store
+  };
 }
 
 describe("normalized sources pipeline stage", () => {
@@ -114,6 +138,55 @@ describe("normalized sources pipeline stage", () => {
     const value = await prepared.artifactStore.getJson(artifact) as { sources: Array<{ path: string }> };
 
     expect(value.sources.map((source) => source.path)).toEqual(Object.keys(sources).sort());
+  });
+
+  test("adds source references without inline bytes for a blob-backed shadow snapshot", async () => {
+    const source = "export const answer = 42;\n";
+    const prepared = await fixture({ "src/app.ts": source }, true);
+    const execute = createNormalizedSourcesStageExecutor({
+      store: prepared.store,
+      artifactStore: prepared.artifactStore,
+      sourceStorageMode: "shadow",
+      sourceBlobReader: prepared.blobReader
+    });
+
+    const result = await execute(prepared.run);
+
+    expect(result.outputManifestIds).toHaveLength(2);
+    const manifests = result.outputManifestIds!.map((id) =>
+      prepared.store.knowledgeArtifacts.find((artifact) => artifact.id === id)!
+    );
+    expect(manifests.map((manifest) => manifest.kind)).toEqual(["normalized-sources", "normalized-source-refs"]);
+    await expect(prepared.artifactStore.getJson(manifests[1]!)).resolves.toEqual({
+      schemaVersion: 2,
+      snapshotId: prepared.snapshot.id,
+      sources: [{
+        snapshotId: prepared.snapshot.id,
+        path: "src/app.ts",
+        sourceBlobId: expect.any(String),
+        blobHash: hash(source),
+        byteSize: Buffer.byteLength(source),
+        language: null
+      }]
+    });
+    expect(JSON.stringify(await prepared.artifactStore.getJson(manifests[1]!))).not.toContain(source);
+  });
+
+  test("keeps legacy output during shadow backfill and rejects incomplete active input", async () => {
+    const prepared = await fixture({ "src/app.ts": "export const answer = 42;\n" });
+
+    await expect(createNormalizedSourcesStageExecutor({
+      store: prepared.store,
+      artifactStore: prepared.artifactStore,
+      sourceStorageMode: "shadow",
+      sourceBlobReader: prepared.blobReader
+    })(prepared.run)).resolves.toEqual({ outputManifestIds: [expect.any(String)], reused: false });
+    await expect(createNormalizedSourcesStageExecutor({
+      store: prepared.store,
+      artifactStore: prepared.artifactStore,
+      sourceStorageMode: "active",
+      sourceBlobReader: prepared.blobReader
+    })(prepared.run)).rejects.toThrow("every pipeline source file to have a source blob");
   });
 
   test("reuses the immutable artifact for the same owned run inputs", async () => {

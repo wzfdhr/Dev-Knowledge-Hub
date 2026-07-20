@@ -3,8 +3,12 @@ import path from "node:path";
 
 import type { ArtifactManifest, TableSchema } from "./contracts.js";
 import { type ArtifactStore } from "./artifact-store.js";
-import { convertSnapshotTableFile } from "./convert.js";
+import { convertSnapshotTableFile, type SnapshotTableFile } from "./convert.js";
 import { pipelineInputDigest } from "./input-digest.js";
+import {
+  normalizedSourceReferencesSchema,
+  type SourceBlobReader
+} from "./source-blob-reader.js";
 import { extractCsvTable, extractXlsxTables, type TableExtractionResult } from "./tables.js";
 import type { PipelineStageExecutor } from "./worker.js";
 import type { BuildRecord } from "../build-service.js";
@@ -81,7 +85,10 @@ function assertOwnedUpstreamManifest(run: PipelineStageRunRecord, manifest: Arti
     || manifest.projectId !== run.projectId
     || manifest.snapshotId !== run.snapshotId
     || manifest.stage !== "convert"
-    || manifest.kind !== "normalized-sources"
+    || !(
+      (manifest.kind === "normalized-sources" && manifest.schemaVersion === 1)
+      || (manifest.kind === "normalized-source-refs" && manifest.schemaVersion === 2)
+    )
   ) {
     throw new Error("Table schemas upstream manifest does not match the project build and snapshot");
   }
@@ -95,6 +102,9 @@ function convertOutputManifestIds(stageRuns: readonly PipelineStageRunRecord[]):
   if (convertRun.outputManifestIds.length === 0) throw new Error("Table schemas stage requires at least one upstream manifest");
   if (new Set(convertRun.outputManifestIds).size !== convertRun.outputManifestIds.length) {
     throw new Error("Table schemas stage requires unique upstream manifests");
+  }
+  if (convertRun.outputManifestIds.length !== 1) {
+    throw new Error("Table schemas stage requires exactly one convert artifact family");
   }
   return convertRun.outputManifestIds;
 }
@@ -115,11 +125,7 @@ function sortedTables(results: readonly TableExtractionResult[]): TableExtractio
   );
 }
 
-async function extractTableFile(
-  snapshot: SourceSnapshotRecord,
-  file: SourceFileRecord
-): Promise<TableExtractionResult[]> {
-  const source = await convertSnapshotTableFile({ snapshot, file });
+async function extractTableSource(source: SnapshotTableFile): Promise<TableExtractionResult[]> {
   if (path.posix.extname(source.path).toLowerCase() === ".csv") {
     let content: string;
     try {
@@ -132,10 +138,18 @@ async function extractTableFile(
   return extractXlsxTables(source);
 }
 
+async function extractTableFile(
+  snapshot: SourceSnapshotRecord,
+  file: SourceFileRecord
+): Promise<TableExtractionResult[]> {
+  return extractTableSource(await convertSnapshotTableFile({ snapshot, file }));
+}
+
 export function createTableSchemasStageExecutor(input: {
   store: TableSchemasStageStore;
   artifactStore: ArtifactStore;
   actorId?: string;
+  sourceBlobReader?: SourceBlobReader;
 }): PipelineStageExecutor {
   return async (run) => {
     const build = await input.store.getBuild(run.workspaceId, run.buildId);
@@ -151,16 +165,44 @@ export function createTableSchemasStageExecutor(input: {
     if (run.inputDigest !== inputDigest) {
       throw new Error("Table schemas stage input digest does not match the persisted upstream manifests");
     }
-    await Promise.all(upstreamManifestIds.map(async (artifactId) => {
+    const manifests = await Promise.all(upstreamManifestIds.map(async (artifactId) => {
       const manifest = await input.store.findArtifactById(artifactId);
       if (!manifest) throw new Error("Table schemas upstream manifest is unavailable");
       assertOwnedUpstreamManifest(run, manifest);
+      return manifest;
     }));
-
-    const files = (await input.store.listSnapshotFiles(run.workspaceId, run.snapshotId))
-      .filter(isTableSourceFile)
-      .sort((left, right) => compareUtf8(left.path, right.path));
-    const extracted = sortedTables((await Promise.all(files.map((file) => extractTableFile(snapshot, file)))).flat());
+    const manifest = manifests[0]!;
+    let extractedResults: TableExtractionResult[][];
+    if (manifest.kind === "normalized-source-refs") {
+      if (!input.sourceBlobReader) throw new Error("Table schemas source blob reader is unavailable");
+      const normalized = normalizedSourceReferencesSchema.parse(await input.artifactStore.getJson(manifest));
+      if (normalized.snapshotId !== manifest.snapshotId) {
+        throw new Error("Normalized source references artifact does not match its snapshot");
+      }
+      extractedResults = await Promise.all(normalized.sources.filter(isTableSourceFile)
+        .sort((left, right) => compareUtf8(left.path, right.path)).map(async (source) => {
+          const sourceRef = manifest.sourceRefs.find((reference) =>
+            reference.snapshotId === source.snapshotId
+            && reference.path === source.path
+            && reference.blobHash === source.blobHash
+          );
+          if (source.snapshotId !== manifest.snapshotId || !sourceRef) {
+            throw new Error("Normalized source references artifact contains an invalid table source");
+          }
+          return extractTableSource({
+            snapshotId: source.snapshotId,
+            path: source.path,
+            content: await input.sourceBlobReader!.read(run.workspaceId, source),
+            blobHash: source.blobHash
+          });
+        }));
+    } else {
+      const files = (await input.store.listSnapshotFiles(run.workspaceId, run.snapshotId))
+        .filter(isTableSourceFile)
+        .sort((left, right) => compareUtf8(left.path, right.path));
+      extractedResults = await Promise.all(files.map((file) => extractTableFile(snapshot, file)));
+    }
+    const extracted = sortedTables(extractedResults.flat());
     const tables: TableSchema[] = extracted.map((result) => result.table);
     const artifact = await input.artifactStore.putJson({
       manifest: {

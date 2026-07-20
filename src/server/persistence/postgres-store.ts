@@ -957,6 +957,16 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     });
   }
 
+  async findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null> {
+    const result = await this.pool.query<SourceBlobRow>(`
+      SELECT id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+             fencing_token, tombstoned_at, trashed_at, deleted_at
+      FROM source_blobs
+      WHERE workspace_id = $1 AND id = $2
+    `, [workspaceId, sourceBlobId]);
+    return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+  }
+
   private async acquireUploadMutationPermit(): Promise<() => void> {
     if (this.activeUploadMutationLocks >= this.uploadMutationLockLimit) {
       await new Promise<void>((resolve) => this.uploadMutationWaiters.push(resolve));

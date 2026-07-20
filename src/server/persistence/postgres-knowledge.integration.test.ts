@@ -2616,6 +2616,9 @@ integration("PostgreSQL cited knowledge integration", () => {
     ]);
 
     expect(second.record.id).toBe(first.record.id);
+    await expect(catalog.findSourceBlobById(setup!.workspace.id, first.record.id))
+      .resolves.toEqual(first.record);
+    await expect(catalog.findSourceBlobById(randomUUID(), first.record.id)).resolves.toBeNull();
     const persisted = await pool.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM source_blobs WHERE workspace_id = $1",
       [setup!.workspace.id]

@@ -5,6 +5,7 @@ import type { ArtifactManifest } from "./contracts.js";
 import { canonicalJson, type ArtifactStore } from "./artifact-store.js";
 import { convertSnapshotSourceFile } from "./convert.js";
 import { pipelineInputDigest } from "./input-digest.js";
+import type { SourceBlobReader } from "./source-blob-reader.js";
 import type { PipelineStageExecutor } from "./worker.js";
 import type { BuildRecord } from "../build-service.js";
 import type {
@@ -20,6 +21,7 @@ const supportedExtensions = new Set([
   ".vue", ".html", ".css", ".scss", ".sass", ".less", ".svelte", ".astro", ".svg",
   ".md", ".json", ".yaml", ".yml"
 ]);
+const referencedExtensions = new Set([...supportedExtensions, ".csv", ".xlsx"]);
 
 export interface NormalizedSourcesStageStore extends PipelineArtifactStore {
   getBuild(workspaceId: string, buildId: string): Promise<BuildRecord | null>;
@@ -98,6 +100,10 @@ function isSupportedSourceFile(file: Pick<SourceFileRecord, "path">): boolean {
   return supportedExtensions.has(path.posix.extname(file.path).toLowerCase());
 }
 
+function isReferencedSourceFile(file: Pick<SourceFileRecord, "path">): boolean {
+  return referencedExtensions.has(path.posix.extname(file.path).toLowerCase());
+}
+
 function lineCount(content: string): number {
   return Math.max(1, content.split(/\r?\n/).length - (content.endsWith("\n") ? 1 : 0));
 }
@@ -106,6 +112,8 @@ export function createNormalizedSourcesStageExecutor(input: {
   store: NormalizedSourcesStageStore;
   artifactStore: ArtifactStore;
   actorId?: string;
+  sourceStorageMode?: "legacy" | "shadow" | "active";
+  sourceBlobReader?: SourceBlobReader;
 }): PipelineStageExecutor {
   return async (run) => {
     const build = await input.store.getBuild(run.workspaceId, run.buildId);
@@ -151,6 +159,60 @@ export function createNormalizedSourcesStageExecutor(input: {
       value: { schemaVersion: 1, snapshotId: snapshot.id, sources },
       actorId: input.actorId
     });
-    return { outputManifestIds: [artifact.manifest.id], reused: artifact.reused };
+    if (input.sourceStorageMode === undefined || input.sourceStorageMode === "legacy") {
+      return { outputManifestIds: [artifact.manifest.id], reused: artifact.reused };
+    }
+
+    const referencedFiles = files.filter(isReferencedSourceFile)
+      .sort((left, right) => Buffer.compare(Buffer.from(left.path, "utf8"), Buffer.from(right.path, "utf8")));
+    if (referencedFiles.some((file) => !file.sourceBlobId)) {
+      if (input.sourceStorageMode === "active") {
+        throw new Error("Blob-backed source references require every pipeline source file to have a source blob");
+      }
+      return { outputManifestIds: [artifact.manifest.id], reused: artifact.reused };
+    }
+    if (!input.sourceBlobReader) throw new Error("Pipeline source blob reader is unavailable");
+    const references = await Promise.all(referencedFiles.map(async (file) => {
+      const reference = {
+        snapshotId: snapshot.id,
+        path: file.path,
+        sourceBlobId: file.sourceBlobId!,
+        blobHash: file.contentHash,
+        byteSize: file.byteSize,
+        language: file.language
+      };
+      await input.sourceBlobReader!.read(run.workspaceId, reference);
+      return reference;
+    }));
+    const referenceArtifact = await input.artifactStore.putJson({
+      manifest: {
+        id: randomUUID(),
+        workspaceId: run.workspaceId,
+        projectId: run.projectId,
+        snapshotId: run.snapshotId,
+        buildId: run.buildId,
+        stage: "convert",
+        kind: "normalized-source-refs",
+        schemaVersion: 2,
+        inputDigest,
+        contentDigest: "0".repeat(64),
+        storageKey: "pending",
+        sourceRefs: references.map((reference) => ({
+          snapshotId: reference.snapshotId,
+          path: reference.path,
+          startLine: 1,
+          endLine: 1,
+          blobHash: reference.blobHash
+        })),
+        producer: "deterministic",
+        createdAt: new Date().toISOString()
+      },
+      value: { schemaVersion: 2, snapshotId: snapshot.id, sources: references },
+      actorId: input.actorId
+    });
+    return {
+      outputManifestIds: [artifact.manifest.id, referenceArtifact.manifest.id],
+      reused: artifact.reused && referenceArtifact.reused
+    };
   };
 }

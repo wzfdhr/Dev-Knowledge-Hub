@@ -16,8 +16,10 @@ import {
   tableSchemasPipelineInputDigest,
   type TableSchemasStageStore
 } from "./tables-stage";
+import { SourceBlobReader } from "./source-blob-reader";
 import type { PipelineStageRunRecord } from "../../persistence/store";
 import { MemoryAppStore } from "../../persistence/memory-store";
+import { SourceBlobStore } from "../../uploads/source-blob-store";
 
 const directories: string[] = [];
 
@@ -179,6 +181,53 @@ describe("table schemas pipeline stage", () => {
     ]));
   });
 
+  test("reads table bytes from normalized source references", async () => {
+    const content = "name,email\nAda,ada@example.com\n";
+    const prepared = await fixture({ "data/users.csv": content });
+    const blobRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-table-stage-blobs-"));
+    directories.push(blobRoot);
+    const blobStore = new SourceBlobStore({ dataDir: blobRoot, catalog: prepared.store });
+    await blobStore.initialize();
+    const blob = await blobStore.put({ workspaceId: prepared.tablesRun.workspaceId, bytes: Buffer.from(content) });
+    const upstream = await prepared.artifactStore.putJson({
+      manifest: {
+        id: randomUUID(), workspaceId: prepared.tablesRun.workspaceId, projectId: prepared.project.id,
+        snapshotId: prepared.snapshot.id, buildId: prepared.build.id, stage: "convert",
+        kind: "normalized-source-refs", schemaVersion: 2, inputDigest: prepared.completedConvertRun.inputDigest,
+        contentDigest: "0".repeat(64), storageKey: "pending", producer: "deterministic",
+        sourceRefs: [{
+          snapshotId: prepared.snapshot.id, path: "data/users.csv", startLine: 1, endLine: 1,
+          blobHash: hash(content)
+        }],
+        createdAt: new Date().toISOString()
+      },
+      value: {
+        schemaVersion: 2,
+        snapshotId: prepared.snapshot.id,
+        sources: [{
+          snapshotId: prepared.snapshot.id, path: "data/users.csv", sourceBlobId: blob.record.id,
+          blobHash: hash(content), byteSize: Buffer.byteLength(content), language: "csv"
+        }]
+      }
+    });
+    const completedConvertRun = { ...prepared.completedConvertRun, outputManifestIds: [upstream.manifest.id] };
+    const run = {
+      ...prepared.tablesRun,
+      inputDigest: tableSchemasPipelineInputDigest(prepared.snapshot, prepared.build.purpose, [upstream.manifest.id])
+    };
+    const execute = createTableSchemasStageExecutor({
+      store: stageStore(prepared, new Map([[upstream.manifest.id, upstream.manifest]]), [completedConvertRun]),
+      artifactStore: prepared.artifactStore,
+      sourceBlobReader: new SourceBlobReader({ catalog: prepared.store, blobStore })
+    });
+
+    const result = await execute(run);
+    const artifact = prepared.store.knowledgeArtifacts.find((candidate) => candidate.id === result.outputManifestIds![0])!;
+    await expect(prepared.artifactStore.getJson(artifact)).resolves.toEqual(expect.objectContaining({
+      tables: [expect.objectContaining({ sourcePath: "data/users.csv", rowCount: 1 })]
+    }));
+  });
+
   test("reuses the deterministic artifact for the same upstream manifest and snapshot files", async () => {
     const prepared = await fixture({ "src/app.ts": "export const answer = 42;\n", "data/users.csv": "name\nAda\n" });
     const execute = createTableSchemasStageExecutor({
@@ -204,5 +253,20 @@ describe("table schemas pipeline stage", () => {
       .rejects.toThrow("does not match the project build and snapshot");
     await expect(execute({ ...prepared.tablesRun, inputDigest: "0".repeat(64) }))
       .rejects.toThrow("input digest does not match the persisted upstream manifests");
+    const mixedConvert = {
+      ...prepared.completedConvertRun,
+      outputManifestIds: ["inline-manifest", "reference-manifest"]
+    };
+    await expect(createTableSchemasStageExecutor({
+      store: stageStore(prepared, new Map(), [mixedConvert]),
+      artifactStore: prepared.artifactStore
+    })({
+      ...prepared.tablesRun,
+      inputDigest: tableSchemasPipelineInputDigest(
+        prepared.snapshot,
+        prepared.build.purpose,
+        mixedConvert.outputManifestIds
+      )
+    })).rejects.toThrow("requires exactly one convert artifact family");
   });
 });

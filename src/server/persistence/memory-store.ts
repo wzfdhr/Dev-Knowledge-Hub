@@ -223,6 +223,13 @@ export class MemoryAppStore implements AppStore {
     }
   }
 
+  async findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null> {
+    const record = this.sourceBlobs.find((candidate) =>
+      candidate.workspaceId === workspaceId && candidate.id === sourceBlobId
+    );
+    return record ? { ...record } : null;
+  }
+
   async createInitialSetup(email: string, passwordHash: string): Promise<SetupResult | null> {
     if (this.admin) return null;
     const previousWorkspace = this.workspace;

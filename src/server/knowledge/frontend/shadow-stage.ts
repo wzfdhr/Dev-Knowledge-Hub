@@ -130,15 +130,19 @@ async function assertFamilyOutputs(
   artifactStore?: ArtifactStore
 ): Promise<ArtifactManifest[]> {
   const manifests = await manifestsForRun(store, run);
-  assertFrontendArtifactFamily(run.stage, SHADOW_FAMILIES, manifests);
-  for (const manifest of manifests) {
+  const familyManifests = manifests.filter((manifest) => SHADOW_FAMILIES.some((family) => {
+    const expected = ARTIFACT_KINDS[run.stage][family];
+    return manifest.kind === expected.kind && manifest.schemaVersion === expected.schemaVersion;
+  }));
+  assertFrontendArtifactFamily(run.stage, SHADOW_FAMILIES, familyManifests);
+  for (const manifest of familyManifests) {
     if (manifest.workspaceId !== run.workspaceId || manifest.projectId !== run.projectId
       || manifest.snapshotId !== run.snapshotId || manifest.stage !== run.stage) {
       throw new Error(`Frontend shadow ${run.stage} output crosses its persisted scope`);
     }
     if (artifactStore) await artifactStore.getJson(manifest);
   }
-  return manifests;
+  return familyManifests;
 }
 
 async function upstreamManifestIds(

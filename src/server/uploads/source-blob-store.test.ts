@@ -25,6 +25,10 @@ class MemorySourceBlobCatalog implements SourceBlobCatalog {
   readonly records: SourceBlobRecord[] = [];
   private readonly locks = new Map<string, Promise<void>>();
 
+  async findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null> {
+    return this.records.find((record) => record.workspaceId === workspaceId && record.id === sourceBlobId) ?? null;
+  }
+
   async withSourceBlobLock<T>(
     workspaceId: string,
     contentHash: string,

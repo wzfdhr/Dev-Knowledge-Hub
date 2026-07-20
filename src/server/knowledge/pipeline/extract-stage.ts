@@ -10,6 +10,10 @@ import { extractDocumentSource } from "./extract-documents.js";
 import { extractVueSfc } from "./extract-vue.js";
 import { extractWebSource } from "./extract-web.js";
 import { pipelineInputDigest } from "./input-digest.js";
+import {
+  normalizedSourceReferencesSchema,
+  type SourceBlobReader
+} from "./source-blob-reader.js";
 import type { PipelineStageExecutor } from "./worker.js";
 import type { BuildRecord } from "../build-service.js";
 import type {
@@ -100,7 +104,10 @@ function assertOwnedUpstreamManifest(run: PipelineStageRunRecord, manifest: Arti
     || manifest.projectId !== run.projectId
     || manifest.snapshotId !== run.snapshotId
     || manifest.stage !== "convert"
-    || manifest.kind !== "normalized-sources"
+    || !(
+      (manifest.kind === "normalized-sources" && manifest.schemaVersion === 1)
+      || (manifest.kind === "normalized-source-refs" && manifest.schemaVersion === 2)
+    )
   ) {
     throw new Error("Knowledge IR upstream manifest does not match the project build and snapshot");
   }
@@ -120,6 +127,9 @@ function convertOutputManifestIds(stageRuns: readonly PipelineStageRunRecord[]):
   }
   if (new Set(convertRun.outputManifestIds).size !== convertRun.outputManifestIds.length) {
     throw new Error("Knowledge IR stage requires unique upstream manifests");
+  }
+  if (convertRun.outputManifestIds.length !== 1) {
+    throw new Error("Knowledge IR stage requires exactly one convert artifact family");
   }
   return convertRun.outputManifestIds;
 }
@@ -142,6 +152,49 @@ function assertNormalizedSources(manifest: ArtifactManifest, value: unknown): No
     }
   }
   return normalized.sources;
+}
+
+function isExtractSourcePath(sourcePath: string): boolean {
+  const extension = path.posix.extname(sourcePath).toLowerCase();
+  return codeExtensions.has(extension) || documentExtensions.has(extension)
+    || frontendV2OnlyExtensions.has(extension) || extension === ".vue";
+}
+
+async function loadNormalizedSources(input: {
+  workspaceId: string;
+  manifest: ArtifactManifest;
+  value: unknown;
+  sourceBlobReader?: SourceBlobReader;
+}): Promise<NormalizedSource[]> {
+  if (input.manifest.kind === "normalized-sources") {
+    return assertNormalizedSources(input.manifest, input.value);
+  }
+  if (!input.sourceBlobReader) throw new Error("Knowledge IR source blob reader is unavailable");
+  const normalized = normalizedSourceReferencesSchema.parse(input.value);
+  if (normalized.snapshotId !== input.manifest.snapshotId) {
+    throw new Error("Normalized source references artifact does not match its snapshot");
+  }
+  return Promise.all(normalized.sources.filter((source) => isExtractSourcePath(source.path)).map(async (source) => {
+    const sourceRef = input.manifest.sourceRefs.find((reference) =>
+      reference.snapshotId === source.snapshotId
+      && reference.path === source.path
+      && reference.blobHash === source.blobHash
+    );
+    if (source.snapshotId !== input.manifest.snapshotId || !sourceRef) {
+      throw new Error("Normalized source references artifact contains an invalid source");
+    }
+    const bytes = await input.sourceBlobReader!.read(input.workspaceId, source);
+    try {
+      return {
+        snapshotId: source.snapshotId,
+        path: source.path,
+        content: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+        blobHash: source.blobHash
+      };
+    } catch {
+      throw new Error("Normalized source reference is not valid UTF-8");
+    }
+  }));
 }
 
 function extractSource(source: NormalizedSource) {
@@ -179,6 +232,7 @@ export function createKnowledgeIrStageExecutor(input: {
   store: KnowledgeIrStageStore;
   artifactStore: ArtifactStore;
   actorId?: string;
+  sourceBlobReader?: SourceBlobReader;
 }): PipelineStageExecutor {
   return async (run) => {
     const build = await input.store.getBuild(run.workspaceId, run.buildId);
@@ -201,7 +255,12 @@ export function createKnowledgeIrStageExecutor(input: {
       return manifest;
     }));
     const sources = (await Promise.all(manifests.map(async (manifest) =>
-      assertNormalizedSources(manifest, await input.artifactStore.getJson(manifest))
+      loadNormalizedSources({
+        workspaceId: run.workspaceId,
+        manifest,
+        value: await input.artifactStore.getJson(manifest),
+        sourceBlobReader: input.sourceBlobReader
+      })
     ))).flat();
     const { ir, lintIssues } = combineKnowledgeIr(snapshot.id, sources);
     const artifact = await input.artifactStore.putJson({

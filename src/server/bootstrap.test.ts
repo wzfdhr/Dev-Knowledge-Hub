@@ -73,7 +73,8 @@ describe("production bootstrap", () => {
     expect(deps.createStore).toHaveBeenCalledWith(database.pool);
     expect(deps.createBuildQueue).toHaveBeenCalledWith("postgres://localhost/devkh");
     expect(deps.createQualityPipelineWorker).toHaveBeenCalledWith(
-      "postgres://localhost/devkh", store, artifactStore, expect.any(Function), expect.any(Function), expect.anything()
+      "postgres://localhost/devkh", store, artifactStore, expect.any(Function), expect.any(Function), expect.anything(),
+      "legacy", expect.anything()
     );
     expect(deps.createParserClient).toHaveBeenCalledWith("/run/devkh-parser/parser.sock");
     const frontendModeForProject = vi.mocked(deps.createQualityPipelineWorker).mock.calls[0]![4]!;

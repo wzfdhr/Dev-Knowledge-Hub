@@ -51,6 +51,7 @@ import {
   type FrontendKnowledgeMode
 } from "./knowledge/frontend/rollout-mode.js";
 import { ParserClient } from "./knowledge/frontend/runtime/parser-client.js";
+import { SourceBlobReader } from "./knowledge/pipeline/source-blob-reader.js";
 import { SourceBlobStore } from "./uploads/source-blob-store.js";
 
 const IMPORT_REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
@@ -100,7 +101,9 @@ export interface BootstrapDependencies {
       workspaceId: string,
       projectId: string
     ) => Promise<FrontendKnowledgeMode>,
-    frontendParser: FrontendParserClient
+    frontendParser: FrontendParserClient,
+    sourceStorageMode: "legacy" | "shadow" | "active",
+    sourceBlobReader: SourceBlobReader
   ) => QualityPipelineWorker;
   buildServer: typeof buildServer;
   setInterval?: (callback: () => void, delay: number) => unknown;
@@ -119,15 +122,22 @@ const defaultDependencies: BootstrapDependencies = {
   createSourceBlobStore: (directory, catalog) => new SourceBlobStore({ dataDir: directory, catalog }),
   createParserClient: (socketPath) => new ParserClient({ socketPath }),
   createQualityPipelineWorker: (
-    connectionString, store, artifactStore, enhancerForWorkspace, frontendModeForProject, frontendParser
+    connectionString, store, artifactStore, enhancerForWorkspace, frontendModeForProject, frontendParser,
+    sourceStorageMode, sourceBlobReader
   ) => {
     const pipelineStore = store as AppStore & PipelineArtifactStore;
     const pipelineArtifacts = artifactStore as ArtifactStore;
     const knowledgeV1Store = createKnowledgeV1StoreView(pipelineStore);
     const legacyExecutor = createPipelineStageExecutor({
-      convert: createNormalizedSourcesStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
-      extract: createKnowledgeIrStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
-      tables: createTableSchemasStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
+      convert: createNormalizedSourcesStageExecutor({
+        store: knowledgeV1Store, artifactStore: pipelineArtifacts, sourceStorageMode, sourceBlobReader
+      }),
+      extract: createKnowledgeIrStageExecutor({
+        store: knowledgeV1Store, artifactStore: pipelineArtifacts, sourceBlobReader
+      }),
+      tables: createTableSchemasStageExecutor({
+        store: knowledgeV1Store, artifactStore: pipelineArtifacts, sourceBlobReader
+      }),
       graph: createKnowledgeGraphStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
       synthesize: createKnowledgeSynthesisStageExecutor({
         store: knowledgeV1Store, artifactStore: pipelineArtifacts, enhancerForWorkspace
@@ -177,6 +187,7 @@ export async function bootstrapServer(
   await artifactStore.initialize();
   const sourceBlobStore = dependencies.createSourceBlobStore(path.join(env.dataDir, "snapshots"), store);
   await sourceBlobStore.initialize();
+  const sourceBlobReader = new SourceBlobReader({ catalog: store, blobStore: sourceBlobStore });
   const queue = dependencies.createBuildQueue(env.databaseUrl);
   const enhancerForWorkspace = async (workspaceId: string): Promise<KnowledgeEnhancer | undefined> => {
     const config = await store.getModelConfig(workspaceId);
@@ -202,7 +213,7 @@ export async function bootstrapServer(
   const qualityWorker = env.knowledgeKernelMode === "shadow"
     ? dependencies.createQualityPipelineWorker(
       env.databaseUrl, store, artifactStore, enhancerForWorkspace, frontendModeForProject,
-      dependencies.createParserClient(env.parserSocketPath)
+      dependencies.createParserClient(env.parserSocketPath), env.sourceStorageMode, sourceBlobReader
     )
     : undefined;
   const initialPipelineStage = qualityWorker

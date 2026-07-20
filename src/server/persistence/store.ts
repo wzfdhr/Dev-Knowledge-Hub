@@ -549,6 +549,7 @@ export interface LockedSourceBlobCatalog {
 }
 
 export interface SourceBlobCatalog {
+  findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null>;
   withSourceBlobLock<T>(
     workspaceId: string,
     contentHash: string,

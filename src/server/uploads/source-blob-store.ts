@@ -81,6 +81,96 @@ export function sourceBlobFileLocations(dataDir: string, record: SourceBlobRecor
   return { source, trash, sourceParent: path.dirname(source), trashParent: path.dirname(trash) };
 }
 
+export async function ensureSafeDirectoryChain(input: {
+  dataDir: string;
+  segments: string[];
+  createMissing?: boolean;
+  syncFinal?: boolean;
+  syncDirectory?: typeof syncDirectory;
+}): Promise<boolean> {
+  const syncDir = input.syncDirectory ?? syncDirectory;
+  let current = path.resolve(input.dataDir);
+  const assertDirectory = async (candidate: string): Promise<"directory" | "missing"> => {
+    try {
+      const metadata = await lstat(candidate);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        throw new SourceBlobIntegrityError(
+          "SOURCE_BLOB_INTEGRITY_FAILED",
+          "Source blob directory chain is unsafe"
+        );
+      }
+      return "directory";
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return "missing";
+      throw error;
+    }
+  };
+
+  if (await assertDirectory(current) !== "directory") {
+    if (!input.createMissing) {
+      throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob data directory is missing");
+    }
+    const parent = path.dirname(current);
+    if (await assertDirectory(parent) !== "directory") {
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_MISSING",
+        "Source blob data directory parent is missing"
+      );
+    }
+    try {
+      await mkdir(current, { mode: 0o700 });
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+    }
+    if (await assertDirectory(current) !== "directory") {
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_INTEGRITY_FAILED",
+        "Source blob data directory was not created safely"
+      );
+    }
+    await syncDir(parent);
+  }
+  for (const segment of input.segments) {
+    if (!segment || segment === "." || segment === ".." || path.isAbsolute(segment)
+      || segment.includes("/") || segment.includes("\\")) {
+      throw new SourceBlobIntegrityError("INVALID_SOURCE_BLOB_SCOPE", "Source blob directory segment is invalid");
+    }
+    const child = path.join(current, segment);
+    if (await assertDirectory(child) === "missing") {
+      if (!input.createMissing) return false;
+      try {
+        await mkdir(child, { mode: 0o700 });
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+      }
+      if (await assertDirectory(child) !== "directory") {
+        throw new SourceBlobIntegrityError(
+          "SOURCE_BLOB_INTEGRITY_FAILED",
+          "Source blob directory was not created safely"
+        );
+      }
+      await syncDir(current);
+    }
+    current = child;
+  }
+  if (input.syncFinal) await syncDir(current);
+  return true;
+}
+
+export function sourceBlobDirectorySegments(
+  record: Pick<SourceBlobRecord, "workspaceId" | "contentHash">
+): string[] {
+  sourceBlobStorageKey(record.workspaceId, record.contentHash, 1);
+  return ["blobs", record.workspaceId, record.contentHash.slice(0, 2), record.contentHash];
+}
+
+export function sourceBlobTrashDirectorySegments(
+  record: Pick<SourceBlobRecord, "workspaceId" | "contentHash">
+): string[] {
+  sourceBlobStorageKey(record.workspaceId, record.contentHash, 1);
+  return [".trash", record.workspaceId, record.contentHash];
+}
+
 export async function assertSourceBlobFile(
   candidate: string,
   record: Pick<SourceBlobRecord, "contentHash" | "byteSize">
@@ -125,8 +215,18 @@ export class SourceBlobStore {
   }) {}
 
   async initialize(): Promise<void> {
-    await mkdir(path.join(this.options.dataDir, "blobs"), { recursive: true, mode: 0o700 });
-    await mkdir(path.join(this.options.dataDir, "snapshots"), { recursive: true, mode: 0o700 });
+    await ensureSafeDirectoryChain({
+      dataDir: this.options.dataDir,
+      segments: ["blobs"],
+      createMissing: true,
+      syncFinal: true
+    });
+    await ensureSafeDirectoryChain({
+      dataDir: this.options.dataDir,
+      segments: ["snapshots"],
+      createMissing: true,
+      syncFinal: true
+    });
   }
 
   async verifyHardlinkSupport(): Promise<void> {
@@ -136,6 +236,10 @@ export class SourceBlobStore {
     const source = path.join(blobsRoot, `.hardlink-probe-${probeId}`);
     const target = path.join(snapshotsRoot, `.hardlink-probe-${probeId}`);
     try {
+      if (!await ensureSafeDirectoryChain({ dataDir: this.options.dataDir, segments: ["blobs"] })
+        || !await ensureSafeDirectoryChain({ dataDir: this.options.dataDir, segments: ["snapshots"] })) {
+        throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob storage roots are missing");
+      }
       const handle = await open(source, "wx", 0o600);
       try {
         await handle.writeFile("devkh-hardlink-probe");
@@ -196,16 +300,25 @@ export class SourceBlobStore {
         let locations: ReturnType<typeof sourceBlobFileLocations>;
         try {
           locations = sourceBlobFileLocations(this.options.dataDir, tombstoned);
-          const [sourceExists, trashExists] = await Promise.all([
-            lstat(locations.source).then(() => true, (error) => {
-              if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
-              throw error;
-            }),
-            lstat(locations.trash).then(() => true, (error) => {
-              if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
-              throw error;
-            })
-          ]);
+          const sourceDirectoryExists = await ensureSafeDirectoryChain({
+            dataDir: this.options.dataDir,
+            segments: sourceBlobDirectorySegments(tombstoned)
+          });
+          if (!sourceDirectoryExists) {
+            throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob directory is missing");
+          }
+          const trashDirectoryExists = await ensureSafeDirectoryChain({
+            dataDir: this.options.dataDir,
+            segments: sourceBlobTrashDirectorySegments(tombstoned)
+          });
+          const sourceExists = await lstat(locations.source).then(() => true, (error) => {
+            if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+            throw error;
+          });
+          const trashExists = trashDirectoryExists && await lstat(locations.trash).then(() => true, (error) => {
+            if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+            throw error;
+          });
           if (sourceExists === trashExists || !tombstoned.fencingToken) {
             throw new SourceBlobIntegrityError(
               "SOURCE_BLOB_INTEGRITY_FAILED",
@@ -252,7 +365,12 @@ export class SourceBlobStore {
       const key = sourceBlobStorageKey(input.workspaceId, contentHash, generation);
       const destination = path.join(this.options.dataDir, ...key.split("/"));
       const directory = path.dirname(destination);
-      await mkdir(directory, { recursive: true, mode: 0o700 });
+      await ensureSafeDirectoryChain({
+        dataDir: this.options.dataDir,
+        segments: ["blobs", input.workspaceId, contentHash.slice(0, 2), contentHash],
+        createMissing: true,
+        syncFinal: true
+      });
       const temporary = path.join(directory, `.${generation}.${randomUUID()}.tmp`);
       try {
         const handle = await open(temporary, "wx", 0o600);
@@ -302,6 +420,12 @@ export class SourceBlobStore {
       throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob record is not readable");
     }
     const absolutePath = path.join(this.options.dataDir, ...expectedKey.split("/"));
+    if (!await ensureSafeDirectoryChain({
+      dataDir: this.options.dataDir,
+      segments: sourceBlobDirectorySegments(record)
+    })) {
+      throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob directory is missing");
+    }
     let metadata;
     try {
       metadata = await lstat(absolutePath);

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -423,6 +423,45 @@ describe("workspace source blob store", () => {
     await writeFile(blobPath, "tampered");
     await expect(context.store.read(created.record))
       .rejects.toMatchObject({ code: "SOURCE_BLOB_INTEGRITY_FAILED" });
+  });
+
+  test("rejects source blob reads and reuse through a symlinked hash directory", async () => {
+    const context = await fixture();
+    const workspaceId = randomUUID();
+    const bytes = Buffer.from("source chain symlink");
+    const created = await context.store.put({ workspaceId, bytes });
+    const hashDirectory = path.dirname(path.join(context.root, created.record.storageKey));
+    const external = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-external-read-"));
+    roots.push(external);
+    const externalHashDirectory = path.join(external, "hash");
+    await rename(hashDirectory, externalHashDirectory);
+    await symlink(externalHashDirectory, hashDirectory, "dir");
+
+    await expect(context.store.read(created.record))
+      .rejects.toMatchObject({ code: "SOURCE_BLOB_INTEGRITY_FAILED" });
+    await expect(context.store.put({ workspaceId, bytes }))
+      .rejects.toMatchObject({ code: "SOURCE_BLOB_INTEGRITY_FAILED" });
+
+    await expect(readdir(externalHashDirectory)).resolves.toEqual(["1"]);
+    expect(context.catalog.records).toHaveLength(1);
+    expect(context.catalog.audits).toEqual([{
+      sourceBlobId: created.record.id,
+      reason: "active_content_inconsistent"
+    }]);
+  });
+
+  test("rejects a new put through a symlinked workspace directory without writing outside dataDir", async () => {
+    const context = await fixture();
+    const workspaceId = randomUUID();
+    const external = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-external-put-"));
+    roots.push(external);
+    await symlink(external, path.join(context.root, "blobs", workspaceId), "dir");
+
+    await expect(context.store.put({ workspaceId, bytes: Buffer.from("escaped put") }))
+      .rejects.toMatchObject({ code: "SOURCE_BLOB_INTEGRITY_FAILED" });
+
+    await expect(readdir(external)).resolves.toEqual([]);
+    expect(context.catalog.records).toHaveLength(0);
   });
 
   test("materializes a read-only snapshot view with same-volume hardlinks", async () => {

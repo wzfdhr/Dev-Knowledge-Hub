@@ -1,17 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, rename, unlink } from "node:fs/promises";
+import { lstat, rename, unlink } from "node:fs/promises";
 
 import {
   SourceBlobIntegrityError,
   assertSourceBlobFile,
-  sourceBlobFileLocations
+  ensureSafeDirectoryChain,
+  sourceBlobDirectorySegments,
+  sourceBlobFileLocations,
+  sourceBlobTrashDirectorySegments
 } from "./source-blob-store.js";
 import { syncDirectory } from "./folder-import.js";
-import {
-  compareSourceBlobGcCursors,
-  normalizeSourceBlobGcCandidateLimit,
-  sourceBlobGcCursor
-} from "../persistence/store.js";
+import { normalizeSourceBlobGcCandidateLimit, sourceBlobGcCursor } from "../persistence/store.js";
 import type {
   LockedSourceBlobCatalog,
   SourceBlobCatalog,
@@ -48,12 +47,20 @@ function graceElapsed(timestamp: Date | null, graceMs: number, now: Date): boole
   return timestamp !== null && now.getTime() - timestamp.getTime() >= graceMs;
 }
 
+function cursorsEqual(left: SourceBlobGcCursor, right: SourceBlobGcCursor): boolean {
+  return left.workspaceId === right.workspaceId
+    && left.contentHash === right.contentHash
+    && left.generation === right.generation
+    && left.id === right.id;
+}
+
 export class SourceBlobGarbageCollector {
   private readonly enabled: boolean;
   private readonly tombstoneGraceMs: number;
   private readonly trashGraceMs: number;
   private readonly now: () => Date;
   private readonly syncDir: typeof syncDirectory;
+  private readonly renameFile: typeof rename;
   private readonly candidateLimit: number;
 
   constructor(private readonly options: {
@@ -64,6 +71,7 @@ export class SourceBlobGarbageCollector {
     trashGraceMs?: number;
     now?: () => Date;
     syncDirectory?: typeof syncDirectory;
+    renameFile?: typeof rename;
     candidateLimit?: number;
   }) {
     this.enabled = options.enabled ?? false;
@@ -71,6 +79,7 @@ export class SourceBlobGarbageCollector {
     this.trashGraceMs = options.trashGraceMs ?? DEFAULT_GRACE_MS;
     this.now = options.now ?? (() => new Date());
     this.syncDir = options.syncDirectory ?? syncDirectory;
+    this.renameFile = options.renameFile ?? rename;
     this.candidateLimit = normalizeSourceBlobGcCandidateLimit(options.candidateLimit);
     if (this.tombstoneGraceMs < 0 || this.trashGraceMs < 0) {
       throw new RangeError("Source blob GC grace periods must be non-negative");
@@ -105,8 +114,7 @@ export class SourceBlobGarbageCollector {
         result.inconsistent += processed.inconsistent;
       }
       after = sourceBlobGcCursor(candidates.at(-1)!);
-      if (candidates.length < this.candidateLimit
-        || compareSourceBlobGcCursors(after, through) >= 0) break;
+      if (candidates.length < this.candidateLimit || cursorsEqual(after, through)) break;
     }
     return result;
   }
@@ -141,10 +149,24 @@ export class SourceBlobGarbageCollector {
     }
 
     try {
+      const sourceDirectoryExists = await ensureSafeDirectoryChain({
+        dataDir: this.options.dataDir,
+        segments: sourceBlobDirectorySegments(current)
+      });
+      if (!sourceDirectoryExists) {
+        await this.inconsistent(catalog, current, "source_directory_missing", result);
+        return result;
+      }
+      const trashDirectoryExists = await ensureSafeDirectoryChain({
+        dataDir: this.options.dataDir,
+        segments: sourceBlobTrashDirectorySegments(current)
+      });
       if (current.status === "tombstoned") {
-        await this.processTombstone(catalog, current, references, locations, now, result);
+        await this.processTombstone(
+          catalog, current, references, locations, trashDirectoryExists, now, result
+        );
       } else {
-        await this.processTrash(catalog, current, references, locations, now, result);
+        await this.processTrash(catalog, current, references, locations, trashDirectoryExists, now, result);
       }
     } catch (error) {
       if (error instanceof SourceBlobIntegrityError
@@ -162,6 +184,7 @@ export class SourceBlobGarbageCollector {
     record: SourceBlobRecord,
     references: number,
     locations: ReturnType<typeof sourceBlobFileLocations>,
+    trashDirectoryExists: boolean,
     now: Date,
     result: SourceBlobGcRunResult
   ): Promise<void> {
@@ -171,7 +194,7 @@ export class SourceBlobGarbageCollector {
     }
     const [sourceExists, trashExists] = await Promise.all([
       exists(locations.source),
-      exists(locations.trash)
+      trashDirectoryExists ? exists(locations.trash) : false
     ]);
     if (sourceExists === trashExists) {
       await this.inconsistent(catalog, record, "tombstone_location_inconsistent", result);
@@ -194,8 +217,14 @@ export class SourceBlobGarbageCollector {
     if (sourceExists) {
       await assertSourceBlobFile(locations.source, record);
       if (!graceElapsed(record.tombstonedAt, this.tombstoneGraceMs, now)) return;
-      await mkdir(locations.trashParent, { recursive: true, mode: 0o700 });
-      await rename(locations.source, locations.trash);
+      await ensureSafeDirectoryChain({
+        dataDir: this.options.dataDir,
+        segments: sourceBlobTrashDirectorySegments(record),
+        createMissing: true,
+        syncFinal: true,
+        syncDirectory: this.syncDir
+      });
+      await this.renameFile(locations.source, locations.trash);
       await Promise.all([
         this.syncDir(locations.sourceParent),
         this.syncDir(locations.trashParent)
@@ -218,6 +247,7 @@ export class SourceBlobGarbageCollector {
     record: SourceBlobRecord,
     references: number,
     locations: ReturnType<typeof sourceBlobFileLocations>,
+    trashDirectoryExists: boolean,
     now: Date,
     result: SourceBlobGcRunResult
   ): Promise<void> {
@@ -231,14 +261,20 @@ export class SourceBlobGarbageCollector {
     }
     const [sourceExists, trashExists] = await Promise.all([
       exists(locations.source),
-      exists(locations.trash)
+      trashDirectoryExists ? exists(locations.trash) : false
     ]);
     if (sourceExists) {
       await this.inconsistent(catalog, record, "trash_source_present", result);
       return;
     }
     if (!trashExists) {
-      await this.syncDir(locations.trashParent);
+      await ensureSafeDirectoryChain({
+        dataDir: this.options.dataDir,
+        segments: sourceBlobTrashDirectorySegments(record),
+        createMissing: true,
+        syncFinal: true,
+        syncDirectory: this.syncDir
+      });
       const deleted = await catalog.markDeletedIfUnreferenced(record.id, record.fencingToken, now);
       if (deleted) result.deleted = 1;
       else await this.inconsistent(catalog, record, "delete_fence_conflict", result);

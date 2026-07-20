@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rename, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -146,6 +146,70 @@ describe("source blob garbage collection", () => {
     expect(created).toHaveLength(3);
   });
 
+  test("continues keyset scanning when the initial through candidate disappears", async () => {
+    const context = await fixture();
+    await Promise.all([
+      context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("vanishing tail one") }),
+      context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("vanishing tail two") }),
+      context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("vanishing tail three") }),
+      context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("vanishing tail four") })
+    ]);
+    const tail = await context.catalog.findSourceBlobGcCandidateTail();
+    const tailRecord = context.catalog.sourceBlobs.find((record) => record.id === tail!.id)!;
+    const baseCatalog = context.catalog;
+    let page = 0;
+    const catalog = {
+      findSourceBlobGcCandidateTail: () => baseCatalog.findSourceBlobGcCandidateTail(),
+      listSourceBlobGcCandidates: async (input: Parameters<typeof baseCatalog.listSourceBlobGcCandidates>[0]) => {
+        page += 1;
+        if (page === 2) Object.assign(tailRecord, { status: "deleted" as const, deletedAt: new Date() });
+        return baseCatalog.listSourceBlobGcCandidates(input);
+      },
+      findSourceBlobById: (workspaceId: string, sourceBlobId: string) =>
+        baseCatalog.findSourceBlobById(workspaceId, sourceBlobId),
+      withSourceBlobLock: baseCatalog.withSourceBlobLock.bind(baseCatalog)
+    };
+
+    await expect(context.collector({ catalog: catalog as never, candidateLimit: 2 }).runOnce())
+      .resolves.toMatchObject({ scanned: 3, tombstoned: 3 });
+    expect(context.catalog.sourceBlobs.filter((record) => record.status === "active")).toHaveLength(0);
+  });
+
+  test("defers a candidate created beyond the initial through cursor until the next run", async () => {
+    const context = await fixture();
+    await context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("initial boundary") });
+    const baseCatalog = context.catalog;
+    const newWorkspaceId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const newHash = "f".repeat(64);
+    const deferred: SourceBlobRecord = {
+      id: randomUUID(), workspaceId: newWorkspaceId, contentHash: newHash, generation: 1,
+      byteSize: 1, status: "active",
+      storageKey: path.posix.join("blobs", newWorkspaceId, "ff", newHash, "1"),
+      fencingToken: null, tombstonedAt: null, trashedAt: null, deletedAt: null
+    };
+    let inserted = false;
+    const catalog = {
+      findSourceBlobGcCandidateTail: () => baseCatalog.findSourceBlobGcCandidateTail(),
+      listSourceBlobGcCandidates: async (input: Parameters<typeof baseCatalog.listSourceBlobGcCandidates>[0]) => {
+        const records = await baseCatalog.listSourceBlobGcCandidates(input);
+        if (!inserted) {
+          inserted = true;
+          baseCatalog.sourceBlobs.push(deferred);
+        }
+        return records;
+      },
+      findSourceBlobById: (workspaceId: string, sourceBlobId: string) =>
+        baseCatalog.findSourceBlobById(workspaceId, sourceBlobId),
+      withSourceBlobLock: baseCatalog.withSourceBlobLock.bind(baseCatalog)
+    };
+    const collector = context.collector({ catalog: catalog as never, candidateLimit: 1 });
+
+    await expect(collector.runOnce()).resolves.toMatchObject({ scanned: 1, tombstoned: 1 });
+    expect(deferred.status).toBe("active");
+    await expect(collector.runOnce()).resolves.toMatchObject({ scanned: 2, tombstoned: 1 });
+    expect(deferred.status).toBe("tombstoned");
+  });
+
   test("tombstones only an unreferenced active blob, then moves and deletes it after separate grace periods", async () => {
     const context = await fixture();
     const created = await context.blobs.put({
@@ -262,6 +326,114 @@ describe("source blob garbage collection", () => {
     await expectMissing(sourcePath(context.root, created.record));
     await expect(stat(trashPath(context.root, created.record))).resolves.toBeDefined();
   });
+
+  test.each([".trash", "workspace", "hash"] as const)(
+    "rejects a trash %s symlink without moving bytes outside dataDir",
+    async (symlinkLevel) => {
+      const context = await fixture();
+      const created = await context.blobs.put({
+        workspaceId: context.workspaceId,
+        bytes: Buffer.from(`trash symlink ${symlinkLevel}`)
+      });
+      await context.collector().runOnce();
+      const external = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-gc-external-"));
+      roots.push(external);
+      const trashRoot = path.join(context.root, ".trash");
+      const workspaceRoot = path.join(trashRoot, context.workspaceId);
+      const hashRoot = path.join(workspaceRoot, created.record.contentHash);
+      if (symlinkLevel === ".trash") {
+        await symlink(external, trashRoot, "dir");
+      } else if (symlinkLevel === "workspace") {
+        await mkdir(trashRoot);
+        await symlink(external, workspaceRoot, "dir");
+      } else {
+        await mkdir(workspaceRoot, { recursive: true });
+        await symlink(external, hashRoot, "dir");
+      }
+      context.advance(1_000);
+
+      await expect(context.collector().runOnce()).resolves.toMatchObject({ inconsistent: 1, trashed: 0 });
+      expect(context.catalog.sourceBlobs[0]).toMatchObject({ status: "tombstoned" });
+      await expect(stat(sourcePath(context.root, created.record))).resolves.toBeDefined();
+      await expect(readdir(external)).resolves.toEqual([]);
+      expect(context.catalog.auditEvents.at(-1)).toMatchObject({ action: "source_blob.gc_inconsistent" });
+    }
+  );
+
+  test("rejects a symlinked data directory without creating a trash tree outside it", async () => {
+    const context = await fixture();
+    const created = await context.blobs.put({
+      workspaceId: context.workspaceId,
+      bytes: Buffer.from("symlinked data directory")
+    });
+    await context.collector().runOnce();
+    const external = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-gc-data-dir-"));
+    roots.push(external);
+    const movedDataDir = path.join(external, "data");
+    await rename(context.root, movedDataDir);
+    await symlink(movedDataDir, context.root, "dir");
+    context.advance(1_000);
+
+    await expect(context.collector().runOnce()).resolves.toMatchObject({ inconsistent: 1, trashed: 0 });
+    expect(context.catalog.sourceBlobs[0]).toMatchObject({ status: "tombstoned" });
+    await expect(stat(path.join(movedDataDir, created.record.storageKey))).resolves.toBeDefined();
+    expect(await readdir(movedDataDir)).not.toContain(".trash");
+    expect(context.catalog.auditEvents.at(-1)).toMatchObject({ action: "source_blob.gc_inconsistent" });
+  });
+
+  test("fsyncs every newly created trash directory level before rename", async () => {
+    const context = await fixture();
+    const created = await context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("ordered trash") });
+    await context.collector().runOnce();
+    context.advance(1_000);
+    const order: string[] = [];
+    const trashRoot = path.join(context.root, ".trash");
+    const workspaceRoot = path.join(trashRoot, context.workspaceId);
+    const hashRoot = path.join(workspaceRoot, created.record.contentHash);
+    const collector = context.collector({
+      syncDirectory: async (directory) => { order.push(`sync:${directory}`); },
+      renameFile: async (source, destination) => {
+        order.push("rename");
+        await rename(source, destination);
+      }
+    });
+
+    await expect(collector.runOnce()).resolves.toMatchObject({ trashed: 1 });
+    expect(order.slice(0, 5)).toEqual([
+      `sync:${context.root}`,
+      `sync:${trashRoot}`,
+      `sync:${workspaceRoot}`,
+      `sync:${hashRoot}`,
+      "rename"
+    ]);
+  });
+
+  test.each([1, 2, 3, 4])(
+    "never renames when power is lost at trash directory fsync step %s",
+    async (failureStep) => {
+      const context = await fixture();
+      const created = await context.blobs.put({
+        workspaceId: context.workspaceId,
+        bytes: Buffer.from(`power loss ${failureStep}`)
+      });
+      await context.collector().runOnce();
+      context.advance(1_000);
+      let syncStep = 0;
+      const renameFile = vi.fn(async () => undefined);
+      const collector = context.collector({
+        syncDirectory: async () => {
+          syncStep += 1;
+          if (syncStep === failureStep) throw new Error("POWER_LOSS");
+        },
+        renameFile
+      });
+
+      await expect(collector.runOnce()).rejects.toThrow("POWER_LOSS");
+      expect(renameFile).not.toHaveBeenCalled();
+      expect(context.catalog.sourceBlobs[0]).toMatchObject({ status: "tombstoned" });
+      await expect(stat(sourcePath(context.root, created.record))).resolves.toBeDefined();
+    }
+  );
 
   test("recovers a crash after rename by verifying trash and completing the fenced trash transition", async () => {
     const context = await fixture();

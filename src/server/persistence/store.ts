@@ -552,9 +552,13 @@ export interface SourceBlobGcCursor {
   id: string;
 }
 
-export interface SourceBlobGcPageInput {
-  after?: SourceBlobGcCursor;
+export interface SourceBlobGcRunBoundary {
   through: SourceBlobGcCursor;
+  creationCutoff: string;
+}
+
+export interface SourceBlobGcPageInput extends SourceBlobGcRunBoundary {
+  after?: SourceBlobGcCursor;
   limit?: number;
 }
 
@@ -606,7 +610,7 @@ export interface LockedSourceBlobCatalog {
 
 export interface SourceBlobCatalog {
   findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null>;
-  findSourceBlobGcCandidateTail(): Promise<SourceBlobGcCursor | null>;
+  findSourceBlobGcRunBoundary(): Promise<SourceBlobGcRunBoundary | null>;
   listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]>;
   withSourceBlobLock<T>(
     workspaceId: string,

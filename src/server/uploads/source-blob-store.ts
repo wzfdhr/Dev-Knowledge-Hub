@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
 import {
   chmod,
   link,
@@ -11,6 +12,7 @@ import {
   rm,
   unlink
 } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 
 import { safeFolderUploadPath, syncDirectory } from "./folder-import.js";
@@ -85,6 +87,7 @@ export async function ensureSafeDirectoryChain(input: {
   dataDir: string;
   segments: string[];
   createMissing?: boolean;
+  prepareRoot?: boolean;
   syncFinal?: boolean;
   syncDirectory?: typeof syncDirectory;
 }): Promise<boolean> {
@@ -130,6 +133,28 @@ export async function ensureSafeDirectoryChain(input: {
     }
     await syncDir(parent);
   }
+  const rootMetadata = await lstat(current);
+  const processUserId = process.getuid?.();
+  if (processUserId !== undefined) {
+    if (rootMetadata.uid !== processUserId) {
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_INTEGRITY_FAILED",
+        "Source blob data directory is not owned by the application user"
+      );
+    }
+    // FK16 trusts a private application-owned root; persisted artifacts below it are still revalidated.
+    if (input.prepareRoot && (rootMetadata.mode & 0o077) !== 0) {
+      await chmod(current, 0o700);
+      await syncDir(current);
+    }
+    const privateRootMetadata = input.prepareRoot ? await lstat(current) : rootMetadata;
+    if ((privateRootMetadata.mode & 0o077) !== 0) {
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_INTEGRITY_FAILED",
+        "Source blob data directory must be private to the application user"
+      );
+    }
+  }
   for (const segment of input.segments) {
     if (!segment || segment === "." || segment === ".." || path.isAbsolute(segment)
       || segment.includes("/") || segment.includes("\\")) {
@@ -173,18 +198,43 @@ export function sourceBlobTrashDirectorySegments(
 
 export async function assertSourceBlobFile(
   candidate: string,
-  record: Pick<SourceBlobRecord, "contentHash" | "byteSize">
-): Promise<void> {
-  const metadata = await lstat(candidate);
-  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o222) !== 0) {
+  record: Pick<SourceBlobRecord, "contentHash" | "byteSize">,
+  openFile: (candidate: string, flags: number) => Promise<FileHandle> = open
+): Promise<Buffer> {
+  const pathMetadata = await lstat(candidate);
+  if (!pathMetadata.isFile() || pathMetadata.isSymbolicLink()) {
     throw new SourceBlobIntegrityError(
       "SOURCE_BLOB_INTEGRITY_FAILED",
       "Source blob is not an immutable regular file"
     );
   }
-  const bytes = await readFile(candidate);
-  if (bytes.length !== record.byteSize || digest(bytes) !== record.contentHash) {
-    throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob bytes do not match metadata");
+  let handle: FileHandle;
+  try {
+    handle = await openFile(candidate, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ELOOP") {
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_INTEGRITY_FAILED",
+        "Source blob final path must not be a symbolic link"
+      );
+    }
+    throw error;
+  }
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || (metadata.mode & 0o222) !== 0) {
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_INTEGRITY_FAILED",
+        "Source blob is not an immutable regular file"
+      );
+    }
+    const bytes = await handle.readFile();
+    if (bytes.length !== record.byteSize || digest(bytes) !== record.contentHash) {
+      throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob bytes do not match metadata");
+    }
+    return bytes;
+  } finally {
+    await handle.close();
   }
 }
 
@@ -219,12 +269,14 @@ export class SourceBlobStore {
       dataDir: this.options.dataDir,
       segments: ["blobs"],
       createMissing: true,
+      prepareRoot: true,
       syncFinal: true
     });
     await ensureSafeDirectoryChain({
       dataDir: this.options.dataDir,
       segments: ["snapshots"],
       createMissing: true,
+      prepareRoot: true,
       syncFinal: true
     });
   }
@@ -426,26 +478,14 @@ export class SourceBlobStore {
     })) {
       throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob directory is missing");
     }
-    let metadata;
     try {
-      metadata = await lstat(absolutePath);
+      return await assertSourceBlobFile(absolutePath, record);
     } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") {
         throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob bytes are missing");
       }
       throw error;
     }
-    if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o222) !== 0) {
-      throw new SourceBlobIntegrityError(
-        "SOURCE_BLOB_INTEGRITY_FAILED",
-        "Source blob is not an immutable regular file"
-      );
-    }
-    const bytes = await readFile(absolutePath);
-    if (bytes.length !== record.byteSize || digest(bytes) !== record.contentHash) {
-      throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob bytes do not match metadata");
-    }
-    return bytes;
   }
 
   async materializeSnapshotView(input: {

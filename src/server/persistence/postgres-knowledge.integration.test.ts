@@ -2708,6 +2708,65 @@ integration("PostgreSQL cited knowledge integration", () => {
       .resolves.toMatchObject({ reused: false, record: { generation: 1, contentHash: orphanHash } });
   }, 30_000);
 
+  test("bounds a real PostgreSQL GC run while new candidates sort within its tail", async () => {
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const catalog = new PostgresAppStore(pool);
+    const setup = await catalog.createInitialSetup("source-blob-boundary@example.com", "hash");
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-postgres-source-blob-boundary-"));
+    retrievalFixtureRoots.push(root);
+    const blobs = new SourceBlobStore({ dataDir: root, catalog });
+    await blobs.initialize();
+    const insertCandidate = async (digit: string) => {
+      const contentHash = digit.repeat(64);
+      return pool!.query<{ id: string }>(
+        `INSERT INTO source_blobs
+         (workspace_id, content_hash, generation, byte_size, status, storage_key,
+          fencing_token, tombstoned_at)
+         VALUES ($1, $2, 1, 1, 'tombstoned', $3, $4, now())
+         RETURNING id`,
+        [setup!.workspace.id, contentHash,
+          `blobs/${setup!.workspace.id}/${digit.repeat(2)}/${contentHash}/1`, randomUUID()]
+      );
+    };
+    const first = await insertCandidate("a");
+    const last = await insertCandidate("f");
+    let pageCount = 0;
+    const boundedCatalog = {
+      findSourceBlobGcRunBoundary: () => catalog.findSourceBlobGcRunBoundary(),
+      listSourceBlobGcCandidates: async (
+        input: Parameters<typeof catalog.listSourceBlobGcCandidates>[0]
+      ) => {
+        pageCount += 1;
+        if (pageCount > 6) throw new Error("GC_SCAN_DID_NOT_TERMINATE");
+        await insertCandidate(String.fromCharCode("a".charCodeAt(0) + pageCount));
+        return catalog.listSourceBlobGcCandidates(input);
+      },
+      findSourceBlobById: catalog.findSourceBlobById.bind(catalog),
+      withSourceBlobLock: catalog.withSourceBlobLock.bind(catalog)
+    };
+    const gc = new SourceBlobGarbageCollector({
+      dataDir: root,
+      catalog: boundedCatalog,
+      enabled: true,
+      candidateLimit: 1
+    });
+
+    await expect(gc.runOnce()).resolves.toMatchObject({ scanned: 2, inconsistent: 2 });
+    expect(pageCount).toBe(2);
+    const initial = await pool.query<{ id: string; status: string }>(
+      "SELECT id, status FROM source_blobs WHERE id = ANY($1::uuid[]) ORDER BY id",
+      [[first.rows[0]!.id, last.rows[0]!.id]]
+    );
+    expect(initial.rows.map((row) => row.status)).toEqual(["tombstoned", "tombstoned"]);
+    const inserted = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM source_blobs WHERE content_hash NOT IN ($1, $2)",
+      ["a".repeat(64), "f".repeat(64)]
+    );
+    expect(inserted.rows[0]?.count).toBe("2");
+  }, 30_000);
+
   test("serializes source_file binding and fenced GC in both PostgreSQL lock orders", async () => {
     pool ??= new Pool({ connectionString: databaseUrl });
     await runMigrations(pool);

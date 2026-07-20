@@ -122,7 +122,8 @@ describe("PostgresAppStore source blob locking", () => {
       id: "33333333-3333-4333-8333-333333333333",
       workspace_id: "11111111-1111-4111-8111-111111111111",
       content_hash: "f".repeat(64),
-      generation: 2
+      generation: 2,
+      creation_cutoff: "2026-07-20 00:00:00.123456+00"
     };
     const query = vi.fn(async (_sql: string, _values?: unknown[]) => {
       void _values;
@@ -131,14 +132,17 @@ describe("PostgresAppStore source blob locking", () => {
     });
     const store = new PostgresAppStore({ query } as never);
 
-    const tail = await store.findSourceBlobGcCandidateTail();
-    await expect(store.listSourceBlobGcCandidates({ through: tail!, limit: 7 })).resolves.toEqual([]);
+    const boundary = await store.findSourceBlobGcRunBoundary();
+    await expect(store.listSourceBlobGcCandidates({ ...boundary!, limit: 7 })).resolves.toEqual([]);
 
-    expect(tail).toEqual({
-      workspaceId: tailRow.workspace_id,
-      contentHash: tailRow.content_hash,
-      generation: tailRow.generation,
-      id: tailRow.id
+    expect(boundary).toEqual({
+      through: {
+        workspaceId: tailRow.workspace_id,
+        contentHash: tailRow.content_hash,
+        generation: tailRow.generation,
+        id: tailRow.id
+      },
+      creationCutoff: tailRow.creation_cutoff
     });
     const sql = String(query.mock.calls[1]?.[0]);
     expect(sql).toContain("FROM source_blobs");
@@ -147,9 +151,11 @@ describe("PostgresAppStore source blob locking", () => {
     expect(sql).toContain("source_files");
     expect(sql).toContain("ROW(blob.workspace_id, blob.content_hash, blob.generation, blob.id)");
     expect(sql).toContain("<= ROW($1, $2, $3, $4)");
-    expect(sql).toContain("LIMIT $5");
+    expect(sql).toContain("blob.created_at <= $5::timestamptz");
+    expect(sql).toContain("LIMIT $6");
     expect(query.mock.calls[1]?.[1]).toEqual([
-      tailRow.workspace_id, tailRow.content_hash, tailRow.generation, tailRow.id, 7
+      tailRow.workspace_id, tailRow.content_hash, tailRow.generation, tailRow.id,
+      tailRow.creation_cutoff, 7
     ]);
   });
 

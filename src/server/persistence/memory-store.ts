@@ -61,6 +61,7 @@ import type {
   SourceBlobRecord,
   SourceBlobGcCursor,
   SourceBlobGcPageInput,
+  SourceBlobGcRunBoundary,
   LockedSourceBlobCatalog,
   SaveKnowledgeGraphInput,
   SetupResult,
@@ -164,6 +165,8 @@ export class MemoryAppStore implements AppStore {
   private readonly uploadSessionLocks = new Map<string, Promise<void>>();
   private readonly uploadIdempotencyLocks = new Map<string, Promise<void>>();
   private readonly sourceBlobLocks = new Map<string, Promise<void>>();
+  private readonly sourceBlobCreationSequences = new Map<string, number>();
+  private nextSourceBlobCreationSequence = 1;
   readonly builds: BuildRecord[] = [];
   readonly buildEvents: BuildEvent[] = [];
   private nextBuildEventSequence = 1;
@@ -191,20 +194,36 @@ export class MemoryAppStore implements AppStore {
       );
   }
 
-  async findSourceBlobGcCandidateTail(): Promise<SourceBlobGcCursor | null> {
+  private sourceBlobCreationSequence(record: SourceBlobRecord): number {
+    const existing = this.sourceBlobCreationSequences.get(record.id);
+    if (existing !== undefined) return existing;
+    const sequence = this.nextSourceBlobCreationSequence;
+    this.nextSourceBlobCreationSequence += 1;
+    this.sourceBlobCreationSequences.set(record.id, sequence);
+    return sequence;
+  }
+
+  async findSourceBlobGcRunBoundary(): Promise<SourceBlobGcRunBoundary | null> {
+    for (const record of this.sourceBlobs) this.sourceBlobCreationSequence(record);
+    const creationCutoff = this.nextSourceBlobCreationSequence - 1;
     let tail: SourceBlobGcCursor | null = null;
     for (const record of this.sourceBlobs) {
       if (!this.isSourceBlobGcCandidate(record)) continue;
       const cursor = sourceBlobGcCursor(record);
       if (!tail || compareSourceBlobGcCursors(cursor, tail) > 0) tail = cursor;
     }
-    return tail;
+    return tail ? { through: tail, creationCutoff: String(creationCutoff) } : null;
   }
 
   async listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]> {
     const candidateLimit = normalizeSourceBlobGcCandidateLimit(input.limit);
+    const creationCutoff = Number(input.creationCutoff);
+    if (!Number.isSafeInteger(creationCutoff) || creationCutoff < 0) {
+      throw new RangeError("Source blob GC creation cutoff is invalid");
+    }
     const page: SourceBlobRecord[] = [];
     for (const record of this.sourceBlobs) {
+      if (this.sourceBlobCreationSequence(record) > creationCutoff) continue;
       if (!this.isSourceBlobGcCandidate(record)) continue;
       const cursor = sourceBlobGcCursor(record);
       if (input.after && compareSourceBlobGcCursors(cursor, input.after) <= 0
@@ -268,6 +287,7 @@ export class MemoryAppStore implements AppStore {
             tombstonedAt: null, trashedAt: null, deletedAt: null
           };
           this.sourceBlobs.push(record);
+          this.sourceBlobCreationSequence(record);
           return { ...record };
         },
         tombstoneIfUnreferenced: async (sourceBlobId, fencingToken, at) => {

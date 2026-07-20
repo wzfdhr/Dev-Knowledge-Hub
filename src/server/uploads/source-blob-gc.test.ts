@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readdir, rename, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -64,7 +64,7 @@ describe("source blob garbage collection", () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-gc-disabled-"));
     roots.push(root);
     const catalog = {
-      findSourceBlobGcCandidateTail: vi.fn(async () => { throw new Error("tail touched"); }),
+      findSourceBlobGcRunBoundary: vi.fn(async () => { throw new Error("boundary touched"); }),
       listSourceBlobGcCandidates: vi.fn(async () => { throw new Error("catalog touched"); }),
       withSourceBlobLock: vi.fn(async () => { throw new Error("lock touched"); })
     };
@@ -72,7 +72,7 @@ describe("source blob garbage collection", () => {
     const result = await new SourceBlobGarbageCollector({ dataDir: root, catalog: catalog as never }).runOnce();
 
     expect(result).toEqual({ scanned: 0, tombstoned: 0, restored: 0, trashed: 0, deleted: 0, inconsistent: 0 });
-    expect(catalog.findSourceBlobGcCandidateTail).not.toHaveBeenCalled();
+    expect(catalog.findSourceBlobGcRunBoundary).not.toHaveBeenCalled();
     expect(catalog.listSourceBlobGcCandidates).not.toHaveBeenCalled();
     expect(catalog.withSourceBlobLock).not.toHaveBeenCalled();
     await expect(stat(path.join(root, ".trash"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -82,8 +82,9 @@ describe("source blob garbage collection", () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-gc-limit-"));
     roots.push(root);
     const tail = { workspaceId: "workspace", contentHash: "f".repeat(64), generation: 1, id: randomUUID() };
+    const boundary = { through: tail, creationCutoff: "2026-07-20T00:00:00.000000Z" };
     const catalog = {
-      findSourceBlobGcCandidateTail: vi.fn(async () => tail),
+      findSourceBlobGcRunBoundary: vi.fn(async () => boundary),
       listSourceBlobGcCandidates: vi.fn(async () => []),
       withSourceBlobLock: vi.fn(async () => { throw new Error("unexpected candidate"); })
     };
@@ -94,8 +95,8 @@ describe("source blob garbage collection", () => {
     }).runOnce();
 
     expect(catalog.listSourceBlobGcCandidates.mock.calls).toEqual([
-      [{ through: tail, limit: 500 }],
-      [{ through: tail, limit: 7 }]
+      [{ ...boundary, limit: 500 }],
+      [{ ...boundary, limit: 7 }]
     ]);
   });
 
@@ -111,9 +112,43 @@ describe("source blob garbage collection", () => {
       });
     }
 
-    const tail = await context.catalog.findSourceBlobGcCandidateTail();
-    await expect(context.catalog.listSourceBlobGcCandidates({ through: tail!, limit: 2 }))
+    const boundary = await context.catalog.findSourceBlobGcRunBoundary();
+    await expect(context.catalog.listSourceBlobGcCandidates({ ...boundary!, limit: 2 }))
       .resolves.toHaveLength(2);
+  });
+
+  test("freezes creation membership while inserts sort inside the initial tail range on every page", async () => {
+    const context = await fixture();
+    const makeCandidate = (digit: string): SourceBlobRecord => {
+      const contentHash = digit.repeat(64);
+      return {
+        id: randomUUID(), workspaceId: context.workspaceId, contentHash, generation: 1,
+        byteSize: 1, status: "tombstoned",
+        storageKey: path.posix.join("blobs", context.workspaceId, digit.repeat(2), contentHash, "1"),
+        fencingToken: randomUUID(), tombstonedAt: new Date("2026-07-20T00:00:00.000Z"),
+        trashedAt: null, deletedAt: null
+      };
+    };
+    context.catalog.sourceBlobs.push(makeCandidate("a"), makeCandidate("f"));
+    const baseCatalog = context.catalog;
+    let pageCount = 0;
+    const catalog = {
+      findSourceBlobGcRunBoundary: () => baseCatalog.findSourceBlobGcRunBoundary(),
+      listSourceBlobGcCandidates: async (
+        input: Parameters<typeof baseCatalog.listSourceBlobGcCandidates>[0]
+      ) => {
+        pageCount += 1;
+        if (pageCount > 6) throw new Error("GC_SCAN_DID_NOT_TERMINATE");
+        baseCatalog.sourceBlobs.push(makeCandidate(String.fromCharCode("a".charCodeAt(0) + pageCount)));
+        return baseCatalog.listSourceBlobGcCandidates(input);
+      },
+      findSourceBlobById: baseCatalog.findSourceBlobById.bind(baseCatalog),
+      withSourceBlobLock: baseCatalog.withSourceBlobLock.bind(baseCatalog)
+    };
+
+    await expect(context.collector({ catalog: catalog as never, candidateLimit: 1 }).runOnce())
+      .resolves.toMatchObject({ scanned: 2, inconsistent: 2 });
+    expect(pageCount).toBe(2);
   });
 
   test("keyset pagination reaches candidates after an inconsistent first page", async () => {
@@ -154,12 +189,13 @@ describe("source blob garbage collection", () => {
       context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("vanishing tail three") }),
       context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("vanishing tail four") })
     ]);
-    const tail = await context.catalog.findSourceBlobGcCandidateTail();
+    const boundary = await context.catalog.findSourceBlobGcRunBoundary();
+    const tail = boundary!.through;
     const tailRecord = context.catalog.sourceBlobs.find((record) => record.id === tail!.id)!;
     const baseCatalog = context.catalog;
     let page = 0;
     const catalog = {
-      findSourceBlobGcCandidateTail: () => baseCatalog.findSourceBlobGcCandidateTail(),
+      findSourceBlobGcRunBoundary: () => baseCatalog.findSourceBlobGcRunBoundary(),
       listSourceBlobGcCandidates: async (input: Parameters<typeof baseCatalog.listSourceBlobGcCandidates>[0]) => {
         page += 1;
         if (page === 2) Object.assign(tailRecord, { status: "deleted" as const, deletedAt: new Date() });
@@ -180,20 +216,24 @@ describe("source blob garbage collection", () => {
     await context.blobs.put({ workspaceId: context.workspaceId, bytes: Buffer.from("initial boundary") });
     const baseCatalog = context.catalog;
     const newWorkspaceId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
-    const newHash = "f".repeat(64);
+    const deferredBytes = Buffer.from("deferred until next GC run");
+    const newHash = createHash("sha256").update(deferredBytes).digest("hex");
     const deferred: SourceBlobRecord = {
       id: randomUUID(), workspaceId: newWorkspaceId, contentHash: newHash, generation: 1,
-      byteSize: 1, status: "active",
-      storageKey: path.posix.join("blobs", newWorkspaceId, "ff", newHash, "1"),
+      byteSize: deferredBytes.length, status: "active",
+      storageKey: path.posix.join("blobs", newWorkspaceId, newHash.slice(0, 2), newHash, "1"),
       fencingToken: null, tombstonedAt: null, trashedAt: null, deletedAt: null
     };
     let inserted = false;
     const catalog = {
-      findSourceBlobGcCandidateTail: () => baseCatalog.findSourceBlobGcCandidateTail(),
+      findSourceBlobGcRunBoundary: () => baseCatalog.findSourceBlobGcRunBoundary(),
       listSourceBlobGcCandidates: async (input: Parameters<typeof baseCatalog.listSourceBlobGcCandidates>[0]) => {
         const records = await baseCatalog.listSourceBlobGcCandidates(input);
         if (!inserted) {
           inserted = true;
+          const deferredPath = sourcePath(context.root, deferred);
+          await mkdir(path.dirname(deferredPath), { recursive: true });
+          await writeFile(deferredPath, deferredBytes, { mode: 0o444 });
           baseCatalog.sourceBlobs.push(deferred);
         }
         return records;
@@ -254,6 +294,65 @@ describe("source blob garbage collection", () => {
     await expect(context.collector().runOnce()).resolves.toMatchObject({ tombstoned: 0 });
     expect(context.catalog.sourceBlobs[0]).toMatchObject({ status: "active", fencingToken: null });
   });
+
+  test.each([
+    "storage-key", "parent-symlink", "final-symlink", "writable", "content-mismatch", "size-mismatch"
+  ] as const)(
+    "audits an active %s artifact before tombstoning and continues later candidates",
+    async (artifact) => {
+      const context = await fixture();
+      const invalid = await context.blobs.put({
+        workspaceId: context.workspaceId,
+        bytes: Buffer.from(`invalid active ${artifact}`)
+      });
+      const valid = await context.blobs.put({
+        workspaceId: context.workspaceId,
+        bytes: Buffer.from(`valid after ${artifact}`)
+      });
+      const invalidRecord = context.catalog.sourceBlobs.find((record) => record.id === invalid.record.id)!;
+      const invalidPath = sourcePath(context.root, invalidRecord);
+      if (artifact === "storage-key") {
+        invalidRecord.storageKey = path.posix.join("blobs", context.workspaceId, "wrong", "1");
+      } else if (artifact === "parent-symlink") {
+        const hashDirectory = path.dirname(invalidPath);
+        const external = await mkdtemp(path.join(os.tmpdir(), "devkh-active-blob-symlink-"));
+        roots.push(external);
+        const moved = path.join(external, "hash");
+        await rename(hashDirectory, moved);
+        await symlink(moved, hashDirectory, "dir");
+      } else if (artifact === "final-symlink") {
+        const external = await mkdtemp(path.join(os.tmpdir(), "devkh-active-blob-final-symlink-"));
+        roots.push(external);
+        const externalFile = path.join(external, "generation");
+        await writeFile(externalFile, await readFile(invalidPath), { mode: 0o444 });
+        await unlink(invalidPath);
+        await symlink(externalFile, invalidPath);
+      } else if (artifact === "writable") {
+        await chmod(invalidPath, 0o644);
+      } else if (artifact === "content-mismatch") {
+        const original = await readFile(invalidPath);
+        await chmod(invalidPath, 0o644);
+        await writeFile(invalidPath, Buffer.alloc(original.length, 0x78));
+        await chmod(invalidPath, 0o444);
+      } else {
+        invalidRecord.byteSize += 1;
+      }
+
+      await expect(context.collector().runOnce()).resolves.toMatchObject({
+        scanned: 2,
+        tombstoned: 1,
+        inconsistent: 1
+      });
+      expect(invalidRecord).toMatchObject({ status: "active", fencingToken: null, tombstonedAt: null });
+      expect(context.catalog.sourceBlobs.find((record) => record.id === valid.record.id))
+        .toMatchObject({ status: "tombstoned", fencingToken: expect.any(String) });
+      expect(context.catalog.auditEvents.find((event) => event.resourceId === invalid.record.id))
+        .toMatchObject({
+          action: "source_blob.gc_inconsistent",
+          metadata: { reason: "active_file_inconsistent", status: "active", generation: 1 }
+        });
+    }
+  );
 
   test("restores a referenced tombstone while its verified original file is still present", async () => {
     const context = await fixture();
@@ -474,7 +573,7 @@ describe("source blob garbage collection", () => {
     const order: string[] = [];
     const baseCatalog = context.catalog;
     const catalog = {
-      findSourceBlobGcCandidateTail: () => baseCatalog.findSourceBlobGcCandidateTail(),
+      findSourceBlobGcRunBoundary: () => baseCatalog.findSourceBlobGcRunBoundary(),
       listSourceBlobGcCandidates: (input: Parameters<typeof baseCatalog.listSourceBlobGcCandidates>[0]) =>
         baseCatalog.listSourceBlobGcCandidates(input),
       findSourceBlobById: (workspaceId: string, sourceBlobId: string) =>

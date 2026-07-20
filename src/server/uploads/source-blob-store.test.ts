@@ -1,13 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, mkdir, mkdtemp, open, readFile, readdir, rename, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import {
   SourceBlobIntegrityError,
   SourceBlobStore,
+  assertSourceBlobFile,
   type LockedSourceBlobCatalog,
   type SourceBlobCatalog,
   type SourceBlobRecord
@@ -27,13 +29,16 @@ class MemorySourceBlobCatalog implements SourceBlobCatalog {
   readonly referenceCounts = new Map<string, number>();
   private readonly locks = new Map<string, Promise<void>>();
 
-  async findSourceBlobGcCandidateTail() {
+  async findSourceBlobGcRunBoundary() {
     const record = this.records.filter((candidate) => candidate.status !== "deleted").at(-1);
     return record ? {
-      workspaceId: record.workspaceId,
-      contentHash: record.contentHash,
-      generation: record.generation,
-      id: record.id
+      through: {
+        workspaceId: record.workspaceId,
+        contentHash: record.contentHash,
+        generation: record.generation,
+        id: record.id
+      },
+      creationCutoff: "0"
     } : null;
   }
 
@@ -130,6 +135,34 @@ function sha256(bytes: Uint8Array): string {
 }
 
 describe("workspace source blob store", () => {
+  test("enforces a private application-owned data root during bootstrap", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blobs-private-root-"));
+    roots.push(root);
+    await chmod(root, 0o755);
+    const store = new SourceBlobStore({ dataDir: root, catalog: new MemorySourceBlobCatalog() });
+
+    await store.initialize();
+
+    expect((await stat(root)).mode & 0o777).toBe(0o700);
+    expect((await stat(path.join(root, "blobs"))).mode & 0o777).toBe(0o700);
+  });
+
+  test("opens immutable final files with no-follow semantics", async () => {
+    const context = await fixture();
+    const bytes = Buffer.from("no follow final file");
+    const created = await context.store.put({ workspaceId: randomUUID(), bytes });
+    const openFile = vi.fn(async (candidate: string, flags: number) => open(candidate, flags));
+
+    await assertSourceBlobFile(
+      path.join(context.root, created.record.storageKey),
+      created.record,
+      openFile
+    );
+
+    expect(openFile).toHaveBeenCalledOnce();
+    expect(Number(openFile.mock.calls[0]![1]) & constants.O_NOFOLLOW).toBe(constants.O_NOFOLLOW);
+  });
+
   test("verifies same-volume hardlinks at startup and removes every probe file", async () => {
     const context = await fixture();
 

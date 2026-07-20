@@ -75,8 +75,8 @@ import type {
   SourceAnalysisArtifactKey,
   SourceAnalysisArtifactRecord,
   SourceFileRecord,
-  SourceBlobGcCursor,
   SourceBlobGcPageInput,
+  SourceBlobGcRunBoundary,
   SourceBlobRecord,
   LockedSourceBlobCatalog,
   SourceSnapshotRecord,
@@ -915,25 +915,34 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     }
   }
 
-  async findSourceBlobGcCandidateTail(): Promise<SourceBlobGcCursor | null> {
+  async findSourceBlobGcRunBoundary(): Promise<SourceBlobGcRunBoundary | null> {
     const result = await this.pool.query<Pick<SourceBlobRow,
-      "id" | "workspace_id" | "content_hash" | "generation">>(`
-      SELECT blob.id, blob.workspace_id, blob.content_hash, blob.generation
+      "id" | "workspace_id" | "content_hash" | "generation"> & { creation_cutoff: string }>(`
+      WITH run_boundary AS (
+        SELECT clock_timestamp() AS creation_cutoff
+      )
+      SELECT blob.id, blob.workspace_id, blob.content_hash, blob.generation,
+             boundary.creation_cutoff::text AS creation_cutoff
       FROM source_blobs blob
-      WHERE blob.status IN ('tombstoned', 'trash')
+      CROSS JOIN run_boundary boundary
+      WHERE blob.created_at <= boundary.creation_cutoff
+        AND (blob.status IN ('tombstoned', 'trash')
          OR (blob.status = 'active' AND NOT EXISTS (
            SELECT 1 FROM source_files file
            WHERE file.workspace_id = blob.workspace_id AND file.source_blob_id = blob.id
-         ))
+         )))
       ORDER BY blob.workspace_id DESC, blob.content_hash DESC, blob.generation DESC, blob.id DESC
       LIMIT 1
     `);
     const row = result.rows[0];
     return row ? {
-      workspaceId: row.workspace_id,
-      contentHash: row.content_hash,
-      generation: Number(row.generation),
-      id: row.id
+      through: {
+        workspaceId: row.workspace_id,
+        contentHash: row.content_hash,
+        generation: Number(row.generation),
+        id: row.id
+      },
+      creationCutoff: row.creation_cutoff
     } : null;
   }
 
@@ -943,13 +952,14 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       input.through.workspaceId,
       input.through.contentHash,
       input.through.generation,
-      input.through.id
+      input.through.id,
+      input.creationCutoff
     ];
     let afterClause = "";
     if (input.after) {
       afterClause = `
         AND ROW(blob.workspace_id, blob.content_hash, blob.generation, blob.id)
-          > ROW($5, $6, $7, $8)`;
+          > ROW($6, $7, $8, $9)`;
       values.push(
         input.after.workspaceId,
         input.after.contentHash,
@@ -971,6 +981,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           WHERE file.workspace_id = blob.workspace_id AND file.source_blob_id = blob.id
         ))
       )
+        AND blob.created_at <= $5::timestamptz
         AND ROW(blob.workspace_id, blob.content_hash, blob.generation, blob.id)
           <= ROW($1, $2, $3, $4)
         ${afterClause}

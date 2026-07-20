@@ -89,14 +89,15 @@ export class SourceBlobGarbageCollector {
   async runOnce(): Promise<SourceBlobGcRunResult> {
     if (!this.enabled) return emptyResult();
     const result = emptyResult();
-    const through = await this.options.catalog.findSourceBlobGcCandidateTail();
-    if (!through) return result;
+    const boundary = await this.options.catalog.findSourceBlobGcRunBoundary();
+    if (!boundary) return result;
+    const { through } = boundary;
     const now = this.now();
     let after: SourceBlobGcCursor | undefined;
     while (true) {
       const candidates = await this.options.catalog.listSourceBlobGcCandidates({
         ...(after ? { after } : {}),
-        through,
+        ...boundary,
         limit: this.candidateLimit
       });
       if (candidates.length === 0) break;
@@ -131,6 +132,24 @@ export class SourceBlobGarbageCollector {
 
     if (current.status === "active") {
       if (references > 0) return result;
+      try {
+        const locations = sourceBlobFileLocations(this.options.dataDir, current);
+        const sourceDirectoryExists = await ensureSafeDirectoryChain({
+          dataDir: this.options.dataDir,
+          segments: sourceBlobDirectorySegments(current)
+        });
+        if (!sourceDirectoryExists) {
+          throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob directory is missing");
+        }
+        await assertSourceBlobFile(locations.source, current);
+      } catch (error) {
+        if (error instanceof SourceBlobIntegrityError
+          || error instanceof Error && "code" in error && error.code === "ENOENT") {
+          await this.inconsistent(catalog, current, "active_file_inconsistent", result);
+          return result;
+        }
+        throw error;
+      }
       const tombstoned = await catalog.tombstoneIfUnreferenced(current.id, randomUUID(), now);
       if (tombstoned) result.tombstoned = 1;
       return result;
@@ -224,6 +243,12 @@ export class SourceBlobGarbageCollector {
         syncFinal: true,
         syncDirectory: this.syncDir
       });
+      if (!await ensureSafeDirectoryChain({
+        dataDir: this.options.dataDir,
+        segments: sourceBlobDirectorySegments(record)
+      })) {
+        throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob directory is missing");
+      }
       await this.renameFile(locations.source, locations.trash);
       await Promise.all([
         this.syncDir(locations.sourceParent),
@@ -283,6 +308,12 @@ export class SourceBlobGarbageCollector {
 
     await assertSourceBlobFile(locations.trash, record);
     if (!graceElapsed(record.trashedAt, this.trashGraceMs, now)) return;
+    if (!await ensureSafeDirectoryChain({
+      dataDir: this.options.dataDir,
+      segments: sourceBlobTrashDirectorySegments(record)
+    })) {
+      throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob trash directory is missing");
+    }
     await unlink(locations.trash);
     await this.syncDir(locations.trashParent);
     const deleted = await catalog.markDeletedIfUnreferenced(record.id, record.fencingToken, now);

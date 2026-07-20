@@ -196,19 +196,24 @@ source_blob_evidence="$(node -e '
   const recordFile=fs.openSync(process.argv[3],"wx",0o600);
   const safeSegment=/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/; const digest=/^[a-f0-9]{64}$/; const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const contained=(candidate)=>candidate===root||candidate.startsWith(root+path.sep);
-  const regularFile=(segments,label)=>{
-    let candidate=root;
-    for(let index=0;index<segments.length;index++){
-      candidate=path.join(candidate,segments[index]);
-      let stats; try{stats=fs.lstatSync(candidate,{bigint:true})}catch{throw new Error(label+" is unavailable")}
-      if(stats.isSymbolicLink()) throw new Error(label+" path contains a symbolic link");
-      if(index<segments.length-1&&!stats.isDirectory()) throw new Error(label+" path parent is not a directory");
-      if(index===segments.length-1&&!stats.isFile()) throw new Error(label+" is not a regular file");
-      if(index===segments.length-1&&(stats.mode&0o222n)!==0n) throw new Error(label+" must be read-only");
-      let canonical; try{canonical=fs.realpathSync(candidate)}catch{throw new Error(label+" canonical path is unavailable")}
+  const noFollow=fs.constants.O_NOFOLLOW; if(!Number.isInteger(noFollow)) throw new Error("no-follow file verification is unavailable");
+  const openRegularFile=(segments,label)=>{
+    let parent=root;
+    for(let index=0;index<segments.length-1;index++){
+      parent=path.join(parent,segments[index]);
+      let stats; try{stats=fs.lstatSync(parent,{bigint:true})}catch{throw new Error(label+" path parent is unavailable")}
+      if(stats.isSymbolicLink()||!stats.isDirectory()) throw new Error(label+" path parent is not a real directory");
+      let canonical; try{canonical=fs.realpathSync(parent)}catch{throw new Error(label+" parent canonical path is unavailable")}
       if(!contained(canonical)) throw new Error(label+" escapes snapshot volume");
     }
-    return { path:candidate, stats:fs.lstatSync(candidate,{bigint:true}) };
+    const candidate=path.join(parent,segments.at(-1)); let descriptor;
+    try{descriptor=fs.openSync(candidate,fs.constants.O_RDONLY|fs.constants.O_NONBLOCK|noFollow)}catch{throw new Error(label+" must be a regular no-follow file")}
+    try{
+      const stats=fs.fstatSync(descriptor,{bigint:true});
+      if(!stats.isFile()) throw new Error(label+" must be a regular no-follow file");
+      if((stats.mode&0o222n)!==0n) throw new Error(label+" must be read-only");
+      return {descriptor,stats};
+    }catch(error){fs.closeSync(descriptor);throw error}
   };
   const checkedGenerations=new Map(); const physicalInodes=new Set(); let blobHardlinkVerifiedCount=0; let sourceBlobLogicalBytes=0n; let sourceBlobPhysicalBytes=0n;
   try{for(const manifest of manifests){
@@ -222,18 +227,21 @@ source_blob_evidence="$(node -e '
     if(manifest.storageKey!==expectedStorageKey) throw new Error("source blob storage key does not match manifest");
     const expectedSnapshotStoragePath="/var/lib/devkh/snapshots/snapshots/"+manifest.snapshotId+"/files";
     if(manifest.snapshotStoragePath!==expectedSnapshotStoragePath) throw new Error("snapshot storage path does not match manifest");
-    const blobFile=regularFile(manifest.storageKey.split("/"),"source blob content"); const blobPath=blobFile.path; const blob=blobFile.stats;
-    const viewFile=regularFile(["snapshots",manifest.snapshotId,"files",...pathSegments],"snapshot view"); const viewPath=viewFile.path; const view=viewFile.stats;
-    const blobBytes=fs.readFileSync(blobPath); const blobContentSha256=crypto.createHash("sha256").update(blobBytes).digest("hex"); if(blobBytes.length!==manifest.byteSize||blobContentSha256!==manifest.contentHash) throw new Error("source blob content digest mismatch");
-    const generationKey=[manifest.workspaceId,manifest.contentHash,manifest.generation].join("/");
-    const known=checkedGenerations.get(generationKey); if(known&&known!==manifest.storageKey) throw new Error("source blob generation has inconsistent storage keys");
-    if(!known){ checkedGenerations.set(generationKey,manifest.storageKey); sourceBlobLogicalBytes+=BigInt(manifest.byteSize); const inodeKey=blob.dev.toString()+":"+blob.ino.toString(); if(!physicalInodes.has(inodeKey)){physicalInodes.add(inodeKey); sourceBlobPhysicalBytes+=blob.blocks*512n;} }
-    const viewBytes=fs.readFileSync(viewPath); const viewContentSha256=crypto.createHash("sha256").update(viewBytes).digest("hex"); if(viewBytes.length!==manifest.byteSize||viewContentSha256!==manifest.contentHash) throw new Error("snapshot view content digest mismatch");
-    if(view.dev!==blob.dev||view.ino!==blob.ino) throw new Error("snapshot view is not a same-inode hardlink");
-    const mode=(stats)=>(stats.mode&0o7777n).toString(8).padStart(4,"0"); const allocated=(stats)=>(stats.blocks*512n).toString();
-    const record={workspaceId:manifest.workspaceId,snapshotId:manifest.snapshotId,sourcePath:manifest.path,storageKey:manifest.storageKey,snapshotStoragePath:manifest.snapshotStoragePath,contentHash:manifest.contentHash,generation:manifest.generation,byteSize:manifest.byteSize,status:manifest.status,fencingToken:manifest.fencingToken,tombstonedAt:manifest.tombstonedAt,trashedAt:manifest.trashedAt,deletedAt:manifest.deletedAt,blobMode:mode(blob),viewMode:mode(view),blobDevice:blob.dev.toString(),blobInode:blob.ino.toString(),viewDevice:view.dev.toString(),viewInode:view.ino.toString(),blobSize:blob.size.toString(),viewSize:view.size.toString(),blobBlocks:blob.blocks.toString(),viewBlocks:view.blocks.toString(),blobAllocatedBytes:allocated(blob),viewAllocatedBytes:allocated(view),blobContentSha256,viewContentSha256,relationship:"same-device-inode-hardlink"};
-    fs.writeSync(recordFile,JSON.stringify(record)+"\n");
-    blobHardlinkVerifiedCount++;
+    let blobFile; let viewFile;
+    try{
+      blobFile=openRegularFile(manifest.storageKey.split("/"),"source blob content"); const blob=blobFile.stats;
+      viewFile=openRegularFile(["snapshots",manifest.snapshotId,"files",...pathSegments],"snapshot view"); const view=viewFile.stats;
+      const blobBytes=fs.readFileSync(blobFile.descriptor); const blobContentSha256=crypto.createHash("sha256").update(blobBytes).digest("hex"); if(blobBytes.length!==manifest.byteSize||blobContentSha256!==manifest.contentHash) throw new Error("source blob content digest mismatch");
+      const generationKey=[manifest.workspaceId,manifest.contentHash,manifest.generation].join("/");
+      const known=checkedGenerations.get(generationKey); if(known&&known!==manifest.storageKey) throw new Error("source blob generation has inconsistent storage keys");
+      if(!known){ checkedGenerations.set(generationKey,manifest.storageKey); sourceBlobLogicalBytes+=BigInt(manifest.byteSize); const inodeKey=blob.dev.toString()+":"+blob.ino.toString(); if(!physicalInodes.has(inodeKey)){physicalInodes.add(inodeKey); sourceBlobPhysicalBytes+=blob.blocks*512n;} }
+      const viewBytes=fs.readFileSync(viewFile.descriptor); const viewContentSha256=crypto.createHash("sha256").update(viewBytes).digest("hex"); if(viewBytes.length!==manifest.byteSize||viewContentSha256!==manifest.contentHash) throw new Error("snapshot view content digest mismatch");
+      if(view.dev!==blob.dev||view.ino!==blob.ino) throw new Error("snapshot view is not a same-inode hardlink");
+      const mode=(stats)=>(stats.mode&0o7777n).toString(8).padStart(4,"0"); const allocated=(stats)=>(stats.blocks*512n).toString();
+      const record={workspaceId:manifest.workspaceId,snapshotId:manifest.snapshotId,sourcePath:manifest.path,storageKey:manifest.storageKey,snapshotStoragePath:manifest.snapshotStoragePath,contentHash:manifest.contentHash,generation:manifest.generation,byteSize:manifest.byteSize,status:manifest.status,fencingToken:manifest.fencingToken,tombstonedAt:manifest.tombstonedAt,trashedAt:manifest.trashedAt,deletedAt:manifest.deletedAt,blobMode:mode(blob),viewMode:mode(view),blobDevice:blob.dev.toString(),blobInode:blob.ino.toString(),viewDevice:view.dev.toString(),viewInode:view.ino.toString(),blobSize:blob.size.toString(),viewSize:view.size.toString(),blobBlocks:blob.blocks.toString(),viewBlocks:view.blocks.toString(),blobAllocatedBytes:allocated(blob),viewAllocatedBytes:allocated(view),blobContentSha256,viewContentSha256,relationship:"same-device-inode-hardlink"};
+      fs.writeSync(recordFile,JSON.stringify(record)+"\n");
+      blobHardlinkVerifiedCount++;
+    }finally{if(viewFile)fs.closeSync(viewFile.descriptor);if(blobFile)fs.closeSync(blobFile.descriptor)}
   }}finally{fs.closeSync(recordFile)}
   const maximum=BigInt(Number.MAX_SAFE_INTEGER); if(sourceBlobLogicalBytes>maximum||sourceBlobPhysicalBytes>maximum) throw new Error("source blob byte evidence exceeds safe integer range");
   process.stdout.write(JSON.stringify({blobReferenceCount:manifests.length,blobContentVerifiedCount:checkedGenerations.size,blobHardlinkVerifiedCount,referencedSourceBlobGenerationCount:checkedGenerations.size,sourceBlobLogicalBytes:Number(sourceBlobLogicalBytes),sourceBlobPhysicalBytes:Number(sourceBlobPhysicalBytes)}));

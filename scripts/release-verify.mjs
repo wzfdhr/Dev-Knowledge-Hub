@@ -59,7 +59,6 @@ async function invalidateRecoveryEvidence(root, errorClass) {
     operation: errorClass === "container_verification_failed" ? "container-verification" : "restore-drill",
     result: "failed",
     errorClass,
-    retentionPath: root,
     finishedAt: new Date().toISOString()
   })}\n`, { mode: 0o600 });
 }
@@ -204,9 +203,10 @@ export async function runContainerVerification(options = {}) {
 
   if (failure) {
     logger.error("[release] container verification failed; retaining the isolated Compose state for diagnosis");
-    if (failure.stepName !== "recovery-drill") {
-      await invalidateEvidence(env.RECOVERY_EVIDENCE_DIR, "container_verification_failed");
-    }
+    const errorClass = failure.stepName === "recovery-drill"
+      ? "recovery_drill_failed"
+      : "container_verification_failed";
+    await invalidateEvidence(env.RECOVERY_EVIDENCE_DIR, errorClass);
     throw failure;
   }
 

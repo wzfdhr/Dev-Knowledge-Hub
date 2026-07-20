@@ -81,6 +81,8 @@ function createFixture({
   requireManifestMode = false,
   snapshotArchiveEntries = null,
   postExtractSymlink = false,
+  replaceSourceBlobWithSymlink = false,
+  replaceSnapshotViewWithSymlink = false,
   writableSourceBlob = false,
   writableSnapshotView = false,
   deriveSourceBlobIntegrity = true,
@@ -118,6 +120,17 @@ case " $* " in
     node -e 'const fs=require("node:fs"); const result=JSON.parse(process.env.FAKE_INTEGRITY_RESULT); if(process.env.FAKE_DERIVE_SOURCE_BLOB_INTEGRITY==="true"){const manifests=JSON.parse(fs.readFileSync(process.env.FAKE_SOURCE_BLOB_MANIFEST_PATH,"utf8")); const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i; const valid=(item)=>item.status==="active" ? item.fencingToken===null&&item.tombstonedAt===null&&item.trashedAt===null&&item.deletedAt===null : item.status==="tombstoned"&&uuid.test(item.fencingToken??"")&&typeof item.tombstonedAt==="string"&&item.trashedAt===null&&item.deletedAt===null; result.invalidSourceBlobReferences=manifests.filter((item)=>!valid(item)).length;} process.stdout.write(JSON.stringify(result)+"\n");' ;;
   *" psql "*"artifact_manifests"*) printf '[{"projectId":"33333333-3333-4333-8333-333333333333","snapshotId":"55555555-5555-4555-8555-555555555555","stage":"convert","storageKey":"%s","contentDigest":"218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9"}]\n' "$FAKE_ARTIFACT_STORAGE_KEY" ;;
   *" psql "*"source_blob_manifests"*)
+    restored_snapshot_root=$(find "$BACKUP_STATE_DIR" -path '*/volumes/snapshots' -type d -print -quit)
+    if [ "$FAKE_REPLACE_SOURCE_BLOB_WITH_SYMLINK" = "true" ]; then
+      replaced_blob="$restored_snapshot_root/blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1"
+      mv "$replaced_blob" "$replaced_blob.real"
+      ln -s "$(basename "$replaced_blob.real")" "$replaced_blob"
+    fi
+    if [ "$FAKE_REPLACE_SNAPSHOT_VIEW_WITH_SYMLINK" = "true" ]; then
+      replaced_view="$restored_snapshot_root/snapshots/55555555-5555-4555-8555-555555555555/files/src/one.ts"
+      mv "$replaced_view" "$replaced_view.real"
+      ln -s "$(basename "$replaced_view.real")" "$replaced_view"
+    fi
     node -e 'const fs=require("node:fs"); if(process.env.FAKE_REQUIRE_MANIFEST_MODE==="true"&&(fs.fstatSync(1).mode&0o777)!==0o600) process.exit(73); fs.createReadStream(process.env.FAKE_SOURCE_BLOB_MANIFEST_PATH).pipe(process.stdout);' ;;
   *" pg_isready "*) exit 0 ;;
   *" exec "*" node -e "*) exit 0 ;;
@@ -231,6 +244,8 @@ fi
       FAKE_SNAPSHOT_ARCHIVE_PATH: snapshotArchiveEntries ? snapshotArchiveFile : "",
       SYSTEM_TAR: systemTar,
       POST_EXTRACT_SYMLINK: String(postExtractSymlink),
+      FAKE_REPLACE_SOURCE_BLOB_WITH_SYMLINK: String(replaceSourceBlobWithSymlink),
+      FAKE_REPLACE_SNAPSHOT_VIEW_WITH_SYMLINK: String(replaceSnapshotViewWithSymlink),
       FAKE_WRITABLE_SOURCE_BLOB: String(writableSourceBlob),
       FAKE_WRITABLE_SNAPSHOT_VIEW: String(writableSnapshotView),
       COMPOSE_DIR: root,
@@ -690,7 +705,7 @@ test("restore drill rejects source blob references that are not backed by a same
     const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
 
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /snapshot view is unavailable/);
+    assert.match(result.stderr, /snapshot view must be a regular no-follow file/);
     assert.equal(existsSync(join(fixture.environment.BACKUP_STATE_DIR, "recovery-evidence")), false);
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
@@ -882,6 +897,25 @@ test("tar validation rejects non-tar whitespace in octal fields", async () => {
   }
 });
 
+test("tar validation requires an octal digit in size and checksum fields", async () => {
+  const { validateTarArchive } = await import(validateTarArchiveScript);
+  const emptySize = tarBytes([{ name: "one.txt", contents: "x" }]);
+  emptySize.fill(0x20, 124, 136);
+  refreshTarChecksum(emptySize);
+  const emptyChecksum = tarBytes([{ name: "one.txt", contents: "x" }]);
+  emptyChecksum.fill(0, 148, 156);
+
+  for (const [bytes, message] of [
+    [emptySize, /invalid archive member size field/],
+    [emptyChecksum, /invalid archive header checksum field/]
+  ]) {
+    await assert.rejects(
+      validateTarArchive("unused-by-injected-stream", { createInputStream: () => Readable.from([gzipSync(bytes)]) }),
+      message
+    );
+  }
+});
+
 test("tar validation enforces complete bounded PAX length prefixes", async () => {
   const { validateTarArchive } = await import(validateTarArchiveScript);
   const validate = (contents) => validateTarArchive("unused-by-injected-stream", {
@@ -913,6 +947,45 @@ for (const [name, options, message] of [
     }
   });
 }
+
+for (const [name, label, options] of [
+  ["source blob", "source blob content", { replaceSourceBlobWithSymlink: true }],
+  ["snapshot view", "snapshot view", { replaceSnapshotViewWithSymlink: true }]
+]) {
+  test(`restore drill rejects a ${name} replaced with a symlink before verification`, () => {
+    const fixture = createFixture(options);
+
+    try {
+      const result = spawnSync(restoreDrillScript, [], { env: fixture.environment, encoding: "utf8" });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, new RegExp(`${label} must be a regular no-follow file`));
+      assert.equal(existsSync(join(fixture.environment.BACKUP_STATE_DIR, "recovery-evidence")), false);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("CI recovery wrapper invalidates pending and final evidence pairs on failure", () => {
+  const wrapper = readFileSync(ciRecoveryDrillScript, "utf8");
+
+  assert.match(wrapper, /invalidate_recovery_evidence\(\)/);
+  assert.match(wrapper, /else\s+if ! invalidate_recovery_evidence/s);
+  for (const suffix of ["*.json", "*.json.pending", "*.ndjson", "*.ndjson.pending"]) {
+    assert.match(wrapper, new RegExp(suffix.replaceAll(".", "\\.").replaceAll("*", "\\*")));
+  }
+  assert.match(wrapper, /ci_recovery_drill_failed/);
+});
+
+test("restore drill derives source blob evidence through pinned no-follow descriptors", () => {
+  const restore = readFileSync(restoreDrillScript, "utf8");
+
+  assert.match(restore, /fs\.openSync\(candidate,fs\.constants\.O_RDONLY\|fs\.constants\.O_NONBLOCK\|noFollow\)/);
+  assert.match(restore, /fs\.fstatSync\(descriptor,\{bigint:true\}\)/);
+  assert.match(restore, /fs\.readFileSync\(blobFile\.descriptor\)/);
+  assert.match(restore, /fs\.readFileSync\(viewFile\.descriptor\)/);
+  assert.doesNotMatch(restore, /fs\.readFileSync\((blobPath|viewPath)\)/);
+});
 
 test("restore drill accepts a strictly formed tombstoned source blob reference", () => {
   const fixture = createFixture();

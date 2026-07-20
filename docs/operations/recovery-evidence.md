@@ -88,7 +88,8 @@ trash 或 deleted 时间；被引用的 `tombstoned` blob 必须有 UUID fence �
 且仍使用规范 source blob 路径。`trash`、`deleted` 或任何不完整状态元组均失败。恢复程序在每个 tgz 提取前
 以流式 tar 状态机拒绝 symlink、越界 hardlink 和特殊节点；普通文件 body 不进入内存缓冲，PAX/GNU long
 metadata 有固定上限。提取后再次遍历并拒绝 symlink、特殊节点或 canonical 越界路径。Blob 与 snapshot view
-还必须是无写位的普通文件；任一 owner/group/other 写位都会使恢复演练失败。
+还必须通过 `O_NOFOLLOW` 先打开为普通文件，再由同一个 pinned descriptor 完成 `fstat`、内容哈希和读取；证据中的
+device、inode、mode、size 和 allocated blocks 也只能来自该 descriptor。任一 owner/group/other 写位都会使恢复演练失败。
 `integrity` 各项均为 `0`。`resticSnapshotId`
 必须是 restic 返回的完整 64 位快照 ID，并与备份或恢复日志对应；
 `startedAt` 和 `finishedAt` 必须是严格 UTC ISO 时间，且结束时间不得早于开始时间。记录不得包含
@@ -98,8 +99,9 @@ GitHub `container-smoke` 使用临时本地 Restic 仓库执行同一套演练�
 `recovery-evidence` artifact 留存。CI 会先写入一组不含真实凭据的代表 workspace、成员、项目、
 快照、release channel 和 artifact，并要求所有数据库计数及四卷文件计数大于 `0`；空库不能通过。
 CI 在成功时删除临时仓库、恢复容器和外层 Compose 项目；失败时会保留临时仓库、恢复现场和 Compose 状态供取证，
-并继续上传已生成的 `recovery-evidence` artifact。CI runner 回收前，值班人员应从日志和 artifact 记录
-失败原因；不得把失败现场误标为一次成功演练。
+但在返回前必须删除 final/pending 两种名称下的 JSON/NDJSON 证据对。无条件上传的 artifact 只能保留不含现场路径
+或对象内容的 `status.json`/失败记录。CI runner 回收前，值班人员应从日志和该失败记录确认错误类别；不得把失败现场
+误标为一次成功演练。
 
 验证器默认只接受 schema v3。`--allow-legacy-v2` 仅供人工审阅历史 v2 证据时显式使用；CI、恢复演练和
 FK17 门禁不得传入该兼容标志。
@@ -116,5 +118,5 @@ symlink、目录及其他非普通文件均拒绝。最终验证或任一重命�
 两种名称并只留下失败记录，上传目录中不得存在成功证据。
 
 容器门禁会先生成 `.json.pending`，它只用于内部校验，不能作为验收证据。只有最外层 Compose 清理成功后才
-原子确认成正式 `.json`。任何失败 artifact 应查看 `status.json` 的 `result=failed`、`errorClass` 和
-`retentionPath`；失败时不得存在可验收的正式成功 JSON。
+原子确认成正式 `.json`。任何失败 artifact 应查看 `status.json` 的 `result=failed` 和 `errorClass`；该状态不得
+记录恢复现场路径，且失败时不得存在 final/pending JSON/NDJSON 证据文件。

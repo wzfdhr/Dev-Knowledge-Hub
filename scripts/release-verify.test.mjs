@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -115,7 +115,38 @@ describe("release verification orchestrator", () => {
 
     expect(execute).toHaveBeenCalledWith(expect.objectContaining({ name: "recovery-drill" }));
     expect(execute).not.toHaveBeenCalledWith(expect.objectContaining({ name: "compose-cleanup" }));
-    expect(invalidateEvidence).not.toHaveBeenCalled();
+    expect(invalidateEvidence).toHaveBeenCalledWith("/tmp/evidence", "recovery_drill_failed");
+  });
+
+  test("recovery drill failure leaves only a sanitized upload record", async () => {
+    const root = mkdtempSync(join(tmpdir(), "devkh-release-evidence-"));
+    const pairDirectory = join(root, "run-1", "recovery-evidence");
+    mkdirSync(pairDirectory, { recursive: true });
+    for (const name of ["evidence.json", "evidence.json.pending", "evidence.ndjson", "evidence.ndjson.pending"]) {
+      writeFileSync(join(pairDirectory, name), "invalid\n");
+    }
+    const execute = vi.fn(async (step) => {
+      if (step.name === "recovery-drill") throw Object.assign(new Error("invalid pending pair"), { exitCode: 65 });
+    });
+
+    try {
+      await expect(runContainerVerification({
+        env: {
+          DEVKH_CONTAINER_SMOKE: "true",
+          COMPOSE_PROJECT_NAME: "devkh-ci",
+          RECOVERY_EVIDENCE_DIR: root
+        },
+        execute,
+        logger: { error: vi.fn(), log: vi.fn() }
+      })).rejects.toThrow("recovery-drill failed with exit code 65");
+
+      expect(readdirSync(root)).toEqual(["recovery-verification-failed.json"]);
+      const failure = JSON.parse(readFileSync(join(root, "recovery-verification-failed.json"), "utf8"));
+      expect(failure).toMatchObject({ result: "failed", errorClass: "recovery_drill_failed" });
+      expect(failure).not.toHaveProperty("retentionPath");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("retains the outer Compose state when an earlier container step fails", async () => {

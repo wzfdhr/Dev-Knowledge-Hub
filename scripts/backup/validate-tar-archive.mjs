@@ -16,10 +16,11 @@ function parseOctal(buffer, label) {
   while (offset < buffer.length && buffer[offset] >= 0x30 && buffer[offset] <= 0x37) offset++;
   const text = buffer.subarray(digitStart, offset).toString("ascii");
   for (; offset < buffer.length; offset++) {
-    if (buffer[offset] !== 0x00 && buffer[offset] !== 0x20) throw new Error(`invalid archive ${label}`);
+    if (buffer[offset] !== 0x00 && buffer[offset] !== 0x20) throw new Error(`invalid archive ${label} field`);
   }
-  const value = text ? Number.parseInt(text, 8) : 0;
-  if (!Number.isSafeInteger(value) || value < 0) throw new Error(`invalid archive ${label}`);
+  if (!text) throw new Error(`invalid archive ${label} field`);
+  const value = Number.parseInt(text, 8);
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error(`invalid archive ${label} field`);
   return value;
 }
 

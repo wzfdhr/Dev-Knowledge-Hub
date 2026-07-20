@@ -608,11 +608,21 @@ export interface LockedSourceBlobCatalog {
   recordGcInconsistency(sourceBlobId: string, reason: string): Promise<void>;
 }
 
+export interface SourceBlobGcLeaseCatalog {
+  findSourceBlobGcRunBoundary(): Promise<SourceBlobGcRunBoundary | null>;
+  listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]>;
+  withSourceBlobLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T>;
+}
+
 export interface SourceBlobCatalog {
   findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null>;
   findSourceBlobGcRunBoundary(): Promise<SourceBlobGcRunBoundary | null>;
   listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]>;
-  withSourceBlobGcLease<T>(operation: () => Promise<T>): Promise<
+  withSourceBlobGcLease<T>(operation: (catalog: SourceBlobGcLeaseCatalog) => Promise<T>): Promise<
     { acquired: true; value: T } | { acquired: false }
   >;
   withSourceBlobWriterLock<T>(

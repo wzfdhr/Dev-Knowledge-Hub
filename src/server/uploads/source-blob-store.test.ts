@@ -52,8 +52,11 @@ class MemorySourceBlobCatalog implements SourceBlobCatalog {
     return this.records.find((record) => record.workspaceId === workspaceId && record.id === sourceBlobId) ?? null;
   }
 
-  async withSourceBlobGcLease<T>(operation: () => Promise<T>) {
-    return { acquired: true as const, value: await operation() };
+  async withSourceBlobGcLease<T>(
+    operation: (catalog: Pick<SourceBlobCatalog,
+      "findSourceBlobGcRunBoundary" | "listSourceBlobGcCandidates" | "withSourceBlobLock">) => Promise<T>
+  ) {
+    return { acquired: true as const, value: await operation(this) };
   }
 
   async withSourceBlobWriterLock<T>(

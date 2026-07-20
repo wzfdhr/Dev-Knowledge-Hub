@@ -2734,17 +2734,19 @@ integration("PostgreSQL cited knowledge integration", () => {
     const last = await insertCandidate("f");
     let pageCount = 0;
     const boundedCatalog = {
-      withSourceBlobGcLease: catalog.withSourceBlobGcLease.bind(catalog),
+      withSourceBlobGcLease: <T>(operation: Parameters<typeof catalog.withSourceBlobGcLease<T>>[0]) =>
+        catalog.withSourceBlobGcLease((scoped) => operation({
+          ...scoped,
+          listSourceBlobGcCandidates: async (input) => {
+            pageCount += 1;
+            if (pageCount > 6) throw new Error("GC_SCAN_DID_NOT_TERMINATE");
+            await insertCandidate(String.fromCharCode("a".charCodeAt(0) + pageCount));
+            return scoped.listSourceBlobGcCandidates(input);
+          }
+        })),
       withSourceBlobWriterLock: catalog.withSourceBlobWriterLock.bind(catalog),
       findSourceBlobGcRunBoundary: () => catalog.findSourceBlobGcRunBoundary(),
-      listSourceBlobGcCandidates: async (
-        input: Parameters<typeof catalog.listSourceBlobGcCandidates>[0]
-      ) => {
-        pageCount += 1;
-        if (pageCount > 6) throw new Error("GC_SCAN_DID_NOT_TERMINATE");
-        await insertCandidate(String.fromCharCode("a".charCodeAt(0) + pageCount));
-        return catalog.listSourceBlobGcCandidates(input);
-      },
+      listSourceBlobGcCandidates: catalog.listSourceBlobGcCandidates.bind(catalog),
       findSourceBlobById: catalog.findSourceBlobById.bind(catalog),
       withSourceBlobLock: catalog.withSourceBlobLock.bind(catalog)
     };
@@ -2767,6 +2769,28 @@ integration("PostgreSQL cited knowledge integration", () => {
       ["a".repeat(64), "f".repeat(64)]
     );
     expect(inserted.rows[0]?.count).toBe("2");
+  }, 30_000);
+
+  test("runs source blob GC with a PostgreSQL pool capacity of one", async () => {
+    const singlePool = new Pool({ connectionString: databaseUrl, max: 1 });
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-postgres-source-blob-single-client-"));
+    retrievalFixtureRoots.push(root);
+    try {
+      await runMigrations(singlePool);
+      await singlePool.query("TRUNCATE workspaces CASCADE");
+      const catalog = new PostgresAppStore(singlePool);
+      const setup = await catalog.createInitialSetup("source-blob-single-client@example.com", "hash");
+      const blobs = new SourceBlobStore({ dataDir: root, catalog });
+      await blobs.initialize();
+      await blobs.put({ workspaceId: setup!.workspace.id, bytes: Buffer.from("single client GC") });
+      const gc = new SourceBlobGarbageCollector({ dataDir: root, catalog, enabled: true });
+
+      await expect(gc.runOnce()).resolves.toMatchObject({
+        scanned: 1, tombstoned: 1, lockBusy: false, resumeRequired: false
+      });
+    } finally {
+      await singlePool.end();
+    }
   }, 30_000);
 
   test("serializes GC membership with writers, including a shared lock acquired in a savepoint", async () => {

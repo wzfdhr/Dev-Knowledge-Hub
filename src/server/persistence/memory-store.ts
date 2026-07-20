@@ -62,6 +62,7 @@ import type {
   SourceBlobGcCursor,
   SourceBlobGcPageInput,
   SourceBlobGcRunBoundary,
+  SourceBlobGcLeaseCatalog,
   LockedSourceBlobCatalog,
   SaveKnowledgeGraphInput,
   SetupResult,
@@ -243,13 +244,13 @@ export class MemoryAppStore implements AppStore {
     return page.map((record) => ({ ...record }));
   }
 
-  async withSourceBlobGcLease<T>(operation: () => Promise<T>): Promise<
+  async withSourceBlobGcLease<T>(operation: (catalog: SourceBlobGcLeaseCatalog) => Promise<T>): Promise<
     { acquired: true; value: T } | { acquired: false }
   > {
     if (this.sourceBlobGcLeaseActive || this.activeSourceBlobWriters > 0) return { acquired: false };
     this.sourceBlobGcLeaseActive = true;
     try {
-      return { acquired: true, value: await operation() };
+      return { acquired: true, value: await operation(this) };
     } finally {
       this.sourceBlobGcLeaseActive = false;
       for (const resolve of this.sourceBlobWriterWaiters.splice(0)) resolve();

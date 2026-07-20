@@ -16,6 +16,7 @@ import { normalizeSourceBlobGcCandidateLimit, sourceBlobGcCursor } from "../pers
 import type {
   LockedSourceBlobCatalog,
   SourceBlobCatalog,
+  SourceBlobGcLeaseCatalog,
   SourceBlobGcCursor,
   SourceBlobRecord
 } from "../persistence/store.js";
@@ -123,14 +124,14 @@ export class SourceBlobGarbageCollector {
 
   async runOnce(): Promise<SourceBlobGcRunResult> {
     if (!this.enabled) return emptyResult();
-    const lease = await this.options.catalog.withSourceBlobGcLease(() => this.runWithLease());
+    const lease = await this.options.catalog.withSourceBlobGcLease((catalog) => this.runWithLease(catalog));
     if (!lease.acquired) return { ...emptyResult(), lockBusy: true };
     return lease.value;
   }
 
-  private async runWithLease(): Promise<SourceBlobGcRunResult> {
+  private async runWithLease(catalog: SourceBlobGcLeaseCatalog): Promise<SourceBlobGcRunResult> {
     const result = emptyResult();
-    const boundary = await this.options.catalog.findSourceBlobGcRunBoundary();
+    const boundary = await catalog.findSourceBlobGcRunBoundary();
     if (!boundary) return result;
     const { through } = boundary;
     const now = this.now();
@@ -142,7 +143,7 @@ export class SourceBlobGarbageCollector {
         break;
       }
       const pageLimit = Math.min(this.candidateLimit, remaining);
-      const candidates = await this.options.catalog.listSourceBlobGcCandidates({
+      const candidates = await catalog.listSourceBlobGcCandidates({
         ...(after ? { after } : {}),
         ...boundary,
         limit: pageLimit
@@ -150,7 +151,7 @@ export class SourceBlobGarbageCollector {
       if (candidates.length === 0) break;
       result.scanned += candidates.length;
       for (const candidate of candidates) {
-        const processed = await this.options.catalog.withSourceBlobLock(
+        const processed = await catalog.withSourceBlobLock(
           candidate.workspaceId,
           candidate.contentHash,
           async (catalog) => this.processGeneration(catalog, candidate, now)
@@ -162,11 +163,16 @@ export class SourceBlobGarbageCollector {
         result.inconsistent += processed.inconsistent;
       }
       after = sourceBlobGcCursor(candidates.at(-1)!);
-      if (cursorsEqual(after, through)) break;
       if (result.scanned >= MAX_CANDIDATES_PER_RUN) {
-        result.resumeRequired = true;
+        const remainingCandidates = await catalog.listSourceBlobGcCandidates({
+          after,
+          ...boundary,
+          limit: 1
+        });
+        result.resumeRequired = remainingCandidates.length > 0;
         break;
       }
+      if (cursorsEqual(after, through)) break;
       if (candidates.length < pageLimit) break;
     }
     return result;

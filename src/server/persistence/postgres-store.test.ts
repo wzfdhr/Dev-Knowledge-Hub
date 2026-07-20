@@ -6,6 +6,7 @@ import path from "node:path";
 import { describe, expect, test, vi } from "vitest";
 
 import { SourceBlobStore } from "../uploads/source-blob-store.js";
+import { SourceBlobGarbageCollector } from "../uploads/source-blob-gc.js";
 import { PostgresAppStore } from "./postgres-store";
 
 describe("PostgresAppStore source blob locking", () => {
@@ -183,6 +184,42 @@ describe("PostgresAppStore source blob locking", () => {
     ]);
   });
 
+  test("completes a GC run with one checkout and all lease SQL on its dedicated client", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-postgres-gc-single-client-"));
+    const row = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspace_id: "11111111-1111-4111-8111-111111111111",
+      content_hash: "a".repeat(64), generation: 1, byte_size: "1", status: "active",
+      storage_key: "blobs/workspace/aa/hash/1", fencing_token: null,
+      tombstoned_at: null, trashed_at: null, deleted_at: null,
+      creation_cutoff: "2026-07-20 00:00:00.123456+00"
+    };
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
+      if (sql.includes("ORDER BY blob.workspace_id DESC")) return { rows: [row] };
+      if (sql.includes("ORDER BY blob.workspace_id, blob.content_hash")) return { rows: [row] };
+      if (sql.includes("id = $3") && sql.includes("FOR UPDATE")) return { rows: [] };
+      if (sql.includes("pg_advisory_unlock")) return { rows: [{ released: true }] };
+      return { rows: [] };
+    });
+    const release = vi.fn();
+    const connect = vi.fn(async () => ({ query, release }));
+    const poolQuery = vi.fn(async () => { throw new Error("second pool acquisition"); });
+    const store = new PostgresAppStore({ connect, query: poolQuery } as never);
+
+    await expect(new SourceBlobGarbageCollector({ dataDir: root, catalog: store, enabled: true }).runOnce())
+      .resolves.toMatchObject({ scanned: 1, lockBusy: false });
+    expect(connect).toHaveBeenCalledOnce();
+    expect(poolQuery).not.toHaveBeenCalled();
+    expect(query.mock.calls.map(([sql]) => String(sql))).toEqual(expect.arrayContaining([
+      "BEGIN",
+      "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+      "COMMIT"
+    ]));
+    expect(release).toHaveBeenCalledWith();
+    await rm(root, { recursive: true, force: true });
+  });
+
   test("wraps GC work in a dedicated exclusive session lock and destroys the client on unlock failure", async () => {
     const operation = vi.fn(async () => "done");
     const query = vi.fn(async (sql: string) => {
@@ -217,9 +254,12 @@ describe("PostgresAppStore source blob locking", () => {
     expect(success.release).toHaveBeenCalledWith();
 
     const failure = makeStore(true);
-    await expect(failure.store.withSourceBlobGcLease(async () => { throw new Error("page failed"); }))
+    await expect(failure.store.withSourceBlobGcLease((catalog) => catalog.withSourceBlobLock(
+      "workspace", "a".repeat(64), async () => { throw new Error("page failed"); }
+    )))
       .rejects.toThrow("page failed");
     expect(failure.query.mock.calls.some(([sql]) => String(sql).includes("pg_advisory_unlock"))).toBe(true);
+    expect(failure.query.mock.calls.map(([sql]) => sql)).toEqual(expect.arrayContaining(["BEGIN", "ROLLBACK"]));
     expect(failure.release).toHaveBeenCalledWith();
 
     const busy = makeStore(false);

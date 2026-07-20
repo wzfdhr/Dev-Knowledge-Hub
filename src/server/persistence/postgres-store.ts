@@ -76,6 +76,7 @@ import type {
   SourceAnalysisArtifactRecord,
   SourceFileRecord,
   SourceBlobGcPageInput,
+  SourceBlobGcLeaseCatalog,
   SourceBlobGcRunBoundary,
   SourceBlobRecord,
   LockedSourceBlobCatalog,
@@ -916,7 +917,11 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   }
 
   async findSourceBlobGcRunBoundary(): Promise<SourceBlobGcRunBoundary | null> {
-    const result = await this.pool.query<Pick<SourceBlobRow,
+    return this.findSourceBlobGcRunBoundaryWith(this.pool);
+  }
+
+  private async findSourceBlobGcRunBoundaryWith(queryable: Queryable): Promise<SourceBlobGcRunBoundary | null> {
+    const result = await queryable.query<Pick<SourceBlobRow,
       "id" | "workspace_id" | "content_hash" | "generation"> & {
         creation_cutoff: string;
       }>(`
@@ -949,6 +954,13 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   }
 
   async listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]> {
+    return this.listSourceBlobGcCandidatesWith(this.pool, input);
+  }
+
+  private async listSourceBlobGcCandidatesWith(
+    queryable: Queryable,
+    input: SourceBlobGcPageInput
+  ): Promise<SourceBlobRecord[]> {
     const candidateLimit = normalizeSourceBlobGcCandidateLimit(input.limit);
     const values: unknown[] = [
       input.through.workspaceId,
@@ -971,7 +983,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     }
     const limitParameter = values.length + 1;
     values.push(candidateLimit);
-    const result = await this.pool.query<SourceBlobRow>(`
+    const result = await queryable.query<SourceBlobRow>(`
       SELECT blob.id, blob.workspace_id, blob.content_hash, blob.generation, blob.byte_size,
              blob.status, blob.storage_key, blob.fencing_token, blob.tombstoned_at,
              blob.trashed_at, blob.deleted_at
@@ -993,7 +1005,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return result.rows.map(sourceBlobRecord);
   }
 
-  async withSourceBlobGcLease<T>(operation: () => Promise<T>): Promise<
+  async withSourceBlobGcLease<T>(operation: (catalog: SourceBlobGcLeaseCatalog) => Promise<T>): Promise<
     { acquired: true; value: T } | { acquired: false }
   > {
     const client = await this.pool.connect();
@@ -1016,7 +1028,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     let operationError: unknown;
     let unlockError: unknown;
     try {
-      value = await operation();
+      value = await operation(this.sourceBlobGcLeaseCatalog(client));
     } catch (error) {
       operationError = error;
     } finally {
@@ -1050,6 +1062,47 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return { acquired: true, value };
   }
 
+  private sourceBlobGcLeaseCatalog(client: PoolClient): SourceBlobGcLeaseCatalog {
+    let queue = Promise.resolve();
+    const serialize = <T>(operation: () => Promise<T>): Promise<T> => {
+      const result = queue.then(operation, operation);
+      queue = result.then(() => undefined, () => undefined);
+      return result;
+    };
+    return {
+      findSourceBlobGcRunBoundary: () => serialize(() => this.findSourceBlobGcRunBoundaryWith(client)),
+      listSourceBlobGcCandidates: (input) => serialize(() => this.listSourceBlobGcCandidatesWith(client, input)),
+      withSourceBlobLock: (workspaceId, contentHash, operation) => serialize(() =>
+        this.withSourceBlobGcLeaseTransaction(client, workspaceId, contentHash, operation)
+      )
+    };
+  }
+
+  private async withSourceBlobGcLeaseTransaction<T>(
+    client: PoolClient,
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    await client.query("BEGIN");
+    try {
+      const result = await this.runSourceBlobLockedOperation(client, workspaceId, contentHash, false, operation);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          "SOURCE_BLOB_GC_TRANSACTION_ROLLBACK_FAILED",
+          { cause: rollbackError }
+        );
+      }
+      throw error;
+    }
+  }
+
   async withSourceBlobWriterLock<T>(
     workspaceId: string,
     contentHash: string,
@@ -1072,14 +1125,25 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     writer: boolean,
     operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
   ): Promise<T> {
-    return this.transaction(async (client) => {
-      if (writer) {
-        await client.query(
-          "SELECT pg_advisory_xact_lock_shared(hashtextextended('devkh.source_blobs.gc.membership', 0))"
-        );
-      }
-      await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [workspaceId, contentHash]);
-      const catalog: LockedSourceBlobCatalog = {
+    return this.transaction((client) =>
+      this.runSourceBlobLockedOperation(client, workspaceId, contentHash, writer, operation)
+    );
+  }
+
+  private async runSourceBlobLockedOperation<T>(
+    client: PoolClient,
+    workspaceId: string,
+    contentHash: string,
+    writer: boolean,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    if (writer) {
+      await client.query(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended('devkh.source_blobs.gc.membership', 0))"
+      );
+    }
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [workspaceId, contentHash]);
+    const catalog: LockedSourceBlobCatalog = {
         findActive: async () => {
           const result = await client.query<SourceBlobRow>(`
             SELECT id, workspace_id, content_hash, generation, byte_size, status, storage_key,
@@ -1212,9 +1276,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
             metadata: { reason, status: record.status, generation: record.generation }
           });
         }
-      };
-      return operation(catalog);
-    });
+    };
+    return operation(catalog);
   }
 
   async findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null> {

@@ -91,10 +91,11 @@ describe("source blob garbage collection", () => {
       through: tail,
       creationCutoff: "2026-07-20T00:00:00.000000Z"
     };
+    const withSourceBlobGcLease = vi.fn(async (operation: (scoped: never) => Promise<unknown>) => ({
+      acquired: true as const, value: await operation(catalog as never)
+    }));
     const catalog = {
-      withSourceBlobGcLease: vi.fn(async (operation: () => Promise<unknown>) => ({
-        acquired: true as const, value: await operation()
-      })),
+      withSourceBlobGcLease,
       findSourceBlobGcRunBoundary: vi.fn(async () => boundary),
       listSourceBlobGcCandidates: vi.fn(async () => []),
       withSourceBlobLock: vi.fn(async () => { throw new Error("unexpected candidate"); })
@@ -136,20 +137,26 @@ describe("source blob garbage collection", () => {
       through: { workspaceId: "workspace", contentHash: "f".repeat(64), generation: 1, id: randomUUID() },
       creationCutoff: "2026-07-20T00:00:00.000000Z"
     };
-    const makeCatalog = (fail: boolean) => ({
-      withSourceBlobGcLease: async (operation: () => Promise<unknown>) => {
+    const makeCatalog = (fail: boolean) => {
+      const leaseCatalog = {
+        findSourceBlobGcRunBoundary: async () => { events.push("boundary"); return boundary; },
+        listSourceBlobGcCandidates: async () => {
+          events.push("page");
+          if (fail) throw new Error("page failed");
+          return [];
+        },
+        withSourceBlobLock: vi.fn()
+      };
+      return {
+      withSourceBlobGcLease: async (operation: (catalog: typeof leaseCatalog) => Promise<unknown>) => {
         events.push("acquire");
-        try { return { acquired: true as const, value: await operation() }; }
+        try { return { acquired: true as const, value: await operation(leaseCatalog) }; }
         finally { events.push("release"); }
       },
-      findSourceBlobGcRunBoundary: async () => { events.push("boundary"); return boundary; },
-      listSourceBlobGcCandidates: async () => {
-        events.push("page");
-        if (fail) throw new Error("page failed");
-        return [];
-      },
-      withSourceBlobLock: vi.fn()
-    });
+      findSourceBlobGcRunBoundary: vi.fn(async () => { throw new Error("escaped lease"); }),
+      listSourceBlobGcCandidates: vi.fn(async () => { throw new Error("escaped lease"); }),
+      withSourceBlobLock: vi.fn(async () => { throw new Error("escaped lease"); })
+    }; };
 
     await new SourceBlobGarbageCollector({ dataDir: root, catalog: makeCatalog(false) as never, enabled: true }).runOnce();
     expect(events).toEqual(["acquire", "boundary", "page", "release"]);
@@ -204,7 +211,7 @@ describe("source blob garbage collection", () => {
     expect(writerEntered).toBe(true);
   });
 
-  test("processes at most 500 candidates under one lease and reports resume required", async () => {
+  test("probes after 500 candidates and reports resume required when a 501st remains", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-gc-cap-"));
     roots.push(root);
     const records = Array.from({ length: 501 }, (_, index): SourceBlobRecord => ({
@@ -213,24 +220,62 @@ describe("source blob garbage collection", () => {
       status: "active", storageKey: `blobs/${index}`, fencingToken: null,
       tombstonedAt: null, trashedAt: null, deletedAt: null
     }));
-    const catalog = {
-      withSourceBlobGcLease: async (operation: () => Promise<unknown>) => ({
-        acquired: true as const, value: await operation()
-      }),
+    const pageLimits: number[] = [];
+    const leaseCatalog = {
       findSourceBlobGcRunBoundary: async () => ({
         through: { workspaceId: "workspace", contentHash: records.at(-1)!.contentHash, generation: 1, id: records.at(-1)!.id },
         creationCutoff: "2026-07-20T00:00:00.000000Z"
       }),
       listSourceBlobGcCandidates: async (input: { after?: { contentHash: string }; limit?: number }) => {
+        pageLimits.push(input.limit!);
         const start = input.after ? records.findIndex((record) => record.contentHash === input.after!.contentHash) + 1 : 0;
         return records.slice(start, start + input.limit!);
       },
       withSourceBlobLock: async (_workspaceId: string, _contentHash: string, operation: (locked: unknown) => Promise<unknown>) =>
         operation({ findById: async () => null })
     };
+    const catalog = {
+      withSourceBlobGcLease: async (operation: (scoped: typeof leaseCatalog) => Promise<unknown>) => ({
+        acquired: true as const, value: await operation(leaseCatalog)
+      })
+    };
 
     await expect(new SourceBlobGarbageCollector({ dataDir: root, catalog: catalog as never, enabled: true }).runOnce())
       .resolves.toMatchObject({ scanned: 500, resumeRequired: true, lockBusy: false });
+    expect(pageLimits).toEqual([500, 1]);
+  });
+
+  test("probes after exactly 500 candidates and clears resume when the tail vanished", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-gc-cap-tail-"));
+    roots.push(root);
+    const records = Array.from({ length: 500 }, (_, index): SourceBlobRecord => ({
+      id: String(index).padStart(36, "0"), workspaceId: "workspace",
+      contentHash: index.toString(16).padStart(64, "0"), generation: 1, byteSize: 1,
+      status: "active", storageKey: `blobs/${index}`, fencingToken: null,
+      tombstonedAt: null, trashedAt: null, deletedAt: null
+    }));
+    const pageLimits: number[] = [];
+    const leaseCatalog = {
+      findSourceBlobGcRunBoundary: async () => ({
+        through: { workspaceId: "workspace", contentHash: records.at(-1)!.contentHash, generation: 1, id: records.at(-1)!.id },
+        creationCutoff: "2026-07-20T00:00:00.000000Z"
+      }),
+      listSourceBlobGcCandidates: async (input: { after?: unknown; limit?: number }) => {
+        pageLimits.push(input.limit!);
+        return input.after ? [] : records;
+      },
+      withSourceBlobLock: async (_workspaceId: string, _contentHash: string, operation: (locked: unknown) => Promise<unknown>) =>
+        operation({ findById: async () => null })
+    };
+    const catalog = {
+      withSourceBlobGcLease: async (operation: (scoped: typeof leaseCatalog) => Promise<unknown>) => ({
+        acquired: true as const, value: await operation(leaseCatalog)
+      })
+    };
+
+    await expect(new SourceBlobGarbageCollector({ dataDir: root, catalog: catalog as never, enabled: true }).runOnce())
+      .resolves.toMatchObject({ scanned: 500, resumeRequired: false });
+    expect(pageLimits).toEqual([500, 1]);
   });
 
   test("freezes creation membership while inserts sort inside the initial tail range on every page", async () => {
@@ -248,8 +293,7 @@ describe("source blob garbage collection", () => {
     context.catalog.sourceBlobs.push(makeCandidate("a"), makeCandidate("f"));
     const baseCatalog = context.catalog;
     let pageCount = 0;
-    const catalog = {
-      withSourceBlobGcLease: baseCatalog.withSourceBlobGcLease.bind(baseCatalog),
+    const leaseCatalog = {
       findSourceBlobGcRunBoundary: () => baseCatalog.findSourceBlobGcRunBoundary(),
       listSourceBlobGcCandidates: async (
         input: Parameters<typeof baseCatalog.listSourceBlobGcCandidates>[0]
@@ -261,6 +305,11 @@ describe("source blob garbage collection", () => {
       },
       findSourceBlobById: baseCatalog.findSourceBlobById.bind(baseCatalog),
       withSourceBlobLock: baseCatalog.withSourceBlobLock.bind(baseCatalog)
+    };
+    const catalog = {
+      ...leaseCatalog,
+      withSourceBlobGcLease: <T>(operation: (scoped: typeof leaseCatalog) => Promise<T>) =>
+        baseCatalog.withSourceBlobGcLease(() => operation(leaseCatalog))
     };
 
     await expect(context.collector({ catalog: catalog as never, candidateLimit: 1 }).runOnce())
@@ -311,8 +360,7 @@ describe("source blob garbage collection", () => {
     const tailRecord = context.catalog.sourceBlobs.find((record) => record.id === tail!.id)!;
     const baseCatalog = context.catalog;
     let page = 0;
-    const catalog = {
-      withSourceBlobGcLease: baseCatalog.withSourceBlobGcLease.bind(baseCatalog),
+    const leaseCatalog = {
       findSourceBlobGcRunBoundary: () => baseCatalog.findSourceBlobGcRunBoundary(),
       listSourceBlobGcCandidates: async (input: Parameters<typeof baseCatalog.listSourceBlobGcCandidates>[0]) => {
         page += 1;
@@ -322,6 +370,11 @@ describe("source blob garbage collection", () => {
       findSourceBlobById: (workspaceId: string, sourceBlobId: string) =>
         baseCatalog.findSourceBlobById(workspaceId, sourceBlobId),
       withSourceBlobLock: baseCatalog.withSourceBlobLock.bind(baseCatalog)
+    };
+    const catalog = {
+      ...leaseCatalog,
+      withSourceBlobGcLease: <T>(operation: (scoped: typeof leaseCatalog) => Promise<T>) =>
+        baseCatalog.withSourceBlobGcLease(() => operation(leaseCatalog))
     };
 
     await expect(context.collector({ catalog: catalog as never, candidateLimit: 2 }).runOnce())
@@ -343,8 +396,7 @@ describe("source blob garbage collection", () => {
       fencingToken: null, tombstonedAt: null, trashedAt: null, deletedAt: null
     };
     let inserted = false;
-    const catalog = {
-      withSourceBlobGcLease: baseCatalog.withSourceBlobGcLease.bind(baseCatalog),
+    const leaseCatalog = {
       findSourceBlobGcRunBoundary: () => baseCatalog.findSourceBlobGcRunBoundary(),
       listSourceBlobGcCandidates: async (input: Parameters<typeof baseCatalog.listSourceBlobGcCandidates>[0]) => {
         const records = await baseCatalog.listSourceBlobGcCandidates(input);
@@ -360,6 +412,11 @@ describe("source blob garbage collection", () => {
       findSourceBlobById: (workspaceId: string, sourceBlobId: string) =>
         baseCatalog.findSourceBlobById(workspaceId, sourceBlobId),
       withSourceBlobLock: baseCatalog.withSourceBlobLock.bind(baseCatalog)
+    };
+    const catalog = {
+      ...leaseCatalog,
+      withSourceBlobGcLease: <T>(operation: (scoped: typeof leaseCatalog) => Promise<T>) =>
+        baseCatalog.withSourceBlobGcLease(() => operation(leaseCatalog))
     };
     const collector = context.collector({ catalog: catalog as never, candidateLimit: 1 });
 
@@ -898,8 +955,7 @@ describe("source blob garbage collection", () => {
     await unlink(trash);
     const order: string[] = [];
     const baseCatalog = context.catalog;
-    const catalog = {
-      withSourceBlobGcLease: baseCatalog.withSourceBlobGcLease.bind(baseCatalog),
+    const leaseCatalog = {
       findSourceBlobGcRunBoundary: () => baseCatalog.findSourceBlobGcRunBoundary(),
       listSourceBlobGcCandidates: (input: Parameters<typeof baseCatalog.listSourceBlobGcCandidates>[0]) =>
         baseCatalog.listSourceBlobGcCandidates(input),
@@ -916,6 +972,11 @@ describe("source blob garbage collection", () => {
           return locked.markDeletedIfUnreferenced(...args);
         }
       }))
+    };
+    const catalog = {
+      ...leaseCatalog,
+      withSourceBlobGcLease: <T>(operation: (scoped: typeof leaseCatalog) => Promise<T>) =>
+        baseCatalog.withSourceBlobGcLease(() => operation(leaseCatalog))
     };
     const collector = context.collector({
       catalog: catalog as never,

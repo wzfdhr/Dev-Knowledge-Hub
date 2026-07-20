@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readdir, rm, utimes, writeFile } from "node:fs/p
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { MemoryAppStore } from "../persistence/memory-store.js";
 import type { AuditEventInput, CompleteUploadSessionInput } from "../persistence/store.js";
@@ -16,6 +16,7 @@ import { importFolderFiles, PENDING_UPLOAD_SNAPSHOT_MARKER } from "./folder-impo
 import { MAX_UPLOAD_MANIFEST_METADATA_BYTES } from "../../shared/import-filter.js";
 
 const temporaryDirectories: string[] = [];
+const FIXED_NOW = new Date("2026-07-19T00:00:00.000Z");
 
 function hash(value: string | Uint8Array): string {
   return createHash("sha256").update(value).digest("hex");
@@ -27,9 +28,15 @@ async function writable(directory: string): Promise<void> {
   await Promise.all(entries.filter((entry) => entry.isDirectory()).map((entry) => writable(path.join(directory, entry.name))));
 }
 
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(FIXED_NOW);
+});
+
 afterEach(async () => {
   await Promise.all(temporaryDirectories.map(writable));
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+  vi.useRealTimers();
 });
 
 class FailingSwitchAuditStore extends MemoryAppStore {
@@ -63,7 +70,7 @@ class ExpiringCompletionStore extends MemoryAppStore {
 }
 
 async function fixture(
-  now = new Date("2026-07-19T00:00:00.000Z"),
+  now = FIXED_NOW,
   store: MemoryAppStore = new MemoryAppStore()
 ) {
   const setup = await store.createInitialSetup("admin@example.com", "hash");

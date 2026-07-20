@@ -43,6 +43,7 @@ class FakePool {
     this.tombstoneBeforeBinding = tombstoneBeforeBinding;
     this.transactionCount = 0;
     this.audits = [];
+    this.storageSwitchBeforeSnapshotLock = null;
   }
 
   async query(text, values = []) {
@@ -67,13 +68,33 @@ class FakePool {
       return { rows: [] };
     }
     if (text.includes("pg_advisory_xact_lock")) return { rows: [{ locked: true }] };
-    if (text.includes("AS checkpoint_complete")) {
-      const [workspaceId, snapshotId, storagePath] = values;
-      const snapshot = this.snapshots.find((candidate) => candidate.workspace_id === workspaceId
-        && candidate.id === snapshotId && candidate.storage_path === storagePath);
-      return { rows: [{ checkpoint_complete: Boolean(snapshot) && !this.files.some((file) =>
-        file.workspace_id === workspaceId && file.snapshot_id === snapshotId && file.source_blob_id === null
-      ) }] };
+    if (text.includes("source_blob.snapshot_backfilled") && text.includes("checkpoint_complete")) {
+      return { rows: this.audits
+        .filter((audit) => audit.action === "source_blob.snapshot_backfilled")
+        .filter((audit) => text.includes("LEFT JOIN source_snapshots") || this.snapshots.some((snapshot) =>
+          snapshot.workspace_id === audit.workspace_id && snapshot.id === audit.resource_id))
+        .sort((left, right) => left.workspace_id.localeCompare(right.workspace_id)
+          || left.resource_id.localeCompare(right.resource_id))
+        .map((audit) => {
+          const snapshot = this.snapshots.find((candidate) => candidate.workspace_id === audit.workspace_id
+            && candidate.id === audit.resource_id);
+          const complete = Boolean(snapshot)
+            && !this.files.some((file) => file.workspace_id === audit.workspace_id
+              && file.snapshot_id === audit.resource_id && file.source_blob_id === null)
+            && this.files.filter((file) => file.workspace_id === audit.workspace_id
+              && file.snapshot_id === audit.resource_id).every((file) => {
+              const blob = this.blobs.find((candidate) => candidate.id === file.source_blob_id);
+              return blob?.status === "active" && blob.workspace_id === file.workspace_id
+                && blob.content_hash === file.content_hash && Number(blob.byte_size) === Number(file.byte_size);
+            });
+          return {
+            workspace_id: audit.workspace_id,
+            snapshot_id: audit.resource_id,
+            metadata: audit.metadata,
+            storage_path: snapshot?.storage_path,
+            checkpoint_complete: complete
+          };
+        }) };
     }
     if (text.includes("FROM source_snapshots snapshot") && text.includes("ORDER BY snapshot.workspace_id")) {
       const [workspaceCursor, snapshotCursor, viewRoot, limit] = values;
@@ -88,7 +109,9 @@ class FakePool {
         })
         .sort((left, right) => left.workspace_id.localeCompare(right.workspace_id) || left.id.localeCompare(right.id))
         .slice(0, limit)
-        .map(({ id: snapshot_id, workspace_id, storage_path }) => ({ snapshot_id, workspace_id, storage_path }));
+        .map(({ id: snapshot_id, workspace_id, storage_path, repository_id, project_id }) => ({
+          snapshot_id, workspace_id, storage_path, repository_id, project_id
+        }));
       return { rows };
     }
     if (text.includes("FROM source_files file") && text.includes("ORDER BY file.path")) {
@@ -121,6 +144,10 @@ class FakePool {
         && blob.content_hash === contentHash).map((blob) => blob.generation)) + 1;
       return { rows: [{ generation }] };
     }
+    if (text.includes("COUNT(*)") && text.includes("source_blob_id")) {
+      const [blobId] = values;
+      return { rows: [{ reference_count: String(this.files.filter((file) => file.source_blob_id === blobId).length) }] };
+    }
     if (text.includes("INSERT INTO source_blobs")) {
       const [workspace_id, content_hash, generation, byte_size, storage_key] = values;
       const blob = { id: randomUUID(), workspace_id, content_hash, generation, byte_size, storage_key, status: "active" };
@@ -145,9 +172,31 @@ class FakePool {
       Object.assign(blob, { status: "trash", trashed_at: new Date().toISOString() });
       return { rows: [{ ...blob }] };
     }
+    if (text.includes("FROM audit_events") && text.includes("source_blob.snapshot_backfilled")) {
+      const [workspaceId, snapshotId] = values;
+      return { rows: this.audits.filter((audit) => audit.workspace_id === workspaceId
+        && audit.resource_id === snapshotId && audit.action === "source_blob.snapshot_backfilled").map((audit) => ({ ...audit })) };
+    }
     if (text.includes("INSERT INTO audit_events")) {
-      this.audits.push({ values });
+      const action = text.match(/'([^']+)'\s*,\s*'([^']+)'/)?.[1];
+      const resourceType = text.match(/'([^']+)'\s*,\s*'([^']+)'/)?.[2];
+      this.audits.push({
+        workspace_id: values[0], action, resource_type: resourceType,
+        resource_id: values[1], metadata: JSON.parse(values[2])
+      });
       return { rows: [] };
+    }
+    if (text.includes("FROM source_snapshots") && text.includes("FOR UPDATE")) {
+      const [snapshotId, workspaceId] = values;
+      if (this.storageSwitchBeforeSnapshotLock) {
+        const snapshot = this.snapshots.find((candidate) => candidate.id === snapshotId
+          && candidate.workspace_id === workspaceId);
+        snapshot.storage_path = this.storageSwitchBeforeSnapshotLock;
+        this.storageSwitchBeforeSnapshotLock = null;
+      }
+      const snapshot = this.snapshots.find((candidate) => candidate.id === snapshotId
+        && candidate.workspace_id === workspaceId);
+      return { rows: snapshot ? [{ ...snapshot }] : [] };
     }
     if (text.includes("SELECT file.id, file.source_blob_id") && text.includes("FROM source_files file")) {
       const [snapshotId, workspaceId] = values;
@@ -187,7 +236,10 @@ async function fixture({ snapshotCount = 1, filesPerSnapshot = 1, batchSize = 50
     const snapshotId = id(snapshotIndex + 10);
     const legacy = path.join(snapshotData, snapshotId, "files");
     await mkdir(path.join(legacy, "src"), { recursive: true });
-    snapshots.push({ id: snapshotId, workspace_id: workspaceId, storage_path: legacy });
+    snapshots.push({
+      id: snapshotId, workspace_id: workspaceId, storage_path: legacy,
+      repository_id: id(100 + snapshotIndex), project_id: id(200 + snapshotIndex)
+    });
     for (let fileIndex = 0; fileIndex < filesPerSnapshot; fileIndex += 1) {
       const relativePath = `src/${snapshotIndex}-${fileIndex}.ts`;
       const bytes = Buffer.from(`export const value${snapshotIndex}_${fileIndex} = true;\n`);
@@ -246,7 +298,8 @@ test("processes snapshots in bounded batches and leaves releases unchanged", asy
   assert.equal(report.created, 2);
   assert.deepEqual(report.lastCursor, { workspaceId: context.snapshots[1].workspace_id, snapshotId: context.snapshots[1].id });
   assert.deepEqual(context.pool.releases, releasesBefore);
-  const snapshotQueries = context.pool.queries.filter(({ text }) => text.includes("FROM source_snapshots snapshot"));
+  const snapshotQueries = context.pool.queries.filter(({ text }) => text.includes("FROM source_snapshots snapshot")
+    && text.includes("ORDER BY snapshot.workspace_id"));
   assert.equal(snapshotQueries.length, 3);
   assert.deepEqual(snapshotQueries[0].values.slice(0, 2), [null, null]);
   assert.match(snapshotQueries[0].text, /\$1::uuid IS NULL/);
@@ -371,6 +424,22 @@ test("reconciles a tombstoned generation already moved to trash before creating 
   assert.equal(context.pool.blobs.find((blob) => blob.status === "active").generation, 2);
 });
 
+test("audits and refuses a moved tombstone that is still referenced", async () => {
+  const context = await fixture();
+  const seeded = await seedBlobFile(context, context.files[0], { status: "tombstoned", location: "trash" });
+  context.files[0].source_blob_id = seeded.blob.id;
+
+  await assert.rejects(
+    runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 500 }),
+    /still referenced/
+  );
+
+  assert.equal(seeded.blob.status, "tombstoned");
+  assert.equal(context.pool.blobs.length, 1);
+  assert.ok(context.pool.audits.some((audit) => audit.action === "source_blob.gc_inconsistent"
+    && audit.metadata.reason === "tombstoned_blob_still_referenced"));
+});
+
 test("creates the next generation when a prior generation is already trash", async () => {
   const context = await fixture();
   await seedBlobFile(context, context.files[0], { status: "trash", location: "trash" });
@@ -416,6 +485,28 @@ test("replaces only a read-only mismatched orphan view while the database still 
   assert.equal(viewStat.dev, blobStat.dev);
 });
 
+test("does not delete an orphan view when a concurrent transaction switches snapshot storage", async () => {
+  const context = await fixture();
+  const orphanRoot = path.join(context.snapshotData, "snapshots", context.snapshots[0].id);
+  const orphanFile = path.join(orphanRoot, "files", context.files[0].path);
+  await mkdir(path.dirname(orphanFile), { recursive: true });
+  await writeFile(orphanFile, "orphan\n");
+  await chmod(orphanFile, 0o444);
+  await chmod(path.dirname(orphanFile), 0o555);
+  await chmod(path.join(orphanRoot, "files"), 0o555);
+  await chmod(orphanRoot, 0o555);
+  const concurrentPath = path.join(context.snapshotData, "snapshots", id(999), "files");
+  context.pool.storageSwitchBeforeSnapshotLock = concurrentPath;
+
+  await assert.rejects(
+    runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 500 }),
+    /storage path changed/
+  );
+
+  assert.equal(await readFile(orphanFile, "utf8"), "orphan\n");
+  assert.equal(context.snapshots[0].storage_path, concurrentPath);
+});
+
 test("never replaces a mismatched view after the database path has switched", async () => {
   const context = await fixture();
   const seeded = await seedBlobFile(context, context.files[0]);
@@ -450,8 +541,11 @@ test("fsyncs immutable blob inodes and snapshot directories before publishing th
   const viewTreeSync = events.findIndex((event) => event.type === "view-tree-fsync");
   const viewRename = events.findIndex((event) => event.type === "view-rename");
   const viewRootSync = events.findIndex((event) => event.type === "view-root-fsync");
+  const reportParentSync = events.findIndex((event) => event.type === "ancestor-directory-fsync"
+    && event.path === context.dataDir);
   assert.ok(blobFileSync >= 0 && blobFileSync < blobLink && blobLink < blobDirectorySync);
   assert.ok(viewLink >= 0 && viewLink < viewTreeSync && viewTreeSync < viewRename && viewRename < viewRootSync);
+  assert.ok(reportParentSync > viewRootSync);
 });
 
 test("rejects symlinks at the legacy view root and in intermediate directories", async (t) => {
@@ -515,6 +609,66 @@ test("checkpoints each completed snapshot and preserves cumulative report state 
   assert.equal(resumed.processed, 2);
   assert.equal(repeated.processed, 2);
   assert.deepEqual(repeated.lastCursor, resumed.lastCursor);
+});
+
+test("rebuilds the report checkpoint from committed audit after crashing before report write", async () => {
+  const context = await fixture({ filesPerSnapshot: 2 });
+  let crashed = false;
+
+  await assert.rejects(runBackfill({
+    pool: context.pool,
+    dataDir: context.dataDir,
+    batchSize: 500,
+    observer: (event) => {
+      if (event.type === "snapshot-bound" && !crashed) {
+        crashed = true;
+        throw new Error("simulated post-commit crash");
+      }
+    }
+  }), /simulated post-commit crash/);
+
+  assert.equal(context.pool.audits.filter((audit) => audit.action === "source_blob.snapshot_backfilled").length, 1);
+  assert.deepEqual(context.pool.audits.find((audit) => audit.action === "source_blob.snapshot_backfilled").metadata, {
+    projectId: context.snapshots[0].project_id,
+    repositoryId: context.snapshots[0].repository_id,
+    reused: 0,
+    created: 2,
+    workspaceId: context.snapshots[0].workspace_id,
+    snapshotId: context.snapshots[0].id
+  });
+  const recovered = await runBackfill({ pool: context.pool, dataDir: context.dataDir, batchSize: 500 });
+  assert.equal(recovered.processed, 1);
+  assert.equal(recovered.reused, 0);
+  assert.equal(recovered.created, 2);
+  assert.deepEqual(recovered.lastCursor, {
+    workspaceId: context.snapshots[0].workspace_id,
+    snapshotId: context.snapshots[0].id
+  });
+  assert.equal(context.pool.audits.filter((audit) => audit.action === "source_blob.snapshot_backfilled").length, 1);
+});
+
+test("rejects an audit checkpoint whose snapshot can no longer be proven", async () => {
+  const context = await fixture();
+  context.pool.audits.push({
+    workspace_id: context.snapshots[0].workspace_id,
+    action: "source_blob.snapshot_backfilled",
+    resource_type: "source_snapshot",
+    resource_id: id(777),
+    metadata: {
+      projectId: id(200), repositoryId: id(100), reused: 0, created: 1,
+      workspaceId: context.snapshots[0].workspace_id, snapshotId: id(777)
+    }
+  });
+
+  await assert.rejects(
+    runBackfill({ pool: context.pool, dataDir: context.dataDir }),
+    /checkpoint cannot be proven/
+  );
+});
+
+test("Docker integration stage includes scripts required by test:integration", async () => {
+  const dockerfile = await readFile(new URL("../../Dockerfile", import.meta.url), "utf8");
+  assert.match(dockerfile, /FROM runtime AS integration[\s\S]*COPY --chown=node:node scripts \.\/scripts/);
 });
 
 test("accepts a private zero-work report written by an earlier run", async () => {
@@ -649,6 +803,23 @@ test("runs the snapshot backfill against PostgreSQL atomically", {
     }
     const releaseAfter = (await pool.query("SELECT to_jsonb(release) AS value FROM releases release WHERE id = $1", [releaseId])).rows[0].value;
     assert.deepEqual(releaseAfter, releaseBefore);
+    const checkpoints = await pool.query(
+      `SELECT metadata FROM audit_events
+       WHERE workspace_id = $1 AND action = 'source_blob.snapshot_backfilled'
+         AND resource_type = 'source_snapshot' AND resource_id = $2`,
+      [workspaceId, snapshotId]
+    );
+    assert.equal(checkpoints.rows.length, 1);
+    assert.deepEqual(checkpoints.rows[0].metadata, {
+      projectId,
+      repositoryId,
+      reused: 0,
+      created: sourceRows.length,
+      workspaceId,
+      snapshotId
+    });
+    const repeated = await runBackfill({ pool, dataDir, batchSize: 1 });
+    assert.deepEqual(repeated, { ...report, completedAt: repeated.completedAt });
   } finally {
     await pool.query("DELETE FROM releases WHERE workspace_id = $1", [workspaceId]).catch(() => undefined);
     await pool.query("DELETE FROM build_jobs WHERE workspace_id = $1", [workspaceId]).catch(() => undefined);

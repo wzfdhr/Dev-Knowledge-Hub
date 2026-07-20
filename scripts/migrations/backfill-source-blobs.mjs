@@ -343,6 +343,23 @@ async function resolveBlob(pool, snapshotData, file, observer) {
           return { blob: { ...blob, reused: true } };
         }
         await verifyBlobAt(snapshotData, candidate, locations.trash);
+        const references = await client.query(
+          `SELECT COUNT(*)::text AS reference_count
+           FROM source_files
+           WHERE source_blob_id = $1`,
+          [candidate.id]
+        );
+        const referenceCount = Number(references.rows[0]?.reference_count);
+        if (!Number.isSafeInteger(referenceCount) || referenceCount < 0) {
+          throw new Error("Source blob reference count is invalid");
+        }
+        if (referenceCount > 0) {
+          await auditBlobInconsistency(client, candidate, "tombstoned_blob_still_referenced");
+          return {
+            integrityError: "Tombstoned source blob moved to trash is still referenced",
+            integrityTag: "tombstoned_blob_still_referenced"
+          };
+        }
         const trashed = await client.query(
           `UPDATE source_blobs
            SET status = 'trash', trashed_at = now(), updated_at = now()
@@ -510,8 +527,8 @@ async function materializeSnapshotView(paths, files, { allowOrphanReplacement, o
   }
 }
 
-async function bindSnapshot(pool, snapshot, paths, files) {
-  await withTransaction(pool, async (client) => {
+async function bindSnapshot(pool, snapshot, paths, files, counts, observer) {
+  return withTransaction(pool, async (client) => {
     const expectedBlobs = [...new Map(files.map((file) => [
       `${file.blob.workspace_id}:${file.blob.content_hash}`,
       file.blob
@@ -519,6 +536,21 @@ async function bindSnapshot(pool, snapshot, paths, files) {
       || left.content_hash.localeCompare(right.content_hash));
     for (const blob of expectedBlobs) {
       await client.query(SOURCE_BLOB_LOCK_SQL, [blob.workspace_id, blob.content_hash]);
+    }
+    const lockedSnapshot = await client.query(
+      `SELECT snapshot.id, snapshot.workspace_id, snapshot.repository_id, snapshot.storage_path,
+              repository.project_id
+       FROM source_snapshots snapshot
+       JOIN repositories repository
+         ON repository.id = snapshot.repository_id AND repository.workspace_id = snapshot.workspace_id
+       WHERE snapshot.id = $1 AND snapshot.workspace_id = $2
+       FOR UPDATE OF snapshot`,
+      [snapshot.snapshot_id, snapshot.workspace_id]
+    );
+    if (lockedSnapshot.rows.length !== 1) throw new Error("Snapshot disappeared during backfill binding");
+    const currentSnapshot = lockedSnapshot.rows[0];
+    if (currentSnapshot.storage_path !== paths.legacyView && currentSnapshot.storage_path !== paths.view) {
+      throw new Error("Snapshot storage path changed during backfill");
     }
     const lockedBlobs = await client.query(
       `SELECT blob.id, blob.workspace_id, blob.content_hash, blob.generation, blob.byte_size, blob.status
@@ -551,6 +583,10 @@ async function bindSnapshot(pool, snapshot, paths, files) {
         throw new Error("Expected source blob is not active during snapshot binding");
       }
     }
+    await materializeSnapshotView(paths, files, {
+      allowOrphanReplacement: currentSnapshot.storage_path === paths.legacyView,
+      observer
+    });
     const current = await client.query(
       `SELECT file.id, file.source_blob_id
        FROM source_files file
@@ -596,12 +632,43 @@ async function bindSnapshot(pool, snapshot, paths, files) {
       [paths.view, snapshot.snapshot_id, snapshot.workspace_id, paths.legacyView, paths.view]
     );
     if (switched.rows.length !== 1) throw new Error("Snapshot storage path changed during backfill");
+    const existingCheckpoint = await client.query(
+      `SELECT metadata
+       FROM audit_events
+       WHERE workspace_id = $1
+         AND action = 'source_blob.snapshot_backfilled'
+         AND resource_type = 'source_snapshot'
+         AND resource_id = $2
+       ORDER BY created_at, id`,
+      [snapshot.workspace_id, snapshot.snapshot_id]
+    );
+    if (existingCheckpoint.rows.length > 1) throw new Error("Snapshot backfill checkpoint is duplicated");
+    if (existingCheckpoint.rows.length === 1) return existingCheckpoint.rows[0].metadata;
+    const metadata = {
+      projectId: currentSnapshot.project_id,
+      repositoryId: currentSnapshot.repository_id,
+      reused: counts.reused,
+      created: counts.created,
+      workspaceId: snapshot.workspace_id,
+      snapshotId: snapshot.snapshot_id
+    };
+    await client.query(
+      `INSERT INTO audit_events (workspace_id, actor_id, action, resource_type, resource_id, metadata)
+       VALUES ($1, NULL, 'source_blob.snapshot_backfilled', 'source_snapshot', $2, $3::jsonb)`,
+      [snapshot.workspace_id, snapshot.snapshot_id, JSON.stringify(metadata)]
+    );
+    return metadata;
   });
 }
 
-async function writePrivateReport(dataDir, payload) {
+async function writePrivateReport(dataDir, payload, observer) {
   const reportRoot = path.resolve(dataDir, "reports");
-  await mkdir(reportRoot, { recursive: true, mode: 0o700 });
+  const resolvedDataDir = path.resolve(dataDir);
+  await ensureDurableDirectory(
+    path.dirname(resolvedDataDir),
+    [path.basename(resolvedDataDir), "reports"],
+    observer
+  );
   const metadata = await lstat(reportRoot);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error("DEVKH_DATA_DIR/reports must be a real directory");
   await chmod(reportRoot, 0o700);
@@ -624,49 +691,51 @@ async function writePrivateReport(dataDir, payload) {
   }
 }
 
-async function readPrivateReport(dataDir, pool) {
-  const reportPath = path.resolve(dataDir, "reports", REPORT_NAME);
-  let metadata;
-  try {
-    metadata = await lstat(reportPath);
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) return null;
-    throw error;
-  }
-  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o777) !== 0o600) {
-    throw new Error("Existing source blob backfill report is not a private regular file");
-  }
-  const report = JSON.parse(await readFile(reportPath, "utf8"));
-  const emptyCursor = report.lastCursor === null
-    && report.processed === 0 && report.reused === 0 && report.created === 0;
-  const populatedCursor = report.lastCursor && typeof report.lastCursor.workspaceId === "string"
-    && typeof report.lastCursor.snapshotId === "string";
-  if (report.schemaVersion !== 1 || !Number.isSafeInteger(report.processed) || report.processed < 0
-    || !Number.isSafeInteger(report.reused) || report.reused < 0
-    || !Number.isSafeInteger(report.created) || report.created < 0
-    || !Number.isSafeInteger(report.batchSize) || report.batchSize < 1
-    || typeof report.completedAt !== "string" || Number.isNaN(Date.parse(report.completedAt))
-    || (!emptyCursor && !populatedCursor)) {
-    throw new Error("Existing source blob backfill report is invalid");
-  }
-  if (emptyCursor) return report;
-  const paths = snapshotPaths(dataDir, report.lastCursor.snapshotId);
-  const proof = await pool.query(
-    `SELECT EXISTS (
-       SELECT 1 FROM source_snapshots snapshot
-       WHERE snapshot.workspace_id = $1 AND snapshot.id = $2 AND snapshot.storage_path = $3
-         AND NOT EXISTS (
-           SELECT 1 FROM source_files file
-           WHERE file.workspace_id = snapshot.workspace_id AND file.snapshot_id = snapshot.id
-             AND file.source_blob_id IS NULL
-         )
-     ) AS checkpoint_complete`,
-    [report.lastCursor.workspaceId, report.lastCursor.snapshotId, paths.view]
+async function rebuildCheckpointState(dataDir, pool) {
+  const checkpoints = await pool.query(
+    `SELECT event.workspace_id, event.resource_id AS snapshot_id, event.metadata,
+            snapshot.storage_path,
+            NOT EXISTS (
+              SELECT 1
+              FROM source_files file
+              LEFT JOIN source_blobs blob
+                ON blob.id = file.source_blob_id AND blob.workspace_id = file.workspace_id
+              WHERE file.workspace_id = event.workspace_id
+                AND file.snapshot_id = snapshot.id
+                AND (
+                  file.source_blob_id IS NULL OR blob.id IS NULL OR blob.status <> 'active'
+                  OR blob.content_hash <> file.content_hash OR blob.byte_size <> file.byte_size
+                )
+            ) AS checkpoint_complete
+     FROM audit_events event
+     LEFT JOIN source_snapshots snapshot
+       ON snapshot.id::text = event.resource_id AND snapshot.workspace_id = event.workspace_id
+     WHERE event.action = 'source_blob.snapshot_backfilled'
+       AND event.resource_type = 'source_snapshot'
+     ORDER BY event.workspace_id, event.resource_id, event.created_at, event.id`
   );
-  if (proof.rows[0]?.checkpoint_complete !== true) {
-    throw new Error("Existing source blob backfill checkpoint cannot be proven from the database");
+  const state = { processed: 0, reused: 0, created: 0, lastCursor: null };
+  const seen = new Set();
+  for (const checkpoint of checkpoints.rows) {
+    const key = `${checkpoint.workspace_id}:${checkpoint.snapshot_id}`;
+    if (seen.has(key)) throw new Error("Snapshot backfill checkpoint is duplicated");
+    seen.add(key);
+    const metadata = checkpoint.metadata;
+    const paths = snapshotPaths(dataDir, checkpoint.snapshot_id);
+    if (checkpoint.checkpoint_complete !== true || checkpoint.storage_path !== paths.view
+      || !metadata || metadata.workspaceId !== checkpoint.workspace_id
+      || metadata.snapshotId !== checkpoint.snapshot_id
+      || typeof metadata.projectId !== "string" || typeof metadata.repositoryId !== "string"
+      || !Number.isSafeInteger(metadata.reused) || metadata.reused < 0
+      || !Number.isSafeInteger(metadata.created) || metadata.created < 0) {
+      throw new Error("Snapshot backfill audit checkpoint cannot be proven from the database");
+    }
+    state.processed += 1;
+    state.reused += metadata.reused;
+    state.created += metadata.created;
+    state.lastCursor = { workspaceId: checkpoint.workspace_id, snapshotId: checkpoint.snapshot_id };
   }
-  return report;
+  return state;
 }
 
 function completedReport(state, batchSize) {
@@ -701,18 +770,15 @@ export async function runBackfill({
 }) {
   if (!Number.isSafeInteger(batchSize) || batchSize < 1) throw new Error("batchSize must be a positive safe integer");
   const snapshotData = path.resolve(dataDir, "snapshots");
-  const prior = writeReport ? await readPrivateReport(dataDir, pool) : null;
-  const state = {
-    processed: prior?.processed ?? 0,
-    reused: prior?.reused ?? 0,
-    created: prior?.created ?? 0,
-    lastCursor: prior?.lastCursor ?? null
-  };
+  const state = await rebuildCheckpointState(dataDir, pool);
   let cursor = null;
   for (;;) {
     const batch = await pool.query(
-      `SELECT snapshot.id AS snapshot_id, snapshot.workspace_id, snapshot.storage_path
+      `SELECT snapshot.id AS snapshot_id, snapshot.workspace_id, snapshot.storage_path,
+              snapshot.repository_id, repository.project_id
        FROM source_snapshots snapshot
+       JOIN repositories repository
+         ON repository.id = snapshot.repository_id AND repository.workspace_id = snapshot.workspace_id
        WHERE (
          ($1::uuid IS NULL AND $2::uuid IS NULL)
          OR (snapshot.workspace_id, snapshot.id) > ($1::uuid, $2::uuid)
@@ -772,21 +838,21 @@ export async function runBackfill({
         else snapshotCreated += 1;
         bound.push({ ...file, blob });
       }
-      await materializeSnapshotView(paths, bound, {
-        allowOrphanReplacement: snapshot.storage_path === paths.legacyView,
-        observer
-      });
-      await bindSnapshot(pool, snapshot, paths, bound);
+      const checkpoint = await bindSnapshot(pool, snapshot, paths, bound, {
+        reused: snapshotReused,
+        created: snapshotCreated
+      }, observer);
+      observe(observer, { type: "snapshot-bound", snapshotId: snapshot.snapshot_id });
       state.processed += 1;
-      state.reused += snapshotReused;
-      state.created += snapshotCreated;
+      state.reused += checkpoint.reused;
+      state.created += checkpoint.created;
       cursor = { workspaceId: snapshot.workspace_id, snapshotId: snapshot.snapshot_id };
       state.lastCursor = cursor;
-      if (writeReport) await writePrivateReport(dataDir, completedReport(state, batchSize));
+      if (writeReport) await writePrivateReport(dataDir, completedReport(state, batchSize), observer);
     }
   }
   const report = completedReport(state, batchSize);
-  if (writeReport) await writePrivateReport(dataDir, report);
+  if (writeReport) await writePrivateReport(dataDir, report, observer);
   return report;
 }
 

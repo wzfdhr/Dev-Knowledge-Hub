@@ -54,3 +54,4 @@ COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/src ./src
 COPY --from=build --chown=node:node /app/drizzle ./drizzle
 COPY --from=build --chown=node:node /app/tsconfig.json /app/tsconfig.node.json /app/vite.config.ts ./
+COPY --chown=node:node scripts ./scripts

@@ -23,6 +23,13 @@ function formatEta(seconds?: number): string | null {
   return `约 ${Math.ceil(seconds / 60)} 分钟`;
 }
 
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
 export function ImportProgress({
   progress,
 }: {
@@ -31,6 +38,13 @@ export function ImportProgress({
   const activeIndex = progress ? stages.findIndex((stage) => stage.phase === progress.phase) : -1;
   const rate = formatRate(progress?.bytesPerSecond);
   const eta = formatEta(progress?.estimatedSeconds);
+  const transfer = progress?.processedFiles !== undefined && progress.totalFiles !== undefined
+    ? `${progress.processedFiles}/${progress.totalFiles} 个文件${
+      progress.processedBytes !== undefined && progress.totalBytes !== undefined
+        ? ` · ${formatBytes(progress.processedBytes)}/${formatBytes(progress.totalBytes)}`
+        : ""
+    }`
+    : null;
 
   return <section className="import-progress-panel" aria-labelledby="import-progress-title">
     <div className="import-section-heading">
@@ -39,7 +53,7 @@ export function ImportProgress({
     </div>
     <div className="import-stage-list" aria-label="导入阶段">
       {stages.map((stage, index) => {
-        const complete = progress?.status === "completed" || activeIndex > index;
+        const complete = activeIndex > index || (progress?.status === "completed" && activeIndex === index);
         const active = activeIndex === index;
         return <div key={stage.phase} className={`import-stage${complete ? " complete" : active ? " active" : ""}`}>
           <span className="import-stage-icon" aria-hidden="true">{complete ? <Check /> : <Circle />}</span>
@@ -50,7 +64,7 @@ export function ImportProgress({
     <Progress percent={progress?.percent ?? 0} showInfo={false} status={progress?.status === "failed" ? "exception" : undefined} />
     <div className="import-progress-meta" aria-live="polite">
       <span>{progress?.detail ?? "选择项目文件夹后，将在本机完成读取和过滤，仅上传可采集文件。"}</span>
-      {(rate || eta) && <span>{[rate, eta].filter(Boolean).join(" · ")}</span>}
+      {(transfer || rate || eta) && <span>{[transfer, rate, eta].filter(Boolean).join(" · ")}</span>}
     </div>
   </section>;
 }

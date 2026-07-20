@@ -4,11 +4,12 @@ import type {
   UploadSnapshotSummary, ImportReport, TeamMember, ProjectMember, Project, ProjectSummary, ProjectActivity, CodexConnectionPack,
   Remediation, RemediationEvent, RemediationState,
   WorkspaceOverview, WorkspaceSearchResult, MfaStatus, ProjectGraphFormat, ProjectGraphResponse,
-  FrontendPreviewResponse, GraphSourceRef
+  FrontendPreviewResponse, GraphSourceRef, ImportProgress
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
 import type { FolderImportFile } from "./folder-import";
+import { createUploadManifest } from "./upload-manifest";
 
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly details?: ApiErrorShape["error"]) {
@@ -37,6 +38,10 @@ export interface PaginatedResponse {
   nextOffset: number | null;
 }
 
+export interface UploadFolderOptions {
+  onProgress?(progress: ImportProgress): void;
+}
+
 export const LIST_PAGE_SIZE = 100;
 export const ACTIVE_PROJECT_STORAGE_KEY = "devkh:active-project-id";
 
@@ -53,19 +58,34 @@ function csrfToken(): string | undefined {
   return document.cookie.split(";").map((item) => item.trim()).find((item) => item.startsWith("devkh_csrf="))?.slice("devkh_csrf=".length);
 }
 
+function retryAfterMilliseconds(value: string | null): number {
+  if (!value) return 1_000;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.min(60_000, Math.max(0, seconds * 1_000));
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.min(60_000, Math.max(0, timestamp - Date.now())) : 1_000;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const projectId = activeProjectId();
   const csrf = init?.method && !["GET", "HEAD", "OPTIONS"].includes(init.method) ? csrfToken() : undefined;
-  const response = await fetch(path, {
-    credentials: "same-origin",
-    ...init,
-    headers: {
-      ...(projectId ? { "x-devkh-project": projectId } : {}),
-      ...(csrf ? { "x-devkh-csrf": csrf } : {}),
-      ...(typeof init?.body === "string" ? { "content-type": "application/json" } : {}),
-      ...init?.headers
-    }
-  });
+  const retryRateLimit = path.includes("/upload-sessions");
+  const fetchAttempt = async (rateLimitRetries = 0): Promise<Response> => {
+    const response = await fetch(path, {
+      credentials: "same-origin",
+      ...init,
+      headers: {
+        ...(projectId ? { "x-devkh-project": projectId } : {}),
+        ...(csrf ? { "x-devkh-csrf": csrf } : {}),
+        ...(typeof init?.body === "string" ? { "content-type": "application/json" } : {}),
+        ...init?.headers
+      }
+    });
+    if (!retryRateLimit || response.status !== 429 || rateLimitRetries >= 5) return response;
+    await new Promise((resolve) => setTimeout(resolve, retryAfterMilliseconds(response.headers.get("retry-after"))));
+    return fetchAttempt(rateLimitRetries + 1);
+  };
+  const response = await fetchAttempt();
   if (!response.ok) {
     const body = await response.json().catch(() => null) as ApiErrorShape | null;
     throw new ApiError(response.status, body?.error.code ?? "REQUEST_FAILED", body?.error.message ?? "Request failed", body?.error);
@@ -99,8 +119,8 @@ export interface ApiClient {
   connectRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository }>;
   replaceRepository(input: { kind: "local"; name: string; path: string } | { kind: "git"; name: string; url: string; token?: string } | { kind: "upload"; name: string }): Promise<{ repository: Repository; pendingUpload?: boolean }>;
   listArchivedRepositories(): Promise<{ repositories: ArchivedRepository[] }>;
-  uploadFolder(projectId: string, files: FolderImportFile[]): Promise<UploadSnapshotSummary>;
-  uploadReplacementFolder(repositoryId: string, files: FolderImportFile[]): Promise<UploadSnapshotSummary>;
+  uploadFolder(projectId: string, repositoryId: string, files: FolderImportFile[], options?: UploadFolderOptions): Promise<UploadSnapshotSummary>;
+  uploadReplacementFolder(projectId: string, repositoryId: string, files: FolderImportFile[], options?: UploadFolderOptions): Promise<UploadSnapshotSummary>;
   getRepository(): Promise<{ repository: Repository | null }>;
   getRepositoryStatus(): Promise<RepositoryStatus>;
   syncRepository(): Promise<SnapshotSummary>;
@@ -166,6 +186,177 @@ function listPath(path: string, pagination: PaginationParams, values: Record<str
   return `${path}?${params}`;
 }
 
+const UPLOAD_MANIFEST_PAGE_SIZE = 500;
+const UPLOAD_RESUME_PREFIX = "devkh:upload-session:";
+
+interface UploadSessionStart {
+  id: string;
+  status: "open" | "committing" | "committed" | "cancelled";
+  entryCount: number;
+  expiresAt: string;
+}
+
+interface UploadManifestDecision {
+  ordinal: number;
+  disposition: "upload_required" | "metadata_only" | "ignored";
+  trust: "pending" | "server_verified" | "client_unverified";
+}
+
+function browserStorage(): Storage | undefined {
+  try {
+    return typeof localStorage === "undefined" ? undefined : localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
+function resumeCreateKey(projectId: string, repositoryId: string, manifestDigest: string): {
+  storage: Storage | undefined;
+  key: string;
+  createKey: string;
+} {
+  const storage = browserStorage();
+  const key = `${UPLOAD_RESUME_PREFIX}${projectId}:${repositoryId}:${manifestDigest}`;
+  const now = Date.now();
+  try {
+    const saved = storage?.getItem(key);
+    if (saved) {
+      const value = JSON.parse(saved) as { createKey?: string; createdAt?: number };
+      if (value.createKey && value.createdAt && now - value.createdAt < 23 * 60 * 60 * 1_000) {
+        return { storage, key, createKey: value.createKey };
+      }
+    }
+  } catch {
+    // A corrupt resume hint must not prevent a new upload.
+  }
+  const createKey = crypto.randomUUID();
+  try {
+    storage?.setItem(key, JSON.stringify({ createKey, createdAt: now }));
+  } catch {
+    // Upload remains usable when browser storage is unavailable.
+  }
+  return { storage, key, createKey };
+}
+
+async function uploadFolderSession(
+  projectId: string,
+  repositoryId: string,
+  files: FolderImportFile[],
+  options: UploadFolderOptions = {}
+): Promise<UploadSnapshotSummary> {
+  const manifest = await createUploadManifest(files);
+  const sourceFiles = files.filter((file) => file.kind === "source");
+  const totalFiles = sourceFiles.length;
+  const totalBytes = sourceFiles.reduce((sum, file) => sum + file.file.size, 0);
+  const verified = new Set<number>();
+  let processedFiles = 0;
+  let processedBytes = 0;
+  let transferredBytesThisAttempt = 0;
+  const startedAt = Date.now();
+  const reportTransfer = (detail: string) => {
+    const elapsedSeconds = Math.max((Date.now() - startedAt) / 1_000, 0.001);
+    const bytesPerSecond = transferredBytesThisAttempt > 0
+      ? Math.round(transferredBytesThisAttempt / elapsedSeconds)
+      : undefined;
+    const remainingBytes = Math.max(0, totalBytes - processedBytes);
+    const percent = totalBytes > 0
+      ? Math.min(100, Math.floor(processedBytes / totalBytes * 100))
+      : totalFiles > 0 ? Math.min(100, Math.floor(processedFiles / totalFiles * 100)) : 100;
+    options.onProgress?.({
+      phase: "uploading", status: "running", percent,
+      processedFiles, totalFiles, processedBytes, totalBytes,
+      bytesPerSecond,
+      estimatedSeconds: bytesPerSecond ? Math.ceil(remainingBytes / bytesPerSecond) : undefined,
+      detail
+    });
+  };
+  const markVerified = (ordinal: number, byteSize: number, detail?: string) => {
+    if (verified.has(ordinal)) return;
+    verified.add(ordinal);
+    processedFiles += 1;
+    processedBytes += byteSize;
+    reportTransfer(detail ?? `已验证 ${processedFiles}/${totalFiles} 个源码文件`);
+  };
+  const resume = resumeCreateKey(projectId, repositoryId, manifest.manifestDigest);
+  const base = `/api/projects/${encodeURIComponent(projectId)}/upload-sessions`;
+  let session: UploadSessionStart | undefined;
+  try {
+    session = await request<UploadSessionStart>(base, {
+      method: "POST",
+      headers: { "Idempotency-Key": resume.createKey },
+      body: json({ repositoryId, entryCount: manifest.entries.length })
+    });
+    reportTransfer(`上传会话保留至 ${new Date(session.expiresAt).toLocaleString("zh-CN")}`);
+    for (let offset = 0; offset < manifest.entries.length; offset += UPLOAD_MANIFEST_PAGE_SIZE) {
+      const page = Math.floor(offset / UPLOAD_MANIFEST_PAGE_SIZE);
+      const response = await request<{ entries: UploadManifestDecision[] }>(
+        `${base}/${encodeURIComponent(session.id)}/manifest-pages/${page}`,
+        {
+          method: "PUT",
+          headers: { "Idempotency-Key": `${resume.createKey}:manifest:${page}` },
+          body: json({ entries: manifest.entries.slice(offset, offset + UPLOAD_MANIFEST_PAGE_SIZE) })
+        }
+      );
+      for (const decision of response.entries) {
+        const source = files[decision.ordinal];
+        if (!source || source.kind !== "source") {
+          if (decision.disposition === "upload_required") {
+            throw new Error("Upload manifest no longer matches selected files");
+          }
+          continue;
+        }
+        if (decision.disposition !== "upload_required") {
+          markVerified(
+            decision.ordinal,
+            source.file.size,
+            `服务端已处理 ${processedFiles + 1}/${totalFiles} 个源码文件`
+          );
+          continue;
+        }
+        if (decision.trust !== "server_verified") {
+          await request(`${base}/${encodeURIComponent(session.id)}/files/${decision.ordinal}`, {
+            method: "PUT",
+            headers: {
+              "Idempotency-Key": `${resume.createKey}:file:${decision.ordinal}`,
+              "content-type": "application/octet-stream"
+            },
+            body: source.file
+          });
+          transferredBytesThisAttempt += source.file.size;
+        }
+        markVerified(decision.ordinal, source.file.size);
+      }
+    }
+    options.onProgress?.({
+      phase: "validating", status: "running", percent: 100,
+      processedFiles, totalFiles, processedBytes, totalBytes,
+      detail: "文件传输完成，正在执行服务端校验"
+    });
+    const result = await request<UploadSnapshotSummary>(`${base}/${encodeURIComponent(session.id)}/commit`, {
+      method: "POST",
+      headers: { "Idempotency-Key": `${resume.createKey}:commit` },
+      body: json({ manifestDigest: manifest.manifestDigest })
+    });
+    try { resume.storage?.removeItem(resume.key); } catch { /* best-effort browser cleanup */ }
+    return result;
+  } catch (error) {
+    const terminal = error instanceof ApiError && [
+      "IDEMPOTENCY_KEY_REUSED", "UPLOAD_SESSION_EXPIRED", "UPLOAD_SESSION_INVALIDATED",
+      "UPLOAD_SESSION_NOT_FOUND", "UPLOAD_SESSION_STATE"
+    ].includes(error.code);
+    if (terminal) {
+      try { resume.storage?.removeItem(resume.key); } catch { /* best-effort browser cleanup */ }
+      if (session) {
+        await request(`${base}/${encodeURIComponent(session.id)}`, {
+          method: "DELETE",
+          headers: { "Idempotency-Key": `${resume.createKey}:cancel-terminal` }
+        }).catch(() => undefined);
+      }
+    }
+    throw error;
+  }
+}
+
 export const api: ApiClient = {
   setupStatus: () => request("/api/setup/status"),
   setup: (input) => request("/api/setup", { method: "POST", body: json(input) }),
@@ -209,16 +400,8 @@ export const api: ApiClient = {
   },
   replaceRepository: (input) => request("/api/repositories/current/replace", { method: "POST", body: json(input) }),
   listArchivedRepositories: () => request("/api/repositories/archived"),
-  uploadFolder: (projectId, files) => {
-    const data = new FormData();
-    for (const item of files) data.append("files", item.file, item.path);
-    return request(`/api/projects/${encodeURIComponent(projectId)}/folder-import`, { method: "POST", body: data });
-  },
-  uploadReplacementFolder: (repositoryId, files) => {
-    const data = new FormData();
-    for (const item of files) data.append("files", item.file, item.path);
-    return request(`/api/repositories/${encodeURIComponent(repositoryId)}/folder-import`, { method: "POST", body: data });
-  },
+  uploadFolder: uploadFolderSession,
+  uploadReplacementFolder: uploadFolderSession,
   getRepository: () => request("/api/repositories/current"),
   getRepositoryStatus: () => request("/api/repositories/current/status"),
   syncRepository: () => request("/api/repositories/current/sync", { method: "POST" }),

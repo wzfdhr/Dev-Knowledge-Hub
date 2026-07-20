@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { MemoryAppStore } from "../persistence/memory-store.js";
-import { FolderUploadError, importFolderFiles, type FolderUploadFile } from "./folder-import.js";
+import { FolderUploadError, importFolderFiles, removeReadOnlyTree, type FolderUploadFile } from "./folder-import.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -122,5 +122,31 @@ describe("folder snapshot import", () => {
     })).rejects.toMatchObject({ code: "EMPTY_FOLDER_UPLOAD" });
     expect(new FolderUploadError("TOO_MANY_FILES", "too many")).toMatchObject({ name: "FolderUploadError", code: "TOO_MANY_FILES" });
     await expect(readdir(path.join(context.dataDir, "uploads"))).resolves.toEqual([]);
+  });
+
+  test("keeps compatibility snapshots hidden until completion and discards a failed import", async () => {
+    const context = await fixture();
+    const reportId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const summary = await importFolderFiles({
+      files: files([["src/index.ts", "export const pending = true;\n"]]),
+      dataDir: context.dataDir,
+      workspaceId: "workspace-1",
+      repositoryId: "repository-1",
+      actorId: "admin-1",
+      store: context.store,
+      pendingImportReportId: reportId
+    });
+
+    await expect(context.store.findSnapshotById("workspace-1", summary.snapshotId)).resolves.toBeNull();
+    await expect(context.store.latestSnapshot("workspace-1", "repository-1")).resolves.toBeNull();
+
+    const discardedPath = await context.store.discardPendingFolderImport(
+      "workspace-1", reportId, summary.snapshotId
+    );
+    expect(discardedPath).toBe(summary.storagePath);
+    await removeReadOnlyTree(path.dirname(discardedPath!));
+    await expect(stat(summary.storagePath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(context.store.sourceSnapshots).toEqual([]);
+    expect(context.store.sourceFiles).toEqual([]);
   });
 });

@@ -2,7 +2,7 @@ import { describe, expect, test } from "vitest";
 
 import { buildServer, type ServerOptions } from "../app";
 import { MemoryAppStore } from "../persistence/memory-store";
-import { RateLimitState, redactSensitive } from "./http";
+import { RateLimitState, UploadBodyConcurrencyState, redactSensitive } from "./http";
 
 function options(overrides: Partial<ServerOptions> = {}): ServerOptions {
   return {
@@ -17,6 +17,7 @@ function options(overrides: Partial<ServerOptions> = {}): ServerOptions {
       mcp: 1,
       feedback: 1,
       upload: 1,
+      uploadOperation: 1,
       windowMs: 60_000,
       maxEntries: 100,
       sweepIntervalMs: 60_000
@@ -26,6 +27,12 @@ function options(overrides: Partial<ServerOptions> = {}): ServerOptions {
 }
 
 describe("HTTP security policy", () => {
+  test("allows authenticated large uploads up to the ten-minute request budget", async () => {
+    const app = buildServer(options());
+    expect((app.initialConfig as { requestTimeout?: number }).requestTimeout).toBe(10 * 60_000);
+    await app.close();
+  });
+
   test("periodically removes expired rate-limit buckets", () => {
     const state = new RateLimitState({ maxEntries: 10, sweepIntervalMs: 100 });
     state.consume("setup:one", 1, 0, 50);
@@ -50,6 +57,19 @@ describe("HTTP security policy", () => {
     }
 
     expect(state.size).toBe(3);
+  });
+
+  test("bounds buffered upload bodies globally, per client, and per session", () => {
+    const state = new UploadBodyConcurrencyState({ global: 2, client: 1, session: 1 });
+    const first = state.acquire("client-a", "session-a");
+    expect(first).toBeTypeOf("function");
+    expect(state.acquire("client-a", "session-b")).toBeNull();
+    const second = state.acquire("client-b", "session-b");
+    expect(second).toBeTypeOf("function");
+    expect(state.acquire("client-c", "session-c")).toBeNull();
+    first!();
+    expect(state.acquire("client-c", "session-a")).toBeTypeOf("function");
+    second!();
   });
 
   test("sets defensive headers and rejects JSON bodies over 1 MiB", async () => {
@@ -77,7 +97,9 @@ describe("HTTP security policy", () => {
     ["setup", "/api/setup", { email: "invalid", password: "invalid" }],
     ["login", "/api/session", { email: "invalid", password: "invalid" }],
     ["mcp", "/mcp", {}],
-    ["upload", "/api/repositories/current/uploads", {}],
+    ["upload", "/api/projects/00000000-0000-4000-8000-000000000000/upload-sessions", {
+      repositoryId: "00000000-0000-4000-8000-000000000001", entryCount: 1
+    }],
     ["feedback", "/api/feedback/00000000-0000-4000-8000-000000000000/rebuild", {}]
   ])("rate limits %s writes independently", async (_name, url, payload) => {
     const app = buildServer(options());
@@ -88,6 +110,46 @@ describe("HTTP security policy", () => {
     expect(limited.statusCode).toBe(429);
     expect(limited.headers["retry-after"]).toBeDefined();
     expect(limited.json()).toMatchObject({ error: { code: "RATE_LIMITED" } });
+    await app.close();
+  });
+
+  test("rate limits durable upload operations separately from session creation", async () => {
+    const app = buildServer(options());
+    const url = "/api/projects/00000000-0000-4000-8000-000000000000/upload-sessions/00000000-0000-4000-8000-000000000001/files/0";
+    const first = await app.inject({ method: "PUT", url, payload: Buffer.from("source") });
+    const limited = await app.inject({ method: "PUT", url, payload: Buffer.from("source") });
+
+    expect(first.statusCode).not.toBe(429);
+    expect(limited.statusCode).toBe(429);
+    expect(limited.json()).toMatchObject({ error: { code: "RATE_LIMITED" } });
+    await app.close();
+  });
+
+  test("trusts exactly one reverse-proxy hop and ignores a client-supplied earlier hop", async () => {
+    const app = buildServer(options());
+    const url = "/api/session";
+    const first = await app.inject({
+      method: "POST", url, headers: { "x-forwarded-for": "203.0.113.10, 10.0.0.2" }, payload: {}
+    });
+    const limited = await app.inject({
+      method: "POST", url, headers: { "x-forwarded-for": "203.0.113.11, 10.0.0.2" }, payload: {}
+    });
+
+    expect(first.statusCode).not.toBe(429);
+    expect(limited.statusCode).toBe(429);
+    await app.close();
+  });
+
+  test.each([
+    "/api/projects/00000000-0000-4000-8000-000000000000/folder-import",
+    "/api/repositories/00000000-0000-4000-8000-000000000000/folder-import"
+  ])("rate limits the compatibility folder upload route %s", async (url) => {
+    const app = buildServer(options());
+    const first = await app.inject({ method: "POST", url });
+    const limited = await app.inject({ method: "POST", url });
+
+    expect(first.statusCode).not.toBe(429);
+    expect(limited.statusCode).toBe(429);
     await app.close();
   });
 

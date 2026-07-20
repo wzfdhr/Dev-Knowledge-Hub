@@ -354,20 +354,20 @@
 }
 
 .import-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px;
   margin: 0;
   border: 1px solid var(--border);
   border-radius: 6px;
+  overflow: hidden;
+  background: var(--border);
 }
 
 .import-metrics > div {
+  flex: 1 1 120px;
   padding: 13px;
-  border-right: 1px solid var(--border);
-}
-
-.import-metrics > div:last-child {
-  border-right: 0;
+  background: #fff;
 }
 
 .import-metrics dt {
@@ -487,16 +487,8 @@
     padding: 20px;
   }
 
-  .import-metrics {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .import-metrics > div:nth-child(2) {
-    border-right: 0;
-  }
-
-  .import-metrics > div:nth-child(-n + 2) {
-    border-bottom: 1px solid var(--border);
+  .import-metrics > div {
+    flex-basis: calc(50% - 1px);
   }
 
   .selected-archive {

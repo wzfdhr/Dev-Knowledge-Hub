@@ -1,4 +1,5 @@
 import type { Pool, PoolClient, QueryResultRow } from "pg";
+import { MAX_UPLOAD_MANIFEST_METADATA_BYTES } from "../../shared/import-filter.js";
 
 import {
   boundedKnowledgePage,
@@ -8,6 +9,8 @@ import {
   LastProjectAdminError,
   LastWorkspaceAdminError,
   knowledgeMatchReason,
+  MAX_UPLOAD_ACCEPTED_BYTES,
+  MAX_UPLOAD_ACCEPTED_FILES,
   normalizePagination
 } from "./store.js";
 import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledge/trust.js";
@@ -21,6 +24,10 @@ import type {
   AppStore,
   AuditEventInput,
   AuditEventRecord,
+  CreateUploadSessionInput,
+  CompleteUploadSessionInput,
+  CompleteFolderImportInput,
+  CancelUploadSessionInput,
   CreateFeedbackInput,
   CreateRemediationInput,
   CreateSnapshotInput,
@@ -70,6 +77,11 @@ import type {
   SourceSnapshotRecord,
   TeamMemberRecord,
   TeamRole,
+  UploadIdempotencyRecord,
+  UploadManifestEntryInput,
+  UploadManifestEntryRecord,
+  UploadSessionMutationIdentity,
+  UploadSessionRecord,
   WorkspaceRecord
 } from "./store.js";
 import type {
@@ -123,6 +135,59 @@ interface SnapshotRow extends QueryResultRow {
   remote_url: string | null;
   commit_timestamp: Date;
   storage_path: string;
+}
+
+interface UploadSessionRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  repository_id: string;
+  actor_id: string;
+  session_version: number;
+  is_replacement: boolean;
+  expected_current_repository_id: string;
+  expected_latest_snapshot_id: string | null;
+  status: UploadSessionRecord["status"];
+  entry_count: number;
+  manifest_digest: string | null;
+  snapshot_id: string | null;
+  commit_response: Record<string, unknown> | null;
+  expires_at: Date;
+  committed_at: Date | null;
+  cancelled_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface UploadManifestEntryRow extends QueryResultRow {
+  session_id: string;
+  workspace_id: string;
+  ordinal: number;
+  path: string;
+  kind: UploadManifestEntryRecord["kind"];
+  byte_size: string;
+  content_hash: string | null;
+  media_type: string | null;
+  metadata_byte_size: number;
+  disposition: UploadManifestEntryRecord["disposition"];
+  trust: UploadManifestEntryRecord["trust"];
+  ignore_reason: string | null;
+  uploaded_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface UploadIdempotencyRow extends QueryResultRow {
+  workspace_id: string;
+  actor_id: string;
+  idempotency_key: string;
+  operation: string;
+  request_digest: string;
+  session_id: string | null;
+  response_status: number;
+  response_body: Record<string, unknown>;
+  created_at: Date;
+  expires_at: Date;
 }
 
 interface BuildRow extends QueryResultRow {
@@ -668,6 +733,65 @@ function importReportRecord(row: ImportReportRow): ImportReportRecord {
   };
 }
 
+function uploadSessionRecord(row: UploadSessionRow): UploadSessionRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    projectId: row.project_id,
+    repositoryId: row.repository_id,
+    actorId: row.actor_id,
+    sessionVersion: row.session_version,
+    isReplacement: row.is_replacement,
+    expectedCurrentRepositoryId: row.expected_current_repository_id,
+    expectedLatestSnapshotId: row.expected_latest_snapshot_id,
+    status: row.status,
+    entryCount: row.entry_count,
+    manifestDigest: row.manifest_digest,
+    snapshotId: row.snapshot_id,
+    commitResponse: row.commit_response,
+    expiresAt: row.expires_at,
+    committedAt: row.committed_at,
+    cancelledAt: row.cancelled_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function uploadManifestEntryRecord(row: UploadManifestEntryRow): UploadManifestEntryRecord {
+  return {
+    sessionId: row.session_id,
+    workspaceId: row.workspace_id,
+    ordinal: row.ordinal,
+    path: row.path,
+    kind: row.kind,
+    byteSize: Number(row.byte_size),
+    contentHash: row.content_hash,
+    mediaType: row.media_type,
+    metadataByteSize: row.metadata_byte_size,
+    disposition: row.disposition,
+    trust: row.trust,
+    ignoreReason: row.ignore_reason,
+    uploadedAt: row.uploaded_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function uploadIdempotencyRecord(row: UploadIdempotencyRow): UploadIdempotencyRecord {
+  return {
+    workspaceId: row.workspace_id,
+    actorId: row.actor_id,
+    idempotencyKey: row.idempotency_key,
+    operation: row.operation,
+    requestDigest: row.request_digest,
+    sessionId: row.session_id,
+    responseStatus: row.response_status,
+    responseBody: row.response_body,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at
+  };
+}
+
 function projectRecord(row: ProjectRow): ProjectRecord {
   return {
     id: row.id,
@@ -731,7 +855,15 @@ function auditEventRecord(row: AuditEventRow): AuditEventRecord {
 }
 
 export class PostgresAppStore implements AppStore, PipelineArtifactStore {
-  constructor(private readonly pool: Pool & Queryable) {}
+  private activeUploadMutationLocks = 0;
+  private readonly uploadMutationWaiters: Array<() => void> = [];
+  private readonly uploadMutationLockLimit: number;
+
+  constructor(private readonly pool: Pool & Queryable) {
+    const maximumConnections = pool.options?.max ?? 10;
+    if (maximumConnections < 4) throw new Error("PostgreSQL upload sessions require a pool with at least four connections");
+    this.uploadMutationLockLimit = Math.max(1, Math.floor(maximumConnections / 2));
+  }
 
   private async transaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
@@ -746,6 +878,57 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     } finally {
       client.release();
     }
+  }
+
+  private async acquireUploadMutationPermit(): Promise<() => void> {
+    if (this.activeUploadMutationLocks >= this.uploadMutationLockLimit) {
+      await new Promise<void>((resolve) => this.uploadMutationWaiters.push(resolve));
+    } else {
+      this.activeUploadMutationLocks += 1;
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = this.uploadMutationWaiters.shift();
+      if (next) next();
+      else this.activeUploadMutationLocks -= 1;
+    };
+  }
+
+  private async lockUploadAuthorization(
+    client: PoolClient,
+    input: {
+      workspaceId: string;
+      projectId: string;
+      actorId: string;
+      sessionVersion: number;
+      administratorRequired: boolean;
+    }
+  ): Promise<boolean> {
+    const user = await client.query<{ session_version: number; disabled_at: Date | null }>(
+      `SELECT session_version, disabled_at FROM admin_users
+       WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+      [input.workspaceId, input.actorId]
+    );
+    if (!user.rows[0] || user.rows[0].disabled_at
+      || user.rows[0].session_version !== input.sessionVersion) return false;
+    const workspaceMember = await client.query<{ role: TeamRole }>(
+      `SELECT role FROM workspace_members
+       WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
+      [input.workspaceId, input.actorId]
+    );
+    if (workspaceMember.rows[0]?.role === "admin") return true;
+    const projectMember = await client.query<{ role: ProjectRole }>(
+      `SELECT pm.role FROM project_members pm
+       JOIN projects project ON project.id = pm.project_id
+       WHERE project.workspace_id = $1 AND pm.project_id = $2 AND pm.user_id = $3
+       FOR UPDATE OF pm`,
+      [input.workspaceId, input.projectId, input.actorId]
+    );
+    return input.administratorRequired
+      ? projectMember.rows[0]?.role === "admin"
+      : ["admin", "member"].includes(projectMember.rows[0]?.role ?? "reader");
   }
 
   private async insertAudit(queryable: Queryable, event: AuditEventInput): Promise<void> {
@@ -1951,6 +2134,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            FROM source_files f WHERE f.snapshot_id = s.id
          ) files ON true
          WHERE s.workspace_id = p.workspace_id AND s.repository_id = repo.id
+           AND s.pending_upload_session_id IS NULL AND s.pending_import_report_id IS NULL
          ORDER BY s.commit_timestamp DESC, s.created_at DESC, s.id DESC LIMIT 1
        ) snapshot ON true
        LEFT JOIN LATERAL (
@@ -2317,6 +2501,27 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return importReportRecord(rows[0]);
   }
 
+  async createUploadSessionImportReport(
+    input: Omit<ImportReportRecord, "id" | "startedAt" | "finishedAt" | "status" | "collectedFileCount" | "collectedTextBytes" | "ignored" | "snapshotId" | "failureCode">,
+    sessionId: string
+  ): Promise<ImportReportRecord> {
+    const { rows } = await this.pool.query<ImportReportRow>(
+      `INSERT INTO import_reports (
+         workspace_id, project_id, repository_id, actor_id, source_kind, status, upload_session_id
+       ) VALUES ($1, $2, $3, $4, $5, 'running', $6)
+       ON CONFLICT (upload_session_id) WHERE upload_session_id IS NOT NULL
+       DO UPDATE SET status = 'running', started_at = now(), finished_at = NULL,
+         collected_file_count = 0, collected_text_bytes = 0,
+         ignored = '{"total":0,"reasons":{}}'::jsonb,
+         snapshot_id = NULL, failure_code = NULL
+       RETURNING id, workspace_id, project_id, repository_id, actor_id, source_kind, status,
+                 started_at, finished_at, collected_file_count, collected_text_bytes, ignored,
+                 snapshot_id, failure_code`,
+      [input.workspaceId, input.projectId, input.repositoryId, input.actorId, input.sourceKind, sessionId]
+    );
+    return importReportRecord(rows[0]);
+  }
+
   async finishImportReport(
     workspaceId: string,
     reportId: string,
@@ -2334,6 +2539,106 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         JSON.stringify(input.ignored), input.snapshotId, input.failureCode]
     );
     return rows[0] ? importReportRecord(rows[0]) : null;
+  }
+
+  async completeFolderImport(input: CompleteFolderImportInput): Promise<ImportReportRecord | null> {
+    return this.transaction(async (client) => {
+      const current = await client.query<{ id: string }>(
+        `SELECT id FROM repositories
+         WHERE workspace_id = $1 AND project_id = $2 AND archived_at IS NULL FOR UPDATE`,
+        [input.workspaceId, input.projectId]
+      );
+      if (current.rows[0]?.id !== input.expectedCurrentRepositoryId) return null;
+      const candidate = await client.query<{ id: string; archived_at: Date | null }>(
+        `SELECT id, archived_at FROM repositories
+         WHERE workspace_id = $1 AND project_id = $2 AND id = $3 FOR UPDATE`,
+        [input.workspaceId, input.projectId, input.repositoryId]
+      );
+      if (!candidate.rows[0]) return null;
+      if (!await this.lockUploadAuthorization(client, {
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        actorId: input.actorId,
+        sessionVersion: input.actorSessionVersion,
+        administratorRequired: input.activateReplacement
+      })) return null;
+      if (input.activateReplacement) {
+        if (candidate.rows[0].archived_at) {
+          await client.query(
+            `UPDATE repositories SET archived_at = now(), updated_at = now()
+             WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND archived_at IS NULL`,
+            [input.workspaceId, input.projectId, current.rows[0].id]
+          );
+          await client.query(
+            `UPDATE repositories SET archived_at = NULL, updated_at = now()
+             WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND archived_at IS NOT NULL`,
+            [input.workspaceId, input.projectId, input.repositoryId]
+          );
+          await this.insertAudit(client, {
+            workspaceId: input.workspaceId, actorId: input.actorId,
+            action: "repository.switched", resourceType: "repository", resourceId: input.repositoryId,
+            metadata: {
+              oldRepositoryId: current.rows[0].id,
+              newRepositoryId: input.repositoryId,
+              projectId: input.projectId
+            }
+          });
+        } else if (current.rows[0].id !== input.repositoryId) {
+          return null;
+        }
+      } else if (candidate.rows[0].archived_at || current.rows[0].id !== input.repositoryId) {
+        return null;
+      }
+      let snapshot: { commit_sha: string; pending_import_report_id: string | null } | undefined;
+      if (input.report.snapshotId) {
+        const selected = await client.query<{ commit_sha: string; pending_import_report_id: string | null }>(
+          `SELECT commit_sha, pending_import_report_id FROM source_snapshots
+           WHERE workspace_id = $1 AND repository_id = $2 AND id = $3
+             AND (pending_import_report_id IS NULL OR pending_import_report_id = $4)
+             AND pending_upload_session_id IS NULL
+           FOR UPDATE`,
+          [input.workspaceId, input.repositoryId, input.report.snapshotId, input.reportId]
+        );
+        snapshot = selected.rows[0];
+        if (!snapshot) throw new Error("Folder import snapshot activation failed");
+        if (snapshot.pending_import_report_id === input.reportId) {
+          await client.query(
+            `UPDATE source_snapshots SET pending_import_report_id = NULL
+             WHERE workspace_id = $1 AND repository_id = $2 AND id = $3
+               AND pending_import_report_id = $4`,
+            [input.workspaceId, input.repositoryId, input.report.snapshotId, input.reportId]
+          );
+        }
+      }
+      const { rows } = await client.query<ImportReportRow>(
+        `UPDATE import_reports
+         SET status = $6, finished_at = now(), collected_file_count = $7,
+             collected_text_bytes = $8, ignored = $9::jsonb, snapshot_id = $10, failure_code = $11
+         WHERE workspace_id = $1 AND project_id = $2 AND repository_id = $3
+           AND actor_id = $4 AND id = $5 AND status = 'running'
+         RETURNING id, workspace_id, project_id, repository_id, actor_id, source_kind, status,
+                   started_at, finished_at, collected_file_count, collected_text_bytes, ignored,
+                   snapshot_id, failure_code`,
+        [input.workspaceId, input.projectId, input.repositoryId, input.actorId, input.reportId,
+          input.report.status, input.report.collectedFileCount, input.report.collectedTextBytes,
+          JSON.stringify(input.report.ignored), input.report.snapshotId, input.report.failureCode]
+      );
+      if (!rows[0]) throw new Error("Folder import report completion failed");
+      if (snapshot) {
+        await this.insertAudit(client, {
+          workspaceId: input.workspaceId,
+          actorId: input.actorId,
+          action: "repository.sync_succeeded",
+          resourceType: "repository",
+          resourceId: input.repositoryId,
+          metadata: {
+            commitSha: snapshot.commit_sha,
+            unchanged: snapshot.pending_import_report_id === null
+          }
+        });
+      }
+      return importReportRecord(rows[0]);
+    });
   }
 
   async listImportReports(workspaceId: string, projectId: string, pagination?: Pagination): Promise<ImportReportRecord[]> {
@@ -2364,6 +2669,684 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       [cutoff]
     );
     return rowCount ?? 0;
+  }
+
+  async failStaleRunningImportReports(cutoff: Date): Promise<number> {
+    const { rowCount } = await this.pool.query(
+      `UPDATE import_reports SET status = 'failed', finished_at = now(), snapshot_id = NULL,
+         failure_code = 'UPLOAD_INTERRUPTED'
+       WHERE source_kind = 'upload' AND status = 'running' AND started_at < $1`,
+      [cutoff]
+    );
+    return rowCount ?? 0;
+  }
+
+  async createUploadSession(input: CreateUploadSessionInput): Promise<UploadSessionRecord> {
+    return this.transaction(async (client) => {
+      const current = await client.query<{ id: string }>(
+        `SELECT id FROM repositories
+         WHERE workspace_id = $1 AND project_id = $2 AND archived_at IS NULL FOR UPDATE`,
+        [input.workspaceId, input.projectId]
+      );
+      if (current.rows[0]?.id !== input.expectedCurrentRepositoryId) {
+        throw new Error("UPLOAD_SESSION_INVALIDATED");
+      }
+      const repository = await client.query<{ id: string }>(
+        "SELECT id FROM repositories WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+        [input.workspaceId, input.repositoryId]
+      );
+      if (!repository.rows[0]) throw new Error("UPLOAD_SESSION_INVALIDATED");
+      const latest = await client.query<{ id: string }>(
+        `SELECT id FROM source_snapshots
+         WHERE workspace_id = $1 AND repository_id = $2
+           AND pending_upload_session_id IS NULL AND pending_import_report_id IS NULL
+         ORDER BY commit_timestamp DESC, created_at DESC, id DESC LIMIT 1 FOR UPDATE`,
+        [input.workspaceId, input.repositoryId]
+      );
+      if (!await this.lockUploadAuthorization(client, {
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        actorId: input.actorId,
+        sessionVersion: input.sessionVersion,
+        administratorRequired: input.isReplacement
+      })) throw new Error("UPLOAD_SESSION_INVALIDATED");
+      await client.query(
+        `INSERT INTO upload_sessions (
+           id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement,
+           expected_current_repository_id, expected_latest_snapshot_id, entry_count, expires_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (id) DO NOTHING`,
+        [input.id, input.workspaceId, input.projectId, input.repositoryId, input.actorId,
+          input.sessionVersion, input.isReplacement, input.expectedCurrentRepositoryId,
+          latest.rows[0]?.id ?? null, input.entryCount, input.expiresAt]
+      );
+      const { rows } = await client.query<UploadSessionRow>(
+        `SELECT id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement, expected_current_repository_id, expected_latest_snapshot_id, status,
+                entry_count, manifest_digest, snapshot_id, commit_response, expires_at, committed_at, cancelled_at,
+                created_at, updated_at
+         FROM upload_sessions WHERE workspace_id = $1 AND id = $2`,
+        [input.workspaceId, input.id]
+      );
+      const row = rows[0];
+      if (!row || row.project_id !== input.projectId || row.repository_id !== input.repositoryId
+        || row.actor_id !== input.actorId || row.session_version !== input.sessionVersion
+        || row.is_replacement !== input.isReplacement
+        || row.expected_current_repository_id !== input.expectedCurrentRepositoryId
+        || row.entry_count !== input.entryCount) {
+        throw new Error("Upload session identity conflicts with an existing record");
+      }
+      return uploadSessionRecord(row);
+    });
+  }
+
+  async getUploadSession(workspaceId: string, sessionId: string): Promise<UploadSessionRecord | null> {
+    const { rows } = await this.pool.query<UploadSessionRow>(
+      `SELECT id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement, expected_current_repository_id, expected_latest_snapshot_id, status,
+              entry_count, manifest_digest, snapshot_id, commit_response, expires_at, committed_at, cancelled_at,
+              created_at, updated_at
+       FROM upload_sessions WHERE workspace_id = $1 AND id = $2`,
+      [workspaceId, sessionId]
+    );
+    return rows[0] ? uploadSessionRecord(rows[0]) : null;
+  }
+
+  async repositoryHasActiveUploadSession(workspaceId: string, repositoryId: string): Promise<boolean> {
+    const { rows } = await this.pool.query<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM upload_sessions WHERE workspace_id = $1 AND repository_id = $2
+           AND status IN ('open', 'committing')
+       ) AS exists`,
+      [workspaceId, repositoryId]
+    );
+    return rows[0]?.exists ?? false;
+  }
+
+  async getUploadSessionStagingOwner(sessionId: string) {
+    const { rows } = await this.pool.query<{ workspace_id: string; status: UploadSessionRecord["status"] }>(
+      "SELECT workspace_id, status FROM upload_sessions WHERE id = $1",
+      [sessionId]
+    );
+    return rows[0] ? {
+      workspaceId: rows[0].workspace_id,
+      active: ["open", "committing"].includes(rows[0].status)
+    } : null;
+  }
+
+  async saveUploadManifestPage(
+    identity: UploadSessionMutationIdentity,
+    entries: UploadManifestEntryInput[]
+  ): Promise<UploadManifestEntryRecord[]> {
+    const { workspaceId, sessionId } = identity;
+    return this.transaction(async (client) => {
+      const locked = await client.query<{
+        status: string; project_id: string; actor_id: string; session_version: number; is_replacement: boolean;
+      }>(
+        `SELECT status, project_id, actor_id, session_version, is_replacement
+         FROM upload_sessions WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+        [workspaceId, sessionId]
+      );
+      const session = locked.rows[0];
+      if (!session || session.status !== "open" || session.project_id !== identity.projectId
+        || session.actor_id !== identity.actorId || session.session_version !== identity.sessionVersion) return [];
+      if (!await this.lockUploadAuthorization(client, {
+        workspaceId,
+        projectId: identity.projectId,
+        actorId: identity.actorId,
+        sessionVersion: identity.sessionVersion,
+        administratorRequired: session.is_replacement
+      })) return [];
+      await client.query(
+        `INSERT INTO upload_session_entries (
+           session_id, workspace_id, ordinal, path, kind, byte_size, content_hash, media_type,
+           metadata_byte_size, disposition, trust, ignore_reason
+         )
+         SELECT $1, $2, item.ordinal, item.path, item.kind, item.byte_size, item.content_hash,
+                item.media_type, item.metadata_byte_size, item.disposition, item.trust, item.ignore_reason
+         FROM jsonb_to_recordset($3::jsonb) AS item(
+           ordinal integer, path text, kind text, byte_size bigint, content_hash text,
+           media_type text, metadata_byte_size integer, disposition text, trust text, ignore_reason text
+         )
+         ON CONFLICT DO NOTHING`,
+        [sessionId, workspaceId, JSON.stringify(entries.map((entry) => ({
+          ordinal: entry.ordinal,
+          path: entry.path,
+          kind: entry.kind,
+          byte_size: entry.byteSize,
+          content_hash: entry.contentHash,
+          media_type: entry.mediaType,
+          metadata_byte_size: entry.metadataByteSize,
+          disposition: entry.disposition,
+          trust: entry.trust,
+          ignore_reason: entry.ignoreReason
+        })))]
+      );
+      const { rows } = await client.query<UploadManifestEntryRow>(
+        `SELECT session_id, workspace_id, ordinal, path, kind, byte_size::text AS byte_size,
+                content_hash, media_type, metadata_byte_size, disposition, trust, ignore_reason, uploaded_at,
+                created_at, updated_at
+         FROM upload_session_entries
+         WHERE workspace_id = $1 AND session_id = $2 AND ordinal = ANY($3::integer[])
+         ORDER BY ordinal`,
+        [workspaceId, sessionId, entries.map((entry) => entry.ordinal)]
+      );
+      const records = rows.map(uploadManifestEntryRecord);
+      const byOrdinal = new Map(records.map((item) => [item.ordinal, item]));
+      const byPath = new Map(records.map((item) => [item.path, item]));
+      for (const input of entries) {
+        const ordinalRecord = byOrdinal.get(input.ordinal);
+        const pathRecord = byPath.get(input.path);
+        if (!ordinalRecord || !pathRecord || ordinalRecord !== pathRecord
+          || ordinalRecord.path !== input.path || ordinalRecord.kind !== input.kind
+          || ordinalRecord.byteSize !== input.byteSize || ordinalRecord.contentHash !== input.contentHash
+          || ordinalRecord.mediaType !== input.mediaType
+          || ordinalRecord.metadataByteSize !== input.metadataByteSize) {
+          throw new Error("UPLOAD_MANIFEST_CONFLICT");
+        }
+      }
+      const usage = await client.query<{
+        accepted_count: string; accepted_bytes: string; manifest_metadata_bytes: string;
+      }>(
+        `SELECT count(*) FILTER (WHERE disposition = 'upload_required')::text AS accepted_count,
+                coalesce(sum(byte_size) FILTER (WHERE disposition = 'upload_required'), 0)::text AS accepted_bytes,
+                (coalesce(sum(metadata_byte_size), 0) + count(*) + 1)::text AS manifest_metadata_bytes
+         FROM upload_session_entries
+         WHERE workspace_id = $1 AND session_id = $2`,
+        [workspaceId, sessionId]
+      );
+      if (Number(usage.rows[0]?.accepted_count ?? 0) > MAX_UPLOAD_ACCEPTED_FILES) {
+        throw new Error("TOO_MANY_FILES");
+      }
+      if (Number(usage.rows[0]?.accepted_bytes ?? 0) > MAX_UPLOAD_ACCEPTED_BYTES) {
+        throw new Error("FOLDER_SIZE_LIMIT");
+      }
+      if (Number(usage.rows[0]?.manifest_metadata_bytes ?? 0) > MAX_UPLOAD_MANIFEST_METADATA_BYTES) {
+        throw new Error("MANIFEST_METADATA_LIMIT");
+      }
+      return records;
+    });
+  }
+
+  async listUploadManifestEntries(workspaceId: string, sessionId: string, pagination?: Pagination): Promise<UploadManifestEntryRecord[]> {
+    const limit = Math.min(500, Math.max(1, pagination?.limit ?? 500));
+    const offset = Math.max(0, pagination?.offset ?? 0);
+    const { rows } = await this.pool.query<UploadManifestEntryRow>(
+      `SELECT session_id, workspace_id, ordinal, path, kind, byte_size::text AS byte_size,
+              content_hash, media_type, metadata_byte_size, disposition, trust, ignore_reason, uploaded_at,
+              created_at, updated_at
+       FROM upload_session_entries
+       WHERE workspace_id = $1 AND session_id = $2 AND ordinal >= $4 AND ordinal < $4 + $3
+       ORDER BY ordinal`,
+      [workspaceId, sessionId, limit, offset]
+    );
+    return rows.map(uploadManifestEntryRecord);
+  }
+
+  async getUploadManifestEntry(workspaceId: string, sessionId: string, ordinal: number) {
+    const { rows } = await this.pool.query<UploadManifestEntryRow>(
+      `SELECT session_id, workspace_id, ordinal, path, kind, byte_size::text AS byte_size,
+              content_hash, media_type, metadata_byte_size, disposition, trust, ignore_reason, uploaded_at,
+              created_at, updated_at
+       FROM upload_session_entries
+       WHERE workspace_id = $1 AND session_id = $2 AND ordinal = $3`,
+      [workspaceId, sessionId, ordinal]
+    );
+    return rows[0] ? uploadManifestEntryRecord(rows[0]) : null;
+  }
+
+  async verifyUploadManifestEntry(
+    identity: UploadSessionMutationIdentity,
+    ordinal: number,
+    input: { disposition: "upload_required" | "ignored"; trust: "server_verified"; ignoreReason: string | null }
+  ): Promise<UploadManifestEntryRecord | null> {
+    const { workspaceId, sessionId } = identity;
+    return this.transaction(async (client) => {
+      const locked = await client.query<{
+        status: string; project_id: string; actor_id: string; session_version: number; is_replacement: boolean;
+      }>(
+        `SELECT status, project_id, actor_id, session_version, is_replacement
+         FROM upload_sessions WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+        [workspaceId, sessionId]
+      );
+      const session = locked.rows[0];
+      if (!session || session.status !== "open" || session.project_id !== identity.projectId
+        || session.actor_id !== identity.actorId || session.session_version !== identity.sessionVersion) return null;
+      if (!await this.lockUploadAuthorization(client, {
+        workspaceId,
+        projectId: identity.projectId,
+        actorId: identity.actorId,
+        sessionVersion: identity.sessionVersion,
+        administratorRequired: session.is_replacement
+      })) return null;
+      const { rows } = await client.query<UploadManifestEntryRow>(
+        `UPDATE upload_session_entries entry
+         SET disposition = $4, trust = $5, ignore_reason = $6, uploaded_at = now(), updated_at = now()
+         WHERE entry.workspace_id = $1 AND entry.session_id = $2 AND entry.ordinal = $3
+           AND entry.kind = 'source' AND entry.disposition <> 'metadata_only'
+         RETURNING session_id, workspace_id, ordinal, path, kind, byte_size::text AS byte_size,
+                   content_hash, media_type, metadata_byte_size, disposition, trust, ignore_reason, uploaded_at,
+                   created_at, updated_at`,
+        [workspaceId, sessionId, ordinal, input.disposition, input.trust, input.ignoreReason]
+      );
+      return rows[0] ? uploadManifestEntryRecord(rows[0]) : null;
+    });
+  }
+
+  async acquireUploadSessionLock(workspaceId: string, sessionId: string): Promise<() => Promise<void>> {
+    const releasePermit = await this.acquireUploadMutationPermit();
+    let client: PoolClient;
+    try {
+      client = await this.pool.connect();
+    } catch (error) {
+      releasePermit();
+      throw error;
+    }
+    try {
+      await client.query("SELECT pg_advisory_lock(hashtext($1), hashtext($2))", [workspaceId, sessionId]);
+    } catch (error) {
+      client.release();
+      releasePermit();
+      throw error;
+    }
+    let released = false;
+    return async () => {
+      if (released) return;
+      released = true;
+      try {
+        await client.query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))", [workspaceId, sessionId]);
+      } finally {
+        client.release();
+        releasePermit();
+      }
+    };
+  }
+
+  async acquireUploadMutationLock(
+    workspaceId: string,
+    sessionId: string,
+    actorId: string,
+    idempotencyKey: string
+  ) {
+    const releasePermit = await this.acquireUploadMutationPermit();
+    let client: PoolClient;
+    try {
+      client = await this.pool.connect();
+    } catch (error) {
+      releasePermit();
+      throw error;
+    }
+    const identity = `${actorId}:${idempotencyKey}`;
+    try {
+      await client.query("SELECT pg_advisory_lock(hashtext($1), hashtext($2))", [workspaceId, identity]);
+      await client.query("SELECT pg_advisory_lock(hashtext($1), hashtext($2))", [workspaceId, sessionId]);
+    } catch (error) {
+      await client.query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))", [workspaceId, identity]).catch(() => undefined);
+      client.release();
+      releasePermit();
+      throw error;
+    }
+    let released = false;
+    return async () => {
+      if (released) return;
+      released = true;
+      try {
+        await client.query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))", [workspaceId, sessionId]);
+        await client.query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))", [workspaceId, identity]);
+      } finally {
+        client.release();
+        releasePermit();
+      }
+    };
+  }
+
+  async markUploadSessionCommitting(workspaceId: string, sessionId: string): Promise<UploadSessionRecord | null> {
+    return this.transaction(async (client) => {
+      await client.query(
+        `UPDATE upload_sessions SET status = 'committing', updated_at = now()
+         WHERE workspace_id = $1 AND id = $2 AND status = 'open'`,
+        [workspaceId, sessionId]
+      );
+      const { rows } = await client.query<UploadSessionRow>(
+        `SELECT id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement, expected_current_repository_id, expected_latest_snapshot_id, status,
+                entry_count, manifest_digest, snapshot_id, commit_response, expires_at, committed_at, cancelled_at,
+                created_at, updated_at
+         FROM upload_sessions WHERE workspace_id = $1 AND id = $2`,
+        [workspaceId, sessionId]
+      );
+      return rows[0] ? uploadSessionRecord(rows[0]) : null;
+    });
+  }
+
+  async completeUploadSessionCommit(input: CompleteUploadSessionInput): Promise<UploadSessionRecord | null> {
+    return this.transaction(async (client) => {
+      const selected = await client.query<UploadSessionRow & { unexpired: boolean }>(
+        `SELECT id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement, expected_current_repository_id, expected_latest_snapshot_id, status,
+                entry_count, manifest_digest, snapshot_id, commit_response, expires_at, committed_at, cancelled_at,
+                created_at, updated_at, expires_at > clock_timestamp() AS unexpired
+         FROM upload_sessions
+         WHERE workspace_id = $1 AND id = $2 AND project_id = $3 AND repository_id = $4
+           AND actor_id = $5
+         FOR UPDATE`,
+        [input.workspaceId, input.sessionId, input.projectId, input.repositoryId, input.actorId]
+      );
+      const session = selected.rows[0];
+      if (!session || !["committing", "committed"].includes(session.status)) return null;
+      if (session.status === "committed") return uploadSessionRecord(session);
+      if (!session.unexpired) return null;
+
+      const current = await client.query<{ id: string }>(
+        `SELECT id FROM repositories
+         WHERE workspace_id = $1 AND project_id = $2 AND archived_at IS NULL
+         FOR UPDATE`,
+        [input.workspaceId, input.projectId]
+      );
+      if (current.rows[0]?.id !== session.expected_current_repository_id) return null;
+      const candidate = await client.query<RepositoryRow>(
+        `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
+                r.default_branch, r.archived_at, false AS has_credential
+         FROM repositories r
+         WHERE r.workspace_id = $1 AND r.project_id = $2 AND r.id = $3
+         FOR UPDATE`,
+        [input.workspaceId, input.projectId, input.repositoryId]
+      );
+      if (!candidate.rows[0]) return null;
+      if (!await this.lockUploadAuthorization(client, {
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        actorId: input.actorId,
+        sessionVersion: session.session_version,
+        administratorRequired: session.is_replacement
+      })) return null;
+      const snapshot = await client.query<{
+        id: string; commit_sha: string; pending_upload_session_id: string | null;
+      }>(
+        `SELECT id, commit_sha, pending_upload_session_id FROM source_snapshots
+         WHERE workspace_id = $1 AND repository_id = $2 AND id = $3
+           AND (pending_upload_session_id IS NULL OR pending_upload_session_id = $4)
+           AND pending_import_report_id IS NULL
+         FOR UPDATE`,
+        [input.workspaceId, input.repositoryId, input.snapshotId, input.sessionId]
+      );
+      if (!snapshot.rows[0]) throw new Error("Upload session snapshot activation failed");
+      const latest = await client.query<{ id: string; commit_sha: string }>(
+        `SELECT id, commit_sha FROM source_snapshots
+         WHERE workspace_id = $1 AND repository_id = $2
+           AND pending_upload_session_id IS NULL AND pending_import_report_id IS NULL
+         ORDER BY commit_timestamp DESC, created_at DESC, id DESC LIMIT 1 FOR UPDATE`,
+        [input.workspaceId, input.repositoryId]
+      );
+      if ((latest.rows[0]?.id ?? null) !== session.expected_latest_snapshot_id
+        && latest.rows[0]?.commit_sha !== snapshot.rows[0].commit_sha) return null;
+      const duplicate = latest.rows[0] && latest.rows[0].id !== snapshot.rows[0].id
+        && latest.rows[0].commit_sha === snapshot.rows[0].commit_sha
+        ? latest.rows[0]
+        : null;
+      const effectiveSnapshotId = duplicate?.id ?? snapshot.rows[0].id;
+      const responseBody = duplicate
+        ? { ...input.responseBody, snapshotId: duplicate.id, unchanged: true }
+        : input.responseBody;
+      if (session.is_replacement) {
+        if (!candidate.rows[0].archived_at) return null;
+        await client.query(
+          `UPDATE repositories SET archived_at = now(), updated_at = now()
+           WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND archived_at IS NULL`,
+          [input.workspaceId, input.projectId, current.rows[0].id]
+        );
+        await client.query(
+          `UPDATE repositories SET archived_at = NULL, updated_at = now()
+           WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND archived_at IS NOT NULL`,
+          [input.workspaceId, input.projectId, input.repositoryId]
+        );
+        await this.insertAudit(client, {
+          workspaceId: input.workspaceId,
+          actorId: input.actorId,
+          action: "repository.switched",
+          resourceType: "repository",
+          resourceId: input.repositoryId,
+          metadata: {
+            oldRepositoryId: current.rows[0].id,
+            newRepositoryId: input.repositoryId,
+            projectId: input.projectId
+          }
+        });
+      } else if (candidate.rows[0].id !== current.rows[0].id || candidate.rows[0].archived_at) {
+        return null;
+      }
+
+      const report = await client.query(
+        `UPDATE import_reports
+         SET status = $3, finished_at = now(), collected_file_count = $4,
+             collected_text_bytes = $5, ignored = $6::jsonb, snapshot_id = $7, failure_code = $8
+         WHERE workspace_id = $1 AND id = $2 AND upload_session_id = $9 AND status = 'running'
+           AND project_id = $10 AND repository_id = $11 AND actor_id = $12`,
+        [input.workspaceId, input.reportId, input.report.status, input.report.collectedFileCount,
+          input.report.collectedTextBytes, JSON.stringify(input.report.ignored), effectiveSnapshotId,
+          input.report.failureCode, input.sessionId, input.projectId, input.repositoryId, input.actorId]
+      );
+      if (report.rowCount !== 1) throw new Error("Upload session import report completion failed");
+
+      if (duplicate) {
+        await client.query(
+          `DELETE FROM source_snapshots
+           WHERE workspace_id = $1 AND repository_id = $2 AND id = $3
+             AND pending_upload_session_id = $4`,
+          [input.workspaceId, input.repositoryId, input.snapshotId, input.sessionId]
+        );
+      } else {
+        await client.query(
+          `UPDATE source_snapshots SET pending_upload_session_id = NULL
+           WHERE workspace_id = $1 AND repository_id = $2 AND id = $3
+             AND pending_upload_session_id = $4`,
+          [input.workspaceId, input.repositoryId, input.snapshotId, input.sessionId]
+        );
+      }
+      await this.insertAudit(client, {
+        workspaceId: input.workspaceId, actorId: input.actorId,
+        action: "repository.sync_succeeded", resourceType: "repository", resourceId: input.repositoryId,
+        metadata: {
+          commitSha: snapshot.rows[0].commit_sha,
+          unchanged: Boolean(duplicate) || snapshot.rows[0].pending_upload_session_id === null
+        }
+      });
+
+      const { rows } = await client.query<UploadSessionRow>(
+        `UPDATE upload_sessions
+         SET status = 'committed', manifest_digest = $3, snapshot_id = $4, commit_response = $5::jsonb,
+             committed_at = now(), updated_at = now()
+         WHERE workspace_id = $1 AND id = $2 AND status IN ('open', 'committing')
+         RETURNING id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement, expected_current_repository_id, expected_latest_snapshot_id, status,
+                   entry_count, manifest_digest, snapshot_id, commit_response, expires_at, committed_at,
+                   cancelled_at, created_at, updated_at`,
+        [input.workspaceId, input.sessionId, input.manifestDigest, effectiveSnapshotId,
+          JSON.stringify(responseBody)]
+      );
+      if (!rows[0]) {
+        const completed = await client.query<UploadSessionRow>(
+          `SELECT id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement, expected_current_repository_id, expected_latest_snapshot_id, status,
+                  entry_count, manifest_digest, snapshot_id, commit_response, expires_at, committed_at, cancelled_at,
+                  created_at, updated_at
+           FROM upload_sessions WHERE workspace_id = $1 AND id = $2`,
+          [input.workspaceId, input.sessionId]
+        );
+        return completed.rows[0] ? uploadSessionRecord(completed.rows[0]) : null;
+      }
+      return uploadSessionRecord(rows[0]);
+    });
+  }
+
+  async cancelUploadSession(input: CancelUploadSessionInput) {
+    return this.transaction(async (client) => {
+      const selected = await client.query<UploadSessionRow>(
+        `SELECT id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement,
+                expected_current_repository_id, expected_latest_snapshot_id, status, entry_count, manifest_digest, snapshot_id,
+                commit_response, expires_at, committed_at, cancelled_at, created_at, updated_at
+         FROM upload_sessions
+         WHERE workspace_id = $1 AND id = $2 AND project_id = $3 AND actor_id = $4
+         FOR UPDATE`,
+        [input.workspaceId, input.sessionId, input.projectId, input.actorId]
+      );
+      const session = selected.rows[0];
+      if (!session || session.status === "committed") return session ? {
+        session: uploadSessionRecord(session), storagePaths: []
+      } : null;
+      if (!await this.lockUploadAuthorization(client, {
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        actorId: input.actorId,
+        sessionVersion: input.sessionVersion,
+        administratorRequired: session.is_replacement
+      })) return null;
+      const snapshots = await client.query<{ storage_path: string }>(
+        `SELECT storage_path FROM source_snapshots
+         WHERE workspace_id = $1 AND pending_upload_session_id = $2 FOR UPDATE`,
+        [input.workspaceId, input.sessionId]
+      );
+      await client.query(
+        `UPDATE import_reports SET status = 'cancelled', finished_at = now(), failure_code = 'UPLOAD_CANCELLED'
+         WHERE workspace_id = $1 AND upload_session_id = $2 AND status = 'running'`,
+        [input.workspaceId, input.sessionId]
+      );
+      await client.query(
+        "DELETE FROM source_snapshots WHERE workspace_id = $1 AND pending_upload_session_id = $2",
+        [input.workspaceId, input.sessionId]
+      );
+      await client.query(
+        `UPDATE upload_sessions
+         SET status = 'cancelled', cancelled_at = now(), updated_at = now()
+         WHERE workspace_id = $1 AND id = $2 AND status IN ('open', 'committing')`,
+        [input.workspaceId, input.sessionId]
+      );
+      const { rows } = await client.query<UploadSessionRow>(
+        `SELECT id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement, expected_current_repository_id, expected_latest_snapshot_id, status,
+                entry_count, manifest_digest, snapshot_id, commit_response, expires_at, committed_at, cancelled_at,
+                created_at, updated_at
+         FROM upload_sessions WHERE workspace_id = $1 AND id = $2`,
+        [input.workspaceId, input.sessionId]
+      );
+      return rows[0] ? {
+        session: uploadSessionRecord(rows[0]),
+        storagePaths: snapshots.rows.map((row) => row.storage_path)
+      } : null;
+    });
+  }
+
+  async uploadSnapshotExists(workspaceId: string, snapshotId: string, sessionId: string): Promise<boolean> {
+    const { rows } = await this.pool.query<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM source_snapshots WHERE workspace_id = $1 AND id = $2
+           AND (pending_upload_session_id IS NULL OR pending_upload_session_id = $3)
+           AND pending_import_report_id IS NULL
+       ) AS exists`,
+      [workspaceId, snapshotId, sessionId]
+    );
+    return rows[0]?.exists ?? false;
+  }
+
+  async listExpiredUploadSessions(now: Date) {
+    const { rows } = await this.pool.query<{ id: string; workspace_id: string }>(
+      `SELECT id, workspace_id FROM upload_sessions
+       WHERE status IN ('open', 'committing', 'committed', 'cancelled') AND expires_at <= $1
+       ORDER BY expires_at, id`,
+      [now]
+    );
+    return rows.map((row) => ({ id: row.id, workspaceId: row.workspace_id }));
+  }
+
+  async deleteExpiredUploadSession(
+    workspaceId: string,
+    sessionId: string,
+    now: Date
+  ): Promise<string[] | null> {
+    return this.transaction(async (client) => {
+      const session = await client.query<{ repository_id: string }>(
+        `SELECT repository_id FROM upload_sessions
+         WHERE workspace_id = $1 AND id = $2 AND status IN ('open', 'committing', 'committed', 'cancelled')
+           AND expires_at <= $3 FOR UPDATE`,
+        [workspaceId, sessionId, now]
+      );
+      if (!session.rows[0]) return null;
+      const snapshots = await client.query<{ storage_path: string }>(
+        `SELECT storage_path FROM source_snapshots
+         WHERE workspace_id = $1 AND pending_upload_session_id = $2`,
+        [workspaceId, sessionId]
+      );
+      await client.query(
+        `UPDATE import_reports SET status = 'failed', finished_at = $3,
+             failure_code = 'UPLOAD_SESSION_EXPIRED'
+         WHERE workspace_id = $1 AND upload_session_id = $2 AND status = 'running'`,
+        [workspaceId, sessionId, now]
+      );
+      await client.query(
+        "UPDATE import_reports SET upload_session_id = NULL WHERE workspace_id = $1 AND upload_session_id = $2",
+        [workspaceId, sessionId]
+      );
+      await client.query("DELETE FROM upload_sessions WHERE workspace_id = $1 AND id = $2", [workspaceId, sessionId]);
+      await client.query(
+        `DELETE FROM repositories r
+         WHERE r.workspace_id = $1 AND r.id = $2 AND r.archived_at IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM source_snapshots s WHERE s.repository_id = r.id)
+           AND NOT EXISTS (SELECT 1 FROM releases release WHERE release.repository_id = r.id)
+           AND NOT EXISTS (
+             SELECT 1 FROM upload_sessions other
+             WHERE other.repository_id = r.id AND other.status IN ('open', 'committing')
+           )`,
+        [workspaceId, session.rows[0].repository_id]
+      );
+      return snapshots.rows.map((row) => row.storage_path);
+    });
+  }
+
+  async findUploadIdempotencyKey(
+    workspaceId: string,
+    actorId: string,
+    idempotencyKey: string,
+    now: Date
+  ): Promise<UploadIdempotencyRecord | null> {
+    return this.transaction(async (client) => {
+      await client.query(
+        `DELETE FROM upload_idempotency_keys
+         WHERE workspace_id = $1 AND actor_id = $2 AND idempotency_key = $3 AND expires_at <= $4`,
+        [workspaceId, actorId, idempotencyKey, now]
+      );
+      const { rows } = await client.query<UploadIdempotencyRow>(
+        `SELECT workspace_id, actor_id, idempotency_key, operation, request_digest, session_id,
+                response_status, response_body, created_at, expires_at
+         FROM upload_idempotency_keys
+         WHERE workspace_id = $1 AND actor_id = $2 AND idempotency_key = $3 AND expires_at > $4`,
+        [workspaceId, actorId, idempotencyKey, now]
+      );
+      return rows[0] ? uploadIdempotencyRecord(rows[0]) : null;
+    });
+  }
+
+  async saveUploadIdempotencyKey(
+    input: Omit<UploadIdempotencyRecord, "createdAt">
+  ): Promise<UploadIdempotencyRecord> {
+    return this.transaction(async (client) => {
+      await client.query(
+        `INSERT INTO upload_idempotency_keys (
+           workspace_id, actor_id, idempotency_key, operation, request_digest, session_id,
+           response_status, response_body, expires_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
+         ON CONFLICT (workspace_id, actor_id, idempotency_key) DO NOTHING`,
+        [input.workspaceId, input.actorId, input.idempotencyKey, input.operation,
+          input.requestDigest, input.sessionId, input.responseStatus,
+          JSON.stringify(input.responseBody), input.expiresAt]
+      );
+      const { rows } = await client.query<UploadIdempotencyRow>(
+        `SELECT workspace_id, actor_id, idempotency_key, operation, request_digest, session_id,
+                response_status, response_body, created_at, expires_at
+         FROM upload_idempotency_keys
+         WHERE workspace_id = $1 AND actor_id = $2 AND idempotency_key = $3`,
+        [input.workspaceId, input.actorId, input.idempotencyKey]
+      );
+      if (!rows[0]) throw new Error("Upload idempotency result was not persisted");
+      return uploadIdempotencyRecord(rows[0]);
+    });
+  }
+
+  async deleteExpiredUploadIdempotencyKeys(now: Date): Promise<number> {
+    const result = await this.pool.query("DELETE FROM upload_idempotency_keys WHERE expires_at <= $1", [now]);
+    return result.rowCount ?? 0;
   }
 
   async createMcpToken(
@@ -3241,6 +4224,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
 
   async switchRepositoryWithAudit(
     workspaceId: string,
+    projectId: string,
     input: RepositoryConnectionInput,
     actorId: string
   ): Promise<RepositoryRecord | null> {
@@ -3253,14 +4237,14 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
                   WHERE c.workspace_id = r.workspace_id AND c.repository_id = r.id
                 ) AS has_credential
          FROM repositories r
-         WHERE r.workspace_id = $1 AND r.archived_at IS NULL
+         WHERE r.workspace_id = $1 AND r.project_id = $2 AND r.archived_at IS NULL
          FOR UPDATE`,
-        [workspaceId]
+        [workspaceId, projectId]
       );
       const currentRow = selected.rows[0];
       if (!currentRow) return null;
       const current = repositoryRecord(currentRow);
-      const replacement = await this.insertRepository(client, workspaceId, input, new Date());
+      const replacement = await this.insertRepository(client, workspaceId, input, new Date(), projectId);
       if (!replacement) return null;
       await client.query(
         `UPDATE repositories SET archived_at = now(), updated_at = now()
@@ -3286,21 +4270,44 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
 
   async prepareUploadReplacementWithAudit(
     workspaceId: string,
+    projectId: string,
     name: string,
     actorId: string
   ): Promise<RepositoryRecord | null> {
     return this.transaction(async (client) => {
       const current = await client.query<{ id: string }>(
         `SELECT id FROM repositories
-         WHERE workspace_id = $1 AND archived_at IS NULL FOR UPDATE`,
-        [workspaceId]
+         WHERE workspace_id = $1 AND project_id = $2 AND archived_at IS NULL FOR UPDATE`,
+        [workspaceId, projectId]
       );
       if (!current.rows[0]) return null;
+      const reusable = await client.query<RepositoryRow>(
+        `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
+                r.default_branch, r.archived_at, false AS has_credential
+         FROM repositories r
+         WHERE r.workspace_id = $1 AND r.project_id = $2 AND r.kind = 'upload'
+           AND r.archived_at IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM releases release WHERE release.repository_id = r.id)
+           AND NOT EXISTS (SELECT 1 FROM build_jobs build WHERE build.repository_id = r.id)
+           AND (
+             EXISTS (SELECT 1 FROM upload_sessions session WHERE session.repository_id = r.id
+               AND session.actor_id = $3 AND session.status IN ('open', 'committing'))
+             OR (
+               NOT EXISTS (SELECT 1 FROM upload_sessions session WHERE session.repository_id = r.id
+                 AND session.status IN ('open', 'committing'))
+               AND NOT EXISTS (SELECT 1 FROM source_snapshots snapshot WHERE snapshot.repository_id = r.id)
+             )
+           )
+         ORDER BY r.archived_at DESC, r.id DESC LIMIT 1 FOR UPDATE`,
+        [workspaceId, projectId, actorId]
+      );
+      if (reusable.rows[0]) return repositoryRecord(reusable.rows[0]);
       const candidate = await this.insertRepository(
         client,
         workspaceId,
         { kind: "upload", name },
-        new Date()
+        new Date(),
+        projectId
       );
       if (!candidate) return null;
       await this.insertAudit(client, {
@@ -3317,6 +4324,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
 
   async activateUploadReplacementWithAudit(
     workspaceId: string,
+    projectId: string,
     repositoryId: string,
     actorId: string
   ): Promise<RepositoryRecord | null> {
@@ -3325,16 +4333,16 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
                 r.default_branch, r.archived_at, false AS has_credential
          FROM repositories r
-         WHERE r.workspace_id = $1 AND r.archived_at IS NULL FOR UPDATE`,
-        [workspaceId]
+         WHERE r.workspace_id = $1 AND r.project_id = $2 AND r.archived_at IS NULL FOR UPDATE`,
+        [workspaceId, projectId]
       );
       const candidate = await client.query<RepositoryRow>(
         `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
                 r.default_branch, r.archived_at, false AS has_credential
          FROM repositories r
-         WHERE r.workspace_id = $1 AND r.id = $2 AND r.kind = 'upload'
+         WHERE r.workspace_id = $1 AND r.project_id = $2 AND r.id = $3 AND r.kind = 'upload'
            AND r.archived_at IS NOT NULL FOR UPDATE`,
-        [workspaceId, repositoryId]
+        [workspaceId, projectId, repositoryId]
       );
       if (!current.rows[0] || !candidate.rows[0]) return null;
       await client.query(
@@ -3364,35 +4372,99 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   }
 
   async discardPendingUploadReplacement(workspaceId: string, repositoryId: string): Promise<void> {
-    await this.pool.query(
-      `DELETE FROM repositories r
-       WHERE r.workspace_id = $1 AND r.id = $2 AND r.kind = 'upload'
-         AND r.archived_at IS NOT NULL
-         AND NOT EXISTS (SELECT 1 FROM source_snapshots s WHERE s.repository_id = r.id)`,
-      [workspaceId, repositoryId]
-    );
+    await this.transaction(async (client) => {
+      const candidate = await client.query<{ id: string }>(
+        `SELECT id FROM repositories
+         WHERE workspace_id = $1 AND id = $2 AND kind = 'upload' AND archived_at IS NOT NULL
+         FOR UPDATE`,
+        [workspaceId, repositoryId]
+      );
+      if (!candidate.rows[0]) return;
+      await client.query(
+        `DELETE FROM repositories r
+         WHERE r.workspace_id = $1 AND r.id = $2
+           AND NOT EXISTS (SELECT 1 FROM source_snapshots s WHERE s.repository_id = r.id)
+           AND NOT EXISTS (
+             SELECT 1 FROM upload_sessions session WHERE session.repository_id = r.id
+               AND session.status IN ('open', 'committing')
+           )`,
+        [workspaceId, repositoryId]
+      );
+    });
   }
 
   async findSnapshotByCommit(
     workspaceId: string,
     repositoryId: string,
-    commitSha: string
+    commitSha: string,
+    pendingUploadSessionId?: string,
+    pendingImportReportId?: string
   ): Promise<SourceSnapshotRecord | null> {
     const { rows } = await this.pool.query<SnapshotRow>(
       `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
               commit_timestamp, storage_path
        FROM source_snapshots
-       WHERE workspace_id = $1 AND repository_id = $2 AND commit_sha = $3`,
-      [workspaceId, repositoryId, commitSha]
+       WHERE workspace_id = $1 AND repository_id = $2 AND commit_sha = $3
+         AND (pending_upload_session_id IS NULL OR pending_upload_session_id = $4)
+         AND (pending_import_report_id IS NULL OR pending_import_report_id = $5)`,
+      [workspaceId, repositoryId, commitSha, pendingUploadSessionId ?? null, pendingImportReportId ?? null]
     );
     return rows[0] ? snapshotRecord(rows[0]) : null;
+  }
+
+  async discardPendingFolderImport(
+    workspaceId: string,
+    reportId: string,
+    snapshotId: string
+  ): Promise<string | null> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<{ storage_path: string }>(
+        `DELETE FROM source_snapshots
+         WHERE workspace_id = $1 AND id = $2 AND pending_import_report_id = $3
+         RETURNING storage_path`,
+        [workspaceId, snapshotId, reportId]
+      );
+      return rows[0]?.storage_path ?? null;
+    });
+  }
+
+  async discardStalePendingFolderImport(
+    workspaceId: string,
+    reportId: string,
+    snapshotId: string,
+    cutoff: Date
+  ): Promise<boolean> {
+    return this.transaction(async (client) => {
+      const report = await client.query<{ id: string }>(
+        `SELECT id FROM import_reports
+         WHERE workspace_id = $1 AND id = $2
+           AND (status IN ('failed', 'cancelled') OR (status = 'running' AND started_at <= $3))
+         FOR UPDATE`,
+        [workspaceId, reportId, cutoff]
+      );
+      if (!report.rows[0]) return false;
+      await client.query(
+        `DELETE FROM source_snapshots
+         WHERE workspace_id = $1 AND id = $2 AND pending_import_report_id = $3
+        `,
+        [workspaceId, snapshotId, reportId]
+      );
+      await client.query(
+        `UPDATE import_reports SET status = 'failed', finished_at = now(), snapshot_id = NULL,
+           failure_code = 'UPLOAD_INTERRUPTED'
+         WHERE workspace_id = $1 AND id = $2 AND status = 'running'`,
+        [workspaceId, reportId]
+      );
+      return true;
+    });
   }
 
   async findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null> {
     const { rows } = await this.pool.query<SnapshotRow>(
       `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
               commit_timestamp, storage_path
-       FROM source_snapshots WHERE workspace_id = $1 AND id = $2`,
+       FROM source_snapshots WHERE workspace_id = $1 AND id = $2
+         AND pending_upload_session_id IS NULL AND pending_import_report_id IS NULL`,
       [workspaceId, snapshotId]
     );
     return rows[0] ? snapshotRecord(rows[0]) : null;
@@ -3419,6 +4491,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
               commit_timestamp, storage_path
        FROM source_snapshots WHERE workspace_id = $1 AND repository_id = $2
+         AND pending_upload_session_id IS NULL AND pending_import_report_id IS NULL
        ORDER BY commit_timestamp DESC, created_at DESC, id DESC LIMIT 1`,
       [workspaceId, repositoryId]
     );
@@ -3430,9 +4503,12 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       `WITH current_snapshot AS (
          SELECT id, repository_id, commit_timestamp, created_at FROM source_snapshots
          WHERE workspace_id = $1 AND repository_id = $2 AND id = $3
+           AND pending_upload_session_id IS NULL AND pending_import_report_id IS NULL
        ), previous_snapshot AS (
          SELECT s.id FROM source_snapshots s JOIN current_snapshot c ON c.repository_id = s.repository_id
-         WHERE s.workspace_id = $1 AND (s.commit_timestamp, s.created_at, s.id) < (c.commit_timestamp, c.created_at, c.id)
+         WHERE s.workspace_id = $1 AND s.pending_upload_session_id IS NULL
+           AND s.pending_import_report_id IS NULL
+           AND (s.commit_timestamp, s.created_at, s.id) < (c.commit_timestamp, c.created_at, c.id)
          ORDER BY s.commit_timestamp DESC, s.created_at DESC, s.id DESC LIMIT 1
        ), current_files AS (
          SELECT path, content_hash FROM source_files
@@ -3482,7 +4558,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   private async insertSnapshot(
     client: Queryable,
     { snapshot, files }: CreateSnapshotInput,
-    lease?: GitSynchronizationLease
+    lease?: GitSynchronizationLease,
+    pendingUploadSessionId?: string,
+    pendingImportReportId?: string
   ): Promise<{ snapshot: SourceSnapshotRecord; inserted: boolean } | null> {
       const inserted = await client.query<SnapshotRow>(
         lease
@@ -3494,16 +4572,22 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
                FOR UPDATE
              )
              INSERT INTO source_snapshots
-             (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path)
-             SELECT $3, $4, $1, $5, $6, $7, $8, $9
+             (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path,
+              pending_upload_session_id, pending_import_report_id)
+             SELECT $3, $4, $1, $5, $6, $7, $8, $9, NULL, NULL
              FROM held_lease
-             ON CONFLICT (repository_id, commit_sha) DO NOTHING
+             ON CONFLICT (repository_id, commit_sha)
+               WHERE pending_upload_session_id IS NULL AND pending_import_report_id IS NULL
+             DO NOTHING
              RETURNING id, workspace_id, repository_id, commit_sha, ref, remote_url,
                        commit_timestamp, storage_path`
           : `INSERT INTO source_snapshots
-         (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (repository_id, commit_sha) DO NOTHING
+         (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path,
+          pending_upload_session_id, pending_import_report_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (repository_id, commit_sha)
+           WHERE pending_upload_session_id IS NULL AND pending_import_report_id IS NULL
+         DO NOTHING
          RETURNING id, workspace_id, repository_id, commit_sha, ref, remote_url,
                    commit_timestamp, storage_path`,
         lease
@@ -3526,7 +4610,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
               snapshot.ref,
               snapshot.remoteUrl,
               snapshot.commitTimestamp,
-              snapshot.storagePath
+              snapshot.storagePath,
+              pendingUploadSessionId ?? null,
+              pendingImportReportId ?? null
             ]
       );
       const insertedSnapshot = inserted.rows[0];
@@ -3535,8 +4621,11 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
                   commit_timestamp, storage_path
            FROM source_snapshots
-           WHERE workspace_id = $1 AND repository_id = $2 AND commit_sha = $3`,
-          [snapshot.workspaceId, snapshot.repositoryId, snapshot.commitSha]
+           WHERE workspace_id = $1 AND repository_id = $2 AND commit_sha = $3
+             AND (pending_upload_session_id IS NULL OR pending_upload_session_id = $4)
+             AND (pending_import_report_id IS NULL OR pending_import_report_id = $5)`,
+          [snapshot.workspaceId, snapshot.repositoryId, snapshot.commitSha,
+            pendingUploadSessionId ?? null, pendingImportReportId ?? null]
         );
         if (!existing.rows[0]) {
           if (lease) return null;
@@ -3593,22 +4682,28 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
 
   async createSnapshotWithAudit(
     input: CreateSnapshotInput,
-    actorId: string
+    actorId: string,
+    pendingUploadSessionId?: string,
+    pendingImportReportId?: string
   ): Promise<SourceSnapshotRecord> {
     return this.transaction(async (client) => {
-      const persisted = await this.insertSnapshot(client, input);
+      const persisted = await this.insertSnapshot(
+        client, input, undefined, pendingUploadSessionId, pendingImportReportId
+      );
       if (!persisted) throw new Error("Snapshot was not persisted");
-      await this.insertAudit(client, {
-        workspaceId: input.snapshot.workspaceId,
-        actorId,
-        action: "repository.sync_succeeded",
-        resourceType: "repository",
-        resourceId: input.snapshot.repositoryId,
-        metadata: {
-          commitSha: persisted.snapshot.commitSha,
-          unchanged: !persisted.inserted
-        }
-      });
+      if (!pendingUploadSessionId && !pendingImportReportId) {
+        await this.insertAudit(client, {
+          workspaceId: input.snapshot.workspaceId,
+          actorId,
+          action: "repository.sync_succeeded",
+          resourceType: "repository",
+          resourceId: input.snapshot.repositoryId,
+          metadata: {
+            commitSha: persisted.snapshot.commitSha,
+            unchanged: !persisted.inserted
+          }
+        });
+      }
       return persisted.snapshot;
     });
   }

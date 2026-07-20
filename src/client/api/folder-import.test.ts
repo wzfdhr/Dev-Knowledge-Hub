@@ -35,13 +35,13 @@ describe("folder import scanning", () => {
     ]));
 
     expect(report.acceptedFiles.map((item) => item.path)).toEqual(["src/main.ts"]);
+    expect(report.assetFiles.map((item) => item.path)).toEqual(["cover.png"]);
     expect(report.ignored).toEqual({
-      total: 4,
+      total: 3,
       reasons: {
         excluded_directory: 1,
         generated: 1,
-        sensitive_file: 1,
-        unsupported_extension: 1
+        sensitive_file: 1
       }
     });
   });
@@ -70,10 +70,11 @@ describe("folder import scanning", () => {
     const report = await scanSelectedFiles(files);
 
     expect(report.acceptedFiles.map((item) => item.path)).toEqual(["src/main.ts"]);
-    expect(report.ignored.reasons).toEqual({ unsupported_extension: 1 });
+    expect(report.assetFiles.map((item) => item.path)).toEqual(["logo.png"]);
+    expect(report.ignored.reasons).toEqual({});
   });
 
-  test("collects frontend text but rejects binary assets before reading their contents", async () => {
+  test("collects frontend text and registers binary assets without reading their contents", async () => {
     const binaryAsset = {
       name: "logo.png",
       size: 1024,
@@ -95,7 +96,8 @@ describe("folder import scanning", () => {
     expect(report.acceptedFiles.map((item) => item.path)).toEqual([
       "src/App.vue", "src/index.html", "src/app.css", "src/theme.scss", "src/icon.svg"
     ]);
-    expect(report.ignored.reasons).toEqual({ unsupported_extension: 1 });
+    expect(report.assetFiles.map((item) => item.path)).toEqual(["assets/logo.png"]);
+    expect(report.ignored.reasons).toEqual({});
   });
 
   test("does not count ignored dependency files against the accepted-file limit", async () => {
@@ -109,6 +111,19 @@ describe("folder import scanning", () => {
 
     expect(report.acceptedFiles.map((item) => item.path)).toEqual(["src/main.ts"]);
     expect(report.ignored.reasons).toEqual({ excluded_directory: 50_001 });
+  });
+
+  test("does not register asset metadata from excluded dependency directories", async () => {
+    const dependencyAsset = {
+      name: "logo.png", size: 10,
+      arrayBuffer: async () => { throw new Error("excluded asset must not be read"); },
+      webkitRelativePath: "demo/node_modules/package/logo.png"
+    } as unknown as File;
+
+    const report = await scanSelectedFiles([dependencyAsset]);
+
+    expect(report.assetFiles).toEqual([]);
+    expect(report.ignored.reasons).toEqual({ excluded_directory: 1 });
   });
 
   test("skips a 60,000-file dependency directory without reading its files and keeps valid files below the limit", async () => {

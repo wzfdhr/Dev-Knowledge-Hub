@@ -1,5 +1,6 @@
 import {
   boolean,
+  bigint,
   bigserial,
   check,
   foreignKey,
@@ -11,9 +12,11 @@ import {
   primaryKey,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid
 } from "drizzle-orm/pg-core";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 import {
@@ -30,6 +33,14 @@ export { AGENT_FEEDBACK_STATUSES, BUILD_JOB_STATUSES } from "../shared/contracts
 export const buildJobStatus = pgEnum("build_job_status", BUILD_JOB_STATUSES);
 export const agentFeedbackStatus = pgEnum("agent_feedback_status", AGENT_FEEDBACK_STATUSES);
 export const teamRole = pgEnum("team_role", ["admin", "member", "reader"]);
+
+function uploadSessionWorkspaceKey(): [AnyPgColumn, AnyPgColumn] {
+  return [uploadSessions.id, uploadSessions.workspaceId];
+}
+
+function importReportScopeKey(): [AnyPgColumn, AnyPgColumn, AnyPgColumn] {
+  return [importReports.id, importReports.workspaceId, importReports.repositoryId];
+}
 
 const timestamps = {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -116,6 +127,7 @@ export const repositories = pgTable("repositories", {
   ...timestamps
 }, (table) => [
   uniqueIndex("repositories_id_workspace_idx").on(table.id, table.workspaceId),
+  uniqueIndex("repositories_id_workspace_project_idx").on(table.id, table.workspaceId, table.projectId),
   uniqueIndex("repositories_project_current_unique_idx")
     .on(table.projectId)
     .where(sql`${table.archivedAt} IS NULL`)
@@ -178,15 +190,35 @@ export const sourceSnapshots = pgTable("source_snapshots", {
   remoteUrl: text("remote_url"),
   commitTimestamp: timestamp("commit_timestamp", { withTimezone: true }).notNull(),
   storagePath: text("storage_path").notNull(),
+  pendingUploadSessionId: uuid("pending_upload_session_id"),
+  pendingImportReportId: uuid("pending_import_report_id"),
   ...timestamps
 }, (table) => [
   uniqueIndex("source_snapshots_id_workspace_idx").on(table.id, table.workspaceId),
+  uniqueIndex("source_snapshots_id_workspace_repository_idx").on(table.id, table.workspaceId, table.repositoryId),
   index("source_snapshots_workspace_repo_idx").on(table.workspaceId, table.repositoryId),
-  uniqueIndex("source_snapshots_repo_commit_idx").on(table.repositoryId, table.commitSha),
+  uniqueIndex("source_snapshots_repo_commit_idx").on(table.repositoryId, table.commitSha)
+    .where(sql`${table.pendingUploadSessionId} IS NULL AND ${table.pendingImportReportId} IS NULL`),
+  uniqueIndex("source_snapshots_pending_upload_session_unique_idx")
+    .on(table.pendingUploadSessionId)
+    .where(sql`${table.pendingUploadSessionId} IS NOT NULL`),
+  uniqueIndex("source_snapshots_pending_import_report_unique_idx")
+    .on(table.pendingImportReportId)
+    .where(sql`${table.pendingImportReportId} IS NOT NULL`),
   foreignKey({
     columns: [table.repositoryId, table.workspaceId],
     foreignColumns: [repositories.id, repositories.workspaceId],
     name: "source_snapshots_repository_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.pendingUploadSessionId, table.workspaceId],
+    foreignColumns: uploadSessionWorkspaceKey(),
+    name: "source_snapshots_pending_upload_session_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.pendingImportReportId, table.workspaceId, table.repositoryId],
+    foreignColumns: importReportScopeKey(),
+    name: "source_snapshots_pending_import_report_scope_fk"
   }).onDelete("cascade")
 ]);
 
@@ -207,6 +239,183 @@ export const sourceFiles = pgTable("source_files", {
     foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId],
     name: "source_files_snapshot_workspace_fk"
   }).onDelete("cascade")
+]);
+
+export const uploadSessions = pgTable("upload_sessions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  projectId: uuid("project_id").notNull(),
+  repositoryId: uuid("repository_id").notNull(),
+  actorId: uuid("actor_id").notNull(),
+  sessionVersion: integer("session_version").notNull(),
+  isReplacement: boolean("is_replacement").notNull(),
+  expectedCurrentRepositoryId: uuid("expected_current_repository_id").notNull(),
+  expectedLatestSnapshotId: uuid("expected_latest_snapshot_id"),
+  status: text("status").$type<"open" | "committing" | "committed" | "cancelled">().notNull().default("open"),
+  entryCount: integer("entry_count").notNull(),
+  manifestDigest: text("manifest_digest"),
+  snapshotId: uuid("snapshot_id"),
+  commitResponse: jsonb("commit_response").$type<Record<string, unknown>>(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  committedAt: timestamp("committed_at", { withTimezone: true }),
+  cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+  ...timestamps
+}, (table) => [
+  uniqueIndex("upload_sessions_id_workspace_idx").on(table.id, table.workspaceId),
+  unique("upload_sessions_scope_unique").on(
+    table.id, table.workspaceId, table.projectId, table.repositoryId, table.actorId
+  ),
+  index("upload_sessions_expiry_idx").on(table.expiresAt)
+    .where(sql`${table.status} IN ('open', 'committing', 'committed', 'cancelled')`),
+  index("upload_sessions_project_created_idx").on(table.workspaceId, table.projectId, table.createdAt.desc()),
+  check("upload_sessions_status_check", sql`${table.status} IN ('open', 'committing', 'committed', 'cancelled')`),
+  check("upload_sessions_entry_count_check", sql`${table.entryCount} BETWEEN 1 AND 100000`),
+  check("upload_sessions_manifest_digest_check", sql`${table.manifestDigest} IS NULL OR ${table.manifestDigest} ~ '^[0-9a-f]{64}$'`),
+  check("upload_sessions_terminal_shape_check", sql`
+    (${table.status} = 'committed' AND ${table.manifestDigest} IS NOT NULL
+      AND ${table.snapshotId} IS NOT NULL AND ${table.commitResponse} IS NOT NULL
+      AND ${table.committedAt} IS NOT NULL)
+    OR (${table.status} = 'cancelled' AND ${table.cancelledAt} IS NOT NULL)
+    OR ${table.status} IN ('open', 'committing')
+  `),
+  foreignKey({
+    columns: [table.projectId, table.workspaceId],
+    foreignColumns: [projects.id, projects.workspaceId],
+    name: "upload_sessions_project_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.repositoryId, table.workspaceId, table.projectId],
+    foreignColumns: [repositories.id, repositories.workspaceId, repositories.projectId],
+    name: "upload_sessions_repository_scope_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.expectedCurrentRepositoryId, table.workspaceId, table.projectId],
+    foreignColumns: [repositories.id, repositories.workspaceId, repositories.projectId],
+    name: "upload_sessions_expected_current_repository_scope_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.expectedLatestSnapshotId, table.workspaceId, table.repositoryId],
+    foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId, sourceSnapshots.repositoryId],
+    name: "upload_sessions_expected_latest_snapshot_scope_fk"
+  }).onDelete("restrict"),
+  foreignKey({
+    columns: [table.actorId, table.workspaceId],
+    foreignColumns: [adminUsers.id, adminUsers.workspaceId],
+    name: "upload_sessions_actor_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.snapshotId, table.workspaceId, table.repositoryId],
+    foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId, sourceSnapshots.repositoryId],
+    name: "upload_sessions_snapshot_repository_fk"
+  }).onDelete("restrict")
+]);
+
+export const uploadSessionEntries = pgTable("upload_session_entries", {
+  sessionId: uuid("session_id").notNull(),
+  workspaceId: uuid("workspace_id").notNull(),
+  ordinal: integer("ordinal").notNull(),
+  path: text("path").notNull(),
+  kind: text("kind").$type<"source" | "asset">().notNull(),
+  byteSize: bigint("byte_size", { mode: "number" }).notNull(),
+  contentHash: text("content_hash"),
+  mediaType: text("media_type"),
+  metadataByteSize: integer("metadata_byte_size").notNull(),
+  disposition: text("disposition").$type<"upload_required" | "metadata_only" | "ignored">().notNull(),
+  trust: text("trust").$type<"pending" | "server_verified" | "client_unverified">().notNull(),
+  ignoreReason: text("ignore_reason"),
+  uploadedAt: timestamp("uploaded_at", { withTimezone: true }),
+  ...timestamps
+}, (table) => [
+  primaryKey({ columns: [table.sessionId, table.ordinal], name: "upload_session_entries_pkey" }),
+  unique("upload_session_entries_path_unique").on(table.sessionId, table.path),
+  foreignKey({
+    columns: [table.sessionId, table.workspaceId],
+    foreignColumns: [uploadSessions.id, uploadSessions.workspaceId],
+    name: "upload_session_entries_session_workspace_fk"
+  }).onDelete("cascade"),
+  check("upload_session_entries_ordinal_check", sql`${table.ordinal} >= 0`),
+  check("upload_session_entries_path_check", sql`octet_length(${table.path}) BETWEEN 1 AND 4096`),
+  check("upload_session_entries_kind_check", sql`${table.kind} IN ('source', 'asset')`),
+  check("upload_session_entries_byte_size_check", sql`${table.byteSize} >= 0`),
+  check("upload_session_entries_metadata_byte_size_check", sql`${table.metadataByteSize} > 0`),
+  check("upload_session_entries_content_hash_check", sql`
+    (${table.kind} = 'source' AND ${table.contentHash} ~ '^[0-9a-f]{64}$')
+    OR (${table.kind} = 'asset' AND ${table.contentHash} IS NULL)
+  `),
+  check("upload_session_entries_disposition_check", sql`${table.disposition} IN ('upload_required', 'metadata_only', 'ignored')`),
+  check("upload_session_entries_trust_check", sql`${table.trust} IN ('pending', 'server_verified', 'client_unverified')`),
+  check("upload_session_entries_state_check", sql`
+    (${table.disposition} = 'upload_required' AND ${table.trust} IN ('pending', 'server_verified') AND ${table.ignoreReason} IS NULL)
+    OR (${table.disposition} = 'metadata_only' AND ${table.trust} = 'client_unverified' AND ${table.ignoreReason} IS NULL)
+    OR (${table.disposition} = 'ignored' AND ${table.ignoreReason} IS NOT NULL)
+  `)
+]);
+
+export const uploadIdempotencyKeys = pgTable("upload_idempotency_keys", {
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  actorId: uuid("actor_id").notNull(),
+  idempotencyKey: text("idempotency_key").notNull(),
+  operation: text("operation").notNull(),
+  requestDigest: text("request_digest").notNull(),
+  sessionId: uuid("session_id"),
+  responseStatus: integer("response_status").notNull(),
+  responseBody: jsonb("response_body").$type<Record<string, unknown>>().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull()
+}, (table) => [
+  primaryKey({
+    columns: [table.workspaceId, table.actorId, table.idempotencyKey],
+    name: "upload_idempotency_keys_pkey"
+  }),
+  index("upload_idempotency_keys_expiry_idx").on(table.expiresAt),
+  check("upload_idempotency_keys_key_check", sql`char_length(${table.idempotencyKey}) BETWEEN 1 AND 200`),
+  check("upload_idempotency_keys_request_digest_check", sql`${table.requestDigest} ~ '^[0-9a-f]{64}$'`),
+  check("upload_idempotency_keys_response_status_check", sql`${table.responseStatus} BETWEEN 200 AND 599`),
+  foreignKey({
+    columns: [table.actorId, table.workspaceId],
+    foreignColumns: [adminUsers.id, adminUsers.workspaceId],
+    name: "upload_idempotency_keys_actor_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.sessionId, table.workspaceId],
+    foreignColumns: [uploadSessions.id, uploadSessions.workspaceId],
+    name: "upload_idempotency_keys_session_workspace_fk"
+  }).onDelete("cascade")
+]);
+
+export const importReports = pgTable("import_reports", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  repositoryId: uuid("repository_id").references(() => repositories.id, { onDelete: "set null" }),
+  actorId: uuid("actor_id").references(() => adminUsers.id, { onDelete: "set null" }),
+  sourceKind: text("source_kind").notNull(),
+  status: text("status").$type<"running" | "succeeded" | "failed" | "cancelled">().notNull(),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  collectedFileCount: integer("collected_file_count").notNull().default(0),
+  collectedTextBytes: bigint("collected_text_bytes", { mode: "number" }).notNull().default(0),
+  ignored: jsonb("ignored").$type<{ total: number; reasons: Record<string, number> }>().notNull().default({ total: 0, reasons: {} }),
+  snapshotId: uuid("snapshot_id").references(() => sourceSnapshots.id, { onDelete: "set null" }),
+  failureCode: text("failure_code"),
+  uploadSessionId: uuid("upload_session_id")
+}, (table) => [
+  index("import_reports_project_started_idx").on(
+    table.workspaceId, table.projectId, table.startedAt.desc(), table.id.desc()
+  ),
+  index("import_reports_retention_idx").on(table.status, table.finishedAt)
+    .where(sql`${table.status} IN ('failed', 'cancelled')`),
+  uniqueIndex("import_reports_id_workspace_repository_idx")
+    .on(table.id, table.workspaceId, table.repositoryId),
+  check("import_reports_status_check", sql`${table.status} IN ('running', 'succeeded', 'failed', 'cancelled')`),
+  uniqueIndex("import_reports_upload_session_unique_idx")
+    .on(table.uploadSessionId)
+    .where(sql`${table.uploadSessionId} IS NOT NULL`),
+  foreignKey({
+    columns: [table.uploadSessionId, table.workspaceId, table.projectId, table.repositoryId, table.actorId],
+    foreignColumns: [uploadSessions.id, uploadSessions.workspaceId, uploadSessions.projectId, uploadSessions.repositoryId, uploadSessions.actorId],
+    name: "import_reports_upload_session_scope_fk"
+  })
 ]);
 
 export const sourceAnalysisArtifacts = pgTable("source_analysis_artifacts", {

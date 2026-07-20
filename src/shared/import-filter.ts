@@ -1,5 +1,6 @@
 export const MAX_IMPORT_SOURCE_FILE_BYTES = 1024 * 1024;
 export const MAX_IMPORT_TABLE_WORKBOOK_BYTES = 50 * 1024 * 1024;
+export const MAX_UPLOAD_MANIFEST_METADATA_BYTES = 32 * 1024 * 1024;
 
 export type ImportIgnoreReason =
   | "binary"
@@ -27,6 +28,11 @@ const sourceExtensions = new Set([
   "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs",
   "vue", "html", "css", "scss", "sass", "less", "svelte", "astro", "svg",
   "md", "json", "yaml", "yml", "csv", "xlsx"
+]);
+const assetExtensions = new Set([
+  "avif", "gif", "ico", "jpeg", "jpg", "png", "webp",
+  "woff", "woff2", "ttf", "otf", "eot",
+  "mp3", "mp4", "ogg", "wav", "webm"
 ]);
 
 const sourceLanguages: Record<string, string> = {
@@ -76,6 +82,11 @@ function hasSupportedExtension(filePath: string): boolean {
 export function importLanguageForPath(filePath: string): string | null {
   const extension = basename(filePath).split(".").at(-1)?.toLowerCase() ?? "";
   return sourceLanguages[extension] ?? null;
+}
+
+export function isImportAssetPath(filePath: string): boolean {
+  const extension = basename(filePath).split(".").at(-1)?.toLowerCase() ?? "";
+  return assetExtensions.has(extension);
 }
 
 function isTableWorkbook(filePath: string): boolean {

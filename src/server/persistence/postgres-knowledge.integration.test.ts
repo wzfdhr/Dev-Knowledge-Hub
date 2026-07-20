@@ -53,6 +53,7 @@ import { PipelineStageWorker, type PipelineStageJob, type PipelineStageJobQueue 
 import { hashMcpToken } from "../mcp/auth";
 import { PostgresSessionStore } from "../security/session-store";
 import { importFolderFiles, type FolderUploadFile } from "../uploads/folder-import";
+import { UploadSessionService, canonicalUploadManifestDigest } from "../uploads/upload-session";
 import { LastProjectAdminError } from "./store";
 import { PostgresAppStore } from "./postgres-store";
 
@@ -115,6 +116,168 @@ async function waitFor<T>(read: () => Promise<T>, ready: (value: T) => boolean):
 }
 
 integration("PostgreSQL cited knowledge integration", () => {
+  test(databaseUrl
+    ? "persists and serializes restart-safe upload sessions"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("durable-upload@example.com", "hash");
+    const project = (await store.listProjects(setup!.workspace.id))[0]!;
+    const repository = await store.createRepository(
+      setup!.workspace.id, { kind: "upload", name: "Durable folder" }, project.id
+    );
+    const otherProject = await store.createProject(
+      setup!.workspace.id, { name: "Other", slug: "other-upload-scope" }, setup!.admin.id
+    );
+    const otherRepository = await store.createRepository(
+      setup!.workspace.id, { kind: "upload", name: "Other folder" }, otherProject!.id
+    );
+    await expect(pool.query(
+      `INSERT INTO upload_sessions (
+         id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement,
+         expected_current_repository_id, entry_count, expires_at
+       ) VALUES ($1, $2, $3, $4, $5, 1, false, $6, 1, now() + interval '1 hour')`,
+      [randomUUID(), setup!.workspace.id, project.id, otherRepository!.id, setup!.admin.id, repository!.id]
+    )).rejects.toMatchObject({ constraint: "upload_sessions_repository_scope_fk" });
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-postgres-upload-session-"));
+    const first = new UploadSessionService({ store, dataDir });
+    const restarted = new UploadSessionService({ store, dataDir });
+    const sourceText = "export const durable = true;\n";
+    const entries = [
+      {
+        ordinal: 0, path: "src/index.ts", kind: "source" as const,
+        byteSize: Buffer.byteLength(sourceText),
+        contentHash: createHash("sha256").update(sourceText).digest("hex"),
+        mediaType: "text/typescript"
+      },
+      {
+        ordinal: 1, path: "assets/logo.png", kind: "asset" as const,
+        byteSize: 1024, contentHash: null, mediaType: "image/png"
+      }
+    ];
+    const identity = {
+      workspaceId: setup!.workspace.id, projectId: project.id,
+      actorId: setup!.admin.id, sessionVersion: setup!.admin.sessionVersion
+    };
+    try {
+      const session = await first.createSession({
+        ...identity, repositoryId: repository!.id, entryCount: entries.length,
+        idempotencyKey: "postgres-create"
+      });
+      await first.putManifestPage({
+        ...identity, sessionId: session.id, page: 0, entries,
+        idempotencyKey: "postgres-page"
+      });
+      await first.putFile({
+        ...identity, sessionId: session.id, ordinal: 0, bytes: Buffer.from(sourceText),
+        idempotencyKey: "postgres-file"
+      });
+      const commit = {
+        ...identity, sessionId: session.id,
+        manifestDigest: canonicalUploadManifestDigest(entries),
+        idempotencyKey: "postgres-commit"
+      };
+
+      const [left, right] = await Promise.all([first.commit(commit), restarted.commit(commit)]);
+      expect(right).toEqual(left);
+      expect(left).toMatchObject({
+        fileCount: 1,
+        assetCount: 1
+      });
+      const reports = await pool.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM import_reports WHERE workspace_id = $1",
+        [setup!.workspace.id]
+      );
+      expect(reports.rows[0]?.count).toBe("1");
+      const durableState = await pool.query<{
+        upload_session_id: string; commit_response: Record<string, unknown>;
+      }>(
+        `SELECT report.upload_session_id, session.commit_response
+         FROM import_reports report
+         JOIN upload_sessions session ON session.id = report.upload_session_id
+         WHERE report.workspace_id = $1`,
+        [setup!.workspace.id]
+      );
+      expect(durableState.rows).toEqual([expect.objectContaining({
+        upload_session_id: session.id,
+        commit_response: expect.objectContaining({ unchanged: false, snapshotId: left.snapshotId })
+      })]);
+      expect(await store.getUploadSession(setup!.workspace.id, session.id))
+        .toMatchObject({ status: "committed", snapshotId: left.snapshotId });
+      expect(await store.getUploadSession(randomUUID(), session.id)).toBeNull();
+    } finally {
+      await removeReadonlyDirectory(dataDir);
+    }
+  }, 30_000);
+
+  test(databaseUrl
+    ? "enforces exact PostgreSQL source-count and byte manifest boundaries"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    await runMigrations(pool);
+    await pool.query("TRUNCATE workspaces CASCADE");
+    const store = new PostgresAppStore(pool);
+    const setup = await store.createInitialSetup("upload-boundaries@example.com", "hash");
+    const project = (await store.listProjects(setup!.workspace.id))[0]!;
+    const repository = await store.createRepository(
+      setup!.workspace.id, { kind: "upload", name: "Boundary folder" }, project.id
+    );
+    const identity = {
+      workspaceId: setup!.workspace.id,
+      projectId: project.id,
+      actorId: setup!.admin.id,
+      sessionVersion: setup!.admin.sessionVersion
+    };
+    const sourceSession = await store.createUploadSession({
+      id: randomUUID(), ...identity, repositoryId: repository!.id,
+      isReplacement: false, expectedCurrentRepositoryId: repository!.id,
+      entryCount: 50_001, expiresAt: new Date(Date.now() + 60 * 60_000)
+    });
+    const manifestEntry = (ordinal: number, byteSize = 0) => ({
+      ordinal,
+      path: `src/${ordinal}.ts`,
+      kind: "source" as const,
+      byteSize,
+      contentHash: createHash("sha256").update(String(ordinal)).digest("hex"),
+      mediaType: "text/typescript",
+      metadataByteSize: 128,
+      disposition: "upload_required" as const,
+      trust: "pending" as const,
+      ignoreReason: null
+    });
+    for (let page = 0; page < 100; page += 1) {
+      await store.saveUploadManifestPage(
+        { ...identity, sessionId: sourceSession.id },
+        Array.from({ length: 500 }, (_, index) => manifestEntry(page * 500 + index))
+      );
+    }
+    await expect(store.saveUploadManifestPage(
+      { ...identity, sessionId: sourceSession.id }, [manifestEntry(50_000)]
+    )).rejects.toThrow("TOO_MANY_FILES");
+    await expect(store.listUploadManifestEntries(
+      identity.workspaceId, sourceSession.id, { limit: 500, offset: 49_500 }
+    )).resolves.toHaveLength(500);
+
+    const byteSession = await store.createUploadSession({
+      id: randomUUID(), ...identity, repositoryId: repository!.id,
+      isReplacement: false, expectedCurrentRepositoryId: repository!.id,
+      entryCount: 42, expiresAt: new Date(Date.now() + 60 * 60_000)
+    });
+    const exactBytes = Array.from({ length: 41 }, (_, ordinal) =>
+      manifestEntry(ordinal, ordinal === 40 ? 48 * 1024 * 1024 : 50 * 1024 * 1024)
+    );
+    await expect(store.saveUploadManifestPage(
+      { ...identity, sessionId: byteSession.id }, exactBytes
+    )).resolves.toHaveLength(41);
+    await expect(store.saveUploadManifestPage(
+      { ...identity, sessionId: byteSession.id }, [manifestEntry(41, 1)]
+    )).rejects.toThrow("FOLDER_SIZE_LIMIT");
+  }, 120_000);
+
   test(databaseUrl
     ? "persists immutable workspace-scoped source analysis facts without project leakage"
     : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
@@ -506,14 +669,12 @@ integration("PostgreSQL cited knowledge integration", () => {
         setup!.workspace.id, { kind: "upload", name: "Upgrade source" }
       );
       const snapshotId = randomUUID();
-      await store.createSnapshot({
-        snapshot: {
-          id: snapshotId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
-          commitSha: "a".repeat(40), ref: "upload", remoteUrl: null,
-          commitTimestamp: new Date("2026-07-17T00:00:00.000Z"), storagePath: "/tmp/frontend-upgrade"
-        },
-        files: []
-      });
+      await scopedPool.query(
+        `INSERT INTO source_snapshots
+           (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path)
+         VALUES ($1, $2, $3, $4, 'upload', NULL, $5, '/tmp/frontend-upgrade')`,
+        [snapshotId, setup!.workspace.id, repository!.id, "a".repeat(40), new Date("2026-07-17T00:00:00.000Z")]
+      );
       const createPublishedBuild = async () => {
         const { build } = await store.createBuild({
           workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId,

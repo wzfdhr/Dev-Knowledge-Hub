@@ -10,6 +10,7 @@ import {
   LastProjectAdminError,
   LastWorkspaceAdminError,
   knowledgeMatchReason,
+  normalizeSourceBlobGcCandidateLimit,
   normalizePagination
 } from "./store.js";
 
@@ -178,6 +179,20 @@ export class MemoryAppStore implements AppStore {
     return this.admin !== null;
   }
 
+  async listSourceBlobGcCandidates(limit?: number): Promise<SourceBlobRecord[]> {
+    const candidateLimit = normalizeSourceBlobGcCandidateLimit(limit);
+    return this.sourceBlobs.filter((record) =>
+      record.status === "tombstoned"
+      || record.status === "trash"
+      || record.status === "active" && !this.sourceFiles.some((file) =>
+        file.workspaceId === record.workspaceId && file.sourceBlobId === record.id
+      )
+    ).sort((left, right) => left.workspaceId.localeCompare(right.workspaceId)
+      || left.contentHash.localeCompare(right.contentHash)
+      || left.generation - right.generation
+    ).slice(0, candidateLimit).map((record) => ({ ...record }));
+  }
+
   async withSourceBlobLock<T>(
     workspaceId: string,
     contentHash: string,
@@ -197,6 +212,19 @@ export class MemoryAppStore implements AppStore {
             && candidate.contentHash === contentHash && candidate.status === "active");
           return record ? { ...record } : null;
         },
+        findTombstoned: async () => {
+          const record = this.sourceBlobs.find((candidate) => candidate.workspaceId === workspaceId
+            && candidate.contentHash === contentHash && candidate.status === "tombstoned");
+          return record ? { ...record } : null;
+        },
+        findById: async (sourceBlobId) => {
+          const record = this.sourceBlobs.find((candidate) => candidate.workspaceId === workspaceId
+            && candidate.contentHash === contentHash && candidate.id === sourceBlobId);
+          return record ? { ...record } : null;
+        },
+        countReferences: async (sourceBlobId) => this.sourceFiles.filter((file) =>
+          file.workspaceId === workspaceId && file.sourceBlobId === sourceBlobId
+        ).length,
         nextGeneration: async () => Math.max(0, ...this.sourceBlobs.filter((candidate) =>
           candidate.workspaceId === workspaceId && candidate.contentHash === contentHash
         ).map((candidate) => candidate.generation)) + 1,
@@ -216,6 +244,66 @@ export class MemoryAppStore implements AppStore {
           };
           this.sourceBlobs.push(record);
           return { ...record };
+        },
+        tombstoneIfUnreferenced: async (sourceBlobId, fencingToken, at) => {
+          const record = this.sourceBlobs.find((candidate) => candidate.workspaceId === workspaceId
+            && candidate.contentHash === contentHash && candidate.id === sourceBlobId
+            && candidate.status === "active");
+          if (!record || this.sourceFiles.some((file) =>
+            file.workspaceId === workspaceId && file.sourceBlobId === sourceBlobId
+          )) return null;
+          Object.assign(record, {
+            status: "tombstoned" as const,
+            fencingToken,
+            tombstonedAt: at,
+            trashedAt: null,
+            deletedAt: null
+          });
+          return { ...record };
+        },
+        restoreTombstoned: async (sourceBlobId, fencingToken) => {
+          const record = this.sourceBlobs.find((candidate) => candidate.workspaceId === workspaceId
+            && candidate.contentHash === contentHash && candidate.id === sourceBlobId
+            && candidate.status === "tombstoned" && candidate.fencingToken === fencingToken);
+          if (!record) return null;
+          Object.assign(record, {
+            status: "active" as const,
+            fencingToken: null,
+            tombstonedAt: null,
+            trashedAt: null,
+            deletedAt: null
+          });
+          return { ...record };
+        },
+        markTrash: async (sourceBlobId, fencingToken, at) => {
+          const record = this.sourceBlobs.find((candidate) => candidate.workspaceId === workspaceId
+            && candidate.contentHash === contentHash && candidate.id === sourceBlobId
+            && candidate.status === "tombstoned" && candidate.fencingToken === fencingToken);
+          if (!record) return null;
+          Object.assign(record, { status: "trash" as const, trashedAt: at });
+          return { ...record };
+        },
+        markDeletedIfUnreferenced: async (sourceBlobId, fencingToken, at) => {
+          const record = this.sourceBlobs.find((candidate) => candidate.workspaceId === workspaceId
+            && candidate.contentHash === contentHash && candidate.id === sourceBlobId
+            && candidate.status === "trash" && candidate.fencingToken === fencingToken);
+          if (!record || this.sourceFiles.some((file) =>
+            file.workspaceId === workspaceId && file.sourceBlobId === sourceBlobId
+          )) return null;
+          Object.assign(record, { status: "deleted" as const, deletedAt: at });
+          return { ...record };
+        },
+        recordGcInconsistency: async (sourceBlobId, reason) => {
+          const record = this.sourceBlobs.find((candidate) => candidate.workspaceId === workspaceId
+            && candidate.contentHash === contentHash && candidate.id === sourceBlobId);
+          if (!record) return;
+          await this.recordAudit({
+            workspaceId,
+            action: "source_blob.gc_inconsistent",
+            resourceType: "source_blob",
+            resourceId: record.id,
+            metadata: { reason, status: record.status, generation: record.generation }
+          });
         }
       });
     } finally {
@@ -229,6 +317,16 @@ export class MemoryAppStore implements AppStore {
       candidate.workspaceId === workspaceId && candidate.id === sourceBlobId
     );
     return record ? { ...record } : null;
+  }
+
+  private assertActiveSourceBlobBindings(files: SourceFileRecord[]): void {
+    for (const file of files) {
+      if (!file.sourceBlobId) continue;
+      const blob = this.sourceBlobs.find((candidate) => candidate.id === file.sourceBlobId
+        && candidate.workspaceId === file.workspaceId && candidate.status === "active"
+        && candidate.contentHash === file.contentHash && candidate.byteSize === file.byteSize);
+      if (!blob) throw new Error("SOURCE_BLOB_NOT_ACTIVE");
+    }
   }
 
   async createInitialSetup(email: string, passwordHash: string): Promise<SetupResult | null> {
@@ -2226,6 +2324,7 @@ export class MemoryAppStore implements AppStore {
       snapshot.commitSha
     );
     if (existing) return existing;
+    this.assertActiveSourceBlobBindings(files);
     this.sourceSnapshots.push(snapshot);
     this.sourceFiles.push(...files);
     return snapshot;
@@ -2258,6 +2357,7 @@ export class MemoryAppStore implements AppStore {
         input.snapshot.commitSha, pendingUploadSessionId, pendingImportReportId
       );
       if (!persisted) {
+        this.assertActiveSourceBlobBindings(input.files);
         this.sourceSnapshots.push(input.snapshot);
         this.sourceFiles.push(...input.files);
         persisted = input.snapshot;

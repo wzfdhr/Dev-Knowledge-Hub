@@ -520,6 +520,17 @@ export interface SourceFileRecord {
 
 export type SourceBlobStatus = "active" | "tombstoned" | "trash" | "deleted";
 
+export const SOURCE_BLOB_GC_CANDIDATE_LIMIT = 500;
+
+export function normalizeSourceBlobGcCandidateLimit(
+  limit = SOURCE_BLOB_GC_CANDIDATE_LIMIT
+): number {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > SOURCE_BLOB_GC_CANDIDATE_LIMIT) {
+    throw new RangeError(`Source blob GC candidate limit must be between 1 and ${SOURCE_BLOB_GC_CANDIDATE_LIMIT}`);
+  }
+  return limit;
+}
+
 export interface SourceBlobRecord {
   id: string;
   workspaceId: string;
@@ -544,12 +555,29 @@ export interface CreateSourceBlobRecordInput {
 
 export interface LockedSourceBlobCatalog {
   findActive(): Promise<SourceBlobRecord | null>;
+  findTombstoned(): Promise<SourceBlobRecord | null>;
+  findById(sourceBlobId: string): Promise<SourceBlobRecord | null>;
+  countReferences(sourceBlobId: string): Promise<number>;
   nextGeneration(): Promise<number>;
   create(input: CreateSourceBlobRecordInput): Promise<SourceBlobRecord>;
+  tombstoneIfUnreferenced(
+    sourceBlobId: string,
+    fencingToken: string,
+    at: Date
+  ): Promise<SourceBlobRecord | null>;
+  restoreTombstoned(sourceBlobId: string, fencingToken: string): Promise<SourceBlobRecord | null>;
+  markTrash(sourceBlobId: string, fencingToken: string, at: Date): Promise<SourceBlobRecord | null>;
+  markDeletedIfUnreferenced(
+    sourceBlobId: string,
+    fencingToken: string,
+    at: Date
+  ): Promise<SourceBlobRecord | null>;
+  recordGcInconsistency(sourceBlobId: string, reason: string): Promise<void>;
 }
 
 export interface SourceBlobCatalog {
   findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null>;
+  listSourceBlobGcCandidates(limit?: number): Promise<SourceBlobRecord[]>;
   withSourceBlobLock<T>(
     workspaceId: string,
     contentHash: string,

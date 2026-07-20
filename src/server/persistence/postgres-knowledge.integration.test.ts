@@ -54,6 +54,7 @@ import { hashMcpToken } from "../mcp/auth";
 import { PostgresSessionStore } from "../security/session-store";
 import { importFolderFiles, type FolderUploadFile } from "../uploads/folder-import";
 import { UploadSessionService, canonicalUploadManifestDigest } from "../uploads/upload-session";
+import { SourceBlobGarbageCollector } from "../uploads/source-blob-gc";
 import { SourceBlobStore } from "../uploads/source-blob-store";
 import { LastProjectAdminError } from "./store";
 import { PostgresAppStore } from "./postgres-store";
@@ -2655,9 +2656,39 @@ integration("PostgreSQL cited knowledge integration", () => {
     );
     expect(persisted.rows[0]?.count).toBe("1");
 
-    await pool.query("UPDATE source_blobs SET status = 'tombstoned' WHERE id = $1", [first.record.id]);
-    await expect(blobs.put({ workspaceId: setup!.workspace.id, bytes })).rejects.toMatchObject({ code: "23505" });
-    await pool.query("UPDATE source_blobs SET status = 'trash' WHERE id = $1", [first.record.id]);
+    const fence = randomUUID();
+    await pool.query(
+      "UPDATE source_blobs SET status = 'tombstoned', fencing_token = $2, tombstoned_at = now() WHERE id = $1",
+      [first.record.id, fence]
+    );
+    const rejectedSnapshotId = randomUUID();
+    await expect(catalog.createSnapshot({
+      snapshot: {
+        id: rejectedSnapshotId, workspaceId: setup!.workspace.id, repositoryId: repository!.id,
+        commitSha: "c".repeat(40), ref: "main", remoteUrl: null,
+        commitTimestamp: new Date("2026-07-20T00:01:00.000Z"), storagePath: root
+      },
+      files: [{
+        id: randomUUID(), workspaceId: setup!.workspace.id, snapshotId: rejectedSnapshotId,
+        path: "src/rejected.ts", byteSize: bytes.length, contentHash: first.record.contentHash,
+        language: "typescript", sourceBlobId: first.record.id
+      }]
+    })).rejects.toThrow("SOURCE_BLOB_NOT_ACTIVE");
+    await expect(blobs.put({ workspaceId: setup!.workspace.id, bytes })).resolves.toMatchObject({
+      reused: true,
+      record: { id: first.record.id, status: "active", fencingToken: null }
+    });
+
+    const gc = new SourceBlobGarbageCollector({
+      dataDir: root, catalog, enabled: true, tombstoneGraceMs: 0, trashGraceMs: 0
+    });
+    await expect(gc.runOnce()).resolves.toMatchObject({ tombstoned: 0 });
+    await pool.query("DELETE FROM source_snapshots WHERE id = $1", [snapshotId]);
+    await expect(gc.runOnce()).resolves.toMatchObject({ tombstoned: 1 });
+    await expect(gc.runOnce()).resolves.toMatchObject({ trashed: 1 });
+    await expect(gc.runOnce()).resolves.toMatchObject({ deleted: 1 });
+    await expect(catalog.findSourceBlobById(setup!.workspace.id, first.record.id))
+      .resolves.toMatchObject({ status: "deleted", fencingToken: expect.any(String) });
     await expect(blobs.put({ workspaceId: setup!.workspace.id, bytes })).resolves.toMatchObject({
       reused: false,
       record: { generation: 2, status: "active" }

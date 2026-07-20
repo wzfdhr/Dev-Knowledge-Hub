@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, readdir, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -25,6 +25,10 @@ class MemorySourceBlobCatalog implements SourceBlobCatalog {
   readonly records: SourceBlobRecord[] = [];
   private readonly locks = new Map<string, Promise<void>>();
 
+  async listSourceBlobGcCandidates(): Promise<SourceBlobRecord[]> {
+    return this.records.filter((record) => record.status !== "deleted").map((record) => ({ ...record }));
+  }
+
   async findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null> {
     return this.records.find((record) => record.workspaceId === workspaceId && record.id === sourceBlobId) ?? null;
   }
@@ -45,6 +49,11 @@ class MemorySourceBlobCatalog implements SourceBlobCatalog {
       return await operation({
         findActive: async () => this.records.find((record) => record.workspaceId === workspaceId
           && record.contentHash === contentHash && record.status === "active") ?? null,
+        findTombstoned: async () => this.records.find((record) => record.workspaceId === workspaceId
+          && record.contentHash === contentHash && record.status === "tombstoned") ?? null,
+        findById: async (sourceBlobId: string) => this.records.find((record) => record.workspaceId === workspaceId
+          && record.contentHash === contentHash && record.id === sourceBlobId) ?? null,
+        countReferences: async () => 0,
         nextGeneration: async () => Math.max(0, ...this.records.filter((record) =>
           record.workspaceId === workspaceId && record.contentHash === contentHash
         ).map((record) => record.generation)) + 1,
@@ -55,12 +64,40 @@ class MemorySourceBlobCatalog implements SourceBlobCatalog {
           };
           this.records.push(record);
           return record;
-        }
+        },
+        tombstoneIfUnreferenced: async (sourceBlobId: string, fencingToken: string, at: Date) =>
+          this.replace(sourceBlobId, (record) => record.status === "active" ? {
+            ...record, status: "tombstoned", fencingToken, tombstonedAt: at
+          } : null),
+        restoreTombstoned: async (sourceBlobId: string, fencingToken: string) =>
+          this.replace(sourceBlobId, (record) => record.status === "tombstoned"
+            && record.fencingToken === fencingToken ? {
+              ...record, status: "active", fencingToken: null, tombstonedAt: null
+            } : null),
+        markTrash: async (sourceBlobId: string, fencingToken: string, at: Date) =>
+          this.replace(sourceBlobId, (record) => record.status === "tombstoned"
+            && record.fencingToken === fencingToken ? { ...record, status: "trash", trashedAt: at } : null),
+        markDeletedIfUnreferenced: async (sourceBlobId: string, fencingToken: string, at: Date) =>
+          this.replace(sourceBlobId, (record) => record.status === "trash"
+            && record.fencingToken === fencingToken ? { ...record, status: "deleted", deletedAt: at } : null),
+        recordGcInconsistency: async () => undefined
       });
     } finally {
       release();
       if (this.locks.get(key) === queued) this.locks.delete(key);
     }
+  }
+
+  private replace(
+    sourceBlobId: string,
+    update: (record: SourceBlobRecord) => SourceBlobRecord | null
+  ): SourceBlobRecord | null {
+    const index = this.records.findIndex((record) => record.id === sourceBlobId);
+    if (index < 0) return null;
+    const updated = update(this.records[index]!);
+    if (!updated) return null;
+    this.records[index] = updated;
+    return { ...updated };
   }
 }
 
@@ -164,6 +201,119 @@ describe("workspace source blob store", () => {
     expect(second.record).toMatchObject({ generation: 2, status: "active" });
     expect(second.record.id).not.toBe(first.record.id);
   });
+
+  test("cancels a tombstone and reuses its verified original while holding the upload lock", async () => {
+    const context = await fixture();
+    const workspaceId = randomUUID();
+    const bytes = Buffer.from("revive before move");
+    const first = await context.store.put({ workspaceId, bytes });
+    const fencingToken = randomUUID();
+    context.catalog.records[0] = {
+      ...first.record, status: "tombstoned", fencingToken, tombstonedAt: new Date()
+    };
+
+    const reused = await context.store.put({ workspaceId, bytes });
+
+    expect(reused).toMatchObject({ reused: true, record: { id: first.record.id, status: "active" } });
+    expect(context.catalog.records[0]).toMatchObject({
+      status: "active", fencingToken: null, tombstonedAt: null
+    });
+  });
+
+  test("does not restore a tombstoned generation while its source file is writable", async () => {
+    const context = await fixture();
+    const workspaceId = randomUUID();
+    const bytes = Buffer.from("mutable tombstone");
+    const first = await context.store.put({ workspaceId, bytes });
+    context.catalog.records[0] = {
+      ...first.record, status: "tombstoned", fencingToken: randomUUID(), tombstonedAt: new Date()
+    };
+    await chmod(path.join(context.root, first.record.storageKey), 0o644);
+
+    await expect(context.store.put({ workspaceId, bytes }))
+      .rejects.toMatchObject({ code: "SOURCE_BLOB_INTEGRITY_FAILED" });
+    expect(context.catalog.records[0]).toMatchObject({ status: "tombstoned" });
+  });
+
+  test("finishes a moved tombstone as trash and creates a new generation without reviving the old one", async () => {
+    const context = await fixture();
+    const workspaceId = randomUUID();
+    const bytes = Buffer.from("replace after move");
+    const first = await context.store.put({ workspaceId, bytes });
+    context.catalog.records[0] = {
+      ...first.record, status: "tombstoned", fencingToken: randomUUID(), tombstonedAt: new Date()
+    };
+    const original = path.join(context.root, first.record.storageKey);
+    const trash = path.join(context.root, ".trash", workspaceId, first.record.contentHash, "1");
+    await mkdir(path.dirname(trash), { recursive: true });
+    await rename(original, trash);
+
+    const replacement = await context.store.put({ workspaceId, bytes });
+
+    expect(replacement).toMatchObject({ reused: false, record: { generation: 2, status: "active" } });
+    expect(context.catalog.records[0]).toMatchObject({ status: "trash", fencingToken: expect.any(String) });
+    await expect(readFile(trash)).resolves.toEqual(bytes);
+    await expect(context.store.read(replacement.record)).resolves.toEqual(bytes);
+  });
+
+  test("rejects a new source_file binding when its blob generation is not active", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-binding-"));
+    roots.push(root);
+    const catalog = new MemoryAppStore();
+    const setup = await catalog.createInitialSetup("binding-owner@example.com", "hash");
+    const store = new SourceBlobStore({ dataDir: root, catalog });
+    await store.initialize();
+    const created = await store.put({ workspaceId: setup!.workspace.id, bytes: Buffer.from("binding") });
+    catalog.sourceBlobs[0] = {
+      ...created.record, status: "tombstoned", fencingToken: randomUUID(), tombstonedAt: new Date()
+    };
+    const snapshotId = randomUUID();
+
+    await expect(catalog.createSnapshot({
+      snapshot: {
+        id: snapshotId, workspaceId: setup!.workspace.id, repositoryId: randomUUID(),
+        commitSha: "a".repeat(40), ref: "main", remoteUrl: null,
+        commitTimestamp: new Date(), storagePath: root
+      },
+      files: [{
+        id: randomUUID(), workspaceId: setup!.workspace.id, snapshotId, path: "src/binding.ts",
+        byteSize: created.record.byteSize, contentHash: created.record.contentHash,
+        language: "typescript", sourceBlobId: created.record.id
+      }]
+    })).rejects.toThrow("SOURCE_BLOB_NOT_ACTIVE");
+    expect(catalog.sourceSnapshots).toHaveLength(0);
+    expect(catalog.sourceFiles).toHaveLength(0);
+  });
+
+  test.each(["content hash", "byte size"] as const)(
+    "rejects an active source_file binding with a mismatched %s",
+    async (mismatch) => {
+      const root = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-metadata-binding-"));
+      roots.push(root);
+      const catalog = new MemoryAppStore();
+      const setup = await catalog.createInitialSetup("metadata-owner@example.com", "hash");
+      const store = new SourceBlobStore({ dataDir: root, catalog });
+      await store.initialize();
+      const created = await store.put({ workspaceId: setup!.workspace.id, bytes: Buffer.from("metadata binding") });
+      const snapshotId = randomUUID();
+
+      await expect(catalog.createSnapshot({
+        snapshot: {
+          id: snapshotId, workspaceId: setup!.workspace.id, repositoryId: randomUUID(),
+          commitSha: "d".repeat(40), ref: "main", remoteUrl: null,
+          commitTimestamp: new Date(), storagePath: root
+        },
+        files: [{
+          id: randomUUID(), workspaceId: setup!.workspace.id, snapshotId, path: "src/metadata.ts",
+          byteSize: mismatch === "byte size" ? created.record.byteSize + 1 : created.record.byteSize,
+          contentHash: mismatch === "content hash" ? "f".repeat(64) : created.record.contentHash,
+          language: "typescript", sourceBlobId: created.record.id
+        }]
+      })).rejects.toThrow("SOURCE_BLOB_NOT_ACTIVE");
+      expect(catalog.sourceSnapshots).toHaveLength(0);
+      expect(catalog.sourceFiles).toHaveLength(0);
+    }
+  );
 
   test("adopts a verified orphan left after bytes were committed before the catalog transaction", async () => {
     const context = await fixture();

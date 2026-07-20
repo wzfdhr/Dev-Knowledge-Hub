@@ -52,12 +52,50 @@ function safeIdentifier(value: string, label: string): string {
   return value;
 }
 
-function storageKey(workspaceId: string, contentHash: string, generation: number): string {
+export function sourceBlobStorageKey(workspaceId: string, contentHash: string, generation: number): string {
   safeIdentifier(workspaceId, "Workspace identifier");
   if (!/^[0-9a-f]{64}$/.test(contentHash) || !Number.isSafeInteger(generation) || generation < 1) {
     throw new SourceBlobIntegrityError("INVALID_SOURCE_BLOB_SCOPE", "Source blob identity is invalid");
   }
   return path.posix.join("blobs", workspaceId, contentHash.slice(0, 2), contentHash, String(generation));
+}
+
+export function sourceBlobFileLocations(dataDir: string, record: SourceBlobRecord): {
+  source: string;
+  trash: string;
+  sourceParent: string;
+  trashParent: string;
+} {
+  const expectedKey = sourceBlobStorageKey(record.workspaceId, record.contentHash, record.generation);
+  if (record.storageKey !== expectedKey) {
+    throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob storage key is invalid");
+  }
+  const source = path.join(dataDir, ...expectedKey.split("/"));
+  const trash = path.join(
+    dataDir,
+    ".trash",
+    safeIdentifier(record.workspaceId, "Workspace identifier"),
+    record.contentHash,
+    String(record.generation)
+  );
+  return { source, trash, sourceParent: path.dirname(source), trashParent: path.dirname(trash) };
+}
+
+export async function assertSourceBlobFile(
+  candidate: string,
+  record: Pick<SourceBlobRecord, "contentHash" | "byteSize">
+): Promise<void> {
+  const metadata = await lstat(candidate);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || (metadata.mode & 0o222) !== 0) {
+    throw new SourceBlobIntegrityError(
+      "SOURCE_BLOB_INTEGRITY_FAILED",
+      "Source blob is not an immutable regular file"
+    );
+  }
+  const bytes = await readFile(candidate);
+  if (bytes.length !== record.byteSize || digest(bytes) !== record.contentHash) {
+    throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob bytes do not match metadata");
+  }
 }
 
 async function makeDirectoriesReadOnly(root: string): Promise<void> {
@@ -76,13 +114,7 @@ async function assertRecoverableOrphan(destination: string, expectedHash: string
       "Orphaned source blob is not an immutable regular file"
     );
   }
-  const bytes = await readFile(destination);
-  if (bytes.length !== expectedSize || digest(bytes) !== expectedHash) {
-    throw new SourceBlobIntegrityError(
-      "SOURCE_BLOB_INTEGRITY_FAILED",
-      "Orphaned source blob does not match the pending generation"
-    );
-  }
+  await assertSourceBlobFile(destination, { contentHash: expectedHash, byteSize: expectedSize });
 }
 
 export class SourceBlobStore {
@@ -147,8 +179,56 @@ export class SourceBlobStore {
         return { record: active, reused: true };
       }
 
+      const tombstoned = await catalog.findTombstoned();
+      if (tombstoned) {
+        let locations: ReturnType<typeof sourceBlobFileLocations>;
+        try {
+          locations = sourceBlobFileLocations(this.options.dataDir, tombstoned);
+          const [sourceExists, trashExists] = await Promise.all([
+            lstat(locations.source).then(() => true, (error) => {
+              if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+              throw error;
+            }),
+            lstat(locations.trash).then(() => true, (error) => {
+              if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+              throw error;
+            })
+          ]);
+          if (sourceExists === trashExists || !tombstoned.fencingToken) {
+            throw new SourceBlobIntegrityError(
+              "SOURCE_BLOB_INTEGRITY_FAILED",
+              "Tombstoned source blob location is inconsistent"
+            );
+          }
+          if (sourceExists) {
+            await assertSourceBlobFile(locations.source, tombstoned);
+            const restored = await catalog.restoreTombstoned(tombstoned.id, tombstoned.fencingToken);
+            if (!restored) throw new SourceBlobIntegrityError(
+              "SOURCE_BLOB_INTEGRITY_FAILED",
+              "Tombstoned source blob could not be restored"
+            );
+            return { record: restored, reused: true };
+          }
+          await assertSourceBlobFile(locations.trash, tombstoned);
+          await Promise.all([
+            syncDirectory(locations.sourceParent),
+            syncDirectory(locations.trashParent)
+          ]);
+          const trashed = await catalog.markTrash(tombstoned.id, tombstoned.fencingToken, new Date());
+          if (!trashed) throw new SourceBlobIntegrityError(
+            "SOURCE_BLOB_INTEGRITY_FAILED",
+            "Moved source blob could not be reconciled"
+          );
+        } catch (error) {
+          if (error instanceof SourceBlobIntegrityError) {
+            await catalog.recordGcInconsistency(tombstoned.id, "tombstone_content_inconsistent");
+          }
+          throw error;
+        }
+      }
+
       const generation = await catalog.nextGeneration();
-      const key = storageKey(input.workspaceId, contentHash, generation);
+      const key = sourceBlobStorageKey(input.workspaceId, contentHash, generation);
       const destination = path.join(this.options.dataDir, ...key.split("/"));
       const directory = path.dirname(destination);
       await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -194,7 +274,7 @@ export class SourceBlobStore {
   }
 
   async read(record: SourceBlobRecord): Promise<Buffer> {
-    const expectedKey = storageKey(record.workspaceId, record.contentHash, record.generation);
+    const expectedKey = sourceBlobStorageKey(record.workspaceId, record.contentHash, record.generation);
     if (record.storageKey !== expectedKey || record.status === "deleted") {
       throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob record is not readable");
     }

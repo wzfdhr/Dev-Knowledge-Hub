@@ -11,6 +11,7 @@ import {
   knowledgeMatchReason,
   MAX_UPLOAD_ACCEPTED_BYTES,
   MAX_UPLOAD_ACCEPTED_FILES,
+  normalizeSourceBlobGcCandidateLimit,
   normalizePagination
 } from "./store.js";
 import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledge/trust.js";
@@ -912,6 +913,24 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     }
   }
 
+  async listSourceBlobGcCandidates(limit?: number): Promise<SourceBlobRecord[]> {
+    const candidateLimit = normalizeSourceBlobGcCandidateLimit(limit);
+    const result = await this.pool.query<SourceBlobRow>(`
+      SELECT blob.id, blob.workspace_id, blob.content_hash, blob.generation, blob.byte_size,
+             blob.status, blob.storage_key, blob.fencing_token, blob.tombstoned_at,
+             blob.trashed_at, blob.deleted_at
+      FROM source_blobs blob
+      WHERE blob.status IN ('tombstoned', 'trash')
+         OR (blob.status = 'active' AND NOT EXISTS (
+           SELECT 1 FROM source_files file
+           WHERE file.workspace_id = blob.workspace_id AND file.source_blob_id = blob.id
+         ))
+      ORDER BY blob.workspace_id, blob.content_hash, blob.generation
+      LIMIT $1
+    `, [candidateLimit]);
+    return result.rows.map(sourceBlobRecord);
+  }
+
   async withSourceBlobLock<T>(
     workspaceId: string,
     contentHash: string,
@@ -929,6 +948,34 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
             FOR UPDATE
           `, [workspaceId, contentHash]);
           return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        findTombstoned: async () => {
+          const result = await client.query<SourceBlobRow>(`
+            SELECT id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                   fencing_token, tombstoned_at, trashed_at, deleted_at
+            FROM source_blobs
+            WHERE workspace_id = $1 AND content_hash = $2 AND status = 'tombstoned'
+            FOR UPDATE
+          `, [workspaceId, contentHash]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        findById: async (sourceBlobId) => {
+          const result = await client.query<SourceBlobRow>(`
+            SELECT id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                   fencing_token, tombstoned_at, trashed_at, deleted_at
+            FROM source_blobs
+            WHERE workspace_id = $1 AND content_hash = $2 AND id = $3
+            FOR UPDATE
+          `, [workspaceId, contentHash, sourceBlobId]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        countReferences: async (sourceBlobId) => {
+          const result = await client.query<{ reference_count: string }>(`
+            SELECT count(*)::text AS reference_count
+            FROM source_files
+            WHERE workspace_id = $1 AND source_blob_id = $2
+          `, [workspaceId, sourceBlobId]);
+          return Number(result.rows[0]?.reference_count ?? 0);
         },
         nextGeneration: async () => {
           const result = await client.query<{ next_generation: number }>(`
@@ -951,6 +998,76 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           `, [workspaceId, contentHash, input.generation, input.byteSize, input.storageKey]);
           if (!result.rows[0]) throw new Error("Source blob record was not created");
           return sourceBlobRecord(result.rows[0]);
+        },
+        tombstoneIfUnreferenced: async (sourceBlobId, fencingToken, at) => {
+          const result = await client.query<SourceBlobRow>(`
+            UPDATE source_blobs blob
+            SET status = 'tombstoned', fencing_token = $4, tombstoned_at = $5,
+                trashed_at = NULL, deleted_at = NULL, updated_at = $5
+            WHERE blob.workspace_id = $1 AND blob.content_hash = $2 AND blob.id = $3
+              AND blob.status = 'active'
+              AND NOT EXISTS (
+                SELECT 1 FROM source_files file
+                WHERE file.workspace_id = blob.workspace_id AND file.source_blob_id = blob.id
+              )
+            RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                      fencing_token, tombstoned_at, trashed_at, deleted_at
+          `, [workspaceId, contentHash, sourceBlobId, fencingToken, at]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        restoreTombstoned: async (sourceBlobId, fencingToken) => {
+          const result = await client.query<SourceBlobRow>(`
+            UPDATE source_blobs
+            SET status = 'active', fencing_token = NULL, tombstoned_at = NULL,
+                trashed_at = NULL, deleted_at = NULL, updated_at = now()
+            WHERE workspace_id = $1 AND content_hash = $2 AND id = $3
+              AND status = 'tombstoned' AND fencing_token = $4
+            RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                      fencing_token, tombstoned_at, trashed_at, deleted_at
+          `, [workspaceId, contentHash, sourceBlobId, fencingToken]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        markTrash: async (sourceBlobId, fencingToken, at) => {
+          const result = await client.query<SourceBlobRow>(`
+            UPDATE source_blobs
+            SET status = 'trash', trashed_at = $5, updated_at = $5
+            WHERE workspace_id = $1 AND content_hash = $2 AND id = $3
+              AND status = 'tombstoned' AND fencing_token = $4
+            RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                      fencing_token, tombstoned_at, trashed_at, deleted_at
+          `, [workspaceId, contentHash, sourceBlobId, fencingToken, at]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        markDeletedIfUnreferenced: async (sourceBlobId, fencingToken, at) => {
+          const result = await client.query<SourceBlobRow>(`
+            UPDATE source_blobs blob
+            SET status = 'deleted', deleted_at = $5, updated_at = $5
+            WHERE blob.workspace_id = $1 AND blob.content_hash = $2 AND blob.id = $3
+              AND blob.status = 'trash' AND blob.fencing_token = $4
+              AND NOT EXISTS (
+                SELECT 1 FROM source_files file
+                WHERE file.workspace_id = blob.workspace_id AND file.source_blob_id = blob.id
+              )
+            RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                      fencing_token, tombstoned_at, trashed_at, deleted_at
+          `, [workspaceId, contentHash, sourceBlobId, fencingToken, at]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        recordGcInconsistency: async (sourceBlobId, reason) => {
+          const result = await client.query<Pick<SourceBlobRow, "id" | "status" | "generation">>(`
+            SELECT id, status, generation
+            FROM source_blobs
+            WHERE workspace_id = $1 AND content_hash = $2 AND id = $3
+          `, [workspaceId, contentHash, sourceBlobId]);
+          const record = result.rows[0];
+          if (!record) return;
+          await this.insertAudit(client, {
+            workspaceId,
+            action: "source_blob.gc_inconsistent",
+            resourceType: "source_blob",
+            resourceId: record.id,
+            metadata: { reason, status: record.status, generation: record.generation }
+          });
         }
       };
       return operation(catalog);
@@ -4750,6 +4867,16 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         return { snapshot: snapshotRecord(existing.rows[0]), inserted: false };
       }
       for (const file of files) {
+        if (file.sourceBlobId) {
+          const activeBlob = await client.query<{ id: string }>(`
+            SELECT id
+            FROM source_blobs
+            WHERE workspace_id = $1 AND id = $2 AND content_hash = $3 AND byte_size = $4
+              AND status = 'active'
+            FOR SHARE
+          `, [file.workspaceId, file.sourceBlobId, file.contentHash, file.byteSize]);
+          if (!activeBlob.rows[0]) throw new Error("SOURCE_BLOB_NOT_ACTIVE");
+        }
         await client.query(
           `INSERT INTO source_files
            (id, workspace_id, snapshot_id, path, language, content_hash, byte_size, source_blob_id)

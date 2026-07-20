@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, rename, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -353,6 +353,88 @@ describe("source blob garbage collection", () => {
         });
     }
   );
+
+  test.each(["EACCES", "EPERM"] as const)(
+    "audits an active blob whose final file open fails with %s and continues the bounded run",
+    async (code) => {
+      const context = await fixture();
+      const inaccessible = await context.blobs.put({
+        workspaceId: context.workspaceId,
+        bytes: Buffer.from(`inaccessible final ${code}`)
+      });
+      const valid = await context.blobs.put({
+        workspaceId: context.workspaceId,
+        bytes: Buffer.from(`valid after final ${code}`)
+      });
+      const inaccessiblePath = sourcePath(context.root, inaccessible.record);
+      const openFile = async (candidate: string, flags: number) => {
+        if (candidate === inaccessiblePath) throw Object.assign(new Error("permission denied"), { code });
+        return open(candidate, flags);
+      };
+
+      await expect(context.collector({ openFile }).runOnce()).resolves.toMatchObject({
+        scanned: 2,
+        tombstoned: 1,
+        inconsistent: 1
+      });
+      expect(context.catalog.sourceBlobs.find((record) => record.id === inaccessible.record.id))
+        .toMatchObject({ status: "active", fencingToken: null });
+      expect(context.catalog.sourceBlobs.find((record) => record.id === valid.record.id))
+        .toMatchObject({ status: "tombstoned", fencingToken: expect.any(String) });
+      expect(context.catalog.auditEvents.find((event) => event.resourceId === inaccessible.record.id))
+        .toMatchObject({ metadata: { reason: "active_file_inaccessible" } });
+    }
+  );
+
+  test("audits an inaccessible active ancestor and continues the bounded run", async () => {
+    const context = await fixture();
+    const inaccessible = await context.blobs.put({
+      workspaceId: context.workspaceId,
+      bytes: Buffer.from("inaccessible ancestor")
+    });
+    const valid = await context.blobs.put({
+      workspaceId: context.workspaceId,
+      bytes: Buffer.from("valid after ancestor")
+    });
+    const inaccessibleParent = path.dirname(sourcePath(context.root, inaccessible.record));
+    const lstatFile = async (candidate: string) => {
+      if (candidate === inaccessibleParent) {
+        throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+      }
+      return lstat(candidate);
+    };
+
+    await expect(context.collector({ lstatFile }).runOnce()).resolves.toMatchObject({
+      scanned: 2,
+      tombstoned: 1,
+      inconsistent: 1
+    });
+    expect(context.catalog.sourceBlobs.find((record) => record.id === inaccessible.record.id))
+      .toMatchObject({ status: "active", fencingToken: null });
+    expect(context.catalog.sourceBlobs.find((record) => record.id === valid.record.id))
+      .toMatchObject({ status: "tombstoned", fencingToken: expect.any(String) });
+    expect(context.catalog.auditEvents.find((event) => event.resourceId === inaccessible.record.id))
+      .toMatchObject({ metadata: { reason: "active_file_inaccessible" } });
+  });
+
+  test("propagates an unexpected final open failure without auditing it as inaccessible", async () => {
+    const context = await fixture();
+    const created = await context.blobs.put({
+      workspaceId: context.workspaceId,
+      bytes: Buffer.from("unexpected final failure")
+    });
+    const createdPath = sourcePath(context.root, created.record);
+    const unexpected = Object.assign(new Error("device failure"), { code: "EIO" });
+
+    await expect(context.collector({
+      openFile: async (candidate, flags) => {
+        if (candidate === createdPath) throw unexpected;
+        return open(candidate, flags);
+      }
+    }).runOnce()).rejects.toBe(unexpected);
+    expect(context.catalog.sourceBlobs[0]).toMatchObject({ status: "active", fencingToken: null });
+    expect(context.catalog.auditEvents.some((event) => event.resourceId === created.record.id)).toBe(false);
+  });
 
   test("restores a referenced tombstone while its verified original file is still present", async () => {
     const context = await fixture();

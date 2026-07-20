@@ -9,6 +9,7 @@ import {
   sourceBlobFileLocations,
   sourceBlobTrashDirectorySegments
 } from "./source-blob-store.js";
+import type { SourceBlobLstatFile, SourceBlobOpenFile } from "./source-blob-store.js";
 import { syncDirectory } from "./folder-import.js";
 import { normalizeSourceBlobGcCandidateLimit, sourceBlobGcCursor } from "../persistence/store.js";
 import type {
@@ -33,12 +34,15 @@ function emptyResult(): SourceBlobGcRunResult {
   return { scanned: 0, tombstoned: 0, restored: 0, trashed: 0, deleted: 0, inconsistent: 0 };
 }
 
-async function exists(candidate: string): Promise<boolean> {
+async function exists(candidate: string, lstatFile: SourceBlobLstatFile = lstat): Promise<boolean> {
   try {
-    await lstat(candidate);
+    await lstatFile(candidate);
     return true;
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+    if (error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM")) {
+      throw new SourceBlobIntegrityError("SOURCE_BLOB_INACCESSIBLE", "Source blob file is inaccessible");
+    }
     throw error;
   }
 }
@@ -72,6 +76,8 @@ export class SourceBlobGarbageCollector {
     now?: () => Date;
     syncDirectory?: typeof syncDirectory;
     renameFile?: typeof rename;
+    lstatFile?: SourceBlobLstatFile;
+    openFile?: SourceBlobOpenFile;
     candidateLimit?: number;
   }) {
     this.enabled = options.enabled ?? false;
@@ -134,18 +140,22 @@ export class SourceBlobGarbageCollector {
       if (references > 0) return result;
       try {
         const locations = sourceBlobFileLocations(this.options.dataDir, current);
-        const sourceDirectoryExists = await ensureSafeDirectoryChain({
+        const sourceDirectoryExists = await this.ensureDirectoryChain({
           dataDir: this.options.dataDir,
           segments: sourceBlobDirectorySegments(current)
         });
         if (!sourceDirectoryExists) {
           throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob directory is missing");
         }
-        await assertSourceBlobFile(locations.source, current);
+        await this.assertFile(locations.source, current);
       } catch (error) {
         if (error instanceof SourceBlobIntegrityError
           || error instanceof Error && "code" in error && error.code === "ENOENT") {
-          await this.inconsistent(catalog, current, "active_file_inconsistent", result);
+          const reason = error instanceof SourceBlobIntegrityError
+            && error.code === "SOURCE_BLOB_INACCESSIBLE"
+            ? "active_file_inaccessible"
+            : "active_file_inconsistent";
+          await this.inconsistent(catalog, current, reason, result);
           return result;
         }
         throw error;
@@ -168,7 +178,7 @@ export class SourceBlobGarbageCollector {
     }
 
     try {
-      const sourceDirectoryExists = await ensureSafeDirectoryChain({
+      const sourceDirectoryExists = await this.ensureDirectoryChain({
         dataDir: this.options.dataDir,
         segments: sourceBlobDirectorySegments(current)
       });
@@ -176,7 +186,7 @@ export class SourceBlobGarbageCollector {
         await this.inconsistent(catalog, current, "source_directory_missing", result);
         return result;
       }
-      const trashDirectoryExists = await ensureSafeDirectoryChain({
+      const trashDirectoryExists = await this.ensureDirectoryChain({
         dataDir: this.options.dataDir,
         segments: sourceBlobTrashDirectorySegments(current)
       });
@@ -212,8 +222,8 @@ export class SourceBlobGarbageCollector {
       return;
     }
     const [sourceExists, trashExists] = await Promise.all([
-      exists(locations.source),
-      trashDirectoryExists ? exists(locations.trash) : false
+      exists(locations.source, this.options.lstatFile),
+      trashDirectoryExists ? exists(locations.trash, this.options.lstatFile) : false
     ]);
     if (sourceExists === trashExists) {
       await this.inconsistent(catalog, record, "tombstone_location_inconsistent", result);
@@ -222,28 +232,28 @@ export class SourceBlobGarbageCollector {
 
     if (references > 0) {
       if (sourceExists) {
-        await assertSourceBlobFile(locations.source, record);
+        await this.assertFile(locations.source, record);
         const restored = await catalog.restoreTombstoned(record.id, record.fencingToken);
         if (restored) result.restored = 1;
         else await this.inconsistent(catalog, record, "restore_fence_conflict", result);
       } else {
-        await assertSourceBlobFile(locations.trash, record);
+        await this.assertFile(locations.trash, record);
         await this.inconsistent(catalog, record, "referenced_tombstone_moved", result);
       }
       return;
     }
 
     if (sourceExists) {
-      await assertSourceBlobFile(locations.source, record);
+      await this.assertFile(locations.source, record);
       if (!graceElapsed(record.tombstonedAt, this.tombstoneGraceMs, now)) return;
-      await ensureSafeDirectoryChain({
+      await this.ensureDirectoryChain({
         dataDir: this.options.dataDir,
         segments: sourceBlobTrashDirectorySegments(record),
         createMissing: true,
         syncFinal: true,
         syncDirectory: this.syncDir
       });
-      if (!await ensureSafeDirectoryChain({
+      if (!await this.ensureDirectoryChain({
         dataDir: this.options.dataDir,
         segments: sourceBlobDirectorySegments(record)
       })) {
@@ -255,7 +265,7 @@ export class SourceBlobGarbageCollector {
         this.syncDir(locations.trashParent)
       ]);
     } else {
-      await assertSourceBlobFile(locations.trash, record);
+      await this.assertFile(locations.trash, record);
       await Promise.all([
         this.syncDir(locations.sourceParent),
         this.syncDir(locations.trashParent)
@@ -285,15 +295,15 @@ export class SourceBlobGarbageCollector {
       return;
     }
     const [sourceExists, trashExists] = await Promise.all([
-      exists(locations.source),
-      trashDirectoryExists ? exists(locations.trash) : false
+      exists(locations.source, this.options.lstatFile),
+      trashDirectoryExists ? exists(locations.trash, this.options.lstatFile) : false
     ]);
     if (sourceExists) {
       await this.inconsistent(catalog, record, "trash_source_present", result);
       return;
     }
     if (!trashExists) {
-      await ensureSafeDirectoryChain({
+      await this.ensureDirectoryChain({
         dataDir: this.options.dataDir,
         segments: sourceBlobTrashDirectorySegments(record),
         createMissing: true,
@@ -306,9 +316,9 @@ export class SourceBlobGarbageCollector {
       return;
     }
 
-    await assertSourceBlobFile(locations.trash, record);
+    await this.assertFile(locations.trash, record);
     if (!graceElapsed(record.trashedAt, this.trashGraceMs, now)) return;
-    if (!await ensureSafeDirectoryChain({
+    if (!await this.ensureDirectoryChain({
       dataDir: this.options.dataDir,
       segments: sourceBlobTrashDirectorySegments(record)
     })) {
@@ -329,5 +339,18 @@ export class SourceBlobGarbageCollector {
   ): Promise<void> {
     await catalog.recordGcInconsistency(record.id, reason);
     result.inconsistent = 1;
+  }
+
+  private ensureDirectoryChain(
+    input: Omit<Parameters<typeof ensureSafeDirectoryChain>[0], "lstatFile">
+  ): Promise<boolean> {
+    return ensureSafeDirectoryChain({ ...input, lstatFile: this.options.lstatFile });
+  }
+
+  private assertFile(
+    candidate: string,
+    record: Pick<SourceBlobRecord, "contentHash" | "byteSize">
+  ): Promise<Buffer> {
+    return assertSourceBlobFile(candidate, record, this.options.openFile, this.options.lstatFile);
   }
 }

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
+import type { Stats } from "node:fs";
 import {
   chmod,
   link,
@@ -34,6 +35,7 @@ export class SourceBlobIntegrityError extends Error {
     readonly code:
       | "INVALID_SOURCE_BLOB_SCOPE"
       | "SOURCE_BLOB_MISSING"
+      | "SOURCE_BLOB_INACCESSIBLE"
       | "SOURCE_BLOB_INTEGRITY_FAILED"
       | "SNAPSHOT_VIEW_FAILED",
     message: string
@@ -41,6 +43,16 @@ export class SourceBlobIntegrityError extends Error {
     super(message);
     this.name = "SourceBlobIntegrityError";
   }
+}
+
+export type SourceBlobLstatFile = (candidate: string) => Promise<Stats>;
+export type SourceBlobOpenFile = (candidate: string, flags: number) => Promise<FileHandle>;
+
+function classifySourceBlobAccessError(error: unknown, message: string): unknown {
+  if (error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM")) {
+    return new SourceBlobIntegrityError("SOURCE_BLOB_INACCESSIBLE", message);
+  }
+  return error;
 }
 
 function digest(bytes: Uint8Array): string {
@@ -90,12 +102,21 @@ export async function ensureSafeDirectoryChain(input: {
   prepareRoot?: boolean;
   syncFinal?: boolean;
   syncDirectory?: typeof syncDirectory;
+  lstatFile?: SourceBlobLstatFile;
 }): Promise<boolean> {
   const syncDir = input.syncDirectory ?? syncDirectory;
+  const lstatFile = input.lstatFile ?? lstat;
   let current = path.resolve(input.dataDir);
+  const inspect = async (candidate: string): Promise<Stats> => {
+    try {
+      return await lstatFile(candidate);
+    } catch (error) {
+      throw classifySourceBlobAccessError(error, "Source blob directory chain is inaccessible");
+    }
+  };
   const assertDirectory = async (candidate: string): Promise<"directory" | "missing"> => {
     try {
-      const metadata = await lstat(candidate);
+      const metadata = await inspect(candidate);
       if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
         throw new SourceBlobIntegrityError(
           "SOURCE_BLOB_INTEGRITY_FAILED",
@@ -123,7 +144,9 @@ export async function ensureSafeDirectoryChain(input: {
     try {
       await mkdir(current, { mode: 0o700 });
     } catch (error) {
-      if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+      if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) {
+        throw classifySourceBlobAccessError(error, "Source blob directory chain is inaccessible");
+      }
     }
     if (await assertDirectory(current) !== "directory") {
       throw new SourceBlobIntegrityError(
@@ -133,7 +156,7 @@ export async function ensureSafeDirectoryChain(input: {
     }
     await syncDir(parent);
   }
-  const rootMetadata = await lstat(current);
+  const rootMetadata = await inspect(current);
   const processUserId = process.getuid?.();
   if (processUserId !== undefined) {
     if (rootMetadata.uid !== processUserId) {
@@ -147,7 +170,7 @@ export async function ensureSafeDirectoryChain(input: {
       await chmod(current, 0o700);
       await syncDir(current);
     }
-    const privateRootMetadata = input.prepareRoot ? await lstat(current) : rootMetadata;
+    const privateRootMetadata = input.prepareRoot ? await inspect(current) : rootMetadata;
     if ((privateRootMetadata.mode & 0o077) !== 0) {
       throw new SourceBlobIntegrityError(
         "SOURCE_BLOB_INTEGRITY_FAILED",
@@ -166,7 +189,9 @@ export async function ensureSafeDirectoryChain(input: {
       try {
         await mkdir(child, { mode: 0o700 });
       } catch (error) {
-        if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+        if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) {
+          throw classifySourceBlobAccessError(error, "Source blob directory chain is inaccessible");
+        }
       }
       if (await assertDirectory(child) !== "directory") {
         throw new SourceBlobIntegrityError(
@@ -199,9 +224,15 @@ export function sourceBlobTrashDirectorySegments(
 export async function assertSourceBlobFile(
   candidate: string,
   record: Pick<SourceBlobRecord, "contentHash" | "byteSize">,
-  openFile: (candidate: string, flags: number) => Promise<FileHandle> = open
+  openFile: SourceBlobOpenFile = open,
+  lstatFile: SourceBlobLstatFile = lstat
 ): Promise<Buffer> {
-  const pathMetadata = await lstat(candidate);
+  let pathMetadata: Stats;
+  try {
+    pathMetadata = await lstatFile(candidate);
+  } catch (error) {
+    throw classifySourceBlobAccessError(error, "Source blob final file is inaccessible");
+  }
   if (!pathMetadata.isFile() || pathMetadata.isSymbolicLink()) {
     throw new SourceBlobIntegrityError(
       "SOURCE_BLOB_INTEGRITY_FAILED",
@@ -218,7 +249,7 @@ export async function assertSourceBlobFile(
         "Source blob final path must not be a symbolic link"
       );
     }
-    throw error;
+    throw classifySourceBlobAccessError(error, "Source blob final file is inaccessible");
   }
   try {
     const metadata = await handle.stat();
@@ -233,6 +264,9 @@ export async function assertSourceBlobFile(
       throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob bytes do not match metadata");
     }
     return bytes;
+  } catch (error) {
+    if (error instanceof SourceBlobIntegrityError) throw error;
+    throw classifySourceBlobAccessError(error, "Source blob final file is inaccessible");
   } finally {
     await handle.close();
   }

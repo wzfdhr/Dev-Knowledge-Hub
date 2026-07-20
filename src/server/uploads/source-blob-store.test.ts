@@ -10,6 +10,7 @@ import {
   SourceBlobIntegrityError,
   SourceBlobStore,
   assertSourceBlobFile,
+  ensureSafeDirectoryChain,
   type LockedSourceBlobCatalog,
   type SourceBlobCatalog,
   type SourceBlobRecord
@@ -161,6 +162,37 @@ describe("workspace source blob store", () => {
 
     expect(openFile).toHaveBeenCalledOnce();
     expect(Number(openFile.mock.calls[0]![1]) & constants.O_NOFOLLOW).toBe(constants.O_NOFOLLOW);
+  });
+
+  test.each(["EACCES", "EPERM"] as const)(
+    "classifies a final file open %s failure as stably inaccessible",
+    async (code) => {
+      const context = await fixture();
+      const created = await context.store.put({ workspaceId: randomUUID(), bytes: Buffer.from(code) });
+
+      await expect(assertSourceBlobFile(
+        path.join(context.root, created.record.storageKey),
+        created.record,
+        async () => { throw Object.assign(new Error("permission denied"), { code }); }
+      )).rejects.toMatchObject({ code: "SOURCE_BLOB_INACCESSIBLE" });
+    }
+  );
+
+  test("classifies ancestor access denial but preserves unexpected lstat failures", async () => {
+    const context = await fixture();
+    const denied = Object.assign(new Error("permission denied"), { code: "EACCES" });
+    const unexpected = Object.assign(new Error("device failure"), { code: "EIO" });
+
+    await expect(ensureSafeDirectoryChain({
+      dataDir: context.root,
+      segments: ["blobs"],
+      lstatFile: async () => { throw denied; }
+    })).rejects.toMatchObject({ code: "SOURCE_BLOB_INACCESSIBLE" });
+    await expect(ensureSafeDirectoryChain({
+      dataDir: context.root,
+      segments: ["blobs"],
+      lstatFile: async () => { throw unexpected; }
+    })).rejects.toBe(unexpected);
   });
 
   test("verifies same-volume hardlinks at startup and removes every probe file", async () => {

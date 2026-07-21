@@ -74,3 +74,58 @@ test("expands workspace source blobs without contracting legacy snapshot storage
   expect(sql).not.toMatch(/source_blob_id uuid NOT NULL/);
   expect(sql).not.toMatch(/DROP COLUMN|DROP TABLE|DELETE FROM source_files/);
 });
+
+test("contracts source blob references only after an authorized locked revalidation", async () => {
+  const sql = await readFile(path.join(resolveMigrationDirectory(), "0035_source_blobs_contract.sql"), "utf8");
+
+  expect(sql).toMatch(/current_setting\('devkh\.source_blob_contract_authorized', true\)/);
+  expect(sql).toMatch(/source blob contract migration is not authorized/i);
+  expect(sql).toMatch(/LOCK TABLE source_files, source_blobs/);
+  expect(sql).toMatch(/source_blob_id IS NULL/);
+  expect(sql).toMatch(/blob\.workspace_id <> file\.workspace_id/);
+  expect(sql).toMatch(/blob\.content_hash <> file\.content_hash/);
+  expect(sql).toMatch(/blob\.byte_size <> file\.byte_size/);
+  expect(sql).toMatch(/blob\.generation < 1/);
+  expect(sql).toMatch(/blob\.status <> 'active'/);
+  expect(sql).toMatch(/source_blobs_reference_identity_unique/);
+  expect(sql).toMatch(/FOREIGN KEY \(source_blob_id, workspace_id, content_hash, byte_size\)/);
+  expect(sql).toMatch(/ALTER COLUMN source_blob_id SET NOT NULL/);
+  expect(sql).not.toMatch(/DROP COLUMN|DROP TABLE|DELETE FROM|TRUNCATE/);
+});
+
+test("fails closed before a container can include the contract migration", async () => {
+  // @ts-expect-error The release verifier is an intentionally plain Node ESM entrypoint.
+  const releaseVerifier = await import("../../scripts/release-verify.mjs");
+  const {
+    assertSourceBlobContractReleaseGates,
+    validateSourceBlobContractRecoveryEvidence
+  } = releaseVerifier;
+  const complete = {
+    DEVKH_SOURCE_BLOB_CONTRACT_AUTHORIZED: "true",
+    DEVKH_SOURCE_BLOB_FORWARD_COMPATIBLE_HEALTHY: "true",
+    DEVKH_SOURCE_BLOB_BACKFILL_COMPLETE: "true",
+    DEVKH_SOURCE_BLOB_ACTIVE_PREFLIGHT: "passed",
+    DEVKH_SOURCE_BLOB_DISK_CAPACITY_VALIDATED: "true",
+    DEVKH_SOURCE_BLOB_HISTORIC_RELEASES_VALIDATED: "true",
+    DEVKH_SOURCE_STORAGE_MODE: "shadow",
+    DEVKH_SOURCE_BLOB_DUAL_READ_STARTED_AT: "2026-07-01T00:00:00.000Z",
+    DEVKH_SOURCE_BLOB_RECOVERY_EVIDENCE_PATH: "/tmp/recovery.json"
+  };
+
+  expect(() => assertSourceBlobContractReleaseGates({}, {
+    contractMigrationPresent: true,
+    now: new Date("2026-07-09T00:00:00.000Z")
+  })).toThrow(/not authorized/i);
+  expect(() => assertSourceBlobContractReleaseGates(complete, {
+    contractMigrationPresent: true,
+    now: new Date("2026-07-07T23:59:59.999Z")
+  })).toThrow(/seven days/i);
+  expect(assertSourceBlobContractReleaseGates(complete, {
+    contractMigrationPresent: true,
+    now: new Date("2026-07-09T00:00:00.000Z")
+  })).toEqual({ recoveryEvidencePath: "/tmp/recovery.json" });
+  await expect(validateSourceBlobContractRecoveryEvidence("/tmp/recovery.json", {
+    now: new Date("2026-07-09T00:00:00.000Z"),
+    validateEvidence: async () => ({ finishedAt: "2026-07-07T23:59:59.999Z" })
+  })).rejects.toThrow(/expired/i);
+});

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { validateRecoveryEvidenceFile } from "./backup/validate-recovery-evidence.mjs";
@@ -8,6 +9,9 @@ import { validateRecoveryEvidenceFile } from "./backup/validate-recovery-evidenc
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const compose = ["compose", "-f", resolve(repositoryRoot, "docker-compose.yml")];
+const sourceBlobContractMigration = resolve(repositoryRoot, "drizzle/0035_source_blobs_contract.sql");
+const sourceBlobObservationMs = 7 * 24 * 60 * 60 * 1_000;
+const sourceBlobRecoveryEvidenceMaxAgeMs = 24 * 60 * 60 * 1_000;
 
 export const VERIFY_STEPS = Object.freeze([
   { name: "secrets", command: npm, args: ["run", "secrets:scan"] },
@@ -122,6 +126,55 @@ export function assertContainerIsolation(env) {
   }
 }
 
+export function assertSourceBlobContractReleaseGates(env, options = {}) {
+  const contractMigrationPresent = options.contractMigrationPresent
+    ?? existsSync(sourceBlobContractMigration);
+  if (!contractMigrationPresent) return null;
+  if (env.DEVKH_SOURCE_BLOB_CONTRACT_AUTHORIZED !== "true") {
+    throw new Error("Source blob contract release is not authorized");
+  }
+  const required = [
+    ["DEVKH_SOURCE_BLOB_FORWARD_COMPATIBLE_HEALTHY", "true"],
+    ["DEVKH_SOURCE_BLOB_BACKFILL_COMPLETE", "true"],
+    ["DEVKH_SOURCE_BLOB_ACTIVE_PREFLIGHT", "passed"],
+    ["DEVKH_SOURCE_BLOB_DISK_CAPACITY_VALIDATED", "true"],
+    ["DEVKH_SOURCE_BLOB_HISTORIC_RELEASES_VALIDATED", "true"]
+  ];
+  for (const [name, expected] of required) {
+    if (env[name] !== expected) throw new Error(`Source blob contract release requires ${name}=${expected}`);
+  }
+  if (env.DEVKH_SOURCE_STORAGE_MODE !== "shadow") {
+    throw new Error("Source blob contract release requires dual-read/dual-write shadow mode");
+  }
+  const observationStartedAt = env.DEVKH_SOURCE_BLOB_DUAL_READ_STARTED_AT;
+  const observationStarted = typeof observationStartedAt === "string"
+    && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(observationStartedAt)
+    ? new Date(observationStartedAt)
+    : null;
+  const now = options.now ?? new Date();
+  if (!observationStarted || !Number.isFinite(observationStarted.getTime())
+    || now.getTime() - observationStarted.getTime() < sourceBlobObservationMs) {
+    throw new Error("Source blob contract release requires at least seven days of dual-read observation");
+  }
+  const recoveryEvidencePath = env.DEVKH_SOURCE_BLOB_RECOVERY_EVIDENCE_PATH?.trim();
+  if (!recoveryEvidencePath || !isAbsolute(recoveryEvidencePath)) {
+    throw new Error("Source blob contract release requires an absolute recovery evidence path");
+  }
+  return { recoveryEvidencePath };
+}
+
+export async function validateSourceBlobContractRecoveryEvidence(path, options = {}) {
+  const validateEvidence = options.validateEvidence ?? validateRecoveryEvidenceFile;
+  const evidence = await validateEvidence(path);
+  const finishedAt = typeof evidence?.finishedAt === "string" ? new Date(evidence.finishedAt) : null;
+  const now = options.now ?? new Date();
+  const age = finishedAt ? now.getTime() - finishedAt.getTime() : Number.NaN;
+  if (!Number.isFinite(age) || age < 0 || age > sourceBlobRecoveryEvidenceMaxAgeMs) {
+    throw new Error("Source blob contract recovery evidence is expired");
+  }
+  return evidence;
+}
+
 function executeCommand(step) {
   return new Promise((resolve, reject) => {
     const child = spawn(step.command, step.args, { cwd: repositoryRoot, env: process.env, stdio: "inherit" });
@@ -230,7 +283,11 @@ export async function runContainerVerification(options = {}) {
 export async function main(args = process.argv.slice(2)) {
   const scope = parseReleaseScope(args);
   if (scope === "verify" || scope === "all") await runReleaseSteps(VERIFY_STEPS);
-  if (scope === "container" || scope === "all") await runContainerVerification();
+  if (scope === "container" || scope === "all") {
+    const gates = assertSourceBlobContractReleaseGates(process.env);
+    if (gates) await validateSourceBlobContractRecoveryEvidence(gates.recoveryEvidencePath);
+    await runContainerVerification();
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

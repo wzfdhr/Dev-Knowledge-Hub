@@ -54,6 +54,12 @@ describe("delivery database isolation", () => {
     expect(ordinaryCommands).toContain("npm run release:verify -- --scope runtime-container");
     expect(ordinaryCommands).not.toContain("--scope container");
     expect(introducingCommands).toContain("npm run release:verify -- --scope container");
+    expect(phaseMerge.jobs.merge.steps.some((step) => step.uses === "actions/upload-artifact@v4")).toBe(true);
+    expect(introducingCommands).not.toContain("phase-merge-approval");
+    const mergeCommands = phaseMerge.jobs.merge.steps.map((step) => step.run).filter(Boolean).join("\n");
+    expect(mergeCommands).toContain("phase-merge-approval.json");
+    expect(mergeCommands).toContain("git rev-parse HEAD");
+    expect(mergeCommands).toContain("$APPROVED_BASE:.github/workflows/phase-merge.yml");
     expect(ci.jobs["container-smoke"].env).not.toHaveProperty("DEVKH_RELEASE_APPROVED_BASE");
     expect(ci.jobs["container-smoke"].env).not.toHaveProperty("DEVKH_SOURCE_BLOB_CONTRACT_GATE_MANIFEST");
   });

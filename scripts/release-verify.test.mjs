@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,12 +16,13 @@ import {
   assertSourceBlobContractReleaseGates,
   assertTrustedRuntimeMaterialIdentity,
   finalizeRecoveryEvidence,
+  loadPhaseMergeApprovalProvenance,
   parseReleaseScope,
   runContainerVerification,
   runReleaseSteps,
-  validatePostContractBaseline,
   validateSourceBlobContractGateManifest
 } from "./release-verify.mjs";
+import { validatePostContractBaselineGrammar } from "./verify-post-contract-database.mjs";
 
 function createPendingEvidence(root) {
   const document = readFileSync(join(process.cwd(), "docs/operations/recovery-evidence.md"), "utf8");
@@ -135,6 +136,25 @@ function createSyntheticDescendant(parent) {
   return result.stdout.trim();
 }
 
+function createPhaseMergeApproval(approvedCommit, repository = "example/devkh") {
+  const blob = (path) => spawnSync("git", ["rev-parse", `${approvedCommit}:${path}`], { encoding: "utf8" }).stdout.trim();
+  const approvedBase = spawnSync("git", ["rev-parse", `${approvedCommit}^`], { encoding: "utf8" }).stdout.trim();
+  return {
+    schemaVersion: 1,
+    kind: "devkh-phase-merge-approval",
+    repository,
+    approvedCommit,
+    approvedHead: "a".repeat(40),
+    approvedBase,
+    contractBlob: blob("drizzle/0035_source_blobs_contract.sql"),
+    baselineBlob: blob("docker/post-contract-ci-baseline.sql"),
+    workflowBlob: spawnSync("git", ["rev-parse", `${approvedBase}:.github/workflows/phase-merge.yml`], { encoding: "utf8" }).stdout.trim(),
+    workflowRunId: 12345,
+    workflowRunAttempt: 1,
+    issuedAt: "2026-07-21T00:00:00.000Z"
+  };
+}
+
 describe("release verification orchestrator", () => {
   test("keeps the release checks in the approved order", () => {
     expect(VERIFY_STEPS.map((step) => step.name)).toEqual([
@@ -155,13 +175,16 @@ describe("release verification orchestrator", () => {
     ]);
     expect(STANDARD_CONTAINER_STEPS.map((step) => step.name)).not.toContain("source-blob-contract-migration");
     expect(POST_CONTRACT_CONTAINER_STEPS.map((step) => step.name)).toEqual([
-      "container-build", "post-contract-compose-config", "post-contract-compose-up", "parser-isolation",
-      "application-health", "recovery-drill"
+      "container-build", "post-contract-compose-config", "post-contract-compose-infrastructure",
+      "post-contract-database-audit", "post-contract-compose-app", "parser-isolation", "application-health",
+      "recovery-drill"
     ]);
     expect(POST_CONTRACT_CONTAINER_STEPS.map((step) => step.name))
       .not.toContain("source-blob-contract-migration");
-    expect(POST_CONTRACT_CONTAINER_STEPS.find((step) => step.name === "post-contract-compose-up")?.args.join(" "))
+    expect(POST_CONTRACT_CONTAINER_STEPS.find((step) => step.name === "post-contract-compose-infrastructure")?.args.join(" "))
       .toContain("docker-compose.post-contract-ci.yml");
+    expect(POST_CONTRACT_CONTAINER_STEPS.findIndex((step) => step.name === "post-contract-database-audit"))
+      .toBeLessThan(POST_CONTRACT_CONTAINER_STEPS.findIndex((step) => step.name === "post-contract-compose-app"));
     const repositoryRoot = process.cwd();
     const composeFile = join(repositoryRoot, "docker-compose.yml");
     expect(isAbsolute(repositoryRoot)).toBe(true);
@@ -280,6 +303,7 @@ describe("release verification orchestrator", () => {
   ])("allows ordinary runtime verification for %s", async (_label, eventFactory, eventName) => {
     const trustedCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
     const candidateCommit = createSyntheticDescendant(trustedCommit);
+    const loadApprovalProvenance = vi.fn(async (commit) => createPhaseMergeApproval(commit));
     await expect(assertPostContractRuntimeCi({
       GITHUB_ACTIONS: "true",
       GITHUB_WORKFLOW: "ci",
@@ -288,11 +312,97 @@ describe("release verification orchestrator", () => {
     }, {
       checkedOutCommit: candidateCommit,
       event: eventFactory(trustedCommit, candidateCommit),
+      loadApprovalProvenance,
       materializeBaseline: false
     })).resolves.toMatchObject({
       eventName,
       trustedContractCommit: trustedCommit
     });
+    expect(loadApprovalProvenance).toHaveBeenCalledWith(trustedCommit, expect.any(Object));
+  });
+
+  test("rejects a second main push after an unapproved contract introduction", async () => {
+    const unauthorizedContractCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    const candidateCommit = createSyntheticDescendant(unauthorizedContractCommit);
+    await expect(assertPostContractRuntimeCi({
+      GITHUB_ACTIONS: "true",
+      GITHUB_WORKFLOW: "ci",
+      GITHUB_EVENT_NAME: "push",
+      GITHUB_REPOSITORY: "example/devkh"
+    }, {
+      checkedOutCommit: candidateCommit,
+      event: {
+        ref: "refs/heads/main",
+        before: unauthorizedContractCommit,
+        after: candidateCommit,
+        repository: { full_name: "example/devkh" }
+      },
+      loadApprovalProvenance: async () => {
+        throw new Error("No independently approved Phase Merge artifact");
+      },
+      materializeBaseline: false
+    })).rejects.toThrow(/independently approved Phase Merge artifact/i);
+  });
+
+  test("verifies an exact-commit approval ZIP against trusted GitHub workflow metadata", async () => {
+    const root = mkdtempSync(join(tmpdir(), "devkh-phase-merge-approval-"));
+    const approvedCommit = "c".repeat(40);
+    const provenance = {
+      schemaVersion: 1,
+      kind: "devkh-phase-merge-approval",
+      repository: "example/devkh",
+      approvedCommit,
+      approvedHead: "a".repeat(40),
+      approvedBase: "b".repeat(40),
+      contractBlob: "d".repeat(40),
+      baselineBlob: "e".repeat(40),
+      workflowBlob: "f".repeat(40),
+      workflowRunId: 12345,
+      workflowRunAttempt: 1,
+      issuedAt: "2026-07-21T00:00:30.000Z"
+    };
+    writeFileSync(join(root, "phase-merge-approval.json"), `${JSON.stringify(provenance)}\n`);
+    execFileSync("zip", ["-q", "-j", join(root, "approval.zip"), join(root, "phase-merge-approval.json")]);
+    const archive = readFileSync(join(root, "approval.zip"));
+    const digest = `sha256:${createHash("sha256").update(archive).digest("hex")}`;
+    const fetchMock = vi.fn(async (url) => {
+      const value = String(url);
+      if (value.includes("actions/artifacts?")) return {
+        ok: true,
+        json: async () => ({ artifacts: [{
+          id: 55, name: `phase-merge-approval-${approvedCommit}`, expired: false, digest,
+          created_at: "2026-07-21T00:01:00Z", workflow_run: { id: 12345 }
+        }] })
+      };
+      if (value.endsWith("/actions/runs/12345")) return {
+        ok: true,
+        json: async () => ({
+          id: 12345, workflow_id: 77, event: "workflow_dispatch", status: "completed", conclusion: "success",
+          run_attempt: 1, actor: { login: "example" }, repository: { full_name: "example/devkh" },
+          head_sha: "b".repeat(40), head_branch: "main",
+          created_at: "2026-07-21T00:00:00Z"
+        })
+      };
+      if (value.endsWith("/actions/workflows/77")) return {
+        ok: true,
+        json: async () => ({ id: 77, path: ".github/workflows/phase-merge.yml" })
+      };
+      if (value.endsWith("/actions/artifacts/55/zip")) return {
+        ok: true,
+        arrayBuffer: async () => archive.buffer.slice(archive.byteOffset, archive.byteOffset + archive.byteLength)
+      };
+      throw new Error(`unexpected GitHub URL: ${value}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await expect(loadPhaseMergeApprovalProvenance(approvedCommit, {
+        repository: "example/devkh",
+        token: "github-token"
+      })).resolves.toEqual(provenance);
+    } finally {
+      vi.unstubAllGlobals();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("allows a codex/mvp push only when its prior commit already contains the unchanged contract", async () => {
@@ -311,6 +421,7 @@ describe("release verification orchestrator", () => {
         after: currentCommit,
         repository: { full_name: "example/devkh" }
       },
+      loadApprovalProvenance: async (commit) => createPhaseMergeApproval(commit),
       materializeBaseline: false
     })).resolves.toMatchObject({
       eventName: "push",
@@ -369,16 +480,16 @@ describe("release verification orchestrator", () => {
   });
 
   test.each([
-    ["application data", (sql) => `${sql}\n  INSERT INTO public.users (id) VALUES ('bad');\n`, /application data/i],
-    ["application data mutation", (sql) => `${sql}\nUPDATE public.users SET disabled = false;\n`, /application data/i],
-    ["nullable source blob references", (sql) => sql.replace("source_blob_id uuid NOT NULL", "source_blob_id uuid"), /NOT NULL/i],
-    ["an incomplete migration ledger", (sql) => sql.replace(/^INSERT INTO public\.schema_migrations.*0035_source_blobs_contract\.sql.*\n/m, ""), /migration ledger/i]
-  ])("rejects a post-contract baseline containing %s", (_label, mutate, pattern) => {
+    ["CTE-wrapped write", "WITH injected AS (INSERT INTO public.workspaces (name, slug) VALUES ('x', 'x') RETURNING id) SELECT * FROM injected;"],
+    ["no-op application delete", "DELETE FROM public.workspaces WHERE false;"],
+    ["table-as-select write", "CREATE TABLE public.injected AS SELECT * FROM public.workspaces;"]
+  ])("rejects arbitrary executable baseline DML: %s", (_label, statement) => {
     const baseline = readFileSync("docker/post-contract-ci-baseline.sql", "utf8");
     const expectedMigrations = readdirSync("drizzle")
       .filter((name) => name.endsWith(".sql") && name <= "0035_source_blobs_contract.sql")
       .sort();
-    expect(() => validatePostContractBaseline(mutate(baseline), expectedMigrations)).toThrow(pattern);
+    expect(() => validatePostContractBaselineGrammar(`${baseline}\n${statement}\n`, expectedMigrations))
+      .toThrow(/executable statement/i);
   });
 
   test("does not let caller flags turn an introducing contract PR into ordinary runtime CI", async () => {

@@ -63,6 +63,9 @@ jobs:
           if-no-files-found: error
 
   container-smoke:
+    permissions:
+      actions: read
+      contents: read
     runs-on: ubuntu-latest
     env:
       POSTGRES_PASSWORD: devkh-container-password
@@ -76,6 +79,7 @@ jobs:
       DEVKH_CONTAINER_SMOKE: "true"
       RECOVERY_EVIDENCE_DIR: /tmp/devkh-recovery-evidence
       RECOVERY_EVIDENCE_DEFER_FINALIZATION: "true"
+      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:

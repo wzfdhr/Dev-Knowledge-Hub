@@ -209,9 +209,57 @@ jobs:
           git merge-base --is-ancestor "$APPROVED_BASE" "$APPROVED_HEAD"
           test "$(git rev-parse HEAD)" = "$APPROVED_BASE"
       - name: Create and atomically push approved merge commit
+        id: merge
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git merge --no-ff --no-edit "$APPROVED_HEAD" -m "Merge pull request #$PR_NUMBER"
           git push origin "HEAD:refs/heads/main" "--force-with-lease=refs/heads/main:$APPROVED_BASE"
+          merge_commit="$(git rev-parse HEAD)"
+          echo "commit=$merge_commit" >> "$GITHUB_OUTPUT"
+          if git cat-file -e "$merge_commit:drizzle/0035_source_blobs_contract.sql" \
+            && git cat-file -e "$merge_commit:docker/post-contract-ci-baseline.sql"; then
+            echo "post_contract=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "post_contract=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Issue exact-commit Phase Merge approval provenance
+        if: ${{ steps.merge.outputs.post_contract == 'true' }}
+        env:
+          MERGE_COMMIT: ${{ steps.merge.outputs.commit }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          contract_blob="$(git rev-parse "$MERGE_COMMIT:drizzle/0035_source_blobs_contract.sql")"
+          baseline_blob="$(git rev-parse "$MERGE_COMMIT:docker/post-contract-ci-baseline.sql")"
+          workflow_blob="$(git rev-parse "$APPROVED_BASE:.github/workflows/phase-merge.yml")"
+          issued_at="$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')"
+          export contract_blob baseline_blob workflow_blob issued_at
+          node --input-type=module -e '
+            import { writeFileSync } from "node:fs";
+            const document = {
+              schemaVersion: 1,
+              kind: "devkh-phase-merge-approval",
+              repository: process.env.GITHUB_REPOSITORY,
+              approvedCommit: process.env.MERGE_COMMIT,
+              approvedHead: process.env.APPROVED_HEAD,
+              approvedBase: process.env.APPROVED_BASE,
+              contractBlob: process.env.contract_blob,
+              baselineBlob: process.env.baseline_blob,
+              workflowBlob: process.env.workflow_blob,
+              workflowRunId: Number(process.env.WORKFLOW_RUN_ID),
+              workflowRunAttempt: Number(process.env.WORKFLOW_RUN_ATTEMPT),
+              issuedAt: process.env.issued_at
+            };
+            writeFileSync("phase-merge-approval.json", `${JSON.stringify(document)}\n`, { mode: 0o600, flag: "wx" });
+          '
+      - name: Upload exact-commit Phase Merge approval provenance
+        if: ${{ steps.merge.outputs.post_contract == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-merge-approval-${{ steps.merge.outputs.commit }}
+          path: phase-merge-approval.json
+          if-no-files-found: error
+          retention-days: 90

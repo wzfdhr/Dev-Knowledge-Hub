@@ -6,8 +6,10 @@ import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import yauzl from "yauzl";
 
 import { validateRecoveryEvidenceFile } from "./backup/validate-recovery-evidence.mjs";
+import { validatePostContractBaselineGrammar } from "./verify-post-contract-database.mjs";
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -71,7 +73,9 @@ export const STANDARD_CONTAINER_STEPS = Object.freeze([
 export const POST_CONTRACT_CONTAINER_STEPS = Object.freeze([
   { name: "container-build", command: "docker", args: ["build", "--target", "runtime", "-t", "devkh:ci", repositoryRoot] },
   { name: "post-contract-compose-config", command: "docker", args: [...postContractCompose, "config", "--quiet"] },
-  { name: "post-contract-compose-up", command: "docker", args: [...postContractCompose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "postgres", "parser", "app"] },
+  { name: "post-contract-compose-infrastructure", command: "docker", args: [...postContractCompose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "postgres", "parser"] },
+  { name: "post-contract-database-audit", command: "node", args: [resolve(repositoryRoot, "scripts/verify-post-contract-database.mjs")] },
+  { name: "post-contract-compose-app", command: "docker", args: [...postContractCompose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "app"] },
   { name: "parser-isolation", command: "node", args: [resolve(repositoryRoot, "scripts/security/verify-parser-container.mjs")] },
   {
     name: "application-health",
@@ -193,6 +197,15 @@ function rejectFutureTimestamp(date, now, label) {
   if (date.getTime() > now.getTime()) {
     throw new Error(`Source blob contract ${label} is from the future`);
   }
+  return date;
+}
+
+function parseGithubUtc(value, label) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) {
+    throw new Error(`Post-contract runtime CI ${label} is not a GitHub UTC timestamp`);
+  }
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) throw new Error(`Post-contract runtime CI ${label} is invalid`);
   return date;
 }
 
@@ -497,44 +510,174 @@ export function assertTrustedRuntimeMaterialIdentity(material) {
   }
 }
 
-export function validatePostContractBaseline(sql, expectedMigrations) {
-  if (typeof sql !== "string" || !Array.isArray(expectedMigrations)
-    || expectedMigrations.length === 0
-    || expectedMigrations.at(-1) !== "0035_source_blobs_contract.sql") {
-    throw new Error("Post-contract runtime baseline migration ledger expectation is invalid");
+export function validatePhaseMergeApprovalProvenance(provenance, expected) {
+  requireExactFields(provenance, [
+    "schemaVersion", "kind", "repository", "approvedCommit", "approvedHead", "approvedBase",
+    "contractBlob", "baselineBlob", "workflowBlob", "workflowRunId", "workflowRunAttempt", "issuedAt"
+  ], "Phase Merge approval provenance");
+  if (provenance.schemaVersion !== 1 || provenance.kind !== "devkh-phase-merge-approval") {
+    throw new Error("Post-contract runtime CI Phase Merge approval provenance is invalid");
   }
-  const dataSections = [...sql.matchAll(/^-- Data for Name: ([^;]+);/gm)].map((match) => match[1]);
-  if (JSON.stringify(dataSections) !== JSON.stringify(["schema_migrations"])) {
-    throw new Error("Post-contract runtime baseline contains application data");
+  if (provenance.repository !== expected.repository || provenance.approvedCommit !== expected.approvedCommit) {
+    throw new Error("Post-contract runtime CI Phase Merge approval does not bind the trusted predecessor");
   }
-  if (/^\s*(?:UPDATE |DELETE FROM |MERGE INTO |TRUNCATE |DO \$|SELECT pg_catalog\.setval)/m.test(sql)) {
-    throw new Error("Post-contract runtime baseline contains application data");
+  for (const field of ["approvedCommit", "approvedHead", "approvedBase", "contractBlob", "baselineBlob", "workflowBlob"]) {
+    if (!/^[a-f0-9]{40}$/.test(provenance[field] ?? "")) {
+      throw new Error(`Post-contract runtime CI Phase Merge approval ${field} is invalid`);
+    }
   }
-  const dataStatements = sql.split("\n").filter((line) => /^\s*(?:COPY |INSERT INTO )/.test(line));
-  const ledgerPattern = /^\s*INSERT INTO public\.schema_migrations \(name, applied_at\) VALUES \('([^']+)', '[^']+'\);$/;
-  const ledger = [];
-  for (const statement of dataStatements) {
-    const match = statement.match(ledgerPattern);
-    if (!match) throw new Error("Post-contract runtime baseline contains application data");
-    ledger.push(match[1]);
+  if (!Number.isSafeInteger(provenance.workflowRunId) || provenance.workflowRunId <= 0
+    || !Number.isSafeInteger(provenance.workflowRunAttempt) || provenance.workflowRunAttempt <= 0) {
+    throw new Error("Post-contract runtime CI Phase Merge approval workflow identity is invalid");
   }
-  if (JSON.stringify(ledger) !== JSON.stringify(expectedMigrations)) {
-    throw new Error("Post-contract runtime baseline migration ledger is incomplete or unexpected");
-  }
-  if (!/CREATE TABLE public\.source_files \([\s\S]*?source_blob_id uuid NOT NULL[\s\S]*?\);/.test(sql)) {
-    throw new Error("Post-contract runtime baseline does not enforce source_blob_id NOT NULL");
-  }
-  if (!/ADD CONSTRAINT source_blobs_reference_identity_unique UNIQUE \(id, workspace_id, content_hash, byte_size\);/.test(sql)
-    || !/ADD CONSTRAINT source_files_source_blob_identity_fk FOREIGN KEY \(source_blob_id, workspace_id, content_hash, byte_size\) REFERENCES public\.source_blobs\(id, workspace_id, content_hash, byte_size\) ON DELETE RESTRICT;/.test(sql)) {
-    throw new Error("Post-contract runtime baseline does not enforce source blob identity constraints");
-  }
+  parseUtc(provenance.issuedAt, "Phase Merge approval issuedAt");
+  return provenance;
 }
 
-async function materializeTrustedBaseline(sql, root = tmpdir()) {
+async function readSingleApprovalFromZip(bytes) {
+  return new Promise((resolveZip, rejectZip) => {
+    yauzl.fromBuffer(bytes, { lazyEntries: true }, (openError, zip) => {
+      if (openError || !zip) return rejectZip(new Error("Phase Merge approval artifact is not a valid ZIP", { cause: openError }));
+      let found = false;
+      let settled = false;
+      let approvalBytes;
+      const fail = (error) => {
+        if (settled) return;
+        settled = true;
+        zip.close();
+        rejectZip(error);
+      };
+      zip.on("error", fail);
+      zip.on("entry", (entry) => {
+        if (entry.fileName !== "phase-merge-approval.json" || found || entry.uncompressedSize > 16 * 1024) {
+          fail(new Error("Phase Merge approval artifact contents are invalid"));
+          return;
+        }
+        found = true;
+        zip.openReadStream(entry, (streamError, stream) => {
+          if (streamError || !stream) return fail(new Error("Phase Merge approval artifact could not be read", { cause: streamError }));
+          const chunks = [];
+          let size = 0;
+          stream.on("data", (chunk) => {
+            size += chunk.length;
+            if (size > 16 * 1024) stream.destroy(new Error("Phase Merge approval artifact is too large"));
+            else chunks.push(chunk);
+          });
+          stream.on("error", fail);
+          stream.on("end", () => {
+            approvalBytes = Buffer.concat(chunks);
+            zip.readEntry();
+          });
+        });
+      });
+      zip.on("end", () => {
+        if (settled) return;
+        if (!found) return fail(new Error("Phase Merge approval artifact is missing its approval document"));
+        settled = true;
+        zip.close();
+        resolveZip(approvalBytes);
+      });
+      zip.readEntry();
+    });
+  });
+}
+
+async function githubRequest(url, token, options = {}) {
+  const binary = options.binary === true;
+  const response = await fetch(url, {
+    redirect: "follow",
+    headers: {
+      Accept: binary ? "application/octet-stream" : "application/vnd.github+json",
+      Authorization: `Bearer ${token}`,
+      "X-GitHub-Api-Version": "2022-11-28"
+    }
+  });
+  if (!response.ok) throw new Error(`GitHub approval provenance request failed with ${response.status}`);
+  return binary ? Buffer.from(await response.arrayBuffer()) : response.json();
+}
+
+export async function loadPhaseMergeApprovalProvenance(approvedCommit, options) {
+  const { repository, token } = options;
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository ?? "") || !token) {
+    throw new Error("Post-contract runtime CI requires a GitHub repository identity and token");
+  }
+  const api = `https://api.github.com/repos/${repository}`;
+  const artifactName = `phase-merge-approval-${approvedCommit}`;
+  const listing = await githubRequest(`${api}/actions/artifacts?name=${encodeURIComponent(artifactName)}&per_page=100`, token);
+  const artifacts = listing?.artifacts?.filter((artifact) => artifact.name === artifactName && artifact.expired === false) ?? [];
+  if (artifacts.length !== 1) {
+    throw new Error("Post-contract runtime CI requires exactly one unexpired Phase Merge approval artifact");
+  }
+  const [artifact] = artifacts;
+  if (!Number.isSafeInteger(artifact.id) || !Number.isSafeInteger(artifact.workflow_run?.id)
+    || !/^sha256:[a-f0-9]{64}$/.test(artifact.digest ?? "")) {
+    throw new Error("Post-contract runtime CI Phase Merge approval artifact metadata is invalid");
+  }
+  const [run, workflow, archive] = await Promise.all([
+    githubRequest(`${api}/actions/runs/${artifact.workflow_run.id}`, token),
+    githubRequest(`${api}/actions/runs/${artifact.workflow_run.id}`, token).then((value) =>
+      githubRequest(`${api}/actions/workflows/${value.workflow_id}`, token)),
+    githubRequest(`${api}/actions/artifacts/${artifact.id}/zip`, token, { binary: true })
+  ]);
+  const owner = repository.split("/")[0];
+  if (run.id !== artifact.workflow_run.id || run.event !== "workflow_dispatch" || run.status !== "completed"
+    || run.conclusion !== "success" || run.run_attempt < 1 || run.actor?.login !== owner
+    || run.repository?.full_name !== repository || workflow.id !== run.workflow_id
+    || workflow.path !== ".github/workflows/phase-merge.yml") {
+    throw new Error("Post-contract runtime CI approval was not issued by the trusted Phase Merge workflow identity");
+  }
+  const digest = `sha256:${createHash("sha256").update(archive).digest("hex")}`;
+  if (digest !== artifact.digest) {
+    throw new Error("Post-contract runtime CI Phase Merge approval artifact digest does not match GitHub metadata");
+  }
+  const approvalBytes = await readSingleApprovalFromZip(archive);
+  const text = approvalBytes.toString("utf8");
+  let provenance;
+  try {
+    provenance = JSON.parse(text);
+  } catch (error) {
+    throw new Error("Post-contract runtime CI Phase Merge approval is not JSON", { cause: error });
+  }
+  if (text !== `${JSON.stringify(provenance)}\n`) {
+    throw new Error("Post-contract runtime CI Phase Merge approval is not canonical JSON");
+  }
+  validatePhaseMergeApprovalProvenance(provenance, { repository, approvedCommit });
+  if (provenance.workflowRunId !== run.id || provenance.workflowRunAttempt !== run.run_attempt) {
+    throw new Error("Post-contract runtime CI Phase Merge approval workflow run does not match its artifact");
+  }
+  if (run.head_sha !== provenance.approvedBase || run.head_branch !== "main") {
+    throw new Error("Post-contract runtime CI Phase Merge approval is not bound to its trusted default-branch workflow revision");
+  }
+  const issuedAt = parseUtc(provenance.issuedAt, "Phase Merge approval issuedAt");
+  const runCreatedAt = parseGithubUtc(run.created_at, "Phase Merge run createdAt");
+  const artifactCreatedAt = parseGithubUtc(artifact.created_at, "Phase Merge artifact createdAt");
+  if (issuedAt < runCreatedAt || issuedAt > artifactCreatedAt || artifactCreatedAt > new Date()) {
+    throw new Error("Post-contract runtime CI Phase Merge approval timestamps are incoherent");
+  }
+  return provenance;
+}
+
+export async function stageTrustedBaseline(sql, root = tmpdir()) {
   const directory = await mkdtemp(join(root, "devkh-post-contract-baseline-"));
-  const path = join(directory, "post-contract-ci-baseline.sql");
-  await writeFile(path, sql, { encoding: "utf8", mode: 0o600, flag: "wx" });
-  return { baselineDirectory: directory, baselinePath: path };
+  const sourcePath = join(directory, "trusted-source.sql");
+  const stagedDirectory = join(directory, "postgres-init");
+  const baselinePath = join(stagedDirectory, "20-post-contract-baseline.sql");
+  await mkdir(stagedDirectory, { mode: 0o700 });
+  await writeFile(sourcePath, sql, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  try {
+    execFileSync("docker", [
+      "run", "--rm", "--user", "0",
+      "-v", `${sourcePath}:/source/trusted.sql:ro`,
+      "-v", `${stagedDirectory}:/target`,
+      "postgres:16-bookworm", "sh", "-ceu",
+      "install -o postgres -g postgres -m 0400 /source/trusted.sql /target/20-post-contract-baseline.sql"
+    ], { cwd: repositoryRoot, stdio: "ignore" });
+    await rm(sourcePath, { force: true });
+    return { baselineDirectory: directory, baselinePath };
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw new Error("Post-contract runtime CI could not stage the trusted baseline for the PostgreSQL UID", { cause: error });
+  }
 }
 
 export async function assertPostContractRuntimeCi(env, options = {}) {
@@ -626,12 +769,39 @@ export async function assertPostContractRuntimeCi(env, options = {}) {
     trustedBaselineBlob,
     candidateBaselineBlob: checkedOutBaselineBlob
   });
-  validatePostContractBaseline(trustedBaseline, expectedMigrations);
+  const loadApproval = options.loadApprovalProvenance ?? loadPhaseMergeApprovalProvenance;
+  const approval = await loadApproval(trustedContractCommit, {
+    repository: env.GITHUB_REPOSITORY,
+    token: env.GITHUB_TOKEN
+  });
+  validatePhaseMergeApprovalProvenance(approval, {
+    repository: env.GITHUB_REPOSITORY,
+    approvedCommit: trustedContractCommit
+  });
+  if (approval.contractBlob !== trustedContractBlob || approval.baselineBlob !== trustedBaselineBlob) {
+    throw new Error("Post-contract runtime CI trusted material does not match Phase Merge approval provenance");
+  }
+  let approvedWorkflowBlob;
+  try {
+    approvedWorkflowBlob = gitOutput([
+      "rev-parse", `${approval.approvedBase}:.github/workflows/phase-merge.yml`
+    ]);
+    execFileSync("git", ["merge-base", "--is-ancestor", approval.approvedBase, trustedContractCommit], {
+      cwd: repositoryRoot,
+      stdio: "ignore"
+    });
+  } catch {
+    throw new Error("Post-contract runtime CI Phase Merge approval base is not trusted commit ancestry");
+  }
+  if (approval.workflowBlob !== approvedWorkflowBlob) {
+    throw new Error("Post-contract runtime CI Phase Merge approval workflow blob does not match its approved base");
+  }
+  validatePostContractBaselineGrammar(trustedBaseline, expectedMigrations);
   let materialized = {};
   if (options.materializeBaseline !== false) {
-    materialized = await materializeTrustedBaseline(trustedBaseline, env.RUNNER_TEMP || tmpdir());
+    materialized = await stageTrustedBaseline(trustedBaseline, env.RUNNER_TEMP || tmpdir());
   }
-  return { eventName, trustedContractCommit, ...materialized };
+  return { eventName, trustedContractCommit, expectedMigrations, ...materialized };
 }
 
 function executeCommand(step) {
@@ -746,10 +916,12 @@ export async function main(args = process.argv.slice(2)) {
   if (scope === "runtime-container") {
     const runtime = await assertPostContractRuntimeCi(process.env);
     process.env.DEVKH_POST_CONTRACT_BASELINE_PATH = runtime.baselinePath;
+    process.env.DEVKH_POST_CONTRACT_EXPECTED_MIGRATIONS = JSON.stringify(runtime.expectedMigrations);
     try {
       await runContainerVerification({ steps: POST_CONTRACT_CONTAINER_STEPS });
     } finally {
       delete process.env.DEVKH_POST_CONTRACT_BASELINE_PATH;
+      delete process.env.DEVKH_POST_CONTRACT_EXPECTED_MIGRATIONS;
       await rm(runtime.baselineDirectory, { recursive: true, force: true });
     }
   }

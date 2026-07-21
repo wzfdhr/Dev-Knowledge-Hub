@@ -169,6 +169,13 @@ function parseUtc(value, label) {
   return date;
 }
 
+function rejectFutureTimestamp(date, now, label) {
+  if (date.getTime() > now.getTime()) {
+    throw new Error(`Source blob contract ${label} is from the future`);
+  }
+  return date;
+}
+
 async function readCanonicalJson(path, label) {
   let handle;
   try {
@@ -226,7 +233,7 @@ export async function validateSourceBlobContractGateManifest(path, options = {})
   }
   const now = options.now ?? new Date();
   const createdAt = parseUtc(manifest.createdAt, "gate manifest createdAt");
-  if (createdAt > now) throw new Error("Source blob contract gate manifest is from the future");
+  rejectFutureTimestamp(createdAt, now, "gate manifest createdAt");
   requireExactFields(
     manifest.references,
     ["preflight", "observation", "capacity", "historicReleases", "approval", "recovery"],
@@ -263,14 +270,29 @@ export async function validateSourceBlobContractGateManifest(path, options = {})
     || evidence.preflight.verifiedSnapshotReferences < 1) {
     throw new Error("Source blob contract preflight evidence did not verify snapshot references");
   }
-  parseUtc(evidence.preflight.finishedAt, "preflight finishedAt");
+  const preflightFinished = rejectFutureTimestamp(
+    parseUtc(evidence.preflight.finishedAt, "preflight finishedAt"),
+    now,
+    "preflight finishedAt"
+  );
 
   requireExactFields(evidence.observation, [
     "schemaVersion", "operation", "candidateCommit", "result", "startedAt", "finishedAt", "incidentCount"
   ], "observation evidence");
   validateCommonEvidence(evidence.observation, "source-blob-dual-read-observation", manifest.candidateCommit, "observation evidence");
-  const observationStarted = parseUtc(evidence.observation.startedAt, "observation startedAt");
-  const observationFinished = parseUtc(evidence.observation.finishedAt, "observation finishedAt");
+  const observationStarted = rejectFutureTimestamp(
+    parseUtc(evidence.observation.startedAt, "observation startedAt"),
+    now,
+    "observation startedAt"
+  );
+  const observationFinished = rejectFutureTimestamp(
+    parseUtc(evidence.observation.finishedAt, "observation finishedAt"),
+    now,
+    "observation finishedAt"
+  );
+  if (observationFinished.getTime() < observationStarted.getTime()) {
+    throw new Error("Source blob contract observation finishedAt is before startedAt");
+  }
   if (observationFinished.getTime() - observationStarted.getTime() < sourceBlobObservationMs) {
     throw new Error("Source blob contract observation evidence does not cover seven days");
   }
@@ -282,7 +304,11 @@ export async function validateSourceBlobContractGateManifest(path, options = {})
     "schemaVersion", "operation", "candidateCommit", "result", "measuredAt", "availableBytes", "requiredBytes"
   ], "capacity evidence");
   validateCommonEvidence(evidence.capacity, "source-blob-capacity", manifest.candidateCommit, "capacity evidence");
-  parseUtc(evidence.capacity.measuredAt, "capacity measuredAt");
+  const capacityMeasured = rejectFutureTimestamp(
+    parseUtc(evidence.capacity.measuredAt, "capacity measuredAt"),
+    now,
+    "capacity measuredAt"
+  );
   if (typeof evidence.capacity.availableBytes !== "string"
     || typeof evidence.capacity.requiredBytes !== "string"
     || !/^(?:0|[1-9][0-9]*)$/.test(evidence.capacity.availableBytes)
@@ -311,7 +337,11 @@ export async function validateSourceBlobContractGateManifest(path, options = {})
     manifest.candidateCommit,
     "historic release evidence"
   );
-  parseUtc(evidence.historicReleases.verifiedAt, "historic release verifiedAt");
+  const historicReleasesVerified = rejectFutureTimestamp(
+    parseUtc(evidence.historicReleases.verifiedAt, "historic release verifiedAt"),
+    now,
+    "historic release verifiedAt"
+  );
   if (!Number.isSafeInteger(evidence.historicReleases.retainedReleaseCount)
     || evidence.historicReleases.retainedReleaseCount < 1
     || evidence.historicReleases.unresolvedDependencies !== 0) {
@@ -327,7 +357,14 @@ export async function validateSourceBlobContractGateManifest(path, options = {})
     || typeof evidence.approval.authorizationId !== "string" || !evidence.approval.authorizationId.trim()) {
     throw new Error("Source blob contract approver evidence does not match");
   }
-  parseUtc(evidence.approval.approvedAt, "approval approvedAt");
+  const approvedAt = rejectFutureTimestamp(
+    parseUtc(evidence.approval.approvedAt, "approval approvedAt"),
+    now,
+    "approval approvedAt"
+  );
+  if (approvedAt.getTime() > createdAt.getTime()) {
+    throw new Error("Source blob contract approval approvedAt is after gate manifest createdAt");
+  }
 
   const validateRecoveryEvidence = options.validateRecoveryEvidence ?? validateRecoveryEvidenceFile;
   const recovery = await validateRecoveryEvidence(evidencePaths.recovery);
@@ -338,6 +375,17 @@ export async function validateSourceBlobContractGateManifest(path, options = {})
   const recoveryAge = now.getTime() - recoveryFinished.getTime();
   if (recoveryAge < 0 || recoveryAge > sourceBlobRecoveryEvidenceMaxAgeMs) {
     throw new Error("Source blob contract recovery evidence is expired");
+  }
+  for (const [label, date] of [
+    ["preflight finishedAt", preflightFinished],
+    ["observation finishedAt", observationFinished],
+    ["capacity measuredAt", capacityMeasured],
+    ["historic release verifiedAt", historicReleasesVerified],
+    ["recovery finishedAt", recoveryFinished]
+  ]) {
+    if (date.getTime() > approvedAt.getTime()) {
+      throw new Error(`Source blob contract ${label} is after approval approvedAt`);
+    }
   }
   return {
     candidateCommit: manifest.candidateCommit,

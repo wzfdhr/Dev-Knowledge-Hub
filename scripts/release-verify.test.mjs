@@ -53,7 +53,7 @@ function createContractGateFixture(root, overrides = {}) {
     preflight: writeCanonicalJson(root, "preflight.json", {
       ...common,
       operation: "source-blob-active-preflight",
-      finishedAt: "2026-07-08T00:00:00.000Z",
+      finishedAt: overrides.preflightFinishedAt ?? "2026-07-08T00:00:00.000Z",
       unboundSourceFiles: overrides.unboundSourceFiles ?? 0,
       invalidSourceBlobReferences: 0,
       duplicateActiveGenerations: 0,
@@ -63,20 +63,20 @@ function createContractGateFixture(root, overrides = {}) {
       ...common,
       operation: "source-blob-dual-read-observation",
       startedAt: overrides.observationStartedAt ?? "2026-07-01T00:00:00.000Z",
-      finishedAt: "2026-07-08T00:00:00.000Z",
+      finishedAt: overrides.observationFinishedAt ?? "2026-07-08T00:00:00.000Z",
       incidentCount: 0
     }),
     capacity: writeCanonicalJson(root, "capacity.json", {
       ...common,
       operation: "source-blob-capacity",
-      measuredAt: "2026-07-08T00:00:00.000Z",
+      measuredAt: overrides.capacityMeasuredAt ?? "2026-07-08T00:00:00.000Z",
       availableBytes: overrides.availableBytes ?? "2000000",
       requiredBytes: "1000000"
     }),
     historicReleases: writeCanonicalJson(root, "historic-releases.json", {
       ...common,
       operation: "source-blob-historic-release-dependencies",
-      verifiedAt: "2026-07-08T00:00:00.000Z",
+      verifiedAt: overrides.historicVerifiedAt ?? "2026-07-08T00:00:00.000Z",
       retainedReleaseCount: 3,
       unresolvedDependencies: overrides.unresolvedDependencies ?? 0
     }),
@@ -85,7 +85,7 @@ function createContractGateFixture(root, overrides = {}) {
       operation: "source-blob-contract-approval",
       candidateCommit,
       result: "approved",
-      approvedAt: "2026-07-08T00:00:00.000Z",
+      approvedAt: overrides.approvedAt ?? "2026-07-08T00:00:00.000Z",
       approver,
       authorizationId: "fk17-review-1"
     }),
@@ -93,14 +93,14 @@ function createContractGateFixture(root, overrides = {}) {
       schemaVersion: 3,
       operation: "restore-drill",
       result: "success",
-      finishedAt: "2026-07-08T00:00:00.000Z"
+      finishedAt: overrides.recoveryFinishedAt ?? "2026-07-08T00:00:00.000Z"
     })
   };
   const manifest = {
     schemaVersion: 1,
     kind: "devkh-source-blob-contract-gate",
     candidateCommit,
-    createdAt: "2026-07-08T00:00:00.000Z",
+    createdAt: overrides.manifestCreatedAt ?? "2026-07-08T00:00:00.000Z",
     references
   };
   const manifestReference = writeCanonicalJson(root, "gate-manifest.json", manifest);
@@ -258,6 +258,63 @@ describe("release verification orchestrator", () => {
         expectedCandidateCommit: fixture.candidateCommit,
         expectedApprover: fixture.approver,
         now: new Date("2026-07-08T12:00:00.000Z"),
+        validateRecoveryEvidence: async (path) => JSON.parse(readFileSync(path, "utf8"))
+      })).rejects.toThrow(pattern);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["preflight", { preflightFinishedAt: "2026-07-08T12:00:00.001Z" }],
+    ["observation", {
+      observationStartedAt: "2026-07-09T00:00:00.000Z",
+      observationFinishedAt: "2026-07-16T00:00:00.000Z"
+    }],
+    ["capacity", { capacityMeasuredAt: "2026-07-08T12:00:00.001Z" }],
+    ["historic release", { historicVerifiedAt: "2026-07-08T12:00:00.001Z" }],
+    ["approval", { approvedAt: "2026-07-08T12:00:00.001Z" }]
+  ])("rejects future-dated %s evidence", async (label, fixtureOptions) => {
+    const root = mkdtempSync(join(tmpdir(), "devkh-contract-gate-"));
+    const fixture = createContractGateFixture(root, fixtureOptions);
+    try {
+      await expect(validateSourceBlobContractGateManifest(fixture.manifestPath, {
+        expectedDigest: fixture.manifestDigest,
+        expectedCandidateCommit: fixture.candidateCommit,
+        expectedApprover: fixture.approver,
+        now: new Date("2026-07-08T12:00:00.000Z"),
+        validateRecoveryEvidence: async (path) => JSON.parse(readFileSync(path, "utf8"))
+      })).rejects.toThrow(new RegExp(`${label}.*future`, "i"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["approval after manifest creation", {
+      approvedAt: "2026-07-08T12:00:00.000Z",
+      manifestCreatedAt: "2026-07-08T00:00:00.000Z"
+    }, /approval.*after.*manifest/i],
+    ["evidence completed after approval", {
+      preflightFinishedAt: "2026-07-08T12:00:00.000Z",
+      approvedAt: "2026-07-08T00:00:00.000Z",
+      manifestCreatedAt: "2026-07-09T00:00:00.000Z"
+    }, /preflight.*after.*approval/i],
+    ["observation ending before it starts", {
+      observationStartedAt: "2026-07-08T00:00:00.000Z",
+      observationFinishedAt: "2026-07-07T00:00:00.000Z",
+      approvedAt: "2026-07-09T00:00:00.000Z",
+      manifestCreatedAt: "2026-07-09T00:00:00.000Z"
+    }, /observation.*before.*start/i]
+  ])("rejects incoherent gate chronology: %s", async (_label, fixtureOptions, pattern) => {
+    const root = mkdtempSync(join(tmpdir(), "devkh-contract-gate-"));
+    const fixture = createContractGateFixture(root, fixtureOptions);
+    try {
+      await expect(validateSourceBlobContractGateManifest(fixture.manifestPath, {
+        expectedDigest: fixture.manifestDigest,
+        expectedCandidateCommit: fixture.candidateCommit,
+        expectedApprover: fixture.approver,
+        now: new Date("2026-07-09T00:00:00.000Z"),
         validateRecoveryEvidence: async (path) => JSON.parse(readFileSync(path, "utf8"))
       })).rejects.toThrow(pattern);
     } finally {

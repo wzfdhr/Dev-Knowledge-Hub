@@ -14,12 +14,14 @@ function fixture({
   snapshotTime = "1970-01-02T03:45:00.000Z",
   snapshots = [{ time: snapshotTime }],
   importCounts = "0|0",
-  shadowPipelineFailures = "0"
+  shadowPipelineFailures = "0",
+  observationProjectId = ""
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "devkh-monitor-"));
   const bin = join(root, "bin");
   const state = join(root, "state");
   const backupEnv = join(root, "backup.env");
+  const dockerArgsPath = join(root, "docker-args.log");
   mkdirSync(bin);
   const writeExecutable = (name, source) => {
     const destination = join(bin, name);
@@ -30,7 +32,7 @@ function fixture({
   writeFileSync(backupEnv, "RESTIC_REPOSITORY=s3:https://example.invalid/devkh\nRESTIC_PASSWORD_FILE=/tmp/password\n");
   writeFileSync(join(root, "docker-compose.yml"), "services: {}\n");
   writeExecutable("curl", "#!/usr/bin/env sh\nexit 0\n");
-  writeExecutable("docker", `#!/usr/bin/env sh\ncase "$*" in *build_stage_runs*) printf '%s\\n' '${shadowPipelineFailures}' ;; *exec*) printf '%s\\n' '${importCounts}' ;; *) printf "app healthy\\npostgres healthy\\n" ;; esac\n`);
+  writeExecutable("docker", `#!/usr/bin/env sh\nprintf '%s\\n' "$*" >> "${dockerArgsPath}"\ncase "$*" in *build_stage_runs*) printf '%s\\n' '${shadowPipelineFailures}' ;; *exec*) printf '%s\\n' '${importCounts}' ;; *) printf "app healthy\\npostgres healthy\\n" ;; esac\n`);
   writeExecutable("df", "#!/usr/bin/env sh\nprintf \"Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/vda 100 70 30 70%% /\\n\"\n");
   writeExecutable("restic", `#!/usr/bin/env sh\nprintf '%s\\n' '${JSON.stringify(snapshots)}'\n`);
 
@@ -49,7 +51,8 @@ function fixture({
       MAX_BACKUP_AGE_SECONDS: "108000",
       MAX_IMPORT_FAILURE_RATE_PERCENT: "25",
       MAX_SHADOW_PIPELINE_FAILURES_24H: "1",
-      DEVKH_MONITOR_NOW_EPOCH_SECONDS: "100000"
+      DEVKH_MONITOR_NOW_EPOCH_SECONDS: "100000",
+      ...(observationProjectId ? { OBSERVATION_PROJECT_ID: observationProjectId } : {})
     }
   };
 }
@@ -62,6 +65,9 @@ test("writes a sanitized successful status when all operational checks pass", ()
     const status = JSON.parse(readFileSync(join(value.root, "state", "status.json"), "utf8"));
     assert.equal(status.schemaVersion, 1);
     assert.equal(status.result, "success");
+    const history = readFileSync(join(value.root, "state", "results.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(history.length, 1);
+    assert.equal(history[0].result, "success");
     assert.match(status.startedAt, /^\d{4}-\d{2}-\d{2}T/);
     assert.match(status.finishedAt, /^\d{4}-\d{2}-\d{2}T/);
     assert.deepEqual(status.failures, []);
@@ -135,6 +141,28 @@ test("refuses a relative Compose directory before querying operational services"
   } finally {
     rmSync(value.root, { recursive: true, force: true });
   }
+});
+
+test("scopes import and shadow failure checks to the configured observation project", () => {
+  const projectId = "8a01b3de-7f7e-4df6-b211-a08bf2935d2f";
+  const value = fixture({ observationProjectId: projectId });
+  try {
+    const result = spawnSync(monitorScript, [], { env: value.environment, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const status = JSON.parse(readFileSync(join(value.root, "state", "status.json"), "utf8"));
+    assert.equal(status.observationProjectId, projectId);
+    const dockerArgs = readFileSync(join(value.root, "docker-args.log"), "utf8");
+    assert.match(dockerArgs, new RegExp(`project_id = '${projectId}'::uuid`));
+  } finally { rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("rejects an invalid observation project id before querying operational services", () => {
+  const value = fixture({ observationProjectId: "not-a-uuid" });
+  try {
+    const result = spawnSync(monitorScript, [], { env: value.environment, encoding: "utf8" });
+    assert.equal(result.status, 64);
+    assert.match(result.stderr, /OBSERVATION_PROJECT_ID must be a UUID/);
+  } finally { rmSync(value.root, { recursive: true, force: true }); }
 });
 
 test("systemd monitoring timer keeps configuration and credentials outside unit files", () => {

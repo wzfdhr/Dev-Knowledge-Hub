@@ -1,0 +1,6 @@
+services:
+  postgres:
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init-test-db.sql:/docker-entrypoint-initdb.d/10-create-test-db.sql:ro
+      - ./docker/post-contract-ci-baseline.sql:/docker-entrypoint-initdb.d/20-post-contract-baseline.sql:ro

@@ -11,6 +11,11 @@ import { validateRecoveryEvidenceFile } from "./backup/validate-recovery-evidenc
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const compose = ["compose", "-f", resolve(repositoryRoot, "docker-compose.yml")];
+const postContractCompose = [
+  ...compose,
+  "-f",
+  resolve(repositoryRoot, "docker-compose.post-contract-ci.yml")
+];
 const sourceBlobContractMigration = resolve(repositoryRoot, "drizzle/0035_source_blobs_contract.sql");
 const sourceBlobObservationMs = 7 * 24 * 60 * 60 * 1_000;
 const sourceBlobRecoveryEvidenceMaxAgeMs = 24 * 60 * 60 * 1_000;
@@ -57,6 +62,20 @@ export const STANDARD_CONTAINER_STEPS = Object.freeze([
     name: "application-health",
     command: "docker",
     args: [...compose, "exec", "-T", "app", "node", "-e",
+      "fetch('http://127.0.0.1:3000/api/health').then(async(response)=>{console.log(await response.text());process.exit(response.ok?0:1)}).catch(()=>process.exit(1))"]
+  },
+  { name: "recovery-drill", command: "bash", args: [resolve(repositoryRoot, "scripts/backup/ci-recovery-drill.sh")] }
+]);
+
+export const POST_CONTRACT_CONTAINER_STEPS = Object.freeze([
+  { name: "container-build", command: "docker", args: ["build", "--target", "runtime", "-t", "devkh:ci", repositoryRoot] },
+  { name: "post-contract-compose-config", command: "docker", args: [...postContractCompose, "config", "--quiet"] },
+  { name: "post-contract-compose-up", command: "docker", args: [...postContractCompose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "postgres", "parser", "app"] },
+  { name: "parser-isolation", command: "node", args: [resolve(repositoryRoot, "scripts/security/verify-parser-container.mjs")] },
+  {
+    name: "application-health",
+    command: "docker",
+    args: [...postContractCompose, "exec", "-T", "app", "node", "-e",
       "fetch('http://127.0.0.1:3000/api/health').then(async(response)=>{console.log(await response.text());process.exit(response.ok?0:1)}).catch(()=>process.exit(1))"]
   },
   { name: "recovery-drill", command: "bash", args: [resolve(repositoryRoot, "scripts/backup/ci-recovery-drill.sh")] }
@@ -130,7 +149,7 @@ export function parseReleaseScope(args) {
   const inline = args.find((arg) => arg.startsWith("--scope="));
   const value = inline?.slice("--scope=".length)
     ?? (args[0] === "--scope" ? args[1] : undefined);
-  if (value === "verify" || value === "container" || value === "all") return value;
+  if (value === "verify" || value === "container" || value === "runtime-container" || value === "all") return value;
   throw new Error(`Unknown release verification scope: ${value ?? args.join(" ")}`);
 }
 
@@ -434,6 +453,99 @@ export async function assertSourceBlobContractReleaseGates(env, options = {}) {
   });
 }
 
+async function readGithubEvent(path) {
+  if (!path) throw new Error("Post-contract runtime CI requires the GitHub event payload");
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0));
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) throw new Error("not a regular file");
+    return JSON.parse((await handle.readFile()).toString("utf8"));
+  } catch (error) {
+    throw new Error("Post-contract runtime CI could not read the GitHub event payload", { cause: error });
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function gitOutput(args) {
+  return execFileSync("git", args, {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"]
+  }).trim();
+}
+
+export async function assertPostContractRuntimeCi(env, options = {}) {
+  if (env.GITHUB_ACTIONS !== "true" || env.GITHUB_WORKFLOW !== "ci") {
+    throw new Error("Post-contract runtime verification is restricted to the ordinary GitHub CI workflow");
+  }
+  const eventName = env.GITHUB_EVENT_NAME;
+  if (eventName !== "pull_request" && eventName !== "push") {
+    throw new Error("Post-contract runtime verification requires a pull_request or main push event");
+  }
+  const checkedOutCommit = options.checkedOutCommit ?? gitOutput(["rev-parse", "HEAD"]);
+  const event = options.event ?? await readGithubEvent(env.GITHUB_EVENT_PATH);
+  if (event?.repository?.full_name !== env.GITHUB_REPOSITORY) {
+    throw new Error("Post-contract runtime CI repository identity does not match the GitHub event");
+  }
+
+  let trustedContractCommit;
+  if (eventName === "pull_request") {
+    if (event?.pull_request?.base?.repo?.full_name !== env.GITHUB_REPOSITORY) {
+      throw new Error("Post-contract runtime CI pull request base repository is not trusted");
+    }
+    trustedContractCommit = event?.pull_request?.base?.sha;
+    if (!/^[a-f0-9]{40}$/.test(trustedContractCommit ?? "")) {
+      throw new Error("Post-contract runtime CI trusted pull request base is invalid");
+    }
+    try {
+      execFileSync("git", ["merge-base", "--is-ancestor", trustedContractCommit, checkedOutCommit], {
+        cwd: repositoryRoot,
+        stdio: "ignore"
+      });
+    } catch {
+      throw new Error("Post-contract runtime CI trusted pull request base is not an ancestor of the checkout");
+    }
+  } else {
+    if (event?.after !== checkedOutCommit) {
+      throw new Error("Post-contract runtime CI push does not match the checkout");
+    }
+    if (event?.ref === "refs/heads/main") {
+      trustedContractCommit = checkedOutCommit;
+    } else if (event?.ref === "refs/heads/codex/mvp" && /^[a-f0-9]{40}$/.test(event?.before ?? "")) {
+      trustedContractCommit = event.before;
+      try {
+        execFileSync("git", ["merge-base", "--is-ancestor", trustedContractCommit, checkedOutCommit], {
+          cwd: repositoryRoot,
+          stdio: "ignore"
+        });
+      } catch {
+        throw new Error("Post-contract runtime CI trusted push base is not an ancestor of the checkout");
+      }
+    } else {
+      throw new Error("Post-contract runtime CI push is not on an allowed CI branch");
+    }
+  }
+
+  let trustedContractBlob;
+  let checkedOutContractBlob;
+  try {
+    trustedContractBlob = gitOutput([
+      "rev-parse", `${trustedContractCommit}:drizzle/0035_source_blobs_contract.sql`
+    ]);
+    checkedOutContractBlob = gitOutput([
+      "rev-parse", `${checkedOutCommit}:drizzle/0035_source_blobs_contract.sql`
+    ]);
+  } catch {
+    throw new Error("Post-contract runtime CI trusted base does not contain 0035");
+  }
+  if (trustedContractBlob !== checkedOutContractBlob) {
+    throw new Error("Post-contract runtime CI checkout changed 0035 from the trusted contract base");
+  }
+  return { eventName, trustedContractCommit };
+}
+
 function executeCommand(step) {
   return new Promise((resolve, reject) => {
     const child = spawn(step.command, step.args, { cwd: repositoryRoot, env: process.env, stdio: "inherit" });
@@ -543,6 +655,10 @@ export async function runContainerVerification(options = {}) {
 export async function main(args = process.argv.slice(2)) {
   const scope = parseReleaseScope(args);
   if (scope === "verify" || scope === "all") await runReleaseSteps(VERIFY_STEPS);
+  if (scope === "runtime-container") {
+    await assertPostContractRuntimeCi(process.env);
+    await runContainerVerification({ steps: POST_CONTRACT_CONTAINER_STEPS });
+  }
   if (scope === "container" || scope === "all") {
     const gates = await assertSourceBlobContractReleaseGates(process.env);
     await runContainerVerification({ steps: gates ? CONTAINER_STEPS : STANDARD_CONTAINER_STEPS });

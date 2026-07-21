@@ -8,9 +8,11 @@ import { pathToFileURL } from "node:url";
 
 import {
   CONTAINER_STEPS,
+  POST_CONTRACT_CONTAINER_STEPS,
   STANDARD_CONTAINER_STEPS,
   VERIFY_STEPS,
   assertContainerIsolation,
+  assertPostContractRuntimeCi,
   assertSourceBlobContractReleaseGates,
   finalizeRecoveryEvidence,
   parseReleaseScope,
@@ -131,6 +133,14 @@ describe("release verification orchestrator", () => {
       "container-build", "compose-config", "compose-up", "parser-isolation", "application-health", "recovery-drill"
     ]);
     expect(STANDARD_CONTAINER_STEPS.map((step) => step.name)).not.toContain("source-blob-contract-migration");
+    expect(POST_CONTRACT_CONTAINER_STEPS.map((step) => step.name)).toEqual([
+      "container-build", "post-contract-compose-config", "post-contract-compose-up", "parser-isolation",
+      "application-health", "recovery-drill"
+    ]);
+    expect(POST_CONTRACT_CONTAINER_STEPS.map((step) => step.name))
+      .not.toContain("source-blob-contract-migration");
+    expect(POST_CONTRACT_CONTAINER_STEPS.find((step) => step.name === "post-contract-compose-up")?.args.join(" "))
+      .toContain("docker-compose.post-contract-ci.yml");
     const repositoryRoot = process.cwd();
     const composeFile = join(repositoryRoot, "docker-compose.yml");
     expect(isAbsolute(repositoryRoot)).toBe(true);
@@ -166,6 +176,7 @@ describe("release verification orchestrator", () => {
     expect(parseReleaseScope([])).toBe("verify");
     expect(parseReleaseScope(["--scope", "verify"])).toBe("verify");
     expect(parseReleaseScope(["--scope=container"])).toBe("container");
+    expect(parseReleaseScope(["--scope=runtime-container"])).toBe("runtime-container");
     expect(() => parseReleaseScope(["--scope", "partial"])).toThrow("Unknown release verification scope");
   });
 
@@ -221,6 +232,75 @@ describe("release verification orchestrator", () => {
     }, {
       contractMigrationPresent: true
     })).resolves.toEqual({ authorizedByApprovedBase: currentCommit });
+  });
+
+  test.each([
+    ["a pull request whose trusted base already contains the unchanged contract", (commit) => ({
+      repository: { full_name: "example/devkh" },
+      pull_request: { base: { sha: commit, repo: { full_name: "example/devkh" } } }
+    }), "pull_request"],
+    ["a protected main push containing the contracted runtime", (commit) => ({
+      ref: "refs/heads/main",
+      after: commit,
+      repository: { full_name: "example/devkh" }
+    }), "push"]
+  ])("allows ordinary runtime verification for %s", async (_label, eventFactory, eventName) => {
+    const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    await expect(assertPostContractRuntimeCi({
+      GITHUB_ACTIONS: "true",
+      GITHUB_WORKFLOW: "ci",
+      GITHUB_EVENT_NAME: eventName,
+      GITHUB_REPOSITORY: "example/devkh"
+    }, {
+      checkedOutCommit: currentCommit,
+      event: eventFactory(currentCommit)
+    })).resolves.toEqual({
+      eventName,
+      trustedContractCommit: currentCommit
+    });
+  });
+
+  test("allows a codex/mvp push only when its prior commit already contains the unchanged contract", async () => {
+    const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    const priorCommit = spawnSync("git", ["rev-parse", "HEAD^"], { encoding: "utf8" }).stdout.trim();
+    await expect(assertPostContractRuntimeCi({
+      GITHUB_ACTIONS: "true",
+      GITHUB_WORKFLOW: "ci",
+      GITHUB_EVENT_NAME: "push",
+      GITHUB_REPOSITORY: "example/devkh"
+    }, {
+      checkedOutCommit: currentCommit,
+      event: {
+        ref: "refs/heads/codex/mvp",
+        before: priorCommit,
+        after: currentCommit,
+        repository: { full_name: "example/devkh" }
+      }
+    })).resolves.toEqual({
+      eventName: "push",
+      trustedContractCommit: priorCommit
+    });
+  });
+
+  test("does not let caller flags turn an introducing contract PR into ordinary runtime CI", async () => {
+    const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    const introducingBase = spawnSync(
+      "git", ["rev-parse", "79c833b7bcd88c5147ff7ee7aba9786bf89032ed^"], { encoding: "utf8" }
+    ).stdout.trim();
+    await expect(assertPostContractRuntimeCi({
+      GITHUB_ACTIONS: "true",
+      GITHUB_WORKFLOW: "ci",
+      GITHUB_EVENT_NAME: "pull_request",
+      GITHUB_REPOSITORY: "example/devkh",
+      DEVKH_RELEASE_APPROVED_BASE: currentCommit,
+      DEVKH_SOURCE_BLOB_CONTRACT_AUTHORIZED: "true"
+    }, {
+      checkedOutCommit: currentCommit,
+      event: {
+        repository: { full_name: "example/devkh" },
+        pull_request: { base: { sha: introducingBase, repo: { full_name: "example/devkh" } } }
+      }
+    })).rejects.toThrow(/trusted.*base.*0035/i);
   });
 
   test.each([

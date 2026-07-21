@@ -18,6 +18,8 @@
 
 The approved container path starts PostgreSQL and the parser first, then explicitly invokes the profiled `contract-migrate` service. That temporary service alone sets the PostgreSQL custom parameter `devkh.source_blob_contract_authorized=true`. The normal app starts only after migration success and never receives the authorization parameter. The migrator performs the authorization check, table lock, zero-null and identity/state revalidation, composite identity foreign key, and `source_blob_id NOT NULL` change in its existing single transaction. It does not change `DEVKH_SOURCE_STORAGE_MODE`, remove legacy data, enable GC, or delete historic release and rollback dependencies.
 
+Later ordinary `main` and pull-request CI uses `--scope runtime-container` with a schema-only post-contract database baseline. It does not execute `0035` or receive contract authorization. The verifier derives eligibility from the GitHub event and Git history: protected `main` is authoritative after merge, a pull request's trusted base must already contain the identical `0035` blob, and a configured `codex/mvp` push must inherit it unchanged from the prior commit. The introducing FK17 candidate therefore remains restricted to the separately approved manifest-bound path.
+
 After SQL commit, verify the forward-compatible application again and switch new writes to `active` only as a separate approved operation. From that point, rollback may use only an application version that recognizes `source_blob_id`; an old-schema client is not a valid rollback target.
 
 ## Stop And Roll Back

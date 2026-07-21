@@ -78,12 +78,14 @@ jobs:
       RECOVERY_EVIDENCE_DEFER_FINALIZATION: "true"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22.13.0
       - name: Install recovery tooling
         run: sudo apt-get update && sudo apt-get install -y restic
-      - run: npm run release:verify -- --scope container
+      - run: npm run release:verify -- --scope runtime-container
       - name: Upload recovery evidence
         if: always()
         uses: actions/upload-artifact@v4

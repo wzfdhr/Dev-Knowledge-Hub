@@ -35,6 +35,29 @@ describe("delivery database isolation", () => {
     expect(compose.services.app.environment).not.toHaveProperty("PGOPTIONS");
   });
 
+  test("uses an already-contracted database fixture for ordinary CI without contract authorization", async () => {
+    const override = parse(await readFile("docker-compose.post-contract-ci.yml", "utf8"));
+    const baseline = await readFile("docker/post-contract-ci-baseline.sql", "utf8");
+    const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
+    const phaseMerge = parse(await readFile(".github/workflows/phase-merge.yml", "utf8"));
+    const ordinaryCommands = ci.jobs["container-smoke"].steps
+      .map((step) => step.run).filter(Boolean).join("\n");
+    const introducingCommands = phaseMerge.jobs["container-smoke"].steps
+      .map((step) => step.run).filter(Boolean).join("\n");
+
+    expect(override.services.postgres.volumes).toContain(
+      "./docker/post-contract-ci-baseline.sql:/docker-entrypoint-initdb.d/20-post-contract-baseline.sql:ro"
+    );
+    expect(baseline).toMatch(/source_blob_id uuid NOT NULL/);
+    expect(baseline).toContain("source_files_source_blob_identity_fk");
+    expect(baseline).toMatch(/INSERT INTO .*schema_migrations.*0035_source_blobs_contract\.sql/is);
+    expect(ordinaryCommands).toContain("npm run release:verify -- --scope runtime-container");
+    expect(ordinaryCommands).not.toContain("--scope container");
+    expect(introducingCommands).toContain("npm run release:verify -- --scope container");
+    expect(ci.jobs["container-smoke"].env).not.toHaveProperty("DEVKH_RELEASE_APPROVED_BASE");
+    expect(ci.jobs["container-smoke"].env).not.toHaveProperty("DEVKH_SOURCE_BLOB_CONTRACT_GATE_MANIFEST");
+  });
+
   test("documents the public HTTPS base URL required by the Compose application", async () => {
     const environment = await readFile(".env.example", "utf8");
     const readme = await readFile("README.md", "utf8");
@@ -124,7 +147,7 @@ describe("delivery database isolation", () => {
     expect(verifySteps).toContain("npx playwright install --with-deps chromium");
     expect(verifySteps).toContain("npm run release:verify -- --scope verify");
     expect(smokeSteps).toContain("apt-get install -y restic");
-    expect(smokeSteps).toContain("npm run release:verify -- --scope container");
+    expect(smokeSteps).toContain("npm run release:verify -- --scope runtime-container");
     expect(ci.jobs["container-smoke"].steps).toEqual(expect.arrayContaining([
       expect.objectContaining({ uses: "actions/upload-artifact@v4", if: "always()" })
     ]));

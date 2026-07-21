@@ -95,6 +95,89 @@ function schemaScopedDatabaseUrl(
   return url.toString();
 }
 
+const sourceBlobContractMigrationName = "0035_source_blobs_contract.sql";
+
+async function createSourceBlobContractFixture() {
+  if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required");
+  pool ??= new Pool({ connectionString: databaseUrl });
+  const sharedPool = pool;
+  const schema = `source_blob_contract_${randomUUID().replaceAll("-", "")}`;
+  const contractRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-contract-"));
+  const scopedPool = new Pool({ connectionString: schemaScopedDatabaseUrl(databaseUrl, schema) });
+  const authorizedPool = new Pool({
+    connectionString: schemaScopedDatabaseUrl(databaseUrl, schema, {
+      "devkh.source_blob_contract_authorized": "true"
+    })
+  });
+
+  try {
+    await sharedPool.query(`CREATE SCHEMA ${schema}`);
+    await runMigrations(scopedPool);
+    const store = new PostgresAppStore(scopedPool);
+    const setup = await store.createInitialSetup("source-blob-contract@example.com", "hash");
+    const repository = await store.createRepository(
+      setup!.workspace.id, { kind: "upload", name: "Contract source" }
+    );
+    const snapshotId = randomUUID();
+    const sourceBlobId = randomUUID();
+    const contentHash = "a".repeat(64);
+    await scopedPool.query(
+      `INSERT INTO source_snapshots
+         (id, workspace_id, repository_id, commit_sha, ref, commit_timestamp, storage_path)
+       VALUES ($1, $2, $3, $4, 'upload', now(), '/tmp/source-blob-contract')`,
+      [snapshotId, setup!.workspace.id, repository!.id, "b".repeat(40)]
+    );
+    await scopedPool.query(
+      `INSERT INTO source_blobs
+         (id, workspace_id, content_hash, generation, byte_size, status, storage_key)
+       VALUES ($1, $2, $3, 1, 12, 'active', $4)`,
+      [sourceBlobId, setup!.workspace.id, contentHash, `blobs/${setup!.workspace.id}/aa/${contentHash}/1`]
+    );
+    const sourceFileId = randomUUID();
+    await scopedPool.query(
+      `INSERT INTO source_files
+         (id, workspace_id, snapshot_id, path, content_hash, byte_size, source_blob_id)
+       VALUES ($1, $2, $3, 'src/index.ts', $4, 12, $5)`,
+      [sourceFileId, setup!.workspace.id, snapshotId, contentHash, sourceBlobId]
+    );
+    await cp(
+      path.resolve("drizzle", sourceBlobContractMigrationName),
+      path.join(contractRoot, sourceBlobContractMigrationName)
+    );
+
+    return {
+      authorizedPool,
+      contentHash,
+      contractRoot,
+      scopedPool,
+      sourceBlobId,
+      sourceFileId,
+      async close() {
+        await authorizedPool.end();
+        await scopedPool.end();
+        await sharedPool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
+        await rm(contractRoot, { recursive: true, force: true });
+      }
+    };
+  } catch (error) {
+    await authorizedPool.end();
+    await scopedPool.end();
+    await sharedPool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
+    await rm(contractRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function expectSourceBlobContractRollback(scopedPool: Pool): Promise<void> {
+  expect((await scopedPool.query(
+    "SELECT 1 FROM schema_migrations WHERE name = $1", [sourceBlobContractMigrationName]
+  )).rows).toHaveLength(0);
+  expect((await scopedPool.query<{ is_nullable: string }>(
+    `SELECT is_nullable FROM information_schema.columns
+     WHERE table_schema = current_schema() AND table_name = 'source_files' AND column_name = 'source_blob_id'`
+  )).rows[0]?.is_nullable).toBe("YES");
+}
+
 class RecordedPipelineQueue implements PipelineStageJobQueue {
   readonly sent: PipelineStageJob[] = [];
 
@@ -685,6 +768,67 @@ integration("PostgreSQL cited knowledge integration", () => {
   }, 30_000);
 
   test(databaseUrl
+    ? "rejects a wrong-workspace source blob reference transactionally"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    const fixture = await createSourceBlobContractFixture();
+    try {
+      const wrongWorkspaceId = randomUUID();
+      const wrongWorkspaceBlobId = randomUUID();
+      await fixture.scopedPool.query(
+        "INSERT INTO workspaces (id, name, slug) VALUES ($1, 'Wrong workspace', $2)",
+        [wrongWorkspaceId, `wrong-workspace-${randomUUID()}`]
+      );
+      await fixture.scopedPool.query(
+        `INSERT INTO source_blobs
+           (id, workspace_id, content_hash, generation, byte_size, status, storage_key)
+         VALUES ($1, $2, $3, 1, 12, 'active', $4)`,
+        [
+          wrongWorkspaceBlobId,
+          wrongWorkspaceId,
+          fixture.contentHash,
+          `blobs/${wrongWorkspaceId}/aa/${fixture.contentHash}/1`
+        ]
+      );
+      await fixture.scopedPool.query(
+        "ALTER TABLE source_files DROP CONSTRAINT source_files_source_blob_workspace_fk"
+      );
+      await fixture.scopedPool.query(
+        "UPDATE source_files SET source_blob_id = $2 WHERE id = $1",
+        [fixture.sourceFileId, wrongWorkspaceBlobId]
+      );
+
+      await expect(runAllMigrations(fixture.authorizedPool, fixture.contractRoot))
+        .rejects.toThrow(/identity mismatch/i);
+      await expectSourceBlobContractRollback(fixture.scopedPool);
+    } finally {
+      await fixture.close();
+    }
+  }, 60_000);
+
+  test(databaseUrl
+    ? "rejects an invalid source blob generation transactionally"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    const fixture = await createSourceBlobContractFixture();
+    try {
+      await fixture.scopedPool.query(
+        "ALTER TABLE source_blobs DROP CONSTRAINT source_blobs_generation_check"
+      );
+      await fixture.scopedPool.query(
+        "UPDATE source_blobs SET generation = 0 WHERE id = $1",
+        [fixture.sourceBlobId]
+      );
+
+      await expect(runAllMigrations(fixture.authorizedPool, fixture.contractRoot))
+        .rejects.toThrow(/identity mismatch/i);
+      await expectSourceBlobContractRollback(fixture.scopedPool);
+    } finally {
+      await fixture.close();
+    }
+  }, 60_000);
+
+  test(databaseUrl
     ? "fails closed before atomically contracting verified source blob references"
     : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
     if (!databaseUrl) return;
@@ -727,13 +871,11 @@ integration("PostgreSQL cited knowledge integration", () => {
          VALUES ($1, $2, $3, 'src/index.ts', $4, 12, $5)`,
         [sourceFileId, setup!.workspace.id, snapshotId, contentHash, sourceBlobId]
       );
-      const migrationName = "0035_source_blobs_contract.sql";
+      const migrationName = sourceBlobContractMigrationName;
       await cp(path.resolve("drizzle", migrationName), path.join(contractRoot, migrationName));
 
       await expect(runAllMigrations(scopedPool, contractRoot)).rejects.toThrow(/not authorized/i);
-      expect((await scopedPool.query(
-        "SELECT 1 FROM schema_migrations WHERE name = $1", [migrationName]
-      )).rows).toHaveLength(0);
+      await expectSourceBlobContractRollback(scopedPool);
 
       await scopedPool.query("UPDATE source_files SET source_blob_id = NULL WHERE id = $1", [sourceFileId]);
       await expect(runAllMigrations(authorizedPool, contractRoot)).rejects.toThrow(/missing source_blob_id/i);
@@ -753,13 +895,7 @@ integration("PostgreSQL cited knowledge integration", () => {
       );
       await expect(runAllMigrations(authorizedPool, contractRoot))
         .rejects.toThrow(/referenced source blob is non-active or fenced/i);
-      expect((await scopedPool.query(
-        "SELECT 1 FROM schema_migrations WHERE name = $1", [migrationName]
-      )).rows).toHaveLength(0);
-      expect((await scopedPool.query<{ is_nullable: string }>(
-        `SELECT is_nullable FROM information_schema.columns
-         WHERE table_schema = current_schema() AND table_name = 'source_files' AND column_name = 'source_blob_id'`
-      )).rows[0]?.is_nullable).toBe("YES");
+      await expectSourceBlobContractRollback(scopedPool);
       await scopedPool.query(
         `UPDATE source_blobs
          SET status = 'active', fencing_token = NULL, tombstoned_at = NULL

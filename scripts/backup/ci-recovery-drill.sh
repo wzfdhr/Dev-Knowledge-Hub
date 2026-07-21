@@ -18,20 +18,36 @@ evidence_directory="$evidence_root/run-${GITHUB_RUN_ID:-$$}-${GITHUB_RUN_ATTEMPT
 password_file="$temporary_root/restic-password"
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+invalidate_recovery_evidence() {
+  rm -f \
+    "$evidence_directory"/recovery-evidence/*.json \
+    "$evidence_directory"/recovery-evidence/*.json.pending \
+    "$evidence_directory"/recovery-evidence/*.ndjson \
+    "$evidence_directory"/recovery-evidence/*.ndjson.pending
+}
+
 cleanup() {
   local exit_code="$1"
   if (( exit_code == 0 )); then
     if ! rm -rf "$temporary_root"; then
-      if ! rm -f "$evidence_directory"/recovery-evidence/*.json "$evidence_directory"/recovery-evidence/*.json.pending; then
+      if ! invalidate_recovery_evidence; then
         printf 'CI recovery cleanup failed to invalidate success evidence: %s\n' "$evidence_directory" >&2
       fi
-      if ! write_status restore-drill failed "$started_at" "" recovery_cleanup_failed "$temporary_root"; then
+      if ! write_status restore-drill failed "$started_at" "" recovery_cleanup_failed; then
         printf 'CI recovery cleanup failed to write failure status: %s\n' "$temporary_root" >&2
       fi
       printf 'CI recovery cleanup failed; retained temporary root: %s\n' "$temporary_root" >&2
       return 1
     fi
   else
+    if ! invalidate_recovery_evidence; then
+      printf 'CI recovery drill failed to invalidate evidence: %s\n' "$evidence_directory" >&2
+      exit_code=1
+    fi
+    if ! write_status restore-drill failed "$started_at" "" ci_recovery_drill_failed; then
+      printf 'CI recovery drill failed to write failure status: %s\n' "$evidence_directory" >&2
+      exit_code=1
+    fi
     printf 'CI recovery drill failed; retained temporary root: %s\n' "$temporary_root" >&2
   fi
   return "$exit_code"

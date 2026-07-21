@@ -76,7 +76,15 @@ If a repository already exists, run `restic snapshots` instead of `restic init`.
 Run an initial backup, repository check, and isolated restore drill. The drill restores to a
 temporary directory below `/var/lib/devkh-backup`, validates checksums and archive paths, restores
 the dump into an ephemeral PostgreSQL container, verifies record counts and permission/release/artifact
-integrity, and starts an ephemeral application container for `/api/health`. 成功时才会移除临时容器、网络和目录；
+integrity, and starts an ephemeral application container for `/api/health`. For source blobs it also
+requires each `source_files.source_blob_id` to remain workspace-scoped, hash/size/generation-correct,
+and `active` or `tombstoned`; a `trash` or `deleted` blob may not be referenced. It verifies each
+referenced blob and snapshot view as a regular non-symlink file, checks SHA-256 and size, and requires
+the view to share device and inode with its blob. Evidence schema version 3 records source blob
+reference/content/hardlink counts, referenced generation count, logical bytes, and physical bytes from
+unique referenced inode allocated blocks; physical bytes are never inferred from logical bytes. The
+all-generation `sourceBlobCount` remains an audit statistic and may include unreferenced GC states.
+成功时才会移除临时容器、网络和目录；
 失败时保留恢复目录和临时资源供取证，并在 systemd journal 中记录保留路径，待值班人员确认后手动清理。清理过程中出现错误时，可能已有部分资源被删除；
 日志中的恢复目录和剩余资源路径是后续检查的权威位置。它绝不停止生产应用、写入生产
 Docker volume, or restores into the live database. It reads the current application image identifier
@@ -106,7 +114,8 @@ environment file blindly.
 3. Restore the selected restic snapshot into a staging directory and verify its manifest and
    checksums.
 4. Start only PostgreSQL, restore `database.pgdump` with `pg_restore --clean --if-exists`,
-   then unpack each volume archive into its corresponding empty Docker volume.
+   then unpack each volume archive into its corresponding empty Docker volume. Preserve hardlinks while
+   unpacking `snapshots.tgz`; do not copy blobs or views separately.
 5. Provide a securely reconstructed `.env` containing the retained `DEVKH_MASTER_KEY`, start
    the remaining services, and verify `/api/health` plus a representative source lookup.
 

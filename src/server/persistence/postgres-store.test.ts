@@ -1,8 +1,25 @@
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
 import { describe, expect, test, vi } from "vitest";
 
+import { SourceBlobStore } from "../uploads/source-blob-store.js";
+import { SourceBlobGarbageCollector } from "../uploads/source-blob-gc.js";
 import { PostgresAppStore } from "./postgres-store";
 
 describe("PostgresAppStore source blob locking", () => {
+  test("keeps the saturated GC integration fixture at the supported four-connection minimum", async () => {
+    const source = await readFile(new URL("./postgres-knowledge.integration.test.ts", import.meta.url), "utf8");
+    const start = source.indexOf('test("runs source blob GC with a saturated PostgreSQL pool"');
+    const end = source.indexOf("\n  test(", start + 1);
+    expect(start).toBeGreaterThan(0);
+    const fixture = source.slice(start, end);
+    expect(fixture).toContain("max: 4");
+    expect(fixture).not.toMatch(/max:\s*[0-3]\b/);
+  });
+
   test("keeps the advisory lock and all catalog queries on one transaction client", async () => {
     const blobRow = {
       id: "33333333-3333-4333-8333-333333333333",
@@ -17,7 +34,8 @@ describe("PostgresAppStore source blob locking", () => {
       trashed_at: null,
       deleted_at: null
     };
-    const clientQuery = vi.fn(async (sql: string) => {
+    const clientQuery = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
       if (sql.includes("COALESCE(MAX(generation)")) return { rows: [{ next_generation: 1 }] };
       if (sql.includes("INSERT INTO source_blobs")) return { rows: [blobRow] };
       return { rows: [] };
@@ -29,7 +47,7 @@ describe("PostgresAppStore source blob locking", () => {
       connect: vi.fn(async () => client)
     } as never);
 
-    const created = await store.withSourceBlobLock(
+    const created = await store.withSourceBlobWriterLock(
       blobRow.workspace_id,
       blobRow.content_hash,
       async (catalog) => {
@@ -48,8 +66,308 @@ describe("PostgresAppStore source blob locking", () => {
     expect(created).toMatchObject({ id: blobRow.id, generation: 1, byteSize: 12 });
     expect(poolQuery).not.toHaveBeenCalled();
     expect(clientQuery.mock.calls[0]?.[0]).toBe("BEGIN");
-    expect(clientQuery.mock.calls.some(([sql]) => sql.includes("pg_advisory_xact_lock"))).toBe(true);
+    const statements = clientQuery.mock.calls.map(([sql]) => String(sql));
+    const sharedLockIndex = statements.indexOf(
+      "SELECT pg_advisory_xact_lock_shared(hashtextextended('devkh.source_blobs.gc.membership', 0))"
+    );
+    const hashLockIndex = statements.indexOf("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))");
+    const insertIndex = statements.findIndex((sql) => sql.includes("INSERT INTO source_blobs"));
+    expect(sharedLockIndex).toBeGreaterThan(0);
+    expect(hashLockIndex).toBeGreaterThan(sharedLockIndex);
+    expect(insertIndex).toBeGreaterThan(hashLockIndex);
+    const insertSql = String(clientQuery.mock.calls.find(([sql]) => sql.includes("INSERT INTO source_blobs"))?.[0]);
+    expect(insertSql).toContain("created_at");
+    expect(insertSql).toContain("clock_timestamp()");
     expect(clientQuery.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+  });
+
+  test("keeps fenced GC transitions, reference checks, and inconsistency audit inside the blob lock transaction", async () => {
+    const active = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspace_id: "11111111-1111-4111-8111-111111111111",
+      content_hash: "a".repeat(64),
+      generation: 1,
+      byte_size: "12",
+      status: "active",
+      storage_key: `blobs/11111111-1111-4111-8111-111111111111/aa/${"a".repeat(64)}/1`,
+      fencing_token: null,
+      tombstoned_at: null,
+      trashed_at: null,
+      deleted_at: null
+    };
+    const fence = "44444444-4444-4444-8444-444444444444";
+    const tombstonedAt = new Date("2026-07-20T00:00:00.000Z");
+    const trashedAt = new Date("2026-07-20T01:00:00.000Z");
+    const deletedAt = new Date("2026-07-20T02:00:00.000Z");
+    const tombstoned = { ...active, status: "tombstoned", fencing_token: fence, tombstoned_at: tombstonedAt };
+    const trash = { ...tombstoned, status: "trash", trashed_at: trashedAt };
+    const deleted = { ...trash, status: "deleted", deleted_at: deletedAt };
+    const clientQuery = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
+      if (sql.includes("count(*)::text AS reference_count")) return { rows: [{ reference_count: "0" }] };
+      if (sql.includes("status = 'tombstoned'") && sql.includes("status = 'active'")) return { rows: [tombstoned] };
+      if (sql.includes("status = 'trash'") && sql.includes("status = 'tombstoned'")) return { rows: [trash] };
+      if (sql.includes("status = 'deleted'") && sql.includes("status = 'trash'")) return { rows: [deleted] };
+      if (sql.includes("FROM source_blobs") && sql.includes("id = $3")) return { rows: [active] };
+      return { rows: [] };
+    });
+    const client = { query: clientQuery, release: vi.fn() };
+    const store = new PostgresAppStore({
+      query: vi.fn(async () => { throw new Error("pool query escaped source blob lock"); }),
+      connect: vi.fn(async () => client)
+    } as never);
+
+    await store.withSourceBlobLock(active.workspace_id, active.content_hash, async (catalog) => {
+      await expect(catalog.create({
+        workspaceId: active.workspace_id,
+        contentHash: active.content_hash,
+        generation: 2,
+        byteSize: 12,
+        storageKey: active.storage_key
+      })).rejects.toThrow("SOURCE_BLOB_WRITER_LOCK_REQUIRED");
+      await expect(catalog.findById(active.id)).resolves.toMatchObject({ id: active.id, status: "active" });
+      await expect(catalog.countReferences(active.id)).resolves.toBe(0);
+      await expect(catalog.tombstoneIfUnreferenced(active.id, fence, tombstonedAt))
+        .resolves.toMatchObject({ status: "tombstoned", fencingToken: fence });
+      await expect(catalog.markTrash(active.id, fence, trashedAt)).resolves.toMatchObject({ status: "trash" });
+      await expect(catalog.markDeletedIfUnreferenced(active.id, fence, deletedAt))
+        .resolves.toMatchObject({ status: "deleted" });
+      await catalog.recordGcInconsistency(active.id, "source_content_mismatch");
+    });
+
+    const statements = clientQuery.mock.calls.map(([sql]) => String(sql));
+    expect(statements.some((sql) => sql.includes("pg_advisory_xact_lock_shared"))).toBe(false);
+    expect(statements.some((sql) => sql.includes("INSERT INTO source_blobs"))).toBe(false);
+    expect(statements.filter((sql) => sql.includes("UPDATE source_blobs"))
+      .every((sql) => sql.includes("id =") && sql.includes("fencing_token ="))).toBe(true);
+    expect(statements.filter((sql) => sql.includes("SET status = 'tombstoned'") || sql.includes("SET status = 'deleted'"))
+      .every((sql) => sql.includes("NOT EXISTS") && sql.includes("source_files"))).toBe(true);
+    expect(clientQuery.mock.calls.some(([, values]) =>
+      Array.isArray(values) && values.includes("source_blob.gc_inconsistent")
+    )).toBe(true);
+    expect(clientQuery.mock.calls.at(-1)?.[0]).toBe("COMMIT");
+  });
+
+  test("lists active zero-reference and non-active GC candidates from source_blobs", async () => {
+    const tailRow = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspace_id: "11111111-1111-4111-8111-111111111111",
+      content_hash: "f".repeat(64),
+      generation: 2,
+      creation_cutoff: "2026-07-20 00:00:00.123456+00",
+    };
+    const query = vi.fn(async (_sql: string, _values?: unknown[]) => {
+      void _values;
+      if (_sql.includes("ORDER BY blob.workspace_id DESC")) return { rows: [tailRow] };
+      return { rows: [] };
+    });
+    const store = new PostgresAppStore({ query } as never);
+
+    const boundary = await store.findSourceBlobGcRunBoundary();
+    await expect(store.listSourceBlobGcCandidates({ ...boundary!, limit: 7 })).resolves.toEqual([]);
+
+    expect(boundary).toEqual({
+      through: {
+        workspaceId: tailRow.workspace_id,
+        contentHash: tailRow.content_hash,
+        generation: tailRow.generation,
+        id: tailRow.id
+      },
+      creationCutoff: tailRow.creation_cutoff,
+    });
+    const boundarySql = String(query.mock.calls[0]?.[0]);
+    const sql = String(query.mock.calls[1]?.[0]);
+    expect(boundarySql).not.toContain("pg_current_snapshot()");
+    expect(sql).toContain("FROM source_blobs");
+    expect(sql).toContain("status IN ('tombstoned', 'trash')");
+    expect(sql).toContain("NOT EXISTS");
+    expect(sql).toContain("source_files");
+    expect(sql).toContain("ROW(blob.workspace_id, blob.content_hash, blob.generation, blob.id)");
+    expect(sql).toContain("<= ROW($1, $2, $3, $4)");
+    expect(sql).toContain("blob.created_at <= $5::timestamptz");
+    expect(sql).not.toContain("pg_visible_in_snapshot");
+    expect(sql).not.toContain("xmin");
+    expect(sql).toContain("LIMIT $6");
+    expect(query.mock.calls[1]?.[1]).toEqual([
+      tailRow.workspace_id, tailRow.content_hash, tailRow.generation, tailRow.id,
+      tailRow.creation_cutoff, 7
+    ]);
+  });
+
+  test("completes a GC run with one checkout and all lease SQL on its dedicated client", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-postgres-gc-single-client-"));
+    const row = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspace_id: "11111111-1111-4111-8111-111111111111",
+      content_hash: "a".repeat(64), generation: 1, byte_size: "1", status: "active",
+      storage_key: "blobs/workspace/aa/hash/1", fencing_token: null,
+      tombstoned_at: null, trashed_at: null, deleted_at: null,
+      creation_cutoff: "2026-07-20 00:00:00.123456+00"
+    };
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
+      if (sql.includes("ORDER BY blob.workspace_id DESC")) return { rows: [row] };
+      if (sql.includes("ORDER BY blob.workspace_id, blob.content_hash")) return { rows: [row] };
+      if (sql.includes("id = $3") && sql.includes("FOR UPDATE")) return { rows: [] };
+      if (sql.includes("pg_advisory_unlock")) return { rows: [{ released: true }] };
+      return { rows: [] };
+    });
+    const release = vi.fn();
+    const connect = vi.fn(async () => ({ query, release }));
+    const poolQuery = vi.fn(async () => { throw new Error("second pool acquisition"); });
+    const store = new PostgresAppStore({ connect, query: poolQuery } as never);
+
+    await expect(new SourceBlobGarbageCollector({ dataDir: root, catalog: store, enabled: true }).runOnce())
+      .resolves.toMatchObject({ scanned: 1, lockBusy: false });
+    expect(connect).toHaveBeenCalledOnce();
+    expect(poolQuery).not.toHaveBeenCalled();
+    expect(query.mock.calls.map(([sql]) => String(sql))).toEqual(expect.arrayContaining([
+      "BEGIN",
+      "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+      "COMMIT"
+    ]));
+    expect(release).toHaveBeenCalledWith();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("wraps GC work in a dedicated exclusive session lock and destroys the client on unlock failure", async () => {
+    const operation = vi.fn(async () => "done");
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
+      if (sql.includes("pg_advisory_unlock")) return { rows: [{ released: false }] };
+      throw new Error(`unexpected SQL: ${sql}`);
+    });
+    const release = vi.fn();
+    const store = new PostgresAppStore({ connect: vi.fn(async () => ({ query, release })) } as never);
+
+    await expect(store.withSourceBlobGcLease(operation)).rejects.toThrow("SOURCE_BLOB_GC_UNLOCK_FAILED");
+    expect(operation).toHaveBeenCalledOnce();
+    expect(query.mock.calls.map(([sql]) => sql)).toEqual([
+      "SELECT pg_try_advisory_lock(hashtextextended('devkh.source_blobs.gc.membership', 0)) AS acquired",
+      "SELECT pg_advisory_unlock(hashtextextended('devkh.source_blobs.gc.membership', 0)) AS released"
+    ]);
+    expect(release).toHaveBeenCalledOnce();
+    expect(release.mock.calls[0]?.[0]).toBeInstanceOf(Error);
+  });
+
+  test("releases the exclusive GC lease after success, errors, and a busy result", async () => {
+    const makeStore = (acquired: boolean) => {
+      const query = vi.fn(async (sql: string) => sql.includes("pg_try_advisory_lock")
+        ? { rows: [{ acquired }] }
+        : { rows: [{ released: true }] });
+      const release = vi.fn();
+      return { store: new PostgresAppStore({ connect: vi.fn(async () => ({ query, release })) } as never), query, release };
+    };
+    const success = makeStore(true);
+    await expect(success.store.withSourceBlobGcLease(async () => "ok"))
+      .resolves.toEqual({ acquired: true, value: "ok" });
+    expect(success.release).toHaveBeenCalledWith();
+
+    const failure = makeStore(true);
+    await expect(failure.store.withSourceBlobGcLease((catalog) => catalog.withSourceBlobLock(
+      "workspace", "a".repeat(64), async () => { throw new Error("page failed"); }
+    )))
+      .rejects.toThrow("page failed");
+    expect(failure.query.mock.calls.some(([sql]) => String(sql).includes("pg_advisory_unlock"))).toBe(true);
+    expect(failure.query.mock.calls.map(([sql]) => sql)).toEqual(expect.arrayContaining(["BEGIN", "ROLLBACK"]));
+    expect(failure.release).toHaveBeenCalledWith();
+
+    const busy = makeStore(false);
+    const operation = vi.fn();
+    await expect(busy.store.withSourceBlobGcLease(operation)).resolves.toEqual({ acquired: false });
+    expect(operation).not.toHaveBeenCalled();
+    expect(busy.query.mock.calls.some(([sql]) => String(sql).includes("pg_advisory_unlock"))).toBe(false);
+    expect(busy.release).toHaveBeenCalledWith();
+  });
+
+  test("commits a moved referenced tombstone audit before SourceBlobStore.put throws outside the lock", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "devkh-postgres-put-audit-"));
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    const bytes = Buffer.from("postgres referenced tombstone");
+    const contentHash = createHash("sha256").update(bytes).digest("hex");
+    const blobRow = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspace_id: workspaceId,
+      content_hash: contentHash,
+      generation: 1,
+      byte_size: String(bytes.length),
+      status: "tombstoned",
+      storage_key: `blobs/${workspaceId}/${contentHash.slice(0, 2)}/${contentHash}/1`,
+      fencing_token: randomUUID(),
+      tombstoned_at: new Date("2026-07-20T00:00:00.000Z"),
+      trashed_at: null,
+      deleted_at: null
+    };
+    const trash = path.join(root, ".trash", workspaceId, contentHash, "1");
+    await mkdir(path.dirname(path.join(root, blobRow.storage_key)), { recursive: true });
+    await mkdir(path.dirname(trash), { recursive: true });
+    await writeFile(trash, bytes);
+    await chmod(trash, 0o444);
+    const clientQuery = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
+      if (sql.includes("status = 'active'") && sql.includes("FROM source_blobs")) return { rows: [] };
+      if (sql.includes("status = 'tombstoned'") && sql.includes("FROM source_blobs")) return { rows: [blobRow] };
+      if (sql.includes("count(*)::text AS reference_count")) return { rows: [{ reference_count: "1" }] };
+      if (sql.includes("SELECT id, status, generation")) {
+        return { rows: [{ id: blobRow.id, status: blobRow.status, generation: blobRow.generation }] };
+      }
+      return { rows: [] };
+    });
+    const client = { query: clientQuery, release: vi.fn() };
+    const catalog = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+    const blobs = new SourceBlobStore({ dataDir: root, catalog });
+
+    try {
+      await expect(blobs.put({ workspaceId, bytes }))
+        .rejects.toMatchObject({ code: "SOURCE_BLOB_INTEGRITY_FAILED" });
+      const statements = clientQuery.mock.calls.map(([sql]) => String(sql));
+      expect(statements).toContain("COMMIT");
+      expect(statements).not.toContain("ROLLBACK");
+      expect(statements.some((sql) => sql.includes("INSERT INTO audit_events"))).toBe(true);
+      expect(statements.some((sql) => sql.includes("UPDATE source_blobs"))).toBe(false);
+      expect(clientQuery.mock.calls.some(([, values]) =>
+        Array.isArray(values) && values.includes("source_blob.gc_inconsistent")
+      )).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("locks and validates active source blob identity and metadata before inserting a source_file binding", async () => {
+    const snapshot = {
+      id: "snapshot-1", workspace_id: "workspace-1", repository_id: "repository-1",
+      commit_sha: "a".repeat(40), ref: "main", remote_url: null,
+      commit_timestamp: new Date("2026-07-20T00:00:00.000Z"), storage_path: "/tmp/snapshot"
+    };
+    const query = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
+      if (sql.includes("INSERT INTO source_snapshots")) return { rows: [snapshot] };
+      if (sql.includes("FROM source_blobs") && sql.includes("FOR SHARE")) {
+        return sql.includes("content_hash = $3") && sql.includes("byte_size = $4")
+          ? { rows: [] }
+          : { rows: [{ id: "blob-1" }] };
+      }
+      return { rows: [] };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+
+    await expect(store.createSnapshot({
+      snapshot: {
+        id: snapshot.id, workspaceId: snapshot.workspace_id, repositoryId: snapshot.repository_id,
+        commitSha: snapshot.commit_sha, ref: snapshot.ref, remoteUrl: null,
+        commitTimestamp: snapshot.commit_timestamp, storagePath: snapshot.storage_path
+      },
+      files: [{
+        id: "file-1", workspaceId: snapshot.workspace_id, snapshotId: snapshot.id, path: "src/index.ts",
+        language: "typescript", contentHash: "b".repeat(64), byteSize: 12, sourceBlobId: "blob-1"
+      }]
+    })).rejects.toThrow("SOURCE_BLOB_NOT_ACTIVE");
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("FOR SHARE"))).toBe(true);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("content_hash = $3"))).toBe(true);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("byte_size = $4"))).toBe(true);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO source_files"))).toBe(false);
+    expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
   });
 });
 

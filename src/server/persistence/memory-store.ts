@@ -4,13 +4,16 @@ import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledg
 
 import {
   boundedKnowledgePage,
+  compareSourceBlobGcCursors,
   FeedbackNotAcknowledgedError,
   InvalidLegacyReleaseRollbackError,
   InvalidFeedbackTransitionError,
   LastProjectAdminError,
   LastWorkspaceAdminError,
   knowledgeMatchReason,
-  normalizePagination
+  normalizeSourceBlobGcCandidateLimit,
+  normalizePagination,
+  sourceBlobGcCursor
 } from "./store.js";
 
 import type {
@@ -56,6 +59,10 @@ import type {
   SourceAnalysisArtifactRecord,
   SourceSnapshotRecord,
   SourceBlobRecord,
+  SourceBlobGcCursor,
+  SourceBlobGcPageInput,
+  SourceBlobGcRunBoundary,
+  SourceBlobGcLeaseCatalog,
   LockedSourceBlobCatalog,
   SaveKnowledgeGraphInput,
   SetupResult,
@@ -159,6 +166,11 @@ export class MemoryAppStore implements AppStore {
   private readonly uploadSessionLocks = new Map<string, Promise<void>>();
   private readonly uploadIdempotencyLocks = new Map<string, Promise<void>>();
   private readonly sourceBlobLocks = new Map<string, Promise<void>>();
+  private sourceBlobGcLeaseActive = false;
+  private activeSourceBlobWriters = 0;
+  private readonly sourceBlobWriterWaiters: Array<() => void> = [];
+  private readonly sourceBlobCreationSequences = new Map<string, number>();
+  private nextSourceBlobCreationSequence = 1;
   readonly builds: BuildRecord[] = [];
   readonly buildEvents: BuildEvent[] = [];
   private nextBuildEventSequence = 1;
@@ -178,9 +190,101 @@ export class MemoryAppStore implements AppStore {
     return this.admin !== null;
   }
 
+  private isSourceBlobGcCandidate(record: SourceBlobRecord): boolean {
+    return record.status === "tombstoned"
+      || record.status === "trash"
+      || record.status === "active" && !this.sourceFiles.some((file) =>
+        file.workspaceId === record.workspaceId && file.sourceBlobId === record.id
+      );
+  }
+
+  private sourceBlobCreationSequence(record: SourceBlobRecord): number {
+    const existing = this.sourceBlobCreationSequences.get(record.id);
+    if (existing !== undefined) return existing;
+    const sequence = this.nextSourceBlobCreationSequence;
+    this.nextSourceBlobCreationSequence += 1;
+    this.sourceBlobCreationSequences.set(record.id, sequence);
+    return sequence;
+  }
+
+  async findSourceBlobGcRunBoundary(): Promise<SourceBlobGcRunBoundary | null> {
+    for (const record of this.sourceBlobs) this.sourceBlobCreationSequence(record);
+    const creationCutoff = this.nextSourceBlobCreationSequence - 1;
+    let tail: SourceBlobGcCursor | null = null;
+    for (const record of this.sourceBlobs) {
+      if (!this.isSourceBlobGcCandidate(record)) continue;
+      const cursor = sourceBlobGcCursor(record);
+      if (!tail || compareSourceBlobGcCursors(cursor, tail) > 0) tail = cursor;
+    }
+    return tail ? {
+      through: tail,
+      creationCutoff: String(creationCutoff)
+    } : null;
+  }
+
+  async listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]> {
+    const candidateLimit = normalizeSourceBlobGcCandidateLimit(input.limit);
+    const creationCutoff = Number(input.creationCutoff);
+    if (!Number.isSafeInteger(creationCutoff) || creationCutoff < 0) {
+      throw new RangeError("Source blob GC creation cutoff is invalid");
+    }
+    const page: SourceBlobRecord[] = [];
+    for (const record of this.sourceBlobs) {
+      if (this.sourceBlobCreationSequence(record) > creationCutoff) continue;
+      if (!this.isSourceBlobGcCandidate(record)) continue;
+      const cursor = sourceBlobGcCursor(record);
+      if (input.after && compareSourceBlobGcCursors(cursor, input.after) <= 0
+        || compareSourceBlobGcCursors(cursor, input.through) > 0) continue;
+      page.push(record);
+      page.sort((left, right) => compareSourceBlobGcCursors(
+        sourceBlobGcCursor(left), sourceBlobGcCursor(right)
+      ));
+      if (page.length > candidateLimit) page.pop();
+    }
+    return page.map((record) => ({ ...record }));
+  }
+
+  async withSourceBlobGcLease<T>(operation: (catalog: SourceBlobGcLeaseCatalog) => Promise<T>): Promise<
+    { acquired: true; value: T } | { acquired: false }
+  > {
+    if (this.sourceBlobGcLeaseActive || this.activeSourceBlobWriters > 0) return { acquired: false };
+    this.sourceBlobGcLeaseActive = true;
+    try {
+      return { acquired: true, value: await operation(this) };
+    } finally {
+      this.sourceBlobGcLeaseActive = false;
+      for (const resolve of this.sourceBlobWriterWaiters.splice(0)) resolve();
+    }
+  }
+
+  async withSourceBlobWriterLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    while (this.sourceBlobGcLeaseActive) {
+      await new Promise<void>((resolve) => this.sourceBlobWriterWaiters.push(resolve));
+    }
+    this.activeSourceBlobWriters += 1;
+    try {
+      return await this.withSourceBlobHashLock(workspaceId, contentHash, true, operation);
+    } finally {
+      this.activeSourceBlobWriters -= 1;
+    }
+  }
+
   async withSourceBlobLock<T>(
     workspaceId: string,
     contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    return this.withSourceBlobHashLock(workspaceId, contentHash, false, operation);
+  }
+
+  private async withSourceBlobHashLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    writer: boolean,
     operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
   ): Promise<T> {
     const key = `${workspaceId}:${contentHash}`;
@@ -197,10 +301,24 @@ export class MemoryAppStore implements AppStore {
             && candidate.contentHash === contentHash && candidate.status === "active");
           return record ? { ...record } : null;
         },
+        findTombstoned: async () => {
+          const record = this.sourceBlobs.find((candidate) => candidate.workspaceId === workspaceId
+            && candidate.contentHash === contentHash && candidate.status === "tombstoned");
+          return record ? { ...record } : null;
+        },
+        findById: async (sourceBlobId) => {
+          const record = this.sourceBlobs.find((candidate) => candidate.workspaceId === workspaceId
+            && candidate.contentHash === contentHash && candidate.id === sourceBlobId);
+          return record ? { ...record } : null;
+        },
+        countReferences: async (sourceBlobId) => this.sourceFiles.filter((file) =>
+          file.workspaceId === workspaceId && file.sourceBlobId === sourceBlobId
+        ).length,
         nextGeneration: async () => Math.max(0, ...this.sourceBlobs.filter((candidate) =>
           candidate.workspaceId === workspaceId && candidate.contentHash === contentHash
         ).map((candidate) => candidate.generation)) + 1,
         create: async (input) => {
+          if (!writer) throw new Error("SOURCE_BLOB_WRITER_LOCK_REQUIRED");
           if (this.workspace?.id !== workspaceId || input.workspaceId !== workspaceId
             || input.contentHash !== contentHash
             || this.sourceBlobs.some((candidate) => candidate.workspaceId === workspaceId
@@ -215,7 +333,68 @@ export class MemoryAppStore implements AppStore {
             tombstonedAt: null, trashedAt: null, deletedAt: null
           };
           this.sourceBlobs.push(record);
+          this.sourceBlobCreationSequence(record);
           return { ...record };
+        },
+        tombstoneIfUnreferenced: async (sourceBlobId, fencingToken, at) => {
+          const record = this.sourceBlobs.find((candidate) => candidate.workspaceId === workspaceId
+            && candidate.contentHash === contentHash && candidate.id === sourceBlobId
+            && candidate.status === "active");
+          if (!record || this.sourceFiles.some((file) =>
+            file.workspaceId === workspaceId && file.sourceBlobId === sourceBlobId
+          )) return null;
+          Object.assign(record, {
+            status: "tombstoned" as const,
+            fencingToken,
+            tombstonedAt: at,
+            trashedAt: null,
+            deletedAt: null
+          });
+          return { ...record };
+        },
+        restoreTombstoned: async (sourceBlobId, fencingToken) => {
+          const record = this.sourceBlobs.find((candidate) => candidate.workspaceId === workspaceId
+            && candidate.contentHash === contentHash && candidate.id === sourceBlobId
+            && candidate.status === "tombstoned" && candidate.fencingToken === fencingToken);
+          if (!record) return null;
+          Object.assign(record, {
+            status: "active" as const,
+            fencingToken: null,
+            tombstonedAt: null,
+            trashedAt: null,
+            deletedAt: null
+          });
+          return { ...record };
+        },
+        markTrash: async (sourceBlobId, fencingToken, at) => {
+          const record = this.sourceBlobs.find((candidate) => candidate.workspaceId === workspaceId
+            && candidate.contentHash === contentHash && candidate.id === sourceBlobId
+            && candidate.status === "tombstoned" && candidate.fencingToken === fencingToken);
+          if (!record) return null;
+          Object.assign(record, { status: "trash" as const, trashedAt: at });
+          return { ...record };
+        },
+        markDeletedIfUnreferenced: async (sourceBlobId, fencingToken, at) => {
+          const record = this.sourceBlobs.find((candidate) => candidate.workspaceId === workspaceId
+            && candidate.contentHash === contentHash && candidate.id === sourceBlobId
+            && candidate.status === "trash" && candidate.fencingToken === fencingToken);
+          if (!record || this.sourceFiles.some((file) =>
+            file.workspaceId === workspaceId && file.sourceBlobId === sourceBlobId
+          )) return null;
+          Object.assign(record, { status: "deleted" as const, deletedAt: at });
+          return { ...record };
+        },
+        recordGcInconsistency: async (sourceBlobId, reason) => {
+          const record = this.sourceBlobs.find((candidate) => candidate.workspaceId === workspaceId
+            && candidate.contentHash === contentHash && candidate.id === sourceBlobId);
+          if (!record) return;
+          await this.recordAudit({
+            workspaceId,
+            action: "source_blob.gc_inconsistent",
+            resourceType: "source_blob",
+            resourceId: record.id,
+            metadata: { reason, status: record.status, generation: record.generation }
+          });
         }
       });
     } finally {
@@ -229,6 +408,16 @@ export class MemoryAppStore implements AppStore {
       candidate.workspaceId === workspaceId && candidate.id === sourceBlobId
     );
     return record ? { ...record } : null;
+  }
+
+  private assertActiveSourceBlobBindings(files: SourceFileRecord[]): void {
+    for (const file of files) {
+      if (!file.sourceBlobId) continue;
+      const blob = this.sourceBlobs.find((candidate) => candidate.id === file.sourceBlobId
+        && candidate.workspaceId === file.workspaceId && candidate.status === "active"
+        && candidate.contentHash === file.contentHash && candidate.byteSize === file.byteSize);
+      if (!blob) throw new Error("SOURCE_BLOB_NOT_ACTIVE");
+    }
   }
 
   async createInitialSetup(email: string, passwordHash: string): Promise<SetupResult | null> {
@@ -2226,6 +2415,7 @@ export class MemoryAppStore implements AppStore {
       snapshot.commitSha
     );
     if (existing) return existing;
+    this.assertActiveSourceBlobBindings(files);
     this.sourceSnapshots.push(snapshot);
     this.sourceFiles.push(...files);
     return snapshot;
@@ -2258,6 +2448,7 @@ export class MemoryAppStore implements AppStore {
         input.snapshot.commitSha, pendingUploadSessionId, pendingImportReportId
       );
       if (!persisted) {
+        this.assertActiveSourceBlobBindings(input.files);
         this.sourceSnapshots.push(input.snapshot);
         this.sourceFiles.push(...input.files);
         persisted = input.snapshot;

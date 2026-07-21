@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
+import type { Stats } from "node:fs";
 import {
   chmod,
   link,
@@ -11,6 +13,7 @@ import {
   rm,
   unlink
 } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 
 import { safeFolderUploadPath, syncDirectory } from "./folder-import.js";
@@ -32,13 +35,29 @@ export class SourceBlobIntegrityError extends Error {
     readonly code:
       | "INVALID_SOURCE_BLOB_SCOPE"
       | "SOURCE_BLOB_MISSING"
+      | "SOURCE_BLOB_INACCESSIBLE"
       | "SOURCE_BLOB_INTEGRITY_FAILED"
       | "SNAPSHOT_VIEW_FAILED",
-    message: string
+    message: string,
+    readonly auditReason?: string
   ) {
     super(message);
     this.name = "SourceBlobIntegrityError";
   }
+}
+
+export type SourceBlobLstatFile = (candidate: string) => Promise<Stats>;
+export type SourceBlobOpenFile = (candidate: string, flags: number) => Promise<FileHandle>;
+
+export function classifySourceBlobAccessError(
+  error: unknown,
+  message: string,
+  auditReason?: string
+): unknown {
+  if (error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "EPERM")) {
+    return new SourceBlobIntegrityError("SOURCE_BLOB_INACCESSIBLE", message, auditReason);
+  }
+  return error;
 }
 
 function digest(bytes: Uint8Array): string {
@@ -52,12 +71,222 @@ function safeIdentifier(value: string, label: string): string {
   return value;
 }
 
-function storageKey(workspaceId: string, contentHash: string, generation: number): string {
+export function sourceBlobStorageKey(workspaceId: string, contentHash: string, generation: number): string {
   safeIdentifier(workspaceId, "Workspace identifier");
   if (!/^[0-9a-f]{64}$/.test(contentHash) || !Number.isSafeInteger(generation) || generation < 1) {
     throw new SourceBlobIntegrityError("INVALID_SOURCE_BLOB_SCOPE", "Source blob identity is invalid");
   }
   return path.posix.join("blobs", workspaceId, contentHash.slice(0, 2), contentHash, String(generation));
+}
+
+export function sourceBlobFileLocations(dataDir: string, record: SourceBlobRecord): {
+  source: string;
+  trash: string;
+  sourceParent: string;
+  trashParent: string;
+} {
+  const expectedKey = sourceBlobStorageKey(record.workspaceId, record.contentHash, record.generation);
+  if (record.storageKey !== expectedKey) {
+    throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob storage key is invalid");
+  }
+  const source = path.join(dataDir, ...expectedKey.split("/"));
+  const trash = path.join(
+    dataDir,
+    ".trash",
+    safeIdentifier(record.workspaceId, "Workspace identifier"),
+    record.contentHash,
+    String(record.generation)
+  );
+  return { source, trash, sourceParent: path.dirname(source), trashParent: path.dirname(trash) };
+}
+
+export async function ensureSafeDirectoryChain(input: {
+  dataDir: string;
+  segments: string[];
+  createMissing?: boolean;
+  prepareRoot?: boolean;
+  syncFinal?: boolean;
+  syncDirectory?: typeof syncDirectory;
+  lstatFile?: SourceBlobLstatFile;
+}): Promise<boolean> {
+  const syncDir = input.syncDirectory ?? syncDirectory;
+  const lstatFile = input.lstatFile ?? lstat;
+  let current = path.resolve(input.dataDir);
+  const inspect = async (candidate: string): Promise<Stats> => {
+    try {
+      return await lstatFile(candidate);
+    } catch (error) {
+      throw classifySourceBlobAccessError(
+        error,
+        "Source blob directory chain is inaccessible",
+        "directory_access_inaccessible"
+      );
+    }
+  };
+  const assertDirectory = async (candidate: string): Promise<"directory" | "missing"> => {
+    try {
+      const metadata = await inspect(candidate);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        throw new SourceBlobIntegrityError(
+          "SOURCE_BLOB_INTEGRITY_FAILED",
+          "Source blob directory chain is unsafe"
+        );
+      }
+      return "directory";
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return "missing";
+      throw error;
+    }
+  };
+
+  if (await assertDirectory(current) !== "directory") {
+    if (!input.createMissing) {
+      throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob data directory is missing");
+    }
+    const parent = path.dirname(current);
+    if (await assertDirectory(parent) !== "directory") {
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_MISSING",
+        "Source blob data directory parent is missing"
+      );
+    }
+    try {
+      await mkdir(current, { mode: 0o700 });
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) {
+        throw classifySourceBlobAccessError(
+          error,
+          "Source blob directory chain is inaccessible",
+          "directory_access_inaccessible"
+        );
+      }
+    }
+    if (await assertDirectory(current) !== "directory") {
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_INTEGRITY_FAILED",
+        "Source blob data directory was not created safely"
+      );
+    }
+    await syncDir(parent);
+  }
+  const rootMetadata = await inspect(current);
+  const processUserId = process.getuid?.();
+  if (processUserId !== undefined) {
+    if (rootMetadata.uid !== processUserId) {
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_INTEGRITY_FAILED",
+        "Source blob data directory is not owned by the application user"
+      );
+    }
+    // FK16 trusts a private application-owned root; persisted artifacts below it are still revalidated.
+    if (input.prepareRoot && (rootMetadata.mode & 0o077) !== 0) {
+      await chmod(current, 0o700);
+      await syncDir(current);
+    }
+    const privateRootMetadata = input.prepareRoot ? await inspect(current) : rootMetadata;
+    if ((privateRootMetadata.mode & 0o077) !== 0) {
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_INTEGRITY_FAILED",
+        "Source blob data directory must be private to the application user"
+      );
+    }
+  }
+  for (const segment of input.segments) {
+    if (!segment || segment === "." || segment === ".." || path.isAbsolute(segment)
+      || segment.includes("/") || segment.includes("\\")) {
+      throw new SourceBlobIntegrityError("INVALID_SOURCE_BLOB_SCOPE", "Source blob directory segment is invalid");
+    }
+    const child = path.join(current, segment);
+    if (await assertDirectory(child) === "missing") {
+      if (!input.createMissing) return false;
+      try {
+        await mkdir(child, { mode: 0o700 });
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) {
+          throw classifySourceBlobAccessError(
+            error,
+            "Source blob directory chain is inaccessible",
+            "directory_access_inaccessible"
+          );
+        }
+      }
+      if (await assertDirectory(child) !== "directory") {
+        throw new SourceBlobIntegrityError(
+          "SOURCE_BLOB_INTEGRITY_FAILED",
+          "Source blob directory was not created safely"
+        );
+      }
+      await syncDir(current);
+    }
+    current = child;
+  }
+  if (input.syncFinal) await syncDir(current);
+  return true;
+}
+
+export function sourceBlobDirectorySegments(
+  record: Pick<SourceBlobRecord, "workspaceId" | "contentHash">
+): string[] {
+  sourceBlobStorageKey(record.workspaceId, record.contentHash, 1);
+  return ["blobs", record.workspaceId, record.contentHash.slice(0, 2), record.contentHash];
+}
+
+export function sourceBlobTrashDirectorySegments(
+  record: Pick<SourceBlobRecord, "workspaceId" | "contentHash">
+): string[] {
+  sourceBlobStorageKey(record.workspaceId, record.contentHash, 1);
+  return [".trash", record.workspaceId, record.contentHash];
+}
+
+export async function assertSourceBlobFile(
+  candidate: string,
+  record: Pick<SourceBlobRecord, "contentHash" | "byteSize">,
+  openFile: SourceBlobOpenFile = open,
+  lstatFile: SourceBlobLstatFile = lstat
+): Promise<Buffer> {
+  let pathMetadata: Stats;
+  try {
+    pathMetadata = await lstatFile(candidate);
+  } catch (error) {
+    throw classifySourceBlobAccessError(error, "Source blob final file is inaccessible", "file_access_inaccessible");
+  }
+  if (!pathMetadata.isFile() || pathMetadata.isSymbolicLink()) {
+    throw new SourceBlobIntegrityError(
+      "SOURCE_BLOB_INTEGRITY_FAILED",
+      "Source blob is not an immutable regular file"
+    );
+  }
+  let handle: FileHandle;
+  try {
+    handle = await openFile(candidate, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ELOOP") {
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_INTEGRITY_FAILED",
+        "Source blob final path must not be a symbolic link"
+      );
+    }
+    throw classifySourceBlobAccessError(error, "Source blob final file is inaccessible", "file_access_inaccessible");
+  }
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || (metadata.mode & 0o222) !== 0) {
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_INTEGRITY_FAILED",
+        "Source blob is not an immutable regular file"
+      );
+    }
+    const bytes = await handle.readFile();
+    if (bytes.length !== record.byteSize || digest(bytes) !== record.contentHash) {
+      throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob bytes do not match metadata");
+    }
+    return bytes;
+  } catch (error) {
+    if (error instanceof SourceBlobIntegrityError) throw error;
+    throw classifySourceBlobAccessError(error, "Source blob final file is inaccessible", "file_access_inaccessible");
+  } finally {
+    await handle.close();
+  }
 }
 
 async function makeDirectoriesReadOnly(root: string): Promise<void> {
@@ -76,13 +305,7 @@ async function assertRecoverableOrphan(destination: string, expectedHash: string
       "Orphaned source blob is not an immutable regular file"
     );
   }
-  const bytes = await readFile(destination);
-  if (bytes.length !== expectedSize || digest(bytes) !== expectedHash) {
-    throw new SourceBlobIntegrityError(
-      "SOURCE_BLOB_INTEGRITY_FAILED",
-      "Orphaned source blob does not match the pending generation"
-    );
-  }
+  await assertSourceBlobFile(destination, { contentHash: expectedHash, byteSize: expectedSize });
 }
 
 export class SourceBlobStore {
@@ -90,11 +313,26 @@ export class SourceBlobStore {
     dataDir: string;
     catalog: SourceBlobCatalog;
     linkFile?: typeof link;
+    lstatFile?: SourceBlobLstatFile;
+    openFile?: SourceBlobOpenFile;
+    syncDirectory?: typeof syncDirectory;
   }) {}
 
   async initialize(): Promise<void> {
-    await mkdir(path.join(this.options.dataDir, "blobs"), { recursive: true, mode: 0o700 });
-    await mkdir(path.join(this.options.dataDir, "snapshots"), { recursive: true, mode: 0o700 });
+    await this.ensureDirectoryChain({
+      dataDir: this.options.dataDir,
+      segments: ["blobs"],
+      createMissing: true,
+      prepareRoot: true,
+      syncFinal: true
+    });
+    await this.ensureDirectoryChain({
+      dataDir: this.options.dataDir,
+      segments: ["snapshots"],
+      createMissing: true,
+      prepareRoot: true,
+      syncFinal: true
+    });
   }
 
   async verifyHardlinkSupport(): Promise<void> {
@@ -104,6 +342,10 @@ export class SourceBlobStore {
     const source = path.join(blobsRoot, `.hardlink-probe-${probeId}`);
     const target = path.join(snapshotsRoot, `.hardlink-probe-${probeId}`);
     try {
+      if (!await this.ensureDirectoryChain({ dataDir: this.options.dataDir, segments: ["blobs"] })
+        || !await this.ensureDirectoryChain({ dataDir: this.options.dataDir, segments: ["snapshots"] })) {
+        throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob storage roots are missing");
+      }
       const handle = await open(source, "wx", 0o600);
       try {
         await handle.writeFile("devkh-hardlink-probe");
@@ -137,21 +379,112 @@ export class SourceBlobStore {
     record: SourceBlobRecord;
     reused: boolean;
   }> {
+    type PutOutcome =
+      | { ok: true; value: { record: SourceBlobRecord; reused: boolean } }
+      | { ok: false; error: SourceBlobIntegrityError };
     const bytes = Buffer.from(input.bytes);
     const contentHash = digest(bytes);
     safeIdentifier(input.workspaceId, "Workspace identifier");
-    return this.options.catalog.withSourceBlobLock(input.workspaceId, contentHash, async (catalog) => {
+    const outcome = await this.options.catalog.withSourceBlobWriterLock<PutOutcome>(
+      input.workspaceId,
+      contentHash,
+      async (catalog) => {
       const active = await catalog.findActive();
       if (active) {
-        await this.read(active);
-        return { record: active, reused: true };
+        try {
+          await this.read(active);
+          return { ok: true, value: { record: active, reused: true } };
+        } catch (error) {
+          if (!(error instanceof SourceBlobIntegrityError)) throw error;
+          const reason = error.code === "SOURCE_BLOB_INACCESSIBLE"
+            ? "active_file_inaccessible"
+            : "active_content_inconsistent";
+          await catalog.recordGcInconsistency(active.id, reason);
+          return { ok: false, error };
+        }
+      }
+
+      const tombstoned = await catalog.findTombstoned();
+      if (tombstoned) {
+        let locations: ReturnType<typeof sourceBlobFileLocations>;
+        try {
+          locations = sourceBlobFileLocations(this.options.dataDir, tombstoned);
+          const sourceDirectoryExists = await this.ensureDirectoryChain({
+            dataDir: this.options.dataDir,
+            segments: sourceBlobDirectorySegments(tombstoned)
+          });
+          if (!sourceDirectoryExists) {
+            throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob directory is missing");
+          }
+          const trashDirectoryExists = await this.ensureDirectoryChain({
+            dataDir: this.options.dataDir,
+            segments: sourceBlobTrashDirectorySegments(tombstoned)
+          });
+          const sourceExists = await this.lstatFile(locations.source).then(() => true, (error) => {
+            if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+            throw error;
+          });
+          const trashExists = trashDirectoryExists && await this.lstatFile(locations.trash).then(() => true, (error) => {
+            if (error instanceof Error && "code" in error && error.code === "ENOENT") return false;
+            throw error;
+          });
+          if (sourceExists === trashExists || !tombstoned.fencingToken) {
+            throw new SourceBlobIntegrityError(
+              "SOURCE_BLOB_INTEGRITY_FAILED",
+              "Tombstoned source blob location is inconsistent"
+            );
+          }
+          if (sourceExists) {
+            await this.assertFile(locations.source, tombstoned);
+            const restored = await catalog.restoreTombstoned(tombstoned.id, tombstoned.fencingToken);
+            if (!restored) throw new SourceBlobIntegrityError(
+              "SOURCE_BLOB_INTEGRITY_FAILED",
+              "Tombstoned source blob could not be restored"
+            );
+            return { ok: true, value: { record: restored, reused: true } };
+          }
+          if (await catalog.countReferences(tombstoned.id) > 0) {
+            const error = new SourceBlobIntegrityError(
+              "SOURCE_BLOB_INTEGRITY_FAILED",
+              "Referenced tombstoned source blob has already moved"
+            );
+            await catalog.recordGcInconsistency(tombstoned.id, "referenced_tombstone_moved");
+            return { ok: false, error };
+          }
+          await this.assertFile(locations.trash, tombstoned);
+          await Promise.all([
+            this.syncDir(locations.sourceParent),
+            this.syncDir(locations.trashParent)
+          ]);
+          const trashed = await catalog.markTrash(tombstoned.id, tombstoned.fencingToken, new Date());
+          if (!trashed) throw new SourceBlobIntegrityError(
+            "SOURCE_BLOB_INTEGRITY_FAILED",
+            "Moved source blob could not be reconciled"
+          );
+        } catch (error) {
+          if (error instanceof SourceBlobIntegrityError) {
+            await catalog.recordGcInconsistency(
+              tombstoned.id,
+              error.code === "SOURCE_BLOB_INACCESSIBLE"
+                ? "tombstone_file_inaccessible"
+                : "tombstone_content_inconsistent"
+            );
+            return { ok: false, error };
+          }
+          throw error;
+        }
       }
 
       const generation = await catalog.nextGeneration();
-      const key = storageKey(input.workspaceId, contentHash, generation);
+      const key = sourceBlobStorageKey(input.workspaceId, contentHash, generation);
       const destination = path.join(this.options.dataDir, ...key.split("/"));
       const directory = path.dirname(destination);
-      await mkdir(directory, { recursive: true, mode: 0o700 });
+      await this.ensureDirectoryChain({
+        dataDir: this.options.dataDir,
+        segments: ["blobs", input.workspaceId, contentHash.slice(0, 2), contentHash],
+        createMissing: true,
+        syncFinal: true
+      });
       const temporary = path.join(directory, `.${generation}.${randomUUID()}.tmp`);
       try {
         const handle = await open(temporary, "wx", 0o600);
@@ -172,7 +505,7 @@ export class SourceBlobStore {
           await assertRecoverableOrphan(destination, contentHash, bytes.length);
         }
         await unlink(temporary);
-        await syncDirectory(directory);
+        await this.syncDir(directory);
         try {
           const record = await catalog.create({
             workspaceId: input.workspaceId,
@@ -181,7 +514,7 @@ export class SourceBlobStore {
             byteSize: bytes.length,
             storageKey: key
           });
-          return { record, reused: false };
+          return { ok: true, value: { record, reused: false } };
         } catch (error) {
           await unlink(destination).catch(() => undefined);
           throw error;
@@ -191,31 +524,30 @@ export class SourceBlobStore {
         throw error;
       }
     });
+    if (!outcome.ok) throw outcome.error;
+    return outcome.value;
   }
 
   async read(record: SourceBlobRecord): Promise<Buffer> {
-    const expectedKey = storageKey(record.workspaceId, record.contentHash, record.generation);
+    const expectedKey = sourceBlobStorageKey(record.workspaceId, record.contentHash, record.generation);
     if (record.storageKey !== expectedKey || record.status === "deleted") {
       throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob record is not readable");
     }
     const absolutePath = path.join(this.options.dataDir, ...expectedKey.split("/"));
-    let metadata;
+    if (!await this.ensureDirectoryChain({
+      dataDir: this.options.dataDir,
+      segments: sourceBlobDirectorySegments(record)
+    })) {
+      throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob directory is missing");
+    }
     try {
-      metadata = await lstat(absolutePath);
+      return await this.assertFile(absolutePath, record);
     } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") {
         throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob bytes are missing");
       }
       throw error;
     }
-    if (!metadata.isFile() || metadata.isSymbolicLink()) {
-      throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob is not a regular file");
-    }
-    const bytes = await readFile(absolutePath);
-    if (bytes.length !== record.byteSize || digest(bytes) !== record.contentHash) {
-      throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob bytes do not match metadata");
-    }
-    return bytes;
   }
 
   async materializeSnapshotView(input: {
@@ -269,6 +601,47 @@ export class SourceBlobStore {
     } catch (error) {
       await rm(temporary, { recursive: true, force: true }).catch(() => undefined);
       throw error;
+    }
+  }
+
+  private ensureDirectoryChain(
+    input: Omit<Parameters<typeof ensureSafeDirectoryChain>[0], "lstatFile" | "syncDirectory">
+  ): Promise<boolean> {
+    return ensureSafeDirectoryChain({
+      ...input,
+      lstatFile: this.options.lstatFile,
+      syncDirectory: (directory) => this.syncDir(directory)
+    });
+  }
+
+  private async lstatFile(candidate: string): Promise<Stats> {
+    try {
+      return await (this.options.lstatFile ?? lstat)(candidate);
+    } catch (error) {
+      throw classifySourceBlobAccessError(
+        error,
+        "Source blob filesystem path is inaccessible",
+        "file_access_inaccessible"
+      );
+    }
+  }
+
+  private assertFile(
+    candidate: string,
+    record: Pick<SourceBlobRecord, "contentHash" | "byteSize">
+  ): Promise<Buffer> {
+    return assertSourceBlobFile(candidate, record, this.options.openFile, this.options.lstatFile);
+  }
+
+  private async syncDir(directory: string): Promise<void> {
+    try {
+      await (this.options.syncDirectory ?? syncDirectory)(directory);
+    } catch (error) {
+      throw classifySourceBlobAccessError(
+        error,
+        "Source blob directory could not be synchronized",
+        "directory_sync_inaccessible"
+      );
     }
   }
 }

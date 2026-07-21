@@ -11,6 +11,7 @@ import {
   knowledgeMatchReason,
   MAX_UPLOAD_ACCEPTED_BYTES,
   MAX_UPLOAD_ACCEPTED_FILES,
+  normalizeSourceBlobGcCandidateLimit,
   normalizePagination
 } from "./store.js";
 import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledge/trust.js";
@@ -74,6 +75,9 @@ import type {
   SourceAnalysisArtifactKey,
   SourceAnalysisArtifactRecord,
   SourceFileRecord,
+  SourceBlobGcPageInput,
+  SourceBlobGcLeaseCatalog,
+  SourceBlobGcRunBoundary,
   SourceBlobRecord,
   LockedSourceBlobCatalog,
   SourceSnapshotRecord,
@@ -912,14 +916,234 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     }
   }
 
+  async findSourceBlobGcRunBoundary(): Promise<SourceBlobGcRunBoundary | null> {
+    return this.findSourceBlobGcRunBoundaryWith(this.pool);
+  }
+
+  private async findSourceBlobGcRunBoundaryWith(queryable: Queryable): Promise<SourceBlobGcRunBoundary | null> {
+    const result = await queryable.query<Pick<SourceBlobRow,
+      "id" | "workspace_id" | "content_hash" | "generation"> & {
+        creation_cutoff: string;
+      }>(`
+      WITH run_boundary AS MATERIALIZED (
+        SELECT clock_timestamp() AS creation_cutoff
+      )
+      SELECT blob.id, blob.workspace_id, blob.content_hash, blob.generation,
+             boundary.creation_cutoff::text AS creation_cutoff
+      FROM source_blobs blob
+      CROSS JOIN run_boundary boundary
+      WHERE blob.created_at <= boundary.creation_cutoff
+        AND (blob.status IN ('tombstoned', 'trash')
+         OR (blob.status = 'active' AND NOT EXISTS (
+           SELECT 1 FROM source_files file
+           WHERE file.workspace_id = blob.workspace_id AND file.source_blob_id = blob.id
+         )))
+      ORDER BY blob.workspace_id DESC, blob.content_hash DESC, blob.generation DESC, blob.id DESC
+      LIMIT 1
+    `);
+    const row = result.rows[0];
+    return row ? {
+      through: {
+        workspaceId: row.workspace_id,
+        contentHash: row.content_hash,
+        generation: Number(row.generation),
+        id: row.id
+      },
+      creationCutoff: row.creation_cutoff
+    } : null;
+  }
+
+  async listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]> {
+    return this.listSourceBlobGcCandidatesWith(this.pool, input);
+  }
+
+  private async listSourceBlobGcCandidatesWith(
+    queryable: Queryable,
+    input: SourceBlobGcPageInput
+  ): Promise<SourceBlobRecord[]> {
+    const candidateLimit = normalizeSourceBlobGcCandidateLimit(input.limit);
+    const values: unknown[] = [
+      input.through.workspaceId,
+      input.through.contentHash,
+      input.through.generation,
+      input.through.id,
+      input.creationCutoff
+    ];
+    let afterClause = "";
+    if (input.after) {
+      afterClause = `
+        AND ROW(blob.workspace_id, blob.content_hash, blob.generation, blob.id)
+          > ROW($6, $7, $8, $9)`;
+      values.push(
+        input.after.workspaceId,
+        input.after.contentHash,
+        input.after.generation,
+        input.after.id
+      );
+    }
+    const limitParameter = values.length + 1;
+    values.push(candidateLimit);
+    const result = await queryable.query<SourceBlobRow>(`
+      SELECT blob.id, blob.workspace_id, blob.content_hash, blob.generation, blob.byte_size,
+             blob.status, blob.storage_key, blob.fencing_token, blob.tombstoned_at,
+             blob.trashed_at, blob.deleted_at
+      FROM source_blobs blob
+      WHERE (
+        blob.status IN ('tombstoned', 'trash')
+        OR (blob.status = 'active' AND NOT EXISTS (
+          SELECT 1 FROM source_files file
+          WHERE file.workspace_id = blob.workspace_id AND file.source_blob_id = blob.id
+        ))
+      )
+        AND blob.created_at <= $5::timestamptz
+        AND ROW(blob.workspace_id, blob.content_hash, blob.generation, blob.id)
+          <= ROW($1, $2, $3, $4)
+        ${afterClause}
+      ORDER BY blob.workspace_id, blob.content_hash, blob.generation, blob.id
+      LIMIT $${limitParameter}
+    `, values);
+    return result.rows.map(sourceBlobRecord);
+  }
+
+  async withSourceBlobGcLease<T>(operation: (catalog: SourceBlobGcLeaseCatalog) => Promise<T>): Promise<
+    { acquired: true; value: T } | { acquired: false }
+  > {
+    const client = await this.pool.connect();
+    let acquired: boolean;
+    try {
+      const lock = await client.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_lock(hashtextextended('devkh.source_blobs.gc.membership', 0)) AS acquired"
+      );
+      acquired = lock.rows[0]?.acquired === true;
+    } catch (error) {
+      client.release();
+      throw error;
+    }
+    if (!acquired) {
+      client.release();
+      return { acquired: false };
+    }
+
+    let value!: T;
+    let operationError: unknown;
+    let unlockError: unknown;
+    try {
+      value = await operation(this.sourceBlobGcLeaseCatalog(client));
+    } catch (error) {
+      operationError = error;
+    } finally {
+      try {
+        const unlock = await client.query<{ released: boolean }>(
+          "SELECT pg_advisory_unlock(hashtextextended('devkh.source_blobs.gc.membership', 0)) AS released"
+        );
+        if (unlock.rows[0]?.released !== true) unlockError = new Error("SOURCE_BLOB_GC_UNLOCK_FAILED");
+      } catch (error) {
+        unlockError = error;
+      }
+      if (unlockError instanceof Error) client.release(unlockError);
+      else if (unlockError !== undefined) {
+        client.release(new Error("SOURCE_BLOB_GC_UNLOCK_FAILED", { cause: unlockError }));
+      } else client.release();
+    }
+    if (unlockError !== undefined) {
+      const failure = unlockError instanceof Error
+        ? unlockError
+        : new Error("SOURCE_BLOB_GC_UNLOCK_FAILED", { cause: unlockError });
+      if (operationError !== undefined) {
+        throw new AggregateError(
+          [operationError, failure],
+          "SOURCE_BLOB_GC_UNLOCK_FAILED",
+          { cause: operationError }
+        );
+      }
+      throw failure;
+    }
+    if (operationError !== undefined) throw operationError;
+    return { acquired: true, value };
+  }
+
+  private sourceBlobGcLeaseCatalog(client: PoolClient): SourceBlobGcLeaseCatalog {
+    let queue = Promise.resolve();
+    const serialize = <T>(operation: () => Promise<T>): Promise<T> => {
+      const result = queue.then(operation, operation);
+      queue = result.then(() => undefined, () => undefined);
+      return result;
+    };
+    return {
+      findSourceBlobGcRunBoundary: () => serialize(() => this.findSourceBlobGcRunBoundaryWith(client)),
+      listSourceBlobGcCandidates: (input) => serialize(() => this.listSourceBlobGcCandidatesWith(client, input)),
+      withSourceBlobLock: (workspaceId, contentHash, operation) => serialize(() =>
+        this.withSourceBlobGcLeaseTransaction(client, workspaceId, contentHash, operation)
+      )
+    };
+  }
+
+  private async withSourceBlobGcLeaseTransaction<T>(
+    client: PoolClient,
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    await client.query("BEGIN");
+    try {
+      const result = await this.runSourceBlobLockedOperation(client, workspaceId, contentHash, false, operation);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          "SOURCE_BLOB_GC_TRANSACTION_ROLLBACK_FAILED",
+          { cause: rollbackError }
+        );
+      }
+      throw error;
+    }
+  }
+
+  async withSourceBlobWriterLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    return this.withSourceBlobTransaction(workspaceId, contentHash, true, operation);
+  }
+
   async withSourceBlobLock<T>(
     workspaceId: string,
     contentHash: string,
     operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
   ): Promise<T> {
-    return this.transaction(async (client) => {
-      await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [workspaceId, contentHash]);
-      const catalog: LockedSourceBlobCatalog = {
+    return this.withSourceBlobTransaction(workspaceId, contentHash, false, operation);
+  }
+
+  private async withSourceBlobTransaction<T>(
+    workspaceId: string,
+    contentHash: string,
+    writer: boolean,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    return this.transaction((client) =>
+      this.runSourceBlobLockedOperation(client, workspaceId, contentHash, writer, operation)
+    );
+  }
+
+  private async runSourceBlobLockedOperation<T>(
+    client: PoolClient,
+    workspaceId: string,
+    contentHash: string,
+    writer: boolean,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    if (writer) {
+      await client.query(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended('devkh.source_blobs.gc.membership', 0))"
+      );
+    }
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [workspaceId, contentHash]);
+    const catalog: LockedSourceBlobCatalog = {
         findActive: async () => {
           const result = await client.query<SourceBlobRow>(`
             SELECT id, workspace_id, content_hash, generation, byte_size, status, storage_key,
@@ -930,6 +1154,34 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           `, [workspaceId, contentHash]);
           return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
         },
+        findTombstoned: async () => {
+          const result = await client.query<SourceBlobRow>(`
+            SELECT id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                   fencing_token, tombstoned_at, trashed_at, deleted_at
+            FROM source_blobs
+            WHERE workspace_id = $1 AND content_hash = $2 AND status = 'tombstoned'
+            FOR UPDATE
+          `, [workspaceId, contentHash]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        findById: async (sourceBlobId) => {
+          const result = await client.query<SourceBlobRow>(`
+            SELECT id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                   fencing_token, tombstoned_at, trashed_at, deleted_at
+            FROM source_blobs
+            WHERE workspace_id = $1 AND content_hash = $2 AND id = $3
+            FOR UPDATE
+          `, [workspaceId, contentHash, sourceBlobId]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        countReferences: async (sourceBlobId) => {
+          const result = await client.query<{ reference_count: string }>(`
+            SELECT count(*)::text AS reference_count
+            FROM source_files
+            WHERE workspace_id = $1 AND source_blob_id = $2
+          `, [workspaceId, sourceBlobId]);
+          return Number(result.rows[0]?.reference_count ?? 0);
+        },
         nextGeneration: async () => {
           const result = await client.query<{ next_generation: number }>(`
             SELECT COALESCE(MAX(generation), 0) + 1 AS next_generation
@@ -939,22 +1191,93 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           return Number(result.rows[0]?.next_generation ?? 1);
         },
         create: async (input) => {
+          if (!writer) throw new Error("SOURCE_BLOB_WRITER_LOCK_REQUIRED");
           if (input.workspaceId !== workspaceId || input.contentHash !== contentHash) {
             throw new Error("SOURCE_BLOB_SCOPE_MISMATCH");
           }
           const result = await client.query<SourceBlobRow>(`
             INSERT INTO source_blobs (
-              workspace_id, content_hash, generation, byte_size, status, storage_key
-            ) VALUES ($1, $2, $3, $4, 'active', $5)
+              workspace_id, content_hash, generation, byte_size, status, storage_key,
+              created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, 'active', $5, clock_timestamp(), clock_timestamp())
             RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
                       fencing_token, tombstoned_at, trashed_at, deleted_at
           `, [workspaceId, contentHash, input.generation, input.byteSize, input.storageKey]);
           if (!result.rows[0]) throw new Error("Source blob record was not created");
           return sourceBlobRecord(result.rows[0]);
+        },
+        tombstoneIfUnreferenced: async (sourceBlobId, fencingToken, at) => {
+          const result = await client.query<SourceBlobRow>(`
+            UPDATE source_blobs blob
+            SET status = 'tombstoned', fencing_token = $4, tombstoned_at = $5,
+                trashed_at = NULL, deleted_at = NULL, updated_at = $5
+            WHERE blob.workspace_id = $1 AND blob.content_hash = $2 AND blob.id = $3
+              AND blob.status = 'active'
+              AND NOT EXISTS (
+                SELECT 1 FROM source_files file
+                WHERE file.workspace_id = blob.workspace_id AND file.source_blob_id = blob.id
+              )
+            RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                      fencing_token, tombstoned_at, trashed_at, deleted_at
+          `, [workspaceId, contentHash, sourceBlobId, fencingToken, at]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        restoreTombstoned: async (sourceBlobId, fencingToken) => {
+          const result = await client.query<SourceBlobRow>(`
+            UPDATE source_blobs
+            SET status = 'active', fencing_token = NULL, tombstoned_at = NULL,
+                trashed_at = NULL, deleted_at = NULL, updated_at = now()
+            WHERE workspace_id = $1 AND content_hash = $2 AND id = $3
+              AND status = 'tombstoned' AND fencing_token = $4
+            RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                      fencing_token, tombstoned_at, trashed_at, deleted_at
+          `, [workspaceId, contentHash, sourceBlobId, fencingToken]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        markTrash: async (sourceBlobId, fencingToken, at) => {
+          const result = await client.query<SourceBlobRow>(`
+            UPDATE source_blobs
+            SET status = 'trash', trashed_at = $5, updated_at = $5
+            WHERE workspace_id = $1 AND content_hash = $2 AND id = $3
+              AND status = 'tombstoned' AND fencing_token = $4
+            RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                      fencing_token, tombstoned_at, trashed_at, deleted_at
+          `, [workspaceId, contentHash, sourceBlobId, fencingToken, at]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        markDeletedIfUnreferenced: async (sourceBlobId, fencingToken, at) => {
+          const result = await client.query<SourceBlobRow>(`
+            UPDATE source_blobs blob
+            SET status = 'deleted', deleted_at = $5, updated_at = $5
+            WHERE blob.workspace_id = $1 AND blob.content_hash = $2 AND blob.id = $3
+              AND blob.status = 'trash' AND blob.fencing_token = $4
+              AND NOT EXISTS (
+                SELECT 1 FROM source_files file
+                WHERE file.workspace_id = blob.workspace_id AND file.source_blob_id = blob.id
+              )
+            RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                      fencing_token, tombstoned_at, trashed_at, deleted_at
+          `, [workspaceId, contentHash, sourceBlobId, fencingToken, at]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        recordGcInconsistency: async (sourceBlobId, reason) => {
+          const result = await client.query<Pick<SourceBlobRow, "id" | "status" | "generation">>(`
+            SELECT id, status, generation
+            FROM source_blobs
+            WHERE workspace_id = $1 AND content_hash = $2 AND id = $3
+          `, [workspaceId, contentHash, sourceBlobId]);
+          const record = result.rows[0];
+          if (!record) return;
+          await this.insertAudit(client, {
+            workspaceId,
+            action: "source_blob.gc_inconsistent",
+            resourceType: "source_blob",
+            resourceId: record.id,
+            metadata: { reason, status: record.status, generation: record.generation }
+          });
         }
-      };
-      return operation(catalog);
-    });
+    };
+    return operation(catalog);
   }
 
   async findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null> {
@@ -4750,6 +5073,16 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         return { snapshot: snapshotRecord(existing.rows[0]), inserted: false };
       }
       for (const file of files) {
+        if (file.sourceBlobId) {
+          const activeBlob = await client.query<{ id: string }>(`
+            SELECT id
+            FROM source_blobs
+            WHERE workspace_id = $1 AND id = $2 AND content_hash = $3 AND byte_size = $4
+              AND status = 'active'
+            FOR SHARE
+          `, [file.workspaceId, file.sourceBlobId, file.contentHash, file.byteSize]);
+          if (!activeBlob.rows[0]) throw new Error("SOURCE_BLOB_NOT_ACTIVE");
+        }
         await client.query(
           `INSERT INTO source_files
            (id, workspace_id, snapshot_id, path, language, content_hash, byte_size, source_blob_id)

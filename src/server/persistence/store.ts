@@ -520,6 +520,17 @@ export interface SourceFileRecord {
 
 export type SourceBlobStatus = "active" | "tombstoned" | "trash" | "deleted";
 
+export const SOURCE_BLOB_GC_CANDIDATE_LIMIT = 500;
+
+export function normalizeSourceBlobGcCandidateLimit(
+  limit = SOURCE_BLOB_GC_CANDIDATE_LIMIT
+): number {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > SOURCE_BLOB_GC_CANDIDATE_LIMIT) {
+    throw new RangeError(`Source blob GC candidate limit must be between 1 and ${SOURCE_BLOB_GC_CANDIDATE_LIMIT}`);
+  }
+  return limit;
+}
+
 export interface SourceBlobRecord {
   id: string;
   workspaceId: string;
@@ -534,6 +545,39 @@ export interface SourceBlobRecord {
   deletedAt: Date | null;
 }
 
+export interface SourceBlobGcCursor {
+  workspaceId: string;
+  contentHash: string;
+  generation: number;
+  id: string;
+}
+
+export interface SourceBlobGcRunBoundary {
+  through: SourceBlobGcCursor;
+  creationCutoff: string;
+}
+
+export interface SourceBlobGcPageInput extends SourceBlobGcRunBoundary {
+  after?: SourceBlobGcCursor;
+  limit?: number;
+}
+
+export function sourceBlobGcCursor(record: SourceBlobRecord): SourceBlobGcCursor {
+  return {
+    workspaceId: record.workspaceId,
+    contentHash: record.contentHash,
+    generation: record.generation,
+    id: record.id
+  };
+}
+
+export function compareSourceBlobGcCursors(left: SourceBlobGcCursor, right: SourceBlobGcCursor): number {
+  return left.workspaceId.localeCompare(right.workspaceId)
+    || left.contentHash.localeCompare(right.contentHash)
+    || left.generation - right.generation
+    || left.id.localeCompare(right.id);
+}
+
 export interface CreateSourceBlobRecordInput {
   workspaceId: string;
   contentHash: string;
@@ -544,12 +588,48 @@ export interface CreateSourceBlobRecordInput {
 
 export interface LockedSourceBlobCatalog {
   findActive(): Promise<SourceBlobRecord | null>;
+  findTombstoned(): Promise<SourceBlobRecord | null>;
+  findById(sourceBlobId: string): Promise<SourceBlobRecord | null>;
+  countReferences(sourceBlobId: string): Promise<number>;
   nextGeneration(): Promise<number>;
   create(input: CreateSourceBlobRecordInput): Promise<SourceBlobRecord>;
+  tombstoneIfUnreferenced(
+    sourceBlobId: string,
+    fencingToken: string,
+    at: Date
+  ): Promise<SourceBlobRecord | null>;
+  restoreTombstoned(sourceBlobId: string, fencingToken: string): Promise<SourceBlobRecord | null>;
+  markTrash(sourceBlobId: string, fencingToken: string, at: Date): Promise<SourceBlobRecord | null>;
+  markDeletedIfUnreferenced(
+    sourceBlobId: string,
+    fencingToken: string,
+    at: Date
+  ): Promise<SourceBlobRecord | null>;
+  recordGcInconsistency(sourceBlobId: string, reason: string): Promise<void>;
+}
+
+export interface SourceBlobGcLeaseCatalog {
+  findSourceBlobGcRunBoundary(): Promise<SourceBlobGcRunBoundary | null>;
+  listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]>;
+  withSourceBlobLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T>;
 }
 
 export interface SourceBlobCatalog {
   findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null>;
+  findSourceBlobGcRunBoundary(): Promise<SourceBlobGcRunBoundary | null>;
+  listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]>;
+  withSourceBlobGcLease<T>(operation: (catalog: SourceBlobGcLeaseCatalog) => Promise<T>): Promise<
+    { acquired: true; value: T } | { acquired: false }
+  >;
+  withSourceBlobWriterLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T>;
   withSourceBlobLock<T>(
     workspaceId: string,
     contentHash: string,

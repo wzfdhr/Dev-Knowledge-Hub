@@ -1,4 +1,5 @@
 import type { Pool, PoolClient, QueryResultRow } from "pg";
+import { MAX_UPLOAD_MANIFEST_METADATA_BYTES } from "../../shared/import-filter.js";
 
 import {
   boundedKnowledgePage,
@@ -8,6 +9,9 @@ import {
   LastProjectAdminError,
   LastWorkspaceAdminError,
   knowledgeMatchReason,
+  MAX_UPLOAD_ACCEPTED_BYTES,
+  MAX_UPLOAD_ACCEPTED_FILES,
+  normalizeSourceBlobGcCandidateLimit,
   normalizePagination
 } from "./store.js";
 import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledge/trust.js";
@@ -21,11 +25,16 @@ import type {
   AppStore,
   AuditEventInput,
   AuditEventRecord,
+  CreateUploadSessionInput,
+  CompleteUploadSessionInput,
+  CompleteFolderImportInput,
+  CancelUploadSessionInput,
   CreateFeedbackInput,
   CreateRemediationInput,
   CreateSnapshotInput,
   FeedbackRebuildInput,
   FinishGitSynchronizationInput,
+  FrontendReleaseDraftProvenance,
   GitSynchronizationClaim,
   GitSynchronizationLease,
   ImportReportRecord,
@@ -52,6 +61,7 @@ import type {
   RepositoryConnectionInput,
   RepositoryRecord,
   ProjectRecord,
+  ProjectFrontendRolloutRecord,
   ProjectAccess,
   ProjectMemberRecord,
   ProjectRole,
@@ -62,10 +72,22 @@ import type {
   WorkspaceKnowledgeSearchRecord,
   WorkspaceProjectOverviewRecord,
   SetupResult,
+  SourceAnalysisArtifactKey,
+  SourceAnalysisArtifactRecord,
   SourceFileRecord,
+  SourceBlobGcPageInput,
+  SourceBlobGcLeaseCatalog,
+  SourceBlobGcRunBoundary,
+  SourceBlobRecord,
+  LockedSourceBlobCatalog,
   SourceSnapshotRecord,
   TeamMemberRecord,
   TeamRole,
+  UploadIdempotencyRecord,
+  UploadManifestEntryInput,
+  UploadManifestEntryRecord,
+  UploadSessionMutationIdentity,
+  UploadSessionRecord,
   WorkspaceRecord
 } from "./store.js";
 import type {
@@ -119,6 +141,73 @@ interface SnapshotRow extends QueryResultRow {
   remote_url: string | null;
   commit_timestamp: Date;
   storage_path: string;
+}
+
+interface SourceBlobRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  content_hash: string;
+  generation: number;
+  byte_size: string | number;
+  status: SourceBlobRecord["status"];
+  storage_key: string;
+  fencing_token: string | null;
+  tombstoned_at: Date | null;
+  trashed_at: Date | null;
+  deleted_at: Date | null;
+}
+
+interface UploadSessionRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  project_id: string;
+  repository_id: string;
+  actor_id: string;
+  session_version: number;
+  is_replacement: boolean;
+  expected_current_repository_id: string;
+  expected_latest_snapshot_id: string | null;
+  status: UploadSessionRecord["status"];
+  entry_count: number;
+  manifest_digest: string | null;
+  snapshot_id: string | null;
+  commit_response: Record<string, unknown> | null;
+  expires_at: Date;
+  committed_at: Date | null;
+  cancelled_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface UploadManifestEntryRow extends QueryResultRow {
+  session_id: string;
+  workspace_id: string;
+  ordinal: number;
+  path: string;
+  kind: UploadManifestEntryRecord["kind"];
+  byte_size: string;
+  content_hash: string | null;
+  media_type: string | null;
+  metadata_byte_size: number;
+  disposition: UploadManifestEntryRecord["disposition"];
+  trust: UploadManifestEntryRecord["trust"];
+  ignore_reason: string | null;
+  uploaded_at: Date | null;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface UploadIdempotencyRow extends QueryResultRow {
+  workspace_id: string;
+  actor_id: string;
+  idempotency_key: string;
+  operation: string;
+  request_digest: string;
+  session_id: string | null;
+  response_status: number;
+  response_body: Record<string, unknown>;
+  created_at: Date;
+  expires_at: Date;
 }
 
 interface BuildRow extends QueryResultRow {
@@ -206,6 +295,17 @@ interface ArtifactRow extends QueryResultRow {
   created_at: Date;
 }
 
+interface SourceAnalysisArtifactRow extends QueryResultRow {
+  workspace_id: string;
+  content_hash: string;
+  analyzer_id: string;
+  analyzer_version: string;
+  parser_config_digest: string;
+  facts: SourceAnalysisArtifactRecord["facts"];
+  facts_digest: string;
+  created_at: Date;
+}
+
 interface PipelineSearchDocumentRow extends QueryResultRow {
   id: string;
   workspace_id: string;
@@ -266,6 +366,11 @@ interface ReleaseRow extends QueryResultRow {
   version: string;
   kernel_mode?: "legacy" | "pipeline";
   package_artifact_id?: string | null;
+  release_artifact_family?: "knowledge-v1" | "frontend-v2";
+  package_stage_run_id?: string | null;
+  frontend_ir_schema_version?: number | null;
+  frontend_graph_schema_version?: number | null;
+  analyzer_manifest_digest?: string | null;
   created_at: Date;
   published_at: Date | null;
   status?: BuildStatus;
@@ -323,6 +428,16 @@ interface ProjectRow extends QueryResultRow {
   slug: string;
   archived_at: Date | null;
   created_at: Date;
+}
+
+interface ProjectFrontendRolloutRow extends QueryResultRow {
+  project_id: string;
+  workspace_id: string;
+  mode: ProjectFrontendRolloutRecord["mode"];
+  reason: string;
+  updated_by: string;
+  created_at: Date;
+  updated_at: Date;
 }
 
 interface TeamMemberRow extends QueryResultRow {
@@ -409,6 +524,22 @@ function snapshotRecord(row: SnapshotRow): SourceSnapshotRecord {
     remoteUrl: row.remote_url,
     commitTimestamp: row.commit_timestamp,
     storagePath: row.storage_path
+  };
+}
+
+function sourceBlobRecord(row: SourceBlobRow): SourceBlobRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    contentHash: row.content_hash,
+    generation: Number(row.generation),
+    byteSize: Number(row.byte_size),
+    status: row.status,
+    storageKey: row.storage_key,
+    fencingToken: row.fencing_token,
+    tombstonedAt: row.tombstoned_at,
+    trashedAt: row.trashed_at,
+    deletedAt: row.deleted_at
   };
 }
 
@@ -523,6 +654,19 @@ function artifactManifest(row: ArtifactRow): ArtifactManifest {
   });
 }
 
+function sourceAnalysisArtifact(row: SourceAnalysisArtifactRow): SourceAnalysisArtifactRecord {
+  return {
+    workspaceId: row.workspace_id,
+    contentHash: row.content_hash,
+    analyzerId: row.analyzer_id,
+    analyzerVersion: row.analyzer_version,
+    parserConfigDigest: row.parser_config_digest,
+    facts: row.facts,
+    factsDigest: row.facts_digest,
+    createdAt: row.created_at
+  };
+}
+
 function pipelineSearchDocument(row: PipelineSearchDocumentRow): PipelineSearchDocumentRecord {
   return {
     id: row.id,
@@ -564,6 +708,11 @@ function releaseRecord(row: ReleaseRow): ReleaseRecord {
     version: row.version,
     kernelMode: row.kernel_mode ?? "legacy",
     packageArtifactId: row.package_artifact_id ?? null,
+    releaseArtifactFamily: row.release_artifact_family ?? "knowledge-v1",
+    packageStageRunId: row.package_stage_run_id ?? null,
+    frontendIrSchemaVersion: row.frontend_ir_schema_version ?? null,
+    frontendGraphSchemaVersion: row.frontend_graph_schema_version ?? null,
+    analyzerManifestDigest: row.analyzer_manifest_digest ?? null,
     createdAt: row.created_at,
     publishedAt: row.published_at
   };
@@ -620,6 +769,65 @@ function importReportRecord(row: ImportReportRow): ImportReportRecord {
   };
 }
 
+function uploadSessionRecord(row: UploadSessionRow): UploadSessionRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    projectId: row.project_id,
+    repositoryId: row.repository_id,
+    actorId: row.actor_id,
+    sessionVersion: row.session_version,
+    isReplacement: row.is_replacement,
+    expectedCurrentRepositoryId: row.expected_current_repository_id,
+    expectedLatestSnapshotId: row.expected_latest_snapshot_id,
+    status: row.status,
+    entryCount: row.entry_count,
+    manifestDigest: row.manifest_digest,
+    snapshotId: row.snapshot_id,
+    commitResponse: row.commit_response,
+    expiresAt: row.expires_at,
+    committedAt: row.committed_at,
+    cancelledAt: row.cancelled_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function uploadManifestEntryRecord(row: UploadManifestEntryRow): UploadManifestEntryRecord {
+  return {
+    sessionId: row.session_id,
+    workspaceId: row.workspace_id,
+    ordinal: row.ordinal,
+    path: row.path,
+    kind: row.kind,
+    byteSize: Number(row.byte_size),
+    contentHash: row.content_hash,
+    mediaType: row.media_type,
+    metadataByteSize: row.metadata_byte_size,
+    disposition: row.disposition,
+    trust: row.trust,
+    ignoreReason: row.ignore_reason,
+    uploadedAt: row.uploaded_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function uploadIdempotencyRecord(row: UploadIdempotencyRow): UploadIdempotencyRecord {
+  return {
+    workspaceId: row.workspace_id,
+    actorId: row.actor_id,
+    idempotencyKey: row.idempotency_key,
+    operation: row.operation,
+    requestDigest: row.request_digest,
+    sessionId: row.session_id,
+    responseStatus: row.response_status,
+    responseBody: row.response_body,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at
+  };
+}
+
 function projectRecord(row: ProjectRow): ProjectRecord {
   return {
     id: row.id,
@@ -628,6 +836,20 @@ function projectRecord(row: ProjectRow): ProjectRecord {
     slug: row.slug,
     archivedAt: row.archived_at,
     createdAt: row.created_at
+  };
+}
+
+function projectFrontendRolloutRecord(
+  row: ProjectFrontendRolloutRow
+): ProjectFrontendRolloutRecord {
+  return {
+    projectId: row.project_id,
+    workspaceId: row.workspace_id,
+    mode: row.mode,
+    reason: row.reason,
+    updatedBy: row.updated_by,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
   };
 }
 
@@ -669,7 +891,15 @@ function auditEventRecord(row: AuditEventRow): AuditEventRecord {
 }
 
 export class PostgresAppStore implements AppStore, PipelineArtifactStore {
-  constructor(private readonly pool: Pool & Queryable) {}
+  private activeUploadMutationLocks = 0;
+  private readonly uploadMutationWaiters: Array<() => void> = [];
+  private readonly uploadMutationLockLimit: number;
+
+  constructor(private readonly pool: Pool & Queryable) {
+    const maximumConnections = pool.options?.max ?? 10;
+    if (maximumConnections < 4) throw new Error("PostgreSQL upload sessions require a pool with at least four connections");
+    this.uploadMutationLockLimit = Math.max(1, Math.floor(maximumConnections / 2));
+  }
 
   private async transaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
@@ -684,6 +914,431 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     } finally {
       client.release();
     }
+  }
+
+  async findSourceBlobGcRunBoundary(): Promise<SourceBlobGcRunBoundary | null> {
+    return this.findSourceBlobGcRunBoundaryWith(this.pool);
+  }
+
+  private async findSourceBlobGcRunBoundaryWith(queryable: Queryable): Promise<SourceBlobGcRunBoundary | null> {
+    const result = await queryable.query<Pick<SourceBlobRow,
+      "id" | "workspace_id" | "content_hash" | "generation"> & {
+        creation_cutoff: string;
+      }>(`
+      WITH run_boundary AS MATERIALIZED (
+        SELECT clock_timestamp() AS creation_cutoff
+      )
+      SELECT blob.id, blob.workspace_id, blob.content_hash, blob.generation,
+             boundary.creation_cutoff::text AS creation_cutoff
+      FROM source_blobs blob
+      CROSS JOIN run_boundary boundary
+      WHERE blob.created_at <= boundary.creation_cutoff
+        AND (blob.status IN ('tombstoned', 'trash')
+         OR (blob.status = 'active' AND NOT EXISTS (
+           SELECT 1 FROM source_files file
+           WHERE file.workspace_id = blob.workspace_id AND file.source_blob_id = blob.id
+         )))
+      ORDER BY blob.workspace_id DESC, blob.content_hash DESC, blob.generation DESC, blob.id DESC
+      LIMIT 1
+    `);
+    const row = result.rows[0];
+    return row ? {
+      through: {
+        workspaceId: row.workspace_id,
+        contentHash: row.content_hash,
+        generation: Number(row.generation),
+        id: row.id
+      },
+      creationCutoff: row.creation_cutoff
+    } : null;
+  }
+
+  async listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]> {
+    return this.listSourceBlobGcCandidatesWith(this.pool, input);
+  }
+
+  private async listSourceBlobGcCandidatesWith(
+    queryable: Queryable,
+    input: SourceBlobGcPageInput
+  ): Promise<SourceBlobRecord[]> {
+    const candidateLimit = normalizeSourceBlobGcCandidateLimit(input.limit);
+    const values: unknown[] = [
+      input.through.workspaceId,
+      input.through.contentHash,
+      input.through.generation,
+      input.through.id,
+      input.creationCutoff
+    ];
+    let afterClause = "";
+    if (input.after) {
+      afterClause = `
+        AND ROW(blob.workspace_id, blob.content_hash, blob.generation, blob.id)
+          > ROW($6, $7, $8, $9)`;
+      values.push(
+        input.after.workspaceId,
+        input.after.contentHash,
+        input.after.generation,
+        input.after.id
+      );
+    }
+    const limitParameter = values.length + 1;
+    values.push(candidateLimit);
+    const result = await queryable.query<SourceBlobRow>(`
+      SELECT blob.id, blob.workspace_id, blob.content_hash, blob.generation, blob.byte_size,
+             blob.status, blob.storage_key, blob.fencing_token, blob.tombstoned_at,
+             blob.trashed_at, blob.deleted_at
+      FROM source_blobs blob
+      WHERE (
+        blob.status IN ('tombstoned', 'trash')
+        OR (blob.status = 'active' AND NOT EXISTS (
+          SELECT 1 FROM source_files file
+          WHERE file.workspace_id = blob.workspace_id AND file.source_blob_id = blob.id
+        ))
+      )
+        AND blob.created_at <= $5::timestamptz
+        AND ROW(blob.workspace_id, blob.content_hash, blob.generation, blob.id)
+          <= ROW($1, $2, $3, $4)
+        ${afterClause}
+      ORDER BY blob.workspace_id, blob.content_hash, blob.generation, blob.id
+      LIMIT $${limitParameter}
+    `, values);
+    return result.rows.map(sourceBlobRecord);
+  }
+
+  async withSourceBlobGcLease<T>(operation: (catalog: SourceBlobGcLeaseCatalog) => Promise<T>): Promise<
+    { acquired: true; value: T } | { acquired: false }
+  > {
+    const client = await this.pool.connect();
+    let acquired: boolean;
+    try {
+      const lock = await client.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_lock(hashtextextended('devkh.source_blobs.gc.membership', 0)) AS acquired"
+      );
+      acquired = lock.rows[0]?.acquired === true;
+    } catch (error) {
+      client.release();
+      throw error;
+    }
+    if (!acquired) {
+      client.release();
+      return { acquired: false };
+    }
+
+    let value!: T;
+    let operationError: unknown;
+    let unlockError: unknown;
+    try {
+      value = await operation(this.sourceBlobGcLeaseCatalog(client));
+    } catch (error) {
+      operationError = error;
+    } finally {
+      try {
+        const unlock = await client.query<{ released: boolean }>(
+          "SELECT pg_advisory_unlock(hashtextextended('devkh.source_blobs.gc.membership', 0)) AS released"
+        );
+        if (unlock.rows[0]?.released !== true) unlockError = new Error("SOURCE_BLOB_GC_UNLOCK_FAILED");
+      } catch (error) {
+        unlockError = error;
+      }
+      if (unlockError instanceof Error) client.release(unlockError);
+      else if (unlockError !== undefined) {
+        client.release(new Error("SOURCE_BLOB_GC_UNLOCK_FAILED", { cause: unlockError }));
+      } else client.release();
+    }
+    if (unlockError !== undefined) {
+      const failure = unlockError instanceof Error
+        ? unlockError
+        : new Error("SOURCE_BLOB_GC_UNLOCK_FAILED", { cause: unlockError });
+      if (operationError !== undefined) {
+        throw new AggregateError(
+          [operationError, failure],
+          "SOURCE_BLOB_GC_UNLOCK_FAILED",
+          { cause: operationError }
+        );
+      }
+      throw failure;
+    }
+    if (operationError !== undefined) throw operationError;
+    return { acquired: true, value };
+  }
+
+  private sourceBlobGcLeaseCatalog(client: PoolClient): SourceBlobGcLeaseCatalog {
+    let queue = Promise.resolve();
+    const serialize = <T>(operation: () => Promise<T>): Promise<T> => {
+      const result = queue.then(operation, operation);
+      queue = result.then(() => undefined, () => undefined);
+      return result;
+    };
+    return {
+      findSourceBlobGcRunBoundary: () => serialize(() => this.findSourceBlobGcRunBoundaryWith(client)),
+      listSourceBlobGcCandidates: (input) => serialize(() => this.listSourceBlobGcCandidatesWith(client, input)),
+      withSourceBlobLock: (workspaceId, contentHash, operation) => serialize(() =>
+        this.withSourceBlobGcLeaseTransaction(client, workspaceId, contentHash, operation)
+      )
+    };
+  }
+
+  private async withSourceBlobGcLeaseTransaction<T>(
+    client: PoolClient,
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    await client.query("BEGIN");
+    try {
+      const result = await this.runSourceBlobLockedOperation(client, workspaceId, contentHash, false, operation);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          "SOURCE_BLOB_GC_TRANSACTION_ROLLBACK_FAILED",
+          { cause: rollbackError }
+        );
+      }
+      throw error;
+    }
+  }
+
+  async withSourceBlobWriterLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    return this.withSourceBlobTransaction(workspaceId, contentHash, true, operation);
+  }
+
+  async withSourceBlobLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    return this.withSourceBlobTransaction(workspaceId, contentHash, false, operation);
+  }
+
+  private async withSourceBlobTransaction<T>(
+    workspaceId: string,
+    contentHash: string,
+    writer: boolean,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    return this.transaction((client) =>
+      this.runSourceBlobLockedOperation(client, workspaceId, contentHash, writer, operation)
+    );
+  }
+
+  private async runSourceBlobLockedOperation<T>(
+    client: PoolClient,
+    workspaceId: string,
+    contentHash: string,
+    writer: boolean,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T> {
+    if (writer) {
+      await client.query(
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended('devkh.source_blobs.gc.membership', 0))"
+      );
+    }
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [workspaceId, contentHash]);
+    const catalog: LockedSourceBlobCatalog = {
+        findActive: async () => {
+          const result = await client.query<SourceBlobRow>(`
+            SELECT id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                   fencing_token, tombstoned_at, trashed_at, deleted_at
+            FROM source_blobs
+            WHERE workspace_id = $1 AND content_hash = $2 AND status = 'active'
+            FOR UPDATE
+          `, [workspaceId, contentHash]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        findTombstoned: async () => {
+          const result = await client.query<SourceBlobRow>(`
+            SELECT id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                   fencing_token, tombstoned_at, trashed_at, deleted_at
+            FROM source_blobs
+            WHERE workspace_id = $1 AND content_hash = $2 AND status = 'tombstoned'
+            FOR UPDATE
+          `, [workspaceId, contentHash]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        findById: async (sourceBlobId) => {
+          const result = await client.query<SourceBlobRow>(`
+            SELECT id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                   fencing_token, tombstoned_at, trashed_at, deleted_at
+            FROM source_blobs
+            WHERE workspace_id = $1 AND content_hash = $2 AND id = $3
+            FOR UPDATE
+          `, [workspaceId, contentHash, sourceBlobId]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        countReferences: async (sourceBlobId) => {
+          const result = await client.query<{ reference_count: string }>(`
+            SELECT count(*)::text AS reference_count
+            FROM source_files
+            WHERE workspace_id = $1 AND source_blob_id = $2
+          `, [workspaceId, sourceBlobId]);
+          return Number(result.rows[0]?.reference_count ?? 0);
+        },
+        nextGeneration: async () => {
+          const result = await client.query<{ next_generation: number }>(`
+            SELECT COALESCE(MAX(generation), 0) + 1 AS next_generation
+            FROM source_blobs
+            WHERE workspace_id = $1 AND content_hash = $2
+          `, [workspaceId, contentHash]);
+          return Number(result.rows[0]?.next_generation ?? 1);
+        },
+        create: async (input) => {
+          if (!writer) throw new Error("SOURCE_BLOB_WRITER_LOCK_REQUIRED");
+          if (input.workspaceId !== workspaceId || input.contentHash !== contentHash) {
+            throw new Error("SOURCE_BLOB_SCOPE_MISMATCH");
+          }
+          const result = await client.query<SourceBlobRow>(`
+            INSERT INTO source_blobs (
+              workspace_id, content_hash, generation, byte_size, status, storage_key,
+              created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, 'active', $5, clock_timestamp(), clock_timestamp())
+            RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                      fencing_token, tombstoned_at, trashed_at, deleted_at
+          `, [workspaceId, contentHash, input.generation, input.byteSize, input.storageKey]);
+          if (!result.rows[0]) throw new Error("Source blob record was not created");
+          return sourceBlobRecord(result.rows[0]);
+        },
+        tombstoneIfUnreferenced: async (sourceBlobId, fencingToken, at) => {
+          const result = await client.query<SourceBlobRow>(`
+            UPDATE source_blobs blob
+            SET status = 'tombstoned', fencing_token = $4, tombstoned_at = $5,
+                trashed_at = NULL, deleted_at = NULL, updated_at = $5
+            WHERE blob.workspace_id = $1 AND blob.content_hash = $2 AND blob.id = $3
+              AND blob.status = 'active'
+              AND NOT EXISTS (
+                SELECT 1 FROM source_files file
+                WHERE file.workspace_id = blob.workspace_id AND file.source_blob_id = blob.id
+              )
+            RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                      fencing_token, tombstoned_at, trashed_at, deleted_at
+          `, [workspaceId, contentHash, sourceBlobId, fencingToken, at]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        restoreTombstoned: async (sourceBlobId, fencingToken) => {
+          const result = await client.query<SourceBlobRow>(`
+            UPDATE source_blobs
+            SET status = 'active', fencing_token = NULL, tombstoned_at = NULL,
+                trashed_at = NULL, deleted_at = NULL, updated_at = now()
+            WHERE workspace_id = $1 AND content_hash = $2 AND id = $3
+              AND status = 'tombstoned' AND fencing_token = $4
+            RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                      fencing_token, tombstoned_at, trashed_at, deleted_at
+          `, [workspaceId, contentHash, sourceBlobId, fencingToken]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        markTrash: async (sourceBlobId, fencingToken, at) => {
+          const result = await client.query<SourceBlobRow>(`
+            UPDATE source_blobs
+            SET status = 'trash', trashed_at = $5, updated_at = $5
+            WHERE workspace_id = $1 AND content_hash = $2 AND id = $3
+              AND status = 'tombstoned' AND fencing_token = $4
+            RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                      fencing_token, tombstoned_at, trashed_at, deleted_at
+          `, [workspaceId, contentHash, sourceBlobId, fencingToken, at]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        markDeletedIfUnreferenced: async (sourceBlobId, fencingToken, at) => {
+          const result = await client.query<SourceBlobRow>(`
+            UPDATE source_blobs blob
+            SET status = 'deleted', deleted_at = $5, updated_at = $5
+            WHERE blob.workspace_id = $1 AND blob.content_hash = $2 AND blob.id = $3
+              AND blob.status = 'trash' AND blob.fencing_token = $4
+              AND NOT EXISTS (
+                SELECT 1 FROM source_files file
+                WHERE file.workspace_id = blob.workspace_id AND file.source_blob_id = blob.id
+              )
+            RETURNING id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+                      fencing_token, tombstoned_at, trashed_at, deleted_at
+          `, [workspaceId, contentHash, sourceBlobId, fencingToken, at]);
+          return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+        },
+        recordGcInconsistency: async (sourceBlobId, reason) => {
+          const result = await client.query<Pick<SourceBlobRow, "id" | "status" | "generation">>(`
+            SELECT id, status, generation
+            FROM source_blobs
+            WHERE workspace_id = $1 AND content_hash = $2 AND id = $3
+          `, [workspaceId, contentHash, sourceBlobId]);
+          const record = result.rows[0];
+          if (!record) return;
+          await this.insertAudit(client, {
+            workspaceId,
+            action: "source_blob.gc_inconsistent",
+            resourceType: "source_blob",
+            resourceId: record.id,
+            metadata: { reason, status: record.status, generation: record.generation }
+          });
+        }
+    };
+    return operation(catalog);
+  }
+
+  async findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null> {
+    const result = await this.pool.query<SourceBlobRow>(`
+      SELECT id, workspace_id, content_hash, generation, byte_size, status, storage_key,
+             fencing_token, tombstoned_at, trashed_at, deleted_at
+      FROM source_blobs
+      WHERE workspace_id = $1 AND id = $2
+    `, [workspaceId, sourceBlobId]);
+    return result.rows[0] ? sourceBlobRecord(result.rows[0]) : null;
+  }
+
+  private async acquireUploadMutationPermit(): Promise<() => void> {
+    if (this.activeUploadMutationLocks >= this.uploadMutationLockLimit) {
+      await new Promise<void>((resolve) => this.uploadMutationWaiters.push(resolve));
+    } else {
+      this.activeUploadMutationLocks += 1;
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = this.uploadMutationWaiters.shift();
+      if (next) next();
+      else this.activeUploadMutationLocks -= 1;
+    };
+  }
+
+  private async lockUploadAuthorization(
+    client: PoolClient,
+    input: {
+      workspaceId: string;
+      projectId: string;
+      actorId: string;
+      sessionVersion: number;
+      administratorRequired: boolean;
+    }
+  ): Promise<boolean> {
+    const user = await client.query<{ session_version: number; disabled_at: Date | null }>(
+      `SELECT session_version, disabled_at FROM admin_users
+       WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+      [input.workspaceId, input.actorId]
+    );
+    if (!user.rows[0] || user.rows[0].disabled_at
+      || user.rows[0].session_version !== input.sessionVersion) return false;
+    const workspaceMember = await client.query<{ role: TeamRole }>(
+      `SELECT role FROM workspace_members
+       WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
+      [input.workspaceId, input.actorId]
+    );
+    if (workspaceMember.rows[0]?.role === "admin") return true;
+    const projectMember = await client.query<{ role: ProjectRole }>(
+      `SELECT pm.role FROM project_members pm
+       JOIN projects project ON project.id = pm.project_id
+       WHERE project.workspace_id = $1 AND pm.project_id = $2 AND pm.user_id = $3
+       FOR UPDATE OF pm`,
+      [input.workspaceId, input.projectId, input.actorId]
+    );
+    return input.administratorRequired
+      ? projectMember.rows[0]?.role === "admin"
+      : ["admin", "member"].includes(projectMember.rows[0]?.role ?? "reader");
   }
 
   private async insertAudit(queryable: Queryable, event: AuditEventInput): Promise<void> {
@@ -1163,6 +1818,55 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       [artifactId]
     );
     return rows[0] ? artifactManifest(rows[0]) : null;
+  }
+
+  async findSourceAnalysisArtifact(key: SourceAnalysisArtifactKey): Promise<SourceAnalysisArtifactRecord | null> {
+    const { rows } = await this.pool.query<SourceAnalysisArtifactRow>(
+      `SELECT workspace_id, content_hash, analyzer_id, analyzer_version,
+              parser_config_digest, facts, facts_digest, created_at
+       FROM source_analysis_artifacts
+       WHERE workspace_id = $1 AND content_hash = $2 AND analyzer_id = $3
+         AND analyzer_version = $4 AND parser_config_digest = $5`,
+      [key.workspaceId, key.contentHash, key.analyzerId, key.analyzerVersion, key.parserConfigDigest]
+    );
+    return rows[0] ? sourceAnalysisArtifact(rows[0]) : null;
+  }
+
+  async putSourceAnalysisArtifact(
+    input: Omit<SourceAnalysisArtifactRecord, "createdAt">
+  ): Promise<SourceAnalysisArtifactRecord> {
+    return this.transaction(async (client) => {
+      const values = [
+        input.workspaceId,
+        input.contentHash,
+        input.analyzerId,
+        input.analyzerVersion,
+        input.parserConfigDigest,
+        input.facts,
+        input.factsDigest
+      ];
+      const inserted = await client.query<SourceAnalysisArtifactRow>(
+        `INSERT INTO source_analysis_artifacts
+           (workspace_id, content_hash, analyzer_id, analyzer_version, parser_config_digest, facts, facts_digest)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT DO NOTHING
+         RETURNING workspace_id, content_hash, analyzer_id, analyzer_version,
+                   parser_config_digest, facts, facts_digest, created_at`,
+        values
+      );
+      const row = inserted.rows[0] ?? (await client.query<SourceAnalysisArtifactRow>(
+        `SELECT workspace_id, content_hash, analyzer_id, analyzer_version,
+                parser_config_digest, facts, facts_digest, created_at
+         FROM source_analysis_artifacts
+         WHERE workspace_id = $1 AND content_hash = $2 AND analyzer_id = $3
+           AND analyzer_version = $4 AND parser_config_digest = $5
+         FOR SHARE`,
+        values.slice(0, 5)
+      )).rows[0];
+      if (!row) throw new Error("Source analysis artifact could not be persisted");
+      if (row.facts_digest !== input.factsDigest) throw new Error("Source analysis cache collision");
+      return sourceAnalysisArtifact(row);
+    });
   }
 
   async savePipelineSearchDocuments(input: {
@@ -1696,6 +2400,77 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     });
   }
 
+  async getProjectFrontendRollout(
+    workspaceId: string,
+    projectId: string
+  ): Promise<ProjectFrontendRolloutRecord | null> {
+    const { rows } = await this.pool.query<ProjectFrontendRolloutRow>(
+      `SELECT project_id, workspace_id, mode, reason, updated_by, created_at, updated_at
+       FROM project_frontend_rollouts
+       WHERE workspace_id = $1 AND project_id = $2`,
+      [workspaceId, projectId]
+    );
+    return rows[0] ? projectFrontendRolloutRecord(rows[0]) : null;
+  }
+
+  async setProjectFrontendRollout(input: {
+    workspaceId: string;
+    projectId: string;
+    mode: ProjectFrontendRolloutRecord["mode"];
+    reason: string;
+    actorId: string;
+  }): Promise<ProjectFrontendRolloutRecord | null> {
+    return this.transaction(async (client) => {
+      const project = await client.query<{ id: string }>(
+        `SELECT projects.id
+         FROM projects
+         JOIN workspace_members ON workspace_members.workspace_id = projects.workspace_id
+           AND workspace_members.user_id = $3
+         JOIN admin_users ON admin_users.workspace_id = workspace_members.workspace_id
+           AND admin_users.id = workspace_members.user_id
+         WHERE projects.workspace_id = $1 AND projects.id = $2
+           AND workspace_members.role = 'admin' AND admin_users.disabled_at IS NULL
+         FOR UPDATE OF projects`,
+        [input.workspaceId, input.projectId, input.actorId]
+      );
+      if (!project.rows[0]) return null;
+      const previous = await client.query<ProjectFrontendRolloutRow>(
+        `SELECT project_id, workspace_id, mode, reason, updated_by, created_at, updated_at
+         FROM project_frontend_rollouts
+         WHERE workspace_id = $1 AND project_id = $2
+         FOR UPDATE`,
+        [input.workspaceId, input.projectId]
+      );
+      const { rows } = await client.query<ProjectFrontendRolloutRow>(
+        `INSERT INTO project_frontend_rollouts
+         (project_id, workspace_id, mode, reason, updated_by)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (project_id) DO UPDATE SET
+           mode = EXCLUDED.mode,
+           reason = EXCLUDED.reason,
+           updated_by = EXCLUDED.updated_by,
+           updated_at = now()
+         RETURNING project_id, workspace_id, mode, reason, updated_by, created_at, updated_at`,
+        [input.projectId, input.workspaceId, input.mode, input.reason, input.actorId]
+      );
+      const rollout = projectFrontendRolloutRecord(rows[0]!);
+      await this.insertAudit(client, {
+        workspaceId: input.workspaceId,
+        actorId: input.actorId,
+        action: "frontend_rollout.changed",
+        resourceType: "project",
+        resourceId: input.projectId,
+        metadata: {
+          projectId: input.projectId,
+          fromMode: previous.rows[0]?.mode ?? "legacy",
+          toMode: rollout.mode,
+          reason: rollout.reason
+        }
+      });
+      return rollout;
+    });
+  }
+
   async listAccessibleProjects(
     workspaceId: string,
     userId: string,
@@ -1769,6 +2544,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            FROM source_files f WHERE f.snapshot_id = s.id
          ) files ON true
          WHERE s.workspace_id = p.workspace_id AND s.repository_id = repo.id
+           AND s.pending_upload_session_id IS NULL AND s.pending_import_report_id IS NULL
          ORDER BY s.commit_timestamp DESC, s.created_at DESC, s.id DESC LIMIT 1
        ) snapshot ON true
        LEFT JOIN LATERAL (
@@ -1776,6 +2552,11 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
            'id', r.id, 'workspace_id', r.workspace_id, 'repository_id', r.repository_id,
            'build_job_id', r.build_job_id, 'snapshot_id', r.snapshot_id, 'version', r.version,
            'kernel_mode', r.kernel_mode, 'package_artifact_id', r.package_artifact_id,
+           'release_artifact_family', r.release_artifact_family,
+           'package_stage_run_id', r.package_stage_run_id,
+           'frontend_ir_schema_version', r.frontend_ir_schema_version,
+           'frontend_graph_schema_version', r.frontend_graph_schema_version,
+           'analyzer_manifest_digest', r.analyzer_manifest_digest,
            'created_at', r.created_at, 'published_at', r.published_at
          ) AS value
          FROM release_channels channel JOIN releases r ON r.id = channel.release_id
@@ -1839,6 +2620,13 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           buildId: String(release.build_job_id), snapshotId: String(release.snapshot_id), version: String(release.version),
           kernelMode: release.kernel_mode === "pipeline" ? "pipeline" : "legacy",
           packageArtifactId: release.package_artifact_id ? String(release.package_artifact_id) : null,
+          releaseArtifactFamily: release.release_artifact_family === "frontend-v2" ? "frontend-v2" : "knowledge-v1",
+          packageStageRunId: release.package_stage_run_id ? String(release.package_stage_run_id) : null,
+          frontendIrSchemaVersion: release.frontend_ir_schema_version === null || release.frontend_ir_schema_version === undefined
+            ? null : Number(release.frontend_ir_schema_version),
+          frontendGraphSchemaVersion: release.frontend_graph_schema_version === null || release.frontend_graph_schema_version === undefined
+            ? null : Number(release.frontend_graph_schema_version),
+          analyzerManifestDigest: release.analyzer_manifest_digest ? String(release.analyzer_manifest_digest) : null,
           createdAt: date(release.created_at), publishedAt: release.published_at ? date(release.published_at) : null
         } : null,
         latestBuild: build ? {
@@ -2123,6 +2911,27 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return importReportRecord(rows[0]);
   }
 
+  async createUploadSessionImportReport(
+    input: Omit<ImportReportRecord, "id" | "startedAt" | "finishedAt" | "status" | "collectedFileCount" | "collectedTextBytes" | "ignored" | "snapshotId" | "failureCode">,
+    sessionId: string
+  ): Promise<ImportReportRecord> {
+    const { rows } = await this.pool.query<ImportReportRow>(
+      `INSERT INTO import_reports (
+         workspace_id, project_id, repository_id, actor_id, source_kind, status, upload_session_id
+       ) VALUES ($1, $2, $3, $4, $5, 'running', $6)
+       ON CONFLICT (upload_session_id) WHERE upload_session_id IS NOT NULL
+       DO UPDATE SET status = 'running', started_at = now(), finished_at = NULL,
+         collected_file_count = 0, collected_text_bytes = 0,
+         ignored = '{"total":0,"reasons":{}}'::jsonb,
+         snapshot_id = NULL, failure_code = NULL
+       RETURNING id, workspace_id, project_id, repository_id, actor_id, source_kind, status,
+                 started_at, finished_at, collected_file_count, collected_text_bytes, ignored,
+                 snapshot_id, failure_code`,
+      [input.workspaceId, input.projectId, input.repositoryId, input.actorId, input.sourceKind, sessionId]
+    );
+    return importReportRecord(rows[0]);
+  }
+
   async finishImportReport(
     workspaceId: string,
     reportId: string,
@@ -2140,6 +2949,106 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         JSON.stringify(input.ignored), input.snapshotId, input.failureCode]
     );
     return rows[0] ? importReportRecord(rows[0]) : null;
+  }
+
+  async completeFolderImport(input: CompleteFolderImportInput): Promise<ImportReportRecord | null> {
+    return this.transaction(async (client) => {
+      const current = await client.query<{ id: string }>(
+        `SELECT id FROM repositories
+         WHERE workspace_id = $1 AND project_id = $2 AND archived_at IS NULL FOR UPDATE`,
+        [input.workspaceId, input.projectId]
+      );
+      if (current.rows[0]?.id !== input.expectedCurrentRepositoryId) return null;
+      const candidate = await client.query<{ id: string; archived_at: Date | null }>(
+        `SELECT id, archived_at FROM repositories
+         WHERE workspace_id = $1 AND project_id = $2 AND id = $3 FOR UPDATE`,
+        [input.workspaceId, input.projectId, input.repositoryId]
+      );
+      if (!candidate.rows[0]) return null;
+      if (!await this.lockUploadAuthorization(client, {
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        actorId: input.actorId,
+        sessionVersion: input.actorSessionVersion,
+        administratorRequired: input.activateReplacement
+      })) return null;
+      if (input.activateReplacement) {
+        if (candidate.rows[0].archived_at) {
+          await client.query(
+            `UPDATE repositories SET archived_at = now(), updated_at = now()
+             WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND archived_at IS NULL`,
+            [input.workspaceId, input.projectId, current.rows[0].id]
+          );
+          await client.query(
+            `UPDATE repositories SET archived_at = NULL, updated_at = now()
+             WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND archived_at IS NOT NULL`,
+            [input.workspaceId, input.projectId, input.repositoryId]
+          );
+          await this.insertAudit(client, {
+            workspaceId: input.workspaceId, actorId: input.actorId,
+            action: "repository.switched", resourceType: "repository", resourceId: input.repositoryId,
+            metadata: {
+              oldRepositoryId: current.rows[0].id,
+              newRepositoryId: input.repositoryId,
+              projectId: input.projectId
+            }
+          });
+        } else if (current.rows[0].id !== input.repositoryId) {
+          return null;
+        }
+      } else if (candidate.rows[0].archived_at || current.rows[0].id !== input.repositoryId) {
+        return null;
+      }
+      let snapshot: { commit_sha: string; pending_import_report_id: string | null } | undefined;
+      if (input.report.snapshotId) {
+        const selected = await client.query<{ commit_sha: string; pending_import_report_id: string | null }>(
+          `SELECT commit_sha, pending_import_report_id FROM source_snapshots
+           WHERE workspace_id = $1 AND repository_id = $2 AND id = $3
+             AND (pending_import_report_id IS NULL OR pending_import_report_id = $4)
+             AND pending_upload_session_id IS NULL
+           FOR UPDATE`,
+          [input.workspaceId, input.repositoryId, input.report.snapshotId, input.reportId]
+        );
+        snapshot = selected.rows[0];
+        if (!snapshot) throw new Error("Folder import snapshot activation failed");
+        if (snapshot.pending_import_report_id === input.reportId) {
+          await client.query(
+            `UPDATE source_snapshots SET pending_import_report_id = NULL
+             WHERE workspace_id = $1 AND repository_id = $2 AND id = $3
+               AND pending_import_report_id = $4`,
+            [input.workspaceId, input.repositoryId, input.report.snapshotId, input.reportId]
+          );
+        }
+      }
+      const { rows } = await client.query<ImportReportRow>(
+        `UPDATE import_reports
+         SET status = $6, finished_at = now(), collected_file_count = $7,
+             collected_text_bytes = $8, ignored = $9::jsonb, snapshot_id = $10, failure_code = $11
+         WHERE workspace_id = $1 AND project_id = $2 AND repository_id = $3
+           AND actor_id = $4 AND id = $5 AND status = 'running'
+         RETURNING id, workspace_id, project_id, repository_id, actor_id, source_kind, status,
+                   started_at, finished_at, collected_file_count, collected_text_bytes, ignored,
+                   snapshot_id, failure_code`,
+        [input.workspaceId, input.projectId, input.repositoryId, input.actorId, input.reportId,
+          input.report.status, input.report.collectedFileCount, input.report.collectedTextBytes,
+          JSON.stringify(input.report.ignored), input.report.snapshotId, input.report.failureCode]
+      );
+      if (!rows[0]) throw new Error("Folder import report completion failed");
+      if (snapshot) {
+        await this.insertAudit(client, {
+          workspaceId: input.workspaceId,
+          actorId: input.actorId,
+          action: "repository.sync_succeeded",
+          resourceType: "repository",
+          resourceId: input.repositoryId,
+          metadata: {
+            commitSha: snapshot.commit_sha,
+            unchanged: snapshot.pending_import_report_id === null
+          }
+        });
+      }
+      return importReportRecord(rows[0]);
+    });
   }
 
   async listImportReports(workspaceId: string, projectId: string, pagination?: Pagination): Promise<ImportReportRecord[]> {
@@ -2170,6 +3079,684 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       [cutoff]
     );
     return rowCount ?? 0;
+  }
+
+  async failStaleRunningImportReports(cutoff: Date): Promise<number> {
+    const { rowCount } = await this.pool.query(
+      `UPDATE import_reports SET status = 'failed', finished_at = now(), snapshot_id = NULL,
+         failure_code = 'UPLOAD_INTERRUPTED'
+       WHERE source_kind = 'upload' AND status = 'running' AND started_at < $1`,
+      [cutoff]
+    );
+    return rowCount ?? 0;
+  }
+
+  async createUploadSession(input: CreateUploadSessionInput): Promise<UploadSessionRecord> {
+    return this.transaction(async (client) => {
+      const current = await client.query<{ id: string }>(
+        `SELECT id FROM repositories
+         WHERE workspace_id = $1 AND project_id = $2 AND archived_at IS NULL FOR UPDATE`,
+        [input.workspaceId, input.projectId]
+      );
+      if (current.rows[0]?.id !== input.expectedCurrentRepositoryId) {
+        throw new Error("UPLOAD_SESSION_INVALIDATED");
+      }
+      const repository = await client.query<{ id: string }>(
+        "SELECT id FROM repositories WHERE workspace_id = $1 AND id = $2 FOR UPDATE",
+        [input.workspaceId, input.repositoryId]
+      );
+      if (!repository.rows[0]) throw new Error("UPLOAD_SESSION_INVALIDATED");
+      const latest = await client.query<{ id: string }>(
+        `SELECT id FROM source_snapshots
+         WHERE workspace_id = $1 AND repository_id = $2
+           AND pending_upload_session_id IS NULL AND pending_import_report_id IS NULL
+         ORDER BY commit_timestamp DESC, created_at DESC, id DESC LIMIT 1 FOR UPDATE`,
+        [input.workspaceId, input.repositoryId]
+      );
+      if (!await this.lockUploadAuthorization(client, {
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        actorId: input.actorId,
+        sessionVersion: input.sessionVersion,
+        administratorRequired: input.isReplacement
+      })) throw new Error("UPLOAD_SESSION_INVALIDATED");
+      await client.query(
+        `INSERT INTO upload_sessions (
+           id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement,
+           expected_current_repository_id, expected_latest_snapshot_id, entry_count, expires_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (id) DO NOTHING`,
+        [input.id, input.workspaceId, input.projectId, input.repositoryId, input.actorId,
+          input.sessionVersion, input.isReplacement, input.expectedCurrentRepositoryId,
+          latest.rows[0]?.id ?? null, input.entryCount, input.expiresAt]
+      );
+      const { rows } = await client.query<UploadSessionRow>(
+        `SELECT id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement, expected_current_repository_id, expected_latest_snapshot_id, status,
+                entry_count, manifest_digest, snapshot_id, commit_response, expires_at, committed_at, cancelled_at,
+                created_at, updated_at
+         FROM upload_sessions WHERE workspace_id = $1 AND id = $2`,
+        [input.workspaceId, input.id]
+      );
+      const row = rows[0];
+      if (!row || row.project_id !== input.projectId || row.repository_id !== input.repositoryId
+        || row.actor_id !== input.actorId || row.session_version !== input.sessionVersion
+        || row.is_replacement !== input.isReplacement
+        || row.expected_current_repository_id !== input.expectedCurrentRepositoryId
+        || row.entry_count !== input.entryCount) {
+        throw new Error("Upload session identity conflicts with an existing record");
+      }
+      return uploadSessionRecord(row);
+    });
+  }
+
+  async getUploadSession(workspaceId: string, sessionId: string): Promise<UploadSessionRecord | null> {
+    const { rows } = await this.pool.query<UploadSessionRow>(
+      `SELECT id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement, expected_current_repository_id, expected_latest_snapshot_id, status,
+              entry_count, manifest_digest, snapshot_id, commit_response, expires_at, committed_at, cancelled_at,
+              created_at, updated_at
+       FROM upload_sessions WHERE workspace_id = $1 AND id = $2`,
+      [workspaceId, sessionId]
+    );
+    return rows[0] ? uploadSessionRecord(rows[0]) : null;
+  }
+
+  async repositoryHasActiveUploadSession(workspaceId: string, repositoryId: string): Promise<boolean> {
+    const { rows } = await this.pool.query<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM upload_sessions WHERE workspace_id = $1 AND repository_id = $2
+           AND status IN ('open', 'committing')
+       ) AS exists`,
+      [workspaceId, repositoryId]
+    );
+    return rows[0]?.exists ?? false;
+  }
+
+  async getUploadSessionStagingOwner(sessionId: string) {
+    const { rows } = await this.pool.query<{ workspace_id: string; status: UploadSessionRecord["status"] }>(
+      "SELECT workspace_id, status FROM upload_sessions WHERE id = $1",
+      [sessionId]
+    );
+    return rows[0] ? {
+      workspaceId: rows[0].workspace_id,
+      active: ["open", "committing"].includes(rows[0].status)
+    } : null;
+  }
+
+  async saveUploadManifestPage(
+    identity: UploadSessionMutationIdentity,
+    entries: UploadManifestEntryInput[]
+  ): Promise<UploadManifestEntryRecord[]> {
+    const { workspaceId, sessionId } = identity;
+    return this.transaction(async (client) => {
+      const locked = await client.query<{
+        status: string; project_id: string; actor_id: string; session_version: number; is_replacement: boolean;
+      }>(
+        `SELECT status, project_id, actor_id, session_version, is_replacement
+         FROM upload_sessions WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+        [workspaceId, sessionId]
+      );
+      const session = locked.rows[0];
+      if (!session || session.status !== "open" || session.project_id !== identity.projectId
+        || session.actor_id !== identity.actorId || session.session_version !== identity.sessionVersion) return [];
+      if (!await this.lockUploadAuthorization(client, {
+        workspaceId,
+        projectId: identity.projectId,
+        actorId: identity.actorId,
+        sessionVersion: identity.sessionVersion,
+        administratorRequired: session.is_replacement
+      })) return [];
+      await client.query(
+        `INSERT INTO upload_session_entries (
+           session_id, workspace_id, ordinal, path, kind, byte_size, content_hash, media_type,
+           metadata_byte_size, disposition, trust, ignore_reason
+         )
+         SELECT $1, $2, item.ordinal, item.path, item.kind, item.byte_size, item.content_hash,
+                item.media_type, item.metadata_byte_size, item.disposition, item.trust, item.ignore_reason
+         FROM jsonb_to_recordset($3::jsonb) AS item(
+           ordinal integer, path text, kind text, byte_size bigint, content_hash text,
+           media_type text, metadata_byte_size integer, disposition text, trust text, ignore_reason text
+         )
+         ON CONFLICT DO NOTHING`,
+        [sessionId, workspaceId, JSON.stringify(entries.map((entry) => ({
+          ordinal: entry.ordinal,
+          path: entry.path,
+          kind: entry.kind,
+          byte_size: entry.byteSize,
+          content_hash: entry.contentHash,
+          media_type: entry.mediaType,
+          metadata_byte_size: entry.metadataByteSize,
+          disposition: entry.disposition,
+          trust: entry.trust,
+          ignore_reason: entry.ignoreReason
+        })))]
+      );
+      const { rows } = await client.query<UploadManifestEntryRow>(
+        `SELECT session_id, workspace_id, ordinal, path, kind, byte_size::text AS byte_size,
+                content_hash, media_type, metadata_byte_size, disposition, trust, ignore_reason, uploaded_at,
+                created_at, updated_at
+         FROM upload_session_entries
+         WHERE workspace_id = $1 AND session_id = $2 AND ordinal = ANY($3::integer[])
+         ORDER BY ordinal`,
+        [workspaceId, sessionId, entries.map((entry) => entry.ordinal)]
+      );
+      const records = rows.map(uploadManifestEntryRecord);
+      const byOrdinal = new Map(records.map((item) => [item.ordinal, item]));
+      const byPath = new Map(records.map((item) => [item.path, item]));
+      for (const input of entries) {
+        const ordinalRecord = byOrdinal.get(input.ordinal);
+        const pathRecord = byPath.get(input.path);
+        if (!ordinalRecord || !pathRecord || ordinalRecord !== pathRecord
+          || ordinalRecord.path !== input.path || ordinalRecord.kind !== input.kind
+          || ordinalRecord.byteSize !== input.byteSize || ordinalRecord.contentHash !== input.contentHash
+          || ordinalRecord.mediaType !== input.mediaType
+          || ordinalRecord.metadataByteSize !== input.metadataByteSize) {
+          throw new Error("UPLOAD_MANIFEST_CONFLICT");
+        }
+      }
+      const usage = await client.query<{
+        accepted_count: string; accepted_bytes: string; manifest_metadata_bytes: string;
+      }>(
+        `SELECT count(*) FILTER (WHERE disposition = 'upload_required')::text AS accepted_count,
+                coalesce(sum(byte_size) FILTER (WHERE disposition = 'upload_required'), 0)::text AS accepted_bytes,
+                (coalesce(sum(metadata_byte_size), 0) + count(*) + 1)::text AS manifest_metadata_bytes
+         FROM upload_session_entries
+         WHERE workspace_id = $1 AND session_id = $2`,
+        [workspaceId, sessionId]
+      );
+      if (Number(usage.rows[0]?.accepted_count ?? 0) > MAX_UPLOAD_ACCEPTED_FILES) {
+        throw new Error("TOO_MANY_FILES");
+      }
+      if (Number(usage.rows[0]?.accepted_bytes ?? 0) > MAX_UPLOAD_ACCEPTED_BYTES) {
+        throw new Error("FOLDER_SIZE_LIMIT");
+      }
+      if (Number(usage.rows[0]?.manifest_metadata_bytes ?? 0) > MAX_UPLOAD_MANIFEST_METADATA_BYTES) {
+        throw new Error("MANIFEST_METADATA_LIMIT");
+      }
+      return records;
+    });
+  }
+
+  async listUploadManifestEntries(workspaceId: string, sessionId: string, pagination?: Pagination): Promise<UploadManifestEntryRecord[]> {
+    const limit = Math.min(500, Math.max(1, pagination?.limit ?? 500));
+    const offset = Math.max(0, pagination?.offset ?? 0);
+    const { rows } = await this.pool.query<UploadManifestEntryRow>(
+      `SELECT session_id, workspace_id, ordinal, path, kind, byte_size::text AS byte_size,
+              content_hash, media_type, metadata_byte_size, disposition, trust, ignore_reason, uploaded_at,
+              created_at, updated_at
+       FROM upload_session_entries
+       WHERE workspace_id = $1 AND session_id = $2 AND ordinal >= $4 AND ordinal < $4 + $3
+       ORDER BY ordinal`,
+      [workspaceId, sessionId, limit, offset]
+    );
+    return rows.map(uploadManifestEntryRecord);
+  }
+
+  async getUploadManifestEntry(workspaceId: string, sessionId: string, ordinal: number) {
+    const { rows } = await this.pool.query<UploadManifestEntryRow>(
+      `SELECT session_id, workspace_id, ordinal, path, kind, byte_size::text AS byte_size,
+              content_hash, media_type, metadata_byte_size, disposition, trust, ignore_reason, uploaded_at,
+              created_at, updated_at
+       FROM upload_session_entries
+       WHERE workspace_id = $1 AND session_id = $2 AND ordinal = $3`,
+      [workspaceId, sessionId, ordinal]
+    );
+    return rows[0] ? uploadManifestEntryRecord(rows[0]) : null;
+  }
+
+  async verifyUploadManifestEntry(
+    identity: UploadSessionMutationIdentity,
+    ordinal: number,
+    input: { disposition: "upload_required" | "ignored"; trust: "server_verified"; ignoreReason: string | null }
+  ): Promise<UploadManifestEntryRecord | null> {
+    const { workspaceId, sessionId } = identity;
+    return this.transaction(async (client) => {
+      const locked = await client.query<{
+        status: string; project_id: string; actor_id: string; session_version: number; is_replacement: boolean;
+      }>(
+        `SELECT status, project_id, actor_id, session_version, is_replacement
+         FROM upload_sessions WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+        [workspaceId, sessionId]
+      );
+      const session = locked.rows[0];
+      if (!session || session.status !== "open" || session.project_id !== identity.projectId
+        || session.actor_id !== identity.actorId || session.session_version !== identity.sessionVersion) return null;
+      if (!await this.lockUploadAuthorization(client, {
+        workspaceId,
+        projectId: identity.projectId,
+        actorId: identity.actorId,
+        sessionVersion: identity.sessionVersion,
+        administratorRequired: session.is_replacement
+      })) return null;
+      const { rows } = await client.query<UploadManifestEntryRow>(
+        `UPDATE upload_session_entries entry
+         SET disposition = $4, trust = $5, ignore_reason = $6, uploaded_at = now(), updated_at = now()
+         WHERE entry.workspace_id = $1 AND entry.session_id = $2 AND entry.ordinal = $3
+           AND entry.kind = 'source' AND entry.disposition <> 'metadata_only'
+         RETURNING session_id, workspace_id, ordinal, path, kind, byte_size::text AS byte_size,
+                   content_hash, media_type, metadata_byte_size, disposition, trust, ignore_reason, uploaded_at,
+                   created_at, updated_at`,
+        [workspaceId, sessionId, ordinal, input.disposition, input.trust, input.ignoreReason]
+      );
+      return rows[0] ? uploadManifestEntryRecord(rows[0]) : null;
+    });
+  }
+
+  async acquireUploadSessionLock(workspaceId: string, sessionId: string): Promise<() => Promise<void>> {
+    const releasePermit = await this.acquireUploadMutationPermit();
+    let client: PoolClient;
+    try {
+      client = await this.pool.connect();
+    } catch (error) {
+      releasePermit();
+      throw error;
+    }
+    try {
+      await client.query("SELECT pg_advisory_lock(hashtext($1), hashtext($2))", [workspaceId, sessionId]);
+    } catch (error) {
+      client.release();
+      releasePermit();
+      throw error;
+    }
+    let released = false;
+    return async () => {
+      if (released) return;
+      released = true;
+      try {
+        await client.query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))", [workspaceId, sessionId]);
+      } finally {
+        client.release();
+        releasePermit();
+      }
+    };
+  }
+
+  async acquireUploadMutationLock(
+    workspaceId: string,
+    sessionId: string,
+    actorId: string,
+    idempotencyKey: string
+  ) {
+    const releasePermit = await this.acquireUploadMutationPermit();
+    let client: PoolClient;
+    try {
+      client = await this.pool.connect();
+    } catch (error) {
+      releasePermit();
+      throw error;
+    }
+    const identity = `${actorId}:${idempotencyKey}`;
+    try {
+      await client.query("SELECT pg_advisory_lock(hashtext($1), hashtext($2))", [workspaceId, identity]);
+      await client.query("SELECT pg_advisory_lock(hashtext($1), hashtext($2))", [workspaceId, sessionId]);
+    } catch (error) {
+      await client.query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))", [workspaceId, identity]).catch(() => undefined);
+      client.release();
+      releasePermit();
+      throw error;
+    }
+    let released = false;
+    return async () => {
+      if (released) return;
+      released = true;
+      try {
+        await client.query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))", [workspaceId, sessionId]);
+        await client.query("SELECT pg_advisory_unlock(hashtext($1), hashtext($2))", [workspaceId, identity]);
+      } finally {
+        client.release();
+        releasePermit();
+      }
+    };
+  }
+
+  async markUploadSessionCommitting(workspaceId: string, sessionId: string): Promise<UploadSessionRecord | null> {
+    return this.transaction(async (client) => {
+      await client.query(
+        `UPDATE upload_sessions SET status = 'committing', updated_at = now()
+         WHERE workspace_id = $1 AND id = $2 AND status = 'open'`,
+        [workspaceId, sessionId]
+      );
+      const { rows } = await client.query<UploadSessionRow>(
+        `SELECT id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement, expected_current_repository_id, expected_latest_snapshot_id, status,
+                entry_count, manifest_digest, snapshot_id, commit_response, expires_at, committed_at, cancelled_at,
+                created_at, updated_at
+         FROM upload_sessions WHERE workspace_id = $1 AND id = $2`,
+        [workspaceId, sessionId]
+      );
+      return rows[0] ? uploadSessionRecord(rows[0]) : null;
+    });
+  }
+
+  async completeUploadSessionCommit(input: CompleteUploadSessionInput): Promise<UploadSessionRecord | null> {
+    return this.transaction(async (client) => {
+      const selected = await client.query<UploadSessionRow & { unexpired: boolean }>(
+        `SELECT id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement, expected_current_repository_id, expected_latest_snapshot_id, status,
+                entry_count, manifest_digest, snapshot_id, commit_response, expires_at, committed_at, cancelled_at,
+                created_at, updated_at, expires_at > clock_timestamp() AS unexpired
+         FROM upload_sessions
+         WHERE workspace_id = $1 AND id = $2 AND project_id = $3 AND repository_id = $4
+           AND actor_id = $5
+         FOR UPDATE`,
+        [input.workspaceId, input.sessionId, input.projectId, input.repositoryId, input.actorId]
+      );
+      const session = selected.rows[0];
+      if (!session || !["committing", "committed"].includes(session.status)) return null;
+      if (session.status === "committed") return uploadSessionRecord(session);
+      if (!session.unexpired) return null;
+
+      const current = await client.query<{ id: string }>(
+        `SELECT id FROM repositories
+         WHERE workspace_id = $1 AND project_id = $2 AND archived_at IS NULL
+         FOR UPDATE`,
+        [input.workspaceId, input.projectId]
+      );
+      if (current.rows[0]?.id !== session.expected_current_repository_id) return null;
+      const candidate = await client.query<RepositoryRow>(
+        `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
+                r.default_branch, r.archived_at, false AS has_credential
+         FROM repositories r
+         WHERE r.workspace_id = $1 AND r.project_id = $2 AND r.id = $3
+         FOR UPDATE`,
+        [input.workspaceId, input.projectId, input.repositoryId]
+      );
+      if (!candidate.rows[0]) return null;
+      if (!await this.lockUploadAuthorization(client, {
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        actorId: input.actorId,
+        sessionVersion: session.session_version,
+        administratorRequired: session.is_replacement
+      })) return null;
+      const snapshot = await client.query<{
+        id: string; commit_sha: string; pending_upload_session_id: string | null;
+      }>(
+        `SELECT id, commit_sha, pending_upload_session_id FROM source_snapshots
+         WHERE workspace_id = $1 AND repository_id = $2 AND id = $3
+           AND (pending_upload_session_id IS NULL OR pending_upload_session_id = $4)
+           AND pending_import_report_id IS NULL
+         FOR UPDATE`,
+        [input.workspaceId, input.repositoryId, input.snapshotId, input.sessionId]
+      );
+      if (!snapshot.rows[0]) throw new Error("Upload session snapshot activation failed");
+      const latest = await client.query<{ id: string; commit_sha: string }>(
+        `SELECT id, commit_sha FROM source_snapshots
+         WHERE workspace_id = $1 AND repository_id = $2
+           AND pending_upload_session_id IS NULL AND pending_import_report_id IS NULL
+         ORDER BY commit_timestamp DESC, created_at DESC, id DESC LIMIT 1 FOR UPDATE`,
+        [input.workspaceId, input.repositoryId]
+      );
+      if ((latest.rows[0]?.id ?? null) !== session.expected_latest_snapshot_id
+        && latest.rows[0]?.commit_sha !== snapshot.rows[0].commit_sha) return null;
+      const duplicate = latest.rows[0] && latest.rows[0].id !== snapshot.rows[0].id
+        && latest.rows[0].commit_sha === snapshot.rows[0].commit_sha
+        ? latest.rows[0]
+        : null;
+      const effectiveSnapshotId = duplicate?.id ?? snapshot.rows[0].id;
+      const responseBody = duplicate
+        ? { ...input.responseBody, snapshotId: duplicate.id, unchanged: true }
+        : input.responseBody;
+      if (session.is_replacement) {
+        if (!candidate.rows[0].archived_at) return null;
+        await client.query(
+          `UPDATE repositories SET archived_at = now(), updated_at = now()
+           WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND archived_at IS NULL`,
+          [input.workspaceId, input.projectId, current.rows[0].id]
+        );
+        await client.query(
+          `UPDATE repositories SET archived_at = NULL, updated_at = now()
+           WHERE workspace_id = $1 AND project_id = $2 AND id = $3 AND archived_at IS NOT NULL`,
+          [input.workspaceId, input.projectId, input.repositoryId]
+        );
+        await this.insertAudit(client, {
+          workspaceId: input.workspaceId,
+          actorId: input.actorId,
+          action: "repository.switched",
+          resourceType: "repository",
+          resourceId: input.repositoryId,
+          metadata: {
+            oldRepositoryId: current.rows[0].id,
+            newRepositoryId: input.repositoryId,
+            projectId: input.projectId
+          }
+        });
+      } else if (candidate.rows[0].id !== current.rows[0].id || candidate.rows[0].archived_at) {
+        return null;
+      }
+
+      const report = await client.query(
+        `UPDATE import_reports
+         SET status = $3, finished_at = now(), collected_file_count = $4,
+             collected_text_bytes = $5, ignored = $6::jsonb, snapshot_id = $7, failure_code = $8
+         WHERE workspace_id = $1 AND id = $2 AND upload_session_id = $9 AND status = 'running'
+           AND project_id = $10 AND repository_id = $11 AND actor_id = $12`,
+        [input.workspaceId, input.reportId, input.report.status, input.report.collectedFileCount,
+          input.report.collectedTextBytes, JSON.stringify(input.report.ignored), effectiveSnapshotId,
+          input.report.failureCode, input.sessionId, input.projectId, input.repositoryId, input.actorId]
+      );
+      if (report.rowCount !== 1) throw new Error("Upload session import report completion failed");
+
+      if (duplicate) {
+        await client.query(
+          `DELETE FROM source_snapshots
+           WHERE workspace_id = $1 AND repository_id = $2 AND id = $3
+             AND pending_upload_session_id = $4`,
+          [input.workspaceId, input.repositoryId, input.snapshotId, input.sessionId]
+        );
+      } else {
+        await client.query(
+          `UPDATE source_snapshots SET pending_upload_session_id = NULL
+           WHERE workspace_id = $1 AND repository_id = $2 AND id = $3
+             AND pending_upload_session_id = $4`,
+          [input.workspaceId, input.repositoryId, input.snapshotId, input.sessionId]
+        );
+      }
+      await this.insertAudit(client, {
+        workspaceId: input.workspaceId, actorId: input.actorId,
+        action: "repository.sync_succeeded", resourceType: "repository", resourceId: input.repositoryId,
+        metadata: {
+          commitSha: snapshot.rows[0].commit_sha,
+          unchanged: Boolean(duplicate) || snapshot.rows[0].pending_upload_session_id === null
+        }
+      });
+
+      const { rows } = await client.query<UploadSessionRow>(
+        `UPDATE upload_sessions
+         SET status = 'committed', manifest_digest = $3, snapshot_id = $4, commit_response = $5::jsonb,
+             committed_at = now(), updated_at = now()
+         WHERE workspace_id = $1 AND id = $2 AND status IN ('open', 'committing')
+         RETURNING id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement, expected_current_repository_id, expected_latest_snapshot_id, status,
+                   entry_count, manifest_digest, snapshot_id, commit_response, expires_at, committed_at,
+                   cancelled_at, created_at, updated_at`,
+        [input.workspaceId, input.sessionId, input.manifestDigest, effectiveSnapshotId,
+          JSON.stringify(responseBody)]
+      );
+      if (!rows[0]) {
+        const completed = await client.query<UploadSessionRow>(
+          `SELECT id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement, expected_current_repository_id, expected_latest_snapshot_id, status,
+                  entry_count, manifest_digest, snapshot_id, commit_response, expires_at, committed_at, cancelled_at,
+                  created_at, updated_at
+           FROM upload_sessions WHERE workspace_id = $1 AND id = $2`,
+          [input.workspaceId, input.sessionId]
+        );
+        return completed.rows[0] ? uploadSessionRecord(completed.rows[0]) : null;
+      }
+      return uploadSessionRecord(rows[0]);
+    });
+  }
+
+  async cancelUploadSession(input: CancelUploadSessionInput) {
+    return this.transaction(async (client) => {
+      const selected = await client.query<UploadSessionRow>(
+        `SELECT id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement,
+                expected_current_repository_id, expected_latest_snapshot_id, status, entry_count, manifest_digest, snapshot_id,
+                commit_response, expires_at, committed_at, cancelled_at, created_at, updated_at
+         FROM upload_sessions
+         WHERE workspace_id = $1 AND id = $2 AND project_id = $3 AND actor_id = $4
+         FOR UPDATE`,
+        [input.workspaceId, input.sessionId, input.projectId, input.actorId]
+      );
+      const session = selected.rows[0];
+      if (!session || session.status === "committed") return session ? {
+        session: uploadSessionRecord(session), storagePaths: []
+      } : null;
+      if (!await this.lockUploadAuthorization(client, {
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        actorId: input.actorId,
+        sessionVersion: input.sessionVersion,
+        administratorRequired: session.is_replacement
+      })) return null;
+      const snapshots = await client.query<{ storage_path: string }>(
+        `SELECT storage_path FROM source_snapshots
+         WHERE workspace_id = $1 AND pending_upload_session_id = $2 FOR UPDATE`,
+        [input.workspaceId, input.sessionId]
+      );
+      await client.query(
+        `UPDATE import_reports SET status = 'cancelled', finished_at = now(), failure_code = 'UPLOAD_CANCELLED'
+         WHERE workspace_id = $1 AND upload_session_id = $2 AND status = 'running'`,
+        [input.workspaceId, input.sessionId]
+      );
+      await client.query(
+        "DELETE FROM source_snapshots WHERE workspace_id = $1 AND pending_upload_session_id = $2",
+        [input.workspaceId, input.sessionId]
+      );
+      await client.query(
+        `UPDATE upload_sessions
+         SET status = 'cancelled', cancelled_at = now(), updated_at = now()
+         WHERE workspace_id = $1 AND id = $2 AND status IN ('open', 'committing')`,
+        [input.workspaceId, input.sessionId]
+      );
+      const { rows } = await client.query<UploadSessionRow>(
+        `SELECT id, workspace_id, project_id, repository_id, actor_id, session_version, is_replacement, expected_current_repository_id, expected_latest_snapshot_id, status,
+                entry_count, manifest_digest, snapshot_id, commit_response, expires_at, committed_at, cancelled_at,
+                created_at, updated_at
+         FROM upload_sessions WHERE workspace_id = $1 AND id = $2`,
+        [input.workspaceId, input.sessionId]
+      );
+      return rows[0] ? {
+        session: uploadSessionRecord(rows[0]),
+        storagePaths: snapshots.rows.map((row) => row.storage_path)
+      } : null;
+    });
+  }
+
+  async uploadSnapshotExists(workspaceId: string, snapshotId: string, sessionId: string): Promise<boolean> {
+    const { rows } = await this.pool.query<{ exists: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM source_snapshots WHERE workspace_id = $1 AND id = $2
+           AND (pending_upload_session_id IS NULL OR pending_upload_session_id = $3)
+           AND pending_import_report_id IS NULL
+       ) AS exists`,
+      [workspaceId, snapshotId, sessionId]
+    );
+    return rows[0]?.exists ?? false;
+  }
+
+  async listExpiredUploadSessions(now: Date) {
+    const { rows } = await this.pool.query<{ id: string; workspace_id: string }>(
+      `SELECT id, workspace_id FROM upload_sessions
+       WHERE status IN ('open', 'committing', 'committed', 'cancelled') AND expires_at <= $1
+       ORDER BY expires_at, id`,
+      [now]
+    );
+    return rows.map((row) => ({ id: row.id, workspaceId: row.workspace_id }));
+  }
+
+  async deleteExpiredUploadSession(
+    workspaceId: string,
+    sessionId: string,
+    now: Date
+  ): Promise<string[] | null> {
+    return this.transaction(async (client) => {
+      const session = await client.query<{ repository_id: string }>(
+        `SELECT repository_id FROM upload_sessions
+         WHERE workspace_id = $1 AND id = $2 AND status IN ('open', 'committing', 'committed', 'cancelled')
+           AND expires_at <= $3 FOR UPDATE`,
+        [workspaceId, sessionId, now]
+      );
+      if (!session.rows[0]) return null;
+      const snapshots = await client.query<{ storage_path: string }>(
+        `SELECT storage_path FROM source_snapshots
+         WHERE workspace_id = $1 AND pending_upload_session_id = $2`,
+        [workspaceId, sessionId]
+      );
+      await client.query(
+        `UPDATE import_reports SET status = 'failed', finished_at = $3,
+             failure_code = 'UPLOAD_SESSION_EXPIRED'
+         WHERE workspace_id = $1 AND upload_session_id = $2 AND status = 'running'`,
+        [workspaceId, sessionId, now]
+      );
+      await client.query(
+        "UPDATE import_reports SET upload_session_id = NULL WHERE workspace_id = $1 AND upload_session_id = $2",
+        [workspaceId, sessionId]
+      );
+      await client.query("DELETE FROM upload_sessions WHERE workspace_id = $1 AND id = $2", [workspaceId, sessionId]);
+      await client.query(
+        `DELETE FROM repositories r
+         WHERE r.workspace_id = $1 AND r.id = $2 AND r.archived_at IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM source_snapshots s WHERE s.repository_id = r.id)
+           AND NOT EXISTS (SELECT 1 FROM releases release WHERE release.repository_id = r.id)
+           AND NOT EXISTS (
+             SELECT 1 FROM upload_sessions other
+             WHERE other.repository_id = r.id AND other.status IN ('open', 'committing')
+           )`,
+        [workspaceId, session.rows[0].repository_id]
+      );
+      return snapshots.rows.map((row) => row.storage_path);
+    });
+  }
+
+  async findUploadIdempotencyKey(
+    workspaceId: string,
+    actorId: string,
+    idempotencyKey: string,
+    now: Date
+  ): Promise<UploadIdempotencyRecord | null> {
+    return this.transaction(async (client) => {
+      await client.query(
+        `DELETE FROM upload_idempotency_keys
+         WHERE workspace_id = $1 AND actor_id = $2 AND idempotency_key = $3 AND expires_at <= $4`,
+        [workspaceId, actorId, idempotencyKey, now]
+      );
+      const { rows } = await client.query<UploadIdempotencyRow>(
+        `SELECT workspace_id, actor_id, idempotency_key, operation, request_digest, session_id,
+                response_status, response_body, created_at, expires_at
+         FROM upload_idempotency_keys
+         WHERE workspace_id = $1 AND actor_id = $2 AND idempotency_key = $3 AND expires_at > $4`,
+        [workspaceId, actorId, idempotencyKey, now]
+      );
+      return rows[0] ? uploadIdempotencyRecord(rows[0]) : null;
+    });
+  }
+
+  async saveUploadIdempotencyKey(
+    input: Omit<UploadIdempotencyRecord, "createdAt">
+  ): Promise<UploadIdempotencyRecord> {
+    return this.transaction(async (client) => {
+      await client.query(
+        `INSERT INTO upload_idempotency_keys (
+           workspace_id, actor_id, idempotency_key, operation, request_digest, session_id,
+           response_status, response_body, expires_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
+         ON CONFLICT (workspace_id, actor_id, idempotency_key) DO NOTHING`,
+        [input.workspaceId, input.actorId, input.idempotencyKey, input.operation,
+          input.requestDigest, input.sessionId, input.responseStatus,
+          JSON.stringify(input.responseBody), input.expiresAt]
+      );
+      const { rows } = await client.query<UploadIdempotencyRow>(
+        `SELECT workspace_id, actor_id, idempotency_key, operation, request_digest, session_id,
+                response_status, response_body, created_at, expires_at
+         FROM upload_idempotency_keys
+         WHERE workspace_id = $1 AND actor_id = $2 AND idempotency_key = $3`,
+        [input.workspaceId, input.actorId, input.idempotencyKey]
+      );
+      if (!rows[0]) throw new Error("Upload idempotency result was not persisted");
+      return uploadIdempotencyRecord(rows[0]);
+    });
+  }
+
+  async deleteExpiredUploadIdempotencyKeys(now: Date): Promise<number> {
+    const result = await this.pool.query("DELETE FROM upload_idempotency_keys WHERE expires_at <= $1", [now]);
+    return result.rowCount ?? 0;
   }
 
   async createMcpToken(
@@ -3047,6 +4634,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
 
   async switchRepositoryWithAudit(
     workspaceId: string,
+    projectId: string,
     input: RepositoryConnectionInput,
     actorId: string
   ): Promise<RepositoryRecord | null> {
@@ -3059,14 +4647,14 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
                   WHERE c.workspace_id = r.workspace_id AND c.repository_id = r.id
                 ) AS has_credential
          FROM repositories r
-         WHERE r.workspace_id = $1 AND r.archived_at IS NULL
+         WHERE r.workspace_id = $1 AND r.project_id = $2 AND r.archived_at IS NULL
          FOR UPDATE`,
-        [workspaceId]
+        [workspaceId, projectId]
       );
       const currentRow = selected.rows[0];
       if (!currentRow) return null;
       const current = repositoryRecord(currentRow);
-      const replacement = await this.insertRepository(client, workspaceId, input, new Date());
+      const replacement = await this.insertRepository(client, workspaceId, input, new Date(), projectId);
       if (!replacement) return null;
       await client.query(
         `UPDATE repositories SET archived_at = now(), updated_at = now()
@@ -3092,21 +4680,44 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
 
   async prepareUploadReplacementWithAudit(
     workspaceId: string,
+    projectId: string,
     name: string,
     actorId: string
   ): Promise<RepositoryRecord | null> {
     return this.transaction(async (client) => {
       const current = await client.query<{ id: string }>(
         `SELECT id FROM repositories
-         WHERE workspace_id = $1 AND archived_at IS NULL FOR UPDATE`,
-        [workspaceId]
+         WHERE workspace_id = $1 AND project_id = $2 AND archived_at IS NULL FOR UPDATE`,
+        [workspaceId, projectId]
       );
       if (!current.rows[0]) return null;
+      const reusable = await client.query<RepositoryRow>(
+        `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
+                r.default_branch, r.archived_at, false AS has_credential
+         FROM repositories r
+         WHERE r.workspace_id = $1 AND r.project_id = $2 AND r.kind = 'upload'
+           AND r.archived_at IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM releases release WHERE release.repository_id = r.id)
+           AND NOT EXISTS (SELECT 1 FROM build_jobs build WHERE build.repository_id = r.id)
+           AND (
+             EXISTS (SELECT 1 FROM upload_sessions session WHERE session.repository_id = r.id
+               AND session.actor_id = $3 AND session.status IN ('open', 'committing'))
+             OR (
+               NOT EXISTS (SELECT 1 FROM upload_sessions session WHERE session.repository_id = r.id
+                 AND session.status IN ('open', 'committing'))
+               AND NOT EXISTS (SELECT 1 FROM source_snapshots snapshot WHERE snapshot.repository_id = r.id)
+             )
+           )
+         ORDER BY r.archived_at DESC, r.id DESC LIMIT 1 FOR UPDATE`,
+        [workspaceId, projectId, actorId]
+      );
+      if (reusable.rows[0]) return repositoryRecord(reusable.rows[0]);
       const candidate = await this.insertRepository(
         client,
         workspaceId,
         { kind: "upload", name },
-        new Date()
+        new Date(),
+        projectId
       );
       if (!candidate) return null;
       await this.insertAudit(client, {
@@ -3123,6 +4734,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
 
   async activateUploadReplacementWithAudit(
     workspaceId: string,
+    projectId: string,
     repositoryId: string,
     actorId: string
   ): Promise<RepositoryRecord | null> {
@@ -3131,16 +4743,16 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
                 r.default_branch, r.archived_at, false AS has_credential
          FROM repositories r
-         WHERE r.workspace_id = $1 AND r.archived_at IS NULL FOR UPDATE`,
-        [workspaceId]
+         WHERE r.workspace_id = $1 AND r.project_id = $2 AND r.archived_at IS NULL FOR UPDATE`,
+        [workspaceId, projectId]
       );
       const candidate = await client.query<RepositoryRow>(
         `SELECT r.id, r.workspace_id, r.project_id, r.kind, r.name, r.local_path, r.clone_url,
                 r.default_branch, r.archived_at, false AS has_credential
          FROM repositories r
-         WHERE r.workspace_id = $1 AND r.id = $2 AND r.kind = 'upload'
+         WHERE r.workspace_id = $1 AND r.project_id = $2 AND r.id = $3 AND r.kind = 'upload'
            AND r.archived_at IS NOT NULL FOR UPDATE`,
-        [workspaceId, repositoryId]
+        [workspaceId, projectId, repositoryId]
       );
       if (!current.rows[0] || !candidate.rows[0]) return null;
       await client.query(
@@ -3170,35 +4782,99 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   }
 
   async discardPendingUploadReplacement(workspaceId: string, repositoryId: string): Promise<void> {
-    await this.pool.query(
-      `DELETE FROM repositories r
-       WHERE r.workspace_id = $1 AND r.id = $2 AND r.kind = 'upload'
-         AND r.archived_at IS NOT NULL
-         AND NOT EXISTS (SELECT 1 FROM source_snapshots s WHERE s.repository_id = r.id)`,
-      [workspaceId, repositoryId]
-    );
+    await this.transaction(async (client) => {
+      const candidate = await client.query<{ id: string }>(
+        `SELECT id FROM repositories
+         WHERE workspace_id = $1 AND id = $2 AND kind = 'upload' AND archived_at IS NOT NULL
+         FOR UPDATE`,
+        [workspaceId, repositoryId]
+      );
+      if (!candidate.rows[0]) return;
+      await client.query(
+        `DELETE FROM repositories r
+         WHERE r.workspace_id = $1 AND r.id = $2
+           AND NOT EXISTS (SELECT 1 FROM source_snapshots s WHERE s.repository_id = r.id)
+           AND NOT EXISTS (
+             SELECT 1 FROM upload_sessions session WHERE session.repository_id = r.id
+               AND session.status IN ('open', 'committing')
+           )`,
+        [workspaceId, repositoryId]
+      );
+    });
   }
 
   async findSnapshotByCommit(
     workspaceId: string,
     repositoryId: string,
-    commitSha: string
+    commitSha: string,
+    pendingUploadSessionId?: string,
+    pendingImportReportId?: string
   ): Promise<SourceSnapshotRecord | null> {
     const { rows } = await this.pool.query<SnapshotRow>(
       `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
               commit_timestamp, storage_path
        FROM source_snapshots
-       WHERE workspace_id = $1 AND repository_id = $2 AND commit_sha = $3`,
-      [workspaceId, repositoryId, commitSha]
+       WHERE workspace_id = $1 AND repository_id = $2 AND commit_sha = $3
+         AND (pending_upload_session_id IS NULL OR pending_upload_session_id = $4)
+         AND (pending_import_report_id IS NULL OR pending_import_report_id = $5)`,
+      [workspaceId, repositoryId, commitSha, pendingUploadSessionId ?? null, pendingImportReportId ?? null]
     );
     return rows[0] ? snapshotRecord(rows[0]) : null;
+  }
+
+  async discardPendingFolderImport(
+    workspaceId: string,
+    reportId: string,
+    snapshotId: string
+  ): Promise<string | null> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<{ storage_path: string }>(
+        `DELETE FROM source_snapshots
+         WHERE workspace_id = $1 AND id = $2 AND pending_import_report_id = $3
+         RETURNING storage_path`,
+        [workspaceId, snapshotId, reportId]
+      );
+      return rows[0]?.storage_path ?? null;
+    });
+  }
+
+  async discardStalePendingFolderImport(
+    workspaceId: string,
+    reportId: string,
+    snapshotId: string,
+    cutoff: Date
+  ): Promise<boolean> {
+    return this.transaction(async (client) => {
+      const report = await client.query<{ id: string }>(
+        `SELECT id FROM import_reports
+         WHERE workspace_id = $1 AND id = $2
+           AND (status IN ('failed', 'cancelled') OR (status = 'running' AND started_at <= $3))
+         FOR UPDATE`,
+        [workspaceId, reportId, cutoff]
+      );
+      if (!report.rows[0]) return false;
+      await client.query(
+        `DELETE FROM source_snapshots
+         WHERE workspace_id = $1 AND id = $2 AND pending_import_report_id = $3
+        `,
+        [workspaceId, snapshotId, reportId]
+      );
+      await client.query(
+        `UPDATE import_reports SET status = 'failed', finished_at = now(), snapshot_id = NULL,
+           failure_code = 'UPLOAD_INTERRUPTED'
+         WHERE workspace_id = $1 AND id = $2 AND status = 'running'`,
+        [workspaceId, reportId]
+      );
+      return true;
+    });
   }
 
   async findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null> {
     const { rows } = await this.pool.query<SnapshotRow>(
       `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
               commit_timestamp, storage_path
-       FROM source_snapshots WHERE workspace_id = $1 AND id = $2`,
+       FROM source_snapshots WHERE workspace_id = $1 AND id = $2
+         AND pending_upload_session_id IS NULL AND pending_import_report_id IS NULL`,
       [workspaceId, snapshotId]
     );
     return rows[0] ? snapshotRecord(rows[0]) : null;
@@ -3207,16 +4883,17 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   async listSnapshotFiles(workspaceId: string, snapshotId: string): Promise<SourceFileRecord[]> {
     const { rows } = await this.pool.query<{
       id: string; workspace_id: string; snapshot_id: string; path: string;
-      byte_size: number; content_hash: string; language: string | null;
+      byte_size: number; content_hash: string; language: string | null; source_blob_id: string | null;
     }>(
-      `SELECT id, workspace_id, snapshot_id, path, byte_size, content_hash, language
+      `SELECT id, workspace_id, snapshot_id, path, byte_size, content_hash, language, source_blob_id
        FROM source_files WHERE workspace_id = $1 AND snapshot_id = $2
        ORDER BY path, id`,
       [workspaceId, snapshotId]
     );
     return rows.map((row) => ({
       id: row.id, workspaceId: row.workspace_id, snapshotId: row.snapshot_id,
-      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language
+      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language,
+      sourceBlobId: row.source_blob_id
     }));
   }
 
@@ -3225,6 +4902,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
               commit_timestamp, storage_path
        FROM source_snapshots WHERE workspace_id = $1 AND repository_id = $2
+         AND pending_upload_session_id IS NULL AND pending_import_report_id IS NULL
        ORDER BY commit_timestamp DESC, created_at DESC, id DESC LIMIT 1`,
       [workspaceId, repositoryId]
     );
@@ -3236,9 +4914,12 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       `WITH current_snapshot AS (
          SELECT id, repository_id, commit_timestamp, created_at FROM source_snapshots
          WHERE workspace_id = $1 AND repository_id = $2 AND id = $3
+           AND pending_upload_session_id IS NULL AND pending_import_report_id IS NULL
        ), previous_snapshot AS (
          SELECT s.id FROM source_snapshots s JOIN current_snapshot c ON c.repository_id = s.repository_id
-         WHERE s.workspace_id = $1 AND (s.commit_timestamp, s.created_at, s.id) < (c.commit_timestamp, c.created_at, c.id)
+         WHERE s.workspace_id = $1 AND s.pending_upload_session_id IS NULL
+           AND s.pending_import_report_id IS NULL
+           AND (s.commit_timestamp, s.created_at, s.id) < (c.commit_timestamp, c.created_at, c.id)
          ORDER BY s.commit_timestamp DESC, s.created_at DESC, s.id DESC LIMIT 1
        ), current_files AS (
          SELECT path, content_hash FROM source_files
@@ -3272,23 +4953,53 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   async findSourceFile(workspaceId: string, snapshotId: string, filePath: string) {
     const { rows } = await this.pool.query<{
       id: string; workspace_id: string; snapshot_id: string; path: string;
-      byte_size: number; content_hash: string; language: string | null;
+      byte_size: number; content_hash: string; language: string | null; source_blob_id: string | null;
     }>(
-      `SELECT id, workspace_id, snapshot_id, path, byte_size, content_hash, language
+      `SELECT id, workspace_id, snapshot_id, path, byte_size, content_hash, language, source_blob_id
        FROM source_files WHERE workspace_id = $1 AND snapshot_id = $2 AND path = $3`,
       [workspaceId, snapshotId, filePath]
     );
     const row = rows[0];
     return row ? {
       id: row.id, workspaceId: row.workspace_id, snapshotId: row.snapshot_id,
-      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language
+      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language,
+      sourceBlobId: row.source_blob_id
+    } : null;
+  }
+
+  async findProjectSourceFile(
+    workspaceId: string,
+    projectId: string,
+    snapshotId: string,
+    filePath: string
+  ) {
+    const { rows } = await this.pool.query<{
+      id: string; workspace_id: string; snapshot_id: string; path: string;
+      byte_size: number; content_hash: string; language: string | null; source_blob_id: string | null;
+    }>(`
+      SELECT sf.id, sf.workspace_id, sf.snapshot_id, sf.path, sf.byte_size,
+             sf.content_hash, sf.language, sf.source_blob_id
+      FROM source_files sf
+      JOIN source_snapshots ss
+        ON ss.id = sf.snapshot_id AND ss.workspace_id = sf.workspace_id
+      JOIN repositories r
+        ON r.id = ss.repository_id AND r.workspace_id = ss.workspace_id
+      WHERE sf.workspace_id = $1 AND r.project_id = $2 AND sf.snapshot_id = $3 AND sf.path = $4
+    `, [workspaceId, projectId, snapshotId, filePath]);
+    const row = rows[0];
+    return row ? {
+      id: row.id, workspaceId: row.workspace_id, snapshotId: row.snapshot_id,
+      path: row.path, byteSize: row.byte_size, contentHash: row.content_hash, language: row.language,
+      sourceBlobId: row.source_blob_id
     } : null;
   }
 
   private async insertSnapshot(
     client: Queryable,
     { snapshot, files }: CreateSnapshotInput,
-    lease?: GitSynchronizationLease
+    lease?: GitSynchronizationLease,
+    pendingUploadSessionId?: string,
+    pendingImportReportId?: string
   ): Promise<{ snapshot: SourceSnapshotRecord; inserted: boolean } | null> {
       const inserted = await client.query<SnapshotRow>(
         lease
@@ -3300,16 +5011,22 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
                FOR UPDATE
              )
              INSERT INTO source_snapshots
-             (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path)
-             SELECT $3, $4, $1, $5, $6, $7, $8, $9
+             (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path,
+              pending_upload_session_id, pending_import_report_id)
+             SELECT $3, $4, $1, $5, $6, $7, $8, $9, NULL, NULL
              FROM held_lease
-             ON CONFLICT (repository_id, commit_sha) DO NOTHING
+             ON CONFLICT (repository_id, commit_sha)
+               WHERE pending_upload_session_id IS NULL AND pending_import_report_id IS NULL
+             DO NOTHING
              RETURNING id, workspace_id, repository_id, commit_sha, ref, remote_url,
                        commit_timestamp, storage_path`
           : `INSERT INTO source_snapshots
-         (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (repository_id, commit_sha) DO NOTHING
+         (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path,
+          pending_upload_session_id, pending_import_report_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (repository_id, commit_sha)
+           WHERE pending_upload_session_id IS NULL AND pending_import_report_id IS NULL
+         DO NOTHING
          RETURNING id, workspace_id, repository_id, commit_sha, ref, remote_url,
                    commit_timestamp, storage_path`,
         lease
@@ -3332,7 +5049,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
               snapshot.ref,
               snapshot.remoteUrl,
               snapshot.commitTimestamp,
-              snapshot.storagePath
+              snapshot.storagePath,
+              pendingUploadSessionId ?? null,
+              pendingImportReportId ?? null
             ]
       );
       const insertedSnapshot = inserted.rows[0];
@@ -3341,8 +5060,11 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
           `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
                   commit_timestamp, storage_path
            FROM source_snapshots
-           WHERE workspace_id = $1 AND repository_id = $2 AND commit_sha = $3`,
-          [snapshot.workspaceId, snapshot.repositoryId, snapshot.commitSha]
+           WHERE workspace_id = $1 AND repository_id = $2 AND commit_sha = $3
+             AND (pending_upload_session_id IS NULL OR pending_upload_session_id = $4)
+             AND (pending_import_report_id IS NULL OR pending_import_report_id = $5)`,
+          [snapshot.workspaceId, snapshot.repositoryId, snapshot.commitSha,
+            pendingUploadSessionId ?? null, pendingImportReportId ?? null]
         );
         if (!existing.rows[0]) {
           if (lease) return null;
@@ -3351,10 +5073,20 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         return { snapshot: snapshotRecord(existing.rows[0]), inserted: false };
       }
       for (const file of files) {
+        if (file.sourceBlobId) {
+          const activeBlob = await client.query<{ id: string }>(`
+            SELECT id
+            FROM source_blobs
+            WHERE workspace_id = $1 AND id = $2 AND content_hash = $3 AND byte_size = $4
+              AND status = 'active'
+            FOR SHARE
+          `, [file.workspaceId, file.sourceBlobId, file.contentHash, file.byteSize]);
+          if (!activeBlob.rows[0]) throw new Error("SOURCE_BLOB_NOT_ACTIVE");
+        }
         await client.query(
           `INSERT INTO source_files
-           (id, workspace_id, snapshot_id, path, language, content_hash, byte_size)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+           (id, workspace_id, snapshot_id, path, language, content_hash, byte_size, source_blob_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
           [
             file.id,
             file.workspaceId,
@@ -3362,7 +5094,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
             file.path,
             file.language,
             file.contentHash,
-            file.byteSize
+            file.byteSize,
+            file.sourceBlobId ?? null
           ]
         );
       }
@@ -3399,22 +5132,28 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
 
   async createSnapshotWithAudit(
     input: CreateSnapshotInput,
-    actorId: string
+    actorId: string,
+    pendingUploadSessionId?: string,
+    pendingImportReportId?: string
   ): Promise<SourceSnapshotRecord> {
     return this.transaction(async (client) => {
-      const persisted = await this.insertSnapshot(client, input);
+      const persisted = await this.insertSnapshot(
+        client, input, undefined, pendingUploadSessionId, pendingImportReportId
+      );
       if (!persisted) throw new Error("Snapshot was not persisted");
-      await this.insertAudit(client, {
-        workspaceId: input.snapshot.workspaceId,
-        actorId,
-        action: "repository.sync_succeeded",
-        resourceType: "repository",
-        resourceId: input.snapshot.repositoryId,
-        metadata: {
-          commitSha: persisted.snapshot.commitSha,
-          unchanged: !persisted.inserted
-        }
-      });
+      if (!pendingUploadSessionId && !pendingImportReportId) {
+        await this.insertAudit(client, {
+          workspaceId: input.snapshot.workspaceId,
+          actorId,
+          action: "repository.sync_succeeded",
+          resourceType: "repository",
+          resourceId: input.snapshot.repositoryId,
+          metadata: {
+            commitSha: persisted.snapshot.commitSha,
+            unchanged: !persisted.inserted
+          }
+        });
+      }
       return persisted.snapshot;
     });
   }
@@ -3931,19 +5670,65 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     workspaceId: string,
     repositoryId: string,
     buildId: string,
-    version: string
+    version: string,
+    provenance?: FrontendReleaseDraftProvenance
   ): Promise<ReleaseRecord> {
-    const { rows } = await this.pool.query<ReleaseRow>(
-      `INSERT INTO releases (workspace_id, repository_id, build_job_id, snapshot_id, version)
-       SELECT $1, $2, b.id, b.snapshot_id, $4
-       FROM build_jobs b
-       WHERE b.id = $3 AND b.workspace_id = $1 AND b.repository_id = $2 AND b.status = 'ready'
-       RETURNING id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-                 kernel_mode, package_artifact_id, created_at, published_at`,
-      [workspaceId, repositoryId, buildId, version]
-    );
-    if (!rows[0]) throw new Error("Only a ready build can create a release draft");
-    return releaseRecord(rows[0]);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const { rows } = await client.query<ReleaseRow>(
+        `INSERT INTO releases (
+           workspace_id, repository_id, build_job_id, snapshot_id, version, kernel_mode,
+           package_artifact_id, release_artifact_family, package_stage_run_id,
+           frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest
+         )
+         SELECT $1, $2, b.id, b.snapshot_id, $4, $5, $6, $7, $8, $9, $10, $11
+         FROM build_jobs b
+         WHERE b.id = $3 AND b.workspace_id = $1 AND b.repository_id = $2 AND b.status = 'ready'
+         RETURNING id, workspace_id, repository_id, build_job_id, snapshot_id, version,
+                   kernel_mode, package_artifact_id, release_artifact_family, package_stage_run_id,
+                   frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest,
+                   created_at, published_at`,
+        [
+          workspaceId, repositoryId, buildId, version,
+          provenance ? "pipeline" : "legacy",
+          provenance?.packageArtifactId ?? null,
+          provenance?.releaseArtifactFamily ?? "knowledge-v1",
+          provenance?.packageStageRunId ?? null,
+          provenance?.frontendIrSchemaVersion ?? null,
+          provenance?.frontendGraphSchemaVersion ?? null,
+          provenance?.analyzerManifestDigest ?? null
+        ]
+      );
+      const row = rows[0];
+      if (!row) throw new Error("Only a ready build can create a release draft");
+      if (provenance) {
+        const retained = await client.query<{ artifact_id: string }>(
+          `INSERT INTO release_artifacts (release_id, artifact_id)
+           SELECT $1, artifact.id
+           FROM unnest($2::uuid[]) AS requested(artifact_id)
+           JOIN knowledge_artifacts artifact ON artifact.id = requested.artifact_id
+           JOIN repositories repository
+             ON repository.id = $3
+             AND repository.workspace_id = $4
+             AND repository.project_id = artifact.project_id
+           WHERE artifact.workspace_id = $4
+             AND artifact.snapshot_id = $5
+           RETURNING artifact_id`,
+          [row.id, provenance.artifactIds, repositoryId, workspaceId, row.snapshot_id]
+        );
+        if (retained.rows.length !== provenance.artifactIds.length) {
+          throw new Error("Frontend v2 release artifacts must share the same release scope");
+        }
+      }
+      await client.query("COMMIT");
+      return releaseRecord(row);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async publishRelease(
@@ -3956,7 +5741,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       await client.query("BEGIN");
       const selected = await client.query<ReleaseRow>(
         `SELECT r.id, r.workspace_id, r.repository_id, r.build_job_id, r.snapshot_id,
-                r.version, r.kernel_mode, r.package_artifact_id, r.created_at, r.published_at, b.status
+                r.version, r.kernel_mode, r.package_artifact_id, r.release_artifact_family,
+                r.package_stage_run_id, r.frontend_ir_schema_version, r.frontend_graph_schema_version,
+                r.analyzer_manifest_digest, r.created_at, r.published_at, b.status
          FROM releases r JOIN build_jobs b ON b.id = r.build_job_id
          WHERE r.workspace_id = $1 AND r.id = $2 FOR UPDATE`,
         [workspaceId, releaseId]
@@ -3975,7 +5762,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         `UPDATE releases SET published_at = COALESCE(published_at, now()), updated_at = now()
          WHERE id = $1
          RETURNING id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-                   kernel_mode, package_artifact_id, created_at, published_at`,
+                   kernel_mode, package_artifact_id, release_artifact_family, package_stage_run_id,
+                   frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest,
+                   created_at, published_at`,
         [release.id]
       );
       const publishedBuild = await client.query<{ id: string; workspace_id: string; status: BuildStatus }>(
@@ -4004,7 +5793,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     return this.transaction(async (client) => {
       const selected = await client.query<ReleaseRow & { project_id: string }>(
         `SELECT r.id, r.workspace_id, r.repository_id, r.build_job_id, r.snapshot_id,
-                r.version, r.kernel_mode, r.package_artifact_id, r.created_at, r.published_at,
+                r.version, r.kernel_mode, r.package_artifact_id, r.release_artifact_family,
+                r.package_stage_run_id, r.frontend_ir_schema_version, r.frontend_graph_schema_version,
+                r.analyzer_manifest_digest, r.created_at, r.published_at,
                 repository.project_id
          FROM releases r
          JOIN repositories repository ON repository.id = r.repository_id
@@ -4052,7 +5843,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   ): Promise<ReleaseRecord | null> {
     const { rows } = await this.pool.query<ReleaseRow>(
       `SELECT r.id, r.workspace_id, r.repository_id, r.build_job_id, r.snapshot_id,
-              r.version, r.kernel_mode, r.package_artifact_id, r.created_at, r.published_at
+              r.version, r.kernel_mode, r.package_artifact_id, r.release_artifact_family,
+              r.package_stage_run_id, r.frontend_ir_schema_version, r.frontend_graph_schema_version,
+              r.analyzer_manifest_digest, r.created_at, r.published_at
        FROM release_channels c JOIN releases r ON r.id = c.release_id
        WHERE c.workspace_id = $1 AND c.repository_id = $2 AND c.name = $3`,
       [workspaceId, repositoryId, channel]
@@ -4063,7 +5856,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   async getRelease(workspaceId: string, releaseId: string): Promise<ReleaseRecord | null> {
     const { rows } = await this.pool.query<ReleaseRow>(
       `SELECT id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-              kernel_mode, package_artifact_id, created_at, published_at
+              kernel_mode, package_artifact_id, release_artifact_family, package_stage_run_id,
+              frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest,
+              created_at, published_at
        FROM releases WHERE workspace_id = $1 AND id = $2 LIMIT 1`,
       [workspaceId, releaseId]
     );
@@ -4078,7 +5873,9 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     const { limit, offset } = normalizePagination(pagination);
     const { rows } = await this.pool.query<ReleaseRow>(
       `SELECT id, workspace_id, repository_id, build_job_id, snapshot_id, version,
-              kernel_mode, package_artifact_id, created_at, published_at
+              kernel_mode, package_artifact_id, release_artifact_family, package_stage_run_id,
+              frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest,
+              created_at, published_at
        FROM releases WHERE workspace_id = $1 AND repository_id = $2
        ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`,
       [workspaceId, repositoryId, limit, offset]

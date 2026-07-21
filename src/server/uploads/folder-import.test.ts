@@ -5,7 +5,8 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { MemoryAppStore } from "../persistence/memory-store.js";
-import { FolderUploadError, importFolderFiles, type FolderUploadFile } from "./folder-import.js";
+import { FolderUploadError, importFolderFiles, removeReadOnlyTree, type FolderUploadFile } from "./folder-import.js";
+import { SourceBlobStore } from "./source-blob-store.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -34,6 +35,35 @@ afterEach(async () => {
 });
 
 describe("folder snapshot import", () => {
+  test("shadow mode stores workspace blobs and exposes the legacy snapshot path as hardlinks", async () => {
+    const context = await fixture();
+    const setup = await context.store.createInitialSetup("folder-blob@example.com", "hash");
+    const project = (await context.store.listProjects(setup!.workspace.id))[0]!;
+    const repository = await context.store.createRepository(
+      setup!.workspace.id, { kind: "upload", name: "Folder" }, project.id
+    );
+    const sourceDataDir = path.join(context.dataDir, "source-data");
+    const sourceBlobStore = new SourceBlobStore({ dataDir: sourceDataDir, catalog: context.store });
+    await sourceBlobStore.initialize();
+
+    const summary = await importFolderFiles({
+      files: files([["src/index.ts", "export const blob = true;\n"]]),
+      dataDir: context.dataDir,
+      workspaceId: setup!.workspace.id,
+      repositoryId: repository!.id,
+      actorId: setup!.admin.id,
+      store: context.store,
+      sourceStorageMode: "shadow",
+      sourceBlobStore
+    });
+
+    const sourceFile = context.store.sourceFiles[0]!;
+    const blob = context.store.sourceBlobs[0]!;
+    expect(sourceFile.sourceBlobId).toBe(blob.id);
+    expect((await stat(path.join(summary.storagePath, sourceFile.path))).ino)
+      .toBe((await stat(path.join(sourceDataDir, ...blob.storageKey.split("/")))).ino);
+  });
+
   test("uploads only accepted files, filters dependencies before snapshotting, and creates a stable content version", async () => {
     const context = await fixture();
     const summary = await importFolderFiles({
@@ -57,6 +87,52 @@ describe("folder snapshot import", () => {
     expect((await stat(path.join(summary.storagePath, "src/index.ts"))).mode & 0o222).toBe(0);
   });
 
+  test("does not count filtered dependency files toward the accepted source limit", async () => {
+    const context = await fixture();
+    async function* dependencyHeavyUpload(): AsyncGenerator<FolderUploadFile> {
+      for (let index = 0; index < 50_001; index += 1) {
+        yield { path: `node_modules/pkg-${index}/index.js`, content: Buffer.from("ignored") };
+      }
+      yield { path: "src/index.ts", content: Buffer.from("export const ready = true;\n") };
+    }
+
+    const summary = await importFolderFiles({
+      files: dependencyHeavyUpload(), dataDir: context.dataDir, workspaceId: "workspace-1",
+      repositoryId: "repository-1", actorId: "admin-1", store: context.store
+    });
+
+    expect(summary).toMatchObject({ fileCount: 1, ignored: { total: 50_001 } });
+  });
+
+  test("persists verified frontend text with stable language metadata and ignores binary assets", async () => {
+    const context = await fixture();
+    const summary = await importFolderFiles({
+      files: files([
+        ["src/App.vue", "<template><main /></template>"],
+        ["src/index.html", "<main></main>"],
+        ["src/app.css", ":root { --brand: blue; }"],
+        ["src/theme.scss", "$brand: blue;"],
+        ["src/icon.svg", "<svg viewBox=\"0 0 1 1\"></svg>"],
+        ["assets/logo.png", "not uploaded as an FK06 asset"]
+      ]),
+      dataDir: context.dataDir,
+      workspaceId: "workspace-1",
+      repositoryId: "repository-1",
+      actorId: "admin-1",
+      store: context.store
+    });
+
+    expect(summary).toMatchObject({ fileCount: 5, ignored: { total: 1, reasons: { unsupported_extension: 1 } } });
+    expect(context.store.sourceFiles.map(({ path: filePath, language }) => [filePath, language]))
+      .toEqual([
+        ["src/App.vue", "vue"],
+        ["src/app.css", "css"],
+        ["src/icon.svg", "svg"],
+        ["src/index.html", "html"],
+        ["src/theme.scss", "scss"]
+      ]);
+  });
+
   test("rejects unsafe and duplicate relative paths", async () => {
     const context = await fixture();
     const options = { dataDir: context.dataDir, workspaceId: "workspace-1", repositoryId: "repository-1", actorId: "admin-1", store: context.store };
@@ -76,5 +152,31 @@ describe("folder snapshot import", () => {
     })).rejects.toMatchObject({ code: "EMPTY_FOLDER_UPLOAD" });
     expect(new FolderUploadError("TOO_MANY_FILES", "too many")).toMatchObject({ name: "FolderUploadError", code: "TOO_MANY_FILES" });
     await expect(readdir(path.join(context.dataDir, "uploads"))).resolves.toEqual([]);
+  });
+
+  test("keeps compatibility snapshots hidden until completion and discards a failed import", async () => {
+    const context = await fixture();
+    const reportId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const summary = await importFolderFiles({
+      files: files([["src/index.ts", "export const pending = true;\n"]]),
+      dataDir: context.dataDir,
+      workspaceId: "workspace-1",
+      repositoryId: "repository-1",
+      actorId: "admin-1",
+      store: context.store,
+      pendingImportReportId: reportId
+    });
+
+    await expect(context.store.findSnapshotById("workspace-1", summary.snapshotId)).resolves.toBeNull();
+    await expect(context.store.latestSnapshot("workspace-1", "repository-1")).resolves.toBeNull();
+
+    const discardedPath = await context.store.discardPendingFolderImport(
+      "workspace-1", reportId, summary.snapshotId
+    );
+    expect(discardedPath).toBe(summary.storagePath);
+    await removeReadOnlyTree(path.dirname(discardedPath!));
+    await expect(stat(summary.storagePath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(context.store.sourceSnapshots).toEqual([]);
+    expect(context.store.sourceFiles).toEqual([]);
   });
 });

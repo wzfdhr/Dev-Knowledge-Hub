@@ -33,7 +33,6 @@ import { createKnowledgeIrStageExecutor } from "./knowledge/pipeline/extract-sta
 import { createTableSchemasStageExecutor } from "./knowledge/pipeline/tables-stage.js";
 import { createKnowledgeGraphStageExecutor } from "./knowledge/pipeline/graph-stage.js";
 import { createPipelineStageExecutor } from "./knowledge/pipeline/stage-executor.js";
-import { createB02StageInputPlanner } from "./knowledge/pipeline/stage-planner.js";
 import { createKnowledgeSynthesisStageExecutor } from "./knowledge/pipeline/synthesize-stage.js";
 import { createPipelineSearchIndexStageExecutor } from "./knowledge/pipeline/index-stage.js";
 import { createKnowledgeQualityStageExecutor } from "./knowledge/pipeline/quality-stage.js";
@@ -41,6 +40,19 @@ import { createKnowledgeVisualizationStageExecutor } from "./knowledge/pipeline/
 import { createKnowledgeValidationStageExecutor } from "./knowledge/pipeline/validate-stage.js";
 import { createKnowledgePackageStageExecutor } from "./knowledge/pipeline/package-stage.js";
 import { PgBossPipelineStageJobQueue } from "./knowledge/job-queue.js";
+import {
+  createFrontendModeStageInputPlanner,
+  createFrontendShadowStageExecutor,
+  createKnowledgeV1StoreView
+} from "./knowledge/frontend/shadow-stage.js";
+import type { FrontendParserClient } from "./knowledge/frontend/shadow-stage.js";
+import {
+  effectiveFrontendKnowledgeMode,
+  type FrontendKnowledgeMode
+} from "./knowledge/frontend/rollout-mode.js";
+import { ParserClient } from "./knowledge/frontend/runtime/parser-client.js";
+import { SourceBlobReader } from "./knowledge/pipeline/source-blob-reader.js";
+import { SourceBlobStore } from "./uploads/source-blob-store.js";
 
 const IMPORT_REPORT_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 const GIT_SYNC_CLAIM_LIMIT = 10;
@@ -78,11 +90,20 @@ export interface BootstrapDependencies {
     schedulePostBuild: (build: BuildRecord, stage?: PersistedInitialPipelineStage) => Promise<void>
   ) => BuildService;
   createArtifactStore: (directory: string, persistence: PipelineArtifactStore) => ArtifactStoreInitializer;
+  createSourceBlobStore: (directory: string, catalog: AppStore) => SourceBlobStore;
+  createParserClient: (socketPath: string) => FrontendParserClient;
   createQualityPipelineWorker: (
     connectionString: string,
     store: AppStore,
     artifactStore: ArtifactStoreInitializer,
-    enhancerForWorkspace?: (workspaceId: string) => Promise<KnowledgeEnhancer | undefined>
+    enhancerForWorkspace: ((workspaceId: string) => Promise<KnowledgeEnhancer | undefined>) | undefined,
+    frontendModeForProject: (
+      workspaceId: string,
+      projectId: string
+    ) => Promise<FrontendKnowledgeMode>,
+    frontendParser: FrontendParserClient,
+    sourceStorageMode: "legacy" | "shadow" | "active",
+    sourceBlobReader: SourceBlobReader
   ) => QualityPipelineWorker;
   buildServer: typeof buildServer;
   setInterval?: (callback: () => void, delay: number) => unknown;
@@ -98,29 +119,52 @@ const defaultDependencies: BootstrapDependencies = {
   createBuildService: (store, queue, enhancerForWorkspace, initialPipelineStage, schedulePostBuild) =>
     new BuildService(store, queue, { enhancerForWorkspace, initialPipelineStage, schedulePostBuild }),
   createArtifactStore: (directory, persistence) => new ArtifactStore(directory, persistence),
-  createQualityPipelineWorker: (connectionString, store, artifactStore, enhancerForWorkspace) => {
+  createSourceBlobStore: (directory, catalog) => new SourceBlobStore({ dataDir: directory, catalog }),
+  createParserClient: (socketPath) => new ParserClient({ socketPath }),
+  createQualityPipelineWorker: (
+    connectionString, store, artifactStore, enhancerForWorkspace, frontendModeForProject, frontendParser,
+    sourceStorageMode, sourceBlobReader
+  ) => {
     const pipelineStore = store as AppStore & PipelineArtifactStore;
     const pipelineArtifacts = artifactStore as ArtifactStore;
+    const knowledgeV1Store = createKnowledgeV1StoreView(
+      pipelineStore,
+      sourceStorageMode === "active" ? "normalized-source-refs" : "normalized-sources"
+    );
+    const legacyExecutor = createPipelineStageExecutor({
+      convert: createNormalizedSourcesStageExecutor({
+        store: knowledgeV1Store, artifactStore: pipelineArtifacts, sourceStorageMode, sourceBlobReader
+      }),
+      extract: createKnowledgeIrStageExecutor({
+        store: knowledgeV1Store, artifactStore: pipelineArtifacts, sourceBlobReader
+      }),
+      tables: createTableSchemasStageExecutor({
+        store: knowledgeV1Store, artifactStore: pipelineArtifacts, sourceBlobReader
+      }),
+      graph: createKnowledgeGraphStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
+      synthesize: createKnowledgeSynthesisStageExecutor({
+        store: knowledgeV1Store, artifactStore: pipelineArtifacts, enhancerForWorkspace
+      }),
+      index: createPipelineSearchIndexStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
+      lint: createKnowledgeQualityStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
+      viz: createKnowledgeVisualizationStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
+      validate: createKnowledgeValidationStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts }),
+      package: createKnowledgePackageStageExecutor({ store: knowledgeV1Store, artifactStore: pipelineArtifacts })
+    });
     return new PipelineStageWorker(
       pipelineStore,
       new PgBossPipelineStageJobQueue(connectionString),
-      createPipelineStageExecutor({
-        convert: createNormalizedSourcesStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        extract: createKnowledgeIrStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        tables: createTableSchemasStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        graph: createKnowledgeGraphStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        synthesize: createKnowledgeSynthesisStageExecutor({
-          store: pipelineStore, artifactStore: pipelineArtifacts, enhancerForWorkspace
-        }),
-        index: createPipelineSearchIndexStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        lint: createKnowledgeQualityStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        viz: createKnowledgeVisualizationStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        validate: createKnowledgeValidationStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts }),
-        package: createKnowledgePackageStageExecutor({ store: pipelineStore, artifactStore: pipelineArtifacts })
+      createFrontendShadowStageExecutor({
+        store: pipelineStore,
+        artifactStore: pipelineArtifacts,
+        legacy: legacyExecutor,
+        frontendParser,
+        sourceStorageMode,
+        sourceBlobReader
       }),
       ["convert", "extract", "tables", "graph", "synthesize", "index", "lint", "viz", "validate", "package"],
       5_000,
-      createB02StageInputPlanner(pipelineStore)
+      createFrontendModeStageInputPlanner(pipelineStore, frontendModeForProject, sourceStorageMode)
     );
   },
   buildServer
@@ -149,6 +193,10 @@ export async function bootstrapServer(
     store as AppStore & PipelineArtifactStore
   );
   await artifactStore.initialize();
+  const sourceBlobStore = dependencies.createSourceBlobStore(path.join(env.dataDir, "snapshots"), store);
+  await sourceBlobStore.initialize();
+  if (env.sourceStorageMode !== "legacy") await sourceBlobStore.verifyHardlinkSupport();
+  const sourceBlobReader = new SourceBlobReader({ catalog: store, blobStore: sourceBlobStore });
   const queue = dependencies.createBuildQueue(env.databaseUrl);
   const enhancerForWorkspace = async (workspaceId: string): Promise<KnowledgeEnhancer | undefined> => {
     const config = await store.getModelConfig(workspaceId);
@@ -158,10 +206,24 @@ export async function bootstrapServer(
       ? anthropicEnhancer({ apiKey, model: config.model })
       : openAiCompatibleEnhancer({ apiKey, model: config.model });
   };
+  const frontendModeForProject = async (
+    workspaceId: string,
+    projectId: string
+  ): Promise<FrontendKnowledgeMode> => {
+    const rollout = await store.getProjectFrontendRollout(workspaceId, projectId);
+    return effectiveFrontendKnowledgeMode({
+      kernelMode: env.knowledgeKernelMode,
+      systemMode: env.frontendKnowledgeMode,
+      ...(rollout ? { projectMode: rollout.mode } : {})
+    });
+  };
   // Before F05 the staged pipeline only runs as a shadow build. Legacy remains
   // the sole source for published knowledge even when the future active mode is set.
   const qualityWorker = env.knowledgeKernelMode === "shadow"
-    ? dependencies.createQualityPipelineWorker(env.databaseUrl, store, artifactStore, enhancerForWorkspace)
+    ? dependencies.createQualityPipelineWorker(
+      env.databaseUrl, store, artifactStore, enhancerForWorkspace, frontendModeForProject,
+      dependencies.createParserClient(env.parserSocketPath), env.sourceStorageMode, sourceBlobReader
+    )
     : undefined;
   const initialPipelineStage = qualityWorker
     ? (build: BuildRecord, files: readonly SnapshotFileMetadata[]): InitialPipelineStage => ({
@@ -204,7 +266,11 @@ export async function bootstrapServer(
     ...(env.legacySessionReadUntil ? { legacySessionReadUntil: env.legacySessionReadUntil } : {}),
     ...(mode === "production" ? { clientDir: path.resolve("dist/client") } : {}),
     sessionStore: new PostgresSessionStore(database.pool),
-    qualityArtifactReader: artifactStore as ArtifactStore
+    qualityArtifactReader: artifactStore as ArtifactStore,
+    knowledgeKernelMode: env.knowledgeKernelMode,
+    frontendKnowledgeMode: env.frontendKnowledgeMode,
+    sourceStorageMode: env.sourceStorageMode,
+    sourceBlobStore
   });
   const reportBackgroundError = dependencies.reportBackgroundError
     ?? ((operation: string, error: unknown) => server.log.error({ err: error }, operation));
@@ -235,6 +301,8 @@ export async function bootstrapServer(
             store,
             gitTimeoutMs: GIT_SYNC_COMMAND_TIMEOUT_MS,
             gitSynchronizationLease: { repositoryId: repository.id, leaseToken },
+            sourceStorageMode: env.sourceStorageMode,
+            sourceBlobStore,
             ...(credential ? { token: decryptSecret(credential, env.masterKey!) } : {})
           });
           const completed = await store.finishGitSynchronization({

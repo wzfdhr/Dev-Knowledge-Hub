@@ -11,8 +11,50 @@ describe("loadEnv", () => {
       host: "127.0.0.1",
       port: 3000,
       dataDir: "./data",
-      knowledgeKernelMode: "legacy"
+      knowledgeKernelMode: "legacy",
+      frontendKnowledgeMode: "legacy",
+      sourceStorageMode: "legacy",
+      parserSocketPath: "/run/devkh-parser/parser.sock"
     });
+  });
+
+  test("loads only documented source storage rollout modes", () => {
+    expect(loadEnv({
+      mode: "development",
+      env: { DEVKH_SOURCE_STORAGE_MODE: "shadow" }
+    }).sourceStorageMode).toBe("shadow");
+    expect(loadEnv({
+      mode: "development",
+      env: { DEVKH_SOURCE_STORAGE_MODE: "active" }
+    }).sourceStorageMode).toBe("active");
+    expect(() => loadEnv({
+      mode: "development",
+      env: { DEVKH_SOURCE_STORAGE_MODE: "unexpected" }
+    })).toThrow(/DEVKH_SOURCE_STORAGE_MODE/);
+  });
+
+  test("loads an explicit parser runtime socket path", () => {
+    expect(loadEnv({
+      mode: "development",
+      env: { DEVKH_PARSER_SOCKET_PATH: "/tmp/devkh-parser/parser.sock" }
+    }).parserSocketPath).toBe("/tmp/devkh-parser/parser.sock");
+  });
+
+  test("enforces the frontend mode below the global knowledge kernel cap", () => {
+    expect(loadEnv({
+      mode: "development",
+      env: {
+        DEVKH_KNOWLEDGE_KERNEL_MODE: "shadow",
+        DEVKH_FRONTEND_KNOWLEDGE_MODE: "shadow"
+      }
+    }).frontendKnowledgeMode).toBe("shadow");
+    expect(() => loadEnv({
+      mode: "development",
+      env: {
+        DEVKH_KNOWLEDGE_KERNEL_MODE: "legacy",
+        DEVKH_FRONTEND_KNOWLEDGE_MODE: "shadow"
+      }
+    })).toThrow("exceeds knowledge kernel mode");
   });
 
   test("defaults to legacy and enables shadow only by explicit kernel mode", () => {

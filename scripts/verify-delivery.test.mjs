@@ -39,6 +39,25 @@ describe("delivery database isolation", () => {
       .toBe("${DEVKH_KNOWLEDGE_KERNEL_MODE:-legacy}");
   });
 
+  test("isolates the parser from networks, credentials, databases, and project volumes", async () => {
+    const compose = parse(await readFile("docker-compose.yml", "utf8"));
+    const parser = compose.services.parser;
+
+    expect(parser.network_mode).toBe("none");
+    expect(parser.read_only).toBe(true);
+    expect(parser.user).toBe("node");
+    expect(parser.cap_drop).toEqual(["ALL"]);
+    expect(parser.security_opt).toContain("no-new-privileges:true");
+    expect(parser.pids_limit).toBe(64);
+    expect(parser.mem_limit).toBe("512m");
+    expect(parser.cpus).toBe(1);
+    expect(parser.healthcheck.test.join(" ")).toContain("isSocket");
+    expect(Object.keys(parser.environment).sort()).toEqual(["DEVKH_PARSER_SOCKET_PATH", "NODE_ENV"]);
+    expect(parser.volumes).toEqual(["parser_runtime:/run/devkh-parser"]);
+    expect(JSON.stringify(parser)).not.toMatch(/DATABASE_URL|MASTER_KEY|SESSION_SECRET|snapshot_data|uploaded_sources|repository_mirrors|artifact_data/);
+    expect(compose.services.app.volumes).toContain("parser_runtime:/run/devkh-parser:ro");
+  });
+
   test("boots both development surfaces, forces production start, and loads dotenv explicitly", async () => {
     const packageJson = JSON.parse(await readFile("package.json", "utf8"));
     const packageLock = JSON.parse(await readFile("package-lock.json", "utf8"));
@@ -72,6 +91,7 @@ describe("delivery database isolation", () => {
       .join("\n");
 
     expect(dockerfile).toContain("COPY --chown=node:node --chmod=755 scripts/git-askpass.sh");
+    expect(dockerfile).not.toContain("ENV DEVKH_GIT_ASKPASS_PATH");
     expect(dockerfile.match(/^FROM node:22\.13-bookworm-slim/gm)).toHaveLength(3);
     expect(deliveryCheck).toContain("node:22\\.13-bookworm-slim");
     expect(String(ci.jobs.verify.steps.find((step) => step.uses === "actions/setup-node@v4")

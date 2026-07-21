@@ -6,7 +6,7 @@
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "operation": "restore-drill",
   "result": "success",
   "startedAt": "2026-07-14T00:00:00.000Z",
@@ -32,6 +32,17 @@
   "ephemeralDatabaseRestored": true,
   "healthCheckPassed": true,
   "artifactContentVerifiedCount": 8,
+  "blobReferenceCount": 2,
+  "blobContentVerifiedCount": 1,
+  "blobHardlinkVerifiedCount": 2,
+  "referencedSourceBlobGenerationCount": 1,
+  "sourceBlobLogicalBytes": 32,
+  "sourceBlobPhysicalBytes": 4096,
+  "sourceBlobRecordManifest": {
+    "file": "evidence.source-blobs.ndjson",
+    "sha256": "86b2854569ef7b591174a93793d3f8ab40147775050543623326d985590c2958",
+    "recordCount": 2
+  },
   "databaseStats": {
     "workspaceCount": 1,
     "userCount": 1,
@@ -40,24 +51,48 @@
     "snapshotCount": 1,
     "releaseCount": 3,
     "releaseChannelCount": 1,
-    "artifactCount": 8
+    "artifactCount": 8,
+    "sourceAnalysisArtifactCount": 12,
+    "sourceBlobCount": 2,
+    "sourceFileBlobReferenceCount": 2,
+    "referencedSourceBlobGenerationCount": 1
   },
   "integrity": {
     "orphanedReleases": 0,
     "orphanedReleaseChannels": 0,
     "crossWorkspaceProjectMembers": 0,
     "projectMembersWithoutWorkspaceMembership": 0,
-    "orphanedArtifacts": 0
+    "orphanedArtifacts": 0,
+    "orphanedSourceAnalysisArtifacts": 0,
+    "unboundSourceFiles": 0,
+    "invalidSourceBlobReferences": 0
   }
 }
 ```
 
+同目录必须保留上述 `sourceBlobRecordManifest.file` 指向的 canonical NDJSON。每行对应一条被引用的
+`source_files` 记录，例如：
+
+```ndjson
+{"workspaceId":"11111111-1111-4111-8111-111111111111","snapshotId":"55555555-5555-4555-8555-555555555555","sourcePath":"src/one.ts","storageKey":"blobs/11111111-1111-4111-8111-111111111111/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/1","snapshotStoragePath":"/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","generation":1,"byteSize":32,"status":"active","fencingToken":null,"tombstonedAt":null,"trashedAt":null,"deletedAt":null,"blobMode":"0444","viewMode":"0444","blobDevice":"2049","blobInode":"1001","viewDevice":"2049","viewInode":"1001","blobSize":"32","viewSize":"32","blobBlocks":"8","viewBlocks":"8","blobAllocatedBytes":"4096","viewAllocatedBytes":"4096","blobContentSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","viewContentSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","relationship":"same-device-inode-hardlink"}
+{"workspaceId":"11111111-1111-4111-8111-111111111111","snapshotId":"55555555-5555-4555-8555-555555555555","sourcePath":"src/two.ts","storageKey":"blobs/11111111-1111-4111-8111-111111111111/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/1","snapshotStoragePath":"/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files","contentHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","generation":1,"byteSize":32,"status":"active","fencingToken":null,"tombstonedAt":null,"trashedAt":null,"deletedAt":null,"blobMode":"0444","viewMode":"0444","blobDevice":"2049","blobInode":"1001","viewDevice":"2049","viewInode":"1001","blobSize":"32","viewSize":"32","blobBlocks":"8","viewBlocks":"8","blobAllocatedBytes":"4096","viewAllocatedBytes":"4096","blobContentSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","viewContentSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","relationship":"same-device-inode-hardlink"}
+```
+
 验收时必须验证 `result=success`、`productionVolumeTouched=false`，且 `volumeArchives`
 中的 `snapshots.tgz`、`repositories.tgz`、`sources.tgz`、`artifacts.tgz` 齐全。恢复演练还必须
-真实恢复临时 PostgreSQL、校验 release/build/snapshot/repository/channel 一致性、项目权限和 artifact
+真实恢复临时 PostgreSQL、校验 release/build/snapshot/repository/channel 一致性、项目权限、source analysis cache 和 artifact
 引用，并逐条按 `storageKey` 校验 artifact 文件路径、JSON 与内容 SHA-256。随后启动临时应用完成健康检查；
-对应字段均为 `true`，`artifactContentVerifiedCount` 必须等于 `databaseStats.artifactCount`，`integrity`
-各项均为 `0`。`resticSnapshotId` 必须是 restic 返回的完整 64 位快照 ID，并与备份或恢复日志对应；
+对应字段均为 `true`，`artifactContentVerifiedCount` 必须等于 `databaseStats.artifactCount`。Blob 引用、内容和
+hardlink 计数必须分别覆盖全部 `source_files.source_blob_id` 引用和被引用 generation；逻辑/物理字节只统计
+被引用的唯一 generation/inode，物理字节来自 allocated blocks。被引用的 `active` blob 必须没有 fence、tombstone、
+trash 或 deleted 时间；被引用的 `tombstoned` blob 必须有 UUID fence 和 tombstone 时间、没有 trash/deleted 时间，
+且仍使用规范 source blob 路径。`trash`、`deleted` 或任何不完整状态元组均失败。恢复程序在每个 tgz 提取前
+以流式 tar 状态机拒绝 symlink、越界 hardlink 和特殊节点；普通文件 body 不进入内存缓冲，PAX/GNU long
+metadata 有固定上限。提取后再次遍历并拒绝 symlink、特殊节点或 canonical 越界路径。Blob 与 snapshot view
+还必须通过 `O_NOFOLLOW` 先打开为普通文件，再由同一个 pinned descriptor 完成 `fstat`、内容哈希和读取；证据中的
+device、inode、mode、size 和 allocated blocks 也只能来自该 descriptor。任一 owner/group/other 写位都会使恢复演练失败。
+`integrity` 各项均为 `0`。`resticSnapshotId`
+必须是 restic 返回的完整 64 位快照 ID，并与备份或恢复日志对应；
 `startedAt` 和 `finishedAt` 必须是严格 UTC ISO 时间，且结束时间不得早于开始时间。记录不得包含
 Restic 密码、OSS/RAM 凭据、数据库 URL、`DEVKH_MASTER_KEY`、源文件内容或数据库转储。
 
@@ -65,9 +100,24 @@ GitHub `container-smoke` 使用临时本地 Restic 仓库执行同一套演练�
 `recovery-evidence` artifact 留存。CI 会先写入一组不含真实凭据的代表 workspace、成员、项目、
 快照、release channel 和 artifact，并要求所有数据库计数及四卷文件计数大于 `0`；空库不能通过。
 CI 在成功时删除临时仓库、恢复容器和外层 Compose 项目；失败时会保留临时仓库、恢复现场和 Compose 状态供取证，
-并继续上传已生成的 `recovery-evidence` artifact。CI runner 回收前，值班人员应从日志和 artifact 记录
-失败原因；不得把失败现场误标为一次成功演练。
+但在返回前必须删除 final/pending 两种名称下的 JSON/NDJSON 证据对。无条件上传的 artifact 只能保留不含现场路径
+或对象内容的 `status.json`/失败记录。CI runner 回收前，值班人员应从日志和该失败记录确认错误类别；不得把失败现场
+误标为一次成功演练。
+
+验证器默认只接受 schema v3。`--allow-legacy-v2` 仅供人工审阅历史 v2 证据时显式使用；CI、恢复演练和
+FK17 门禁不得传入该兼容标志。
+
+严格验证必须同时读取主 JSON 与 sidecar，校验 sidecar 文件名、SHA-256、记录数、canonical 行格式，并从逐对象
+事实重新计算 generation、hardlink、逻辑字节和物理字节聚合。缺失、篡改、未排序或语义不一致的 sidecar 均使
+整份 v3 证据无效。主 JSON 和 sidecar 先以 `.pending` 成对写入，清理成功后 sidecar 先于主 JSON 原子确认；
+任一失败会同时移除两者，不能留下可验收的单边成功证据。
+
+CI 使用 deferred finalization 时，`release:verify --scope container` 必须在外层 Compose 清理成功后先将 NDJSON
+sidecar 从 `.pending` 重命名为最终名，再重命名主 JSON，随后立即对最终文件对执行一次严格验证，成功返回后
+workflow 才能上传 artifact。验证器通过 `O_NOFOLLOW` 的只读文件句柄读取并 `fstat` 主 JSON 和 sidecar；
+symlink、目录及其他非普通文件均拒绝。最终验证或任一重命名失败时，release verification 会删除 final/pending
+两种名称并只留下失败记录，上传目录中不得存在成功证据。
 
 容器门禁会先生成 `.json.pending`，它只用于内部校验，不能作为验收证据。只有最外层 Compose 清理成功后才
-原子确认成正式 `.json`。任何失败 artifact 应查看 `status.json` 的 `result=failed`、`errorClass` 和
-`retentionPath`；失败时不得存在可验收的正式成功 JSON。
+原子确认成正式 `.json`。任何失败 artifact 应查看 `status.json` 的 `result=failed` 和 `errorClass`；该状态不得
+记录恢复现场路径，且失败时不得存在 final/pending JSON/NDJSON 证据文件。

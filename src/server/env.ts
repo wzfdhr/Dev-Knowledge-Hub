@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+import {
+  FRONTEND_KNOWLEDGE_MODES,
+  validateFrontendModeConfiguration
+} from "./knowledge/frontend/rollout-mode.js";
+
 const masterKeySchema = z.string().refine((value) => {
   const decoded = Buffer.from(value, "base64");
   return decoded.length === 32 && decoded.toString("base64") === value;
@@ -16,6 +21,8 @@ const legacySessionReadUntilSchema = z.string().datetime({ offset: true })
   .transform((value) => new Date(value));
 
 const knowledgeKernelModeSchema = z.enum(["legacy", "shadow", "active"]);
+const frontendKnowledgeModeSchema = z.enum(FRONTEND_KNOWLEDGE_MODES);
+const sourceStorageModeSchema = z.enum(["legacy", "shadow", "active"]);
 
 const sharedEnvSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
@@ -26,7 +33,10 @@ const sharedEnvSchema = z.object({
   DEVKH_SESSION_SECRET: z.string().min(1).optional(),
   PUBLIC_BASE_URL: publicBaseUrlSchema.optional(),
   DEVKH_LEGACY_SESSION_READ_UNTIL: legacySessionReadUntilSchema.optional(),
-  DEVKH_KNOWLEDGE_KERNEL_MODE: knowledgeKernelModeSchema.default("legacy")
+  DEVKH_KNOWLEDGE_KERNEL_MODE: knowledgeKernelModeSchema.default("legacy"),
+  DEVKH_FRONTEND_KNOWLEDGE_MODE: frontendKnowledgeModeSchema.default("legacy"),
+  DEVKH_SOURCE_STORAGE_MODE: sourceStorageModeSchema.default("legacy"),
+  DEVKH_PARSER_SOCKET_PATH: z.string().startsWith("/").default("/run/devkh-parser/parser.sock")
 });
 
 const productionEnvSchema = sharedEnvSchema.extend({
@@ -48,6 +58,9 @@ export interface AppEnv {
   publicBaseUrl?: string;
   legacySessionReadUntil?: Date;
   knowledgeKernelMode: z.infer<typeof knowledgeKernelModeSchema>;
+  frontendKnowledgeMode: z.infer<typeof frontendKnowledgeModeSchema>;
+  sourceStorageMode: z.infer<typeof sourceStorageModeSchema>;
+  parserSocketPath: string;
 }
 
 export function loadEnv({
@@ -59,6 +72,10 @@ export function loadEnv({
 }): AppEnv {
   if (mode === "production") {
     const parsed = productionEnvSchema.parse(env);
+    validateFrontendModeConfiguration({
+      kernelMode: parsed.DEVKH_KNOWLEDGE_KERNEL_MODE,
+      systemMode: parsed.DEVKH_FRONTEND_KNOWLEDGE_MODE
+    });
     return {
       nodeEnv: mode,
       host: parsed.HOST,
@@ -69,11 +86,18 @@ export function loadEnv({
       sessionSecret: parsed.DEVKH_SESSION_SECRET,
       publicBaseUrl: parsed.PUBLIC_BASE_URL,
       legacySessionReadUntil: parsed.DEVKH_LEGACY_SESSION_READ_UNTIL,
-      knowledgeKernelMode: parsed.DEVKH_KNOWLEDGE_KERNEL_MODE
+      knowledgeKernelMode: parsed.DEVKH_KNOWLEDGE_KERNEL_MODE,
+      frontendKnowledgeMode: parsed.DEVKH_FRONTEND_KNOWLEDGE_MODE,
+      sourceStorageMode: parsed.DEVKH_SOURCE_STORAGE_MODE,
+      parserSocketPath: parsed.DEVKH_PARSER_SOCKET_PATH
     };
   }
 
   const parsed = sharedEnvSchema.parse(env);
+  validateFrontendModeConfiguration({
+    kernelMode: parsed.DEVKH_KNOWLEDGE_KERNEL_MODE,
+    systemMode: parsed.DEVKH_FRONTEND_KNOWLEDGE_MODE
+  });
   return {
     nodeEnv: mode,
     host: parsed.HOST,
@@ -84,6 +108,9 @@ export function loadEnv({
     sessionSecret: parsed.DEVKH_SESSION_SECRET,
     publicBaseUrl: parsed.PUBLIC_BASE_URL,
     legacySessionReadUntil: parsed.DEVKH_LEGACY_SESSION_READ_UNTIL,
-    knowledgeKernelMode: parsed.DEVKH_KNOWLEDGE_KERNEL_MODE
+    knowledgeKernelMode: parsed.DEVKH_KNOWLEDGE_KERNEL_MODE,
+    frontendKnowledgeMode: parsed.DEVKH_FRONTEND_KNOWLEDGE_MODE,
+    sourceStorageMode: parsed.DEVKH_SOURCE_STORAGE_MODE,
+    parserSocketPath: parsed.DEVKH_PARSER_SOCKET_PATH
   };
 }

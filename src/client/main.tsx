@@ -7,8 +7,8 @@ import { BrowserRouter } from "react-router-dom";
 
 import "antd/dist/reset.css";
 import "./styles.css";
-import "./responsive.css";
 import "./workbench.css";
+import "./responsive.css";
 import { App } from "./app";
 import { cspNonceFromDocument } from "./csp-nonce";
 

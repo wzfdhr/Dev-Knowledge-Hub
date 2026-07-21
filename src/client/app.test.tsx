@@ -21,6 +21,7 @@ import { ApiError, type ApiClient } from "./api/client";
 import { App } from "./app";
 import { ErrorState } from "./components/ui";
 import { AppShell } from "./components/app-shell";
+import { ImportProgress } from "./components/import-progress";
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 beforeEach(() => { sessionStorage.clear(); localStorage.clear(); });
@@ -68,6 +69,28 @@ describe("shared console copy", () => {
     expect(screen.queryByRole("link", { name: "成员" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "设置" })).not.toBeInTheDocument();
     expect(screen.getByText("成员", { selector: "footer strong" })).toBeVisible();
+  });
+
+  test("marks only completed import stages before upload confirmation", () => {
+    const { container } = renderPage(<ImportProgress progress={{
+      phase: "filtering", status: "completed", percent: 100,
+      processedFiles: 3, totalFiles: 3, detail: "已完成过滤"
+    }} />);
+
+    const stages = Array.from(container.querySelectorAll(".import-stage"));
+    expect(stages.map((stage) => stage.classList.contains("complete"))).toEqual([
+      true, true, false, false, false
+    ]);
+  });
+
+  test("shows verified file and byte totals during folder transfer", () => {
+    renderPage(<ImportProgress progress={{
+      phase: "uploading", status: "running", percent: 40,
+      processedFiles: 1, totalFiles: 2, processedBytes: 4, totalBytes: 10,
+      detail: "已验证 1/2 个源码文件"
+    }} />);
+
+    expect(screen.getByText("1/2 个文件 · 4 B/10 B")).toBeVisible();
   });
 
   test("explains when a remediation candidate is not ready for resolution", () => {
@@ -1234,8 +1257,8 @@ describe("repository replacement", () => {
         id: "upload", projectId: "project", kind: "upload", name: "Uploaded project", defaultBranch: "upload"
       } }),
       uploadFolder: vi.fn().mockResolvedValue({
-        snapshotId: "snapshot", sourceVersion: "a".repeat(40), fileCount: 2, unchanged: false,
-        ignored: { total: 2, reasons: { binary: 1, generated: 1 } }
+        snapshotId: "snapshot", sourceVersion: "a".repeat(40), fileCount: 1, textBytes: 10, unchanged: false,
+        ignored: { total: 0, reasons: {} }, assetCount: 0
       }),
       getModelConfig: vi.fn().mockResolvedValue({ config: null }),
       getMcpConnection: vi.fn().mockResolvedValue({ endpoint: "/mcp", transport: "streamable-http", authorization: "bearer", tools: [] }),
@@ -1244,15 +1267,60 @@ describe("repository replacement", () => {
 
     renderPage(<ProjectImportsPage api={api} projectId="project" />);
     const projectFile = new File(["export {};"], "main.ts", { type: "text/typescript" });
+    const secretFile = new File(["TOKEN=secret"], ".env", { type: "text/plain" });
     const uploadInput = await screen.findByLabelText("项目文件夹") as HTMLInputElement;
-    await user.upload(uploadInput, projectFile);
+    await user.upload(uploadInput, [projectFile, secretFile]);
     await user.click(await screen.findByRole("button", { name: "确认并开始上传" }));
 
     await waitFor(() => expect(api.uploadFolder).toHaveBeenCalledWith(
-      "project", [expect.objectContaining({ path: "main.ts" })]
+      "project", "upload", [expect.objectContaining({ path: "main.ts", kind: "source" })],
+      { onProgress: expect.any(Function) }
     ));
     await waitFor(() => expect(sessionStorage.getItem("devkh:last-snapshot")).toContain("snapshot"));
-    expect(await screen.findByText("已忽略 2 个文件")).toBeVisible();
+    expect(await screen.findByText("本地预过滤 1 个文件")).toBeVisible();
+    expect(screen.getByText("服务端二次过滤 0 个文件")).toBeVisible();
+  });
+
+  test("reuses a newly connected upload repository when the first transfer is interrupted", async () => {
+    const user = userEvent.setup();
+    const connectRepository = vi.fn().mockResolvedValue({ repository: {
+      id: "upload-resume", projectId: "project", kind: "upload", name: "Uploaded project", defaultBranch: "upload"
+    } });
+    const uploadFolder = vi.fn()
+      .mockRejectedValueOnce(new ApiError(500, "TEMPORARY", "interrupted"))
+      .mockRejectedValueOnce(new ApiError(409, "UPLOAD_SESSION_INVALIDATED", "invalidated"))
+      .mockResolvedValue({
+        snapshotId: "snapshot-resume", sourceVersion: "b".repeat(40), fileCount: 1, textBytes: 10,
+        unchanged: false, ignored: { total: 0, reasons: {} }, assetCount: 0
+      });
+    const api = {
+      getRepository: vi.fn().mockRejectedValue(new ApiError(404, "REPOSITORY_NOT_FOUND", "missing")),
+      connectRepository,
+      uploadFolder,
+      listImportReports: vi.fn().mockResolvedValue({ reports: [], total: 0, limit: 20, offset: 0 })
+    } as unknown as ApiClient;
+
+    renderPage(<ProjectImportsPage api={api} projectId="project" />);
+    const uploadInput = await screen.findByLabelText("项目文件夹") as HTMLInputElement;
+    await user.upload(uploadInput, new File(["export {};"], "main.ts", { type: "text/typescript" }));
+    const confirm = await screen.findByRole("button", { name: "确认并开始上传" });
+    await user.click(confirm);
+    await waitFor(() => expect(uploadFolder).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("上传暂时中断，已验证文件会保留约 24 小时")).toBeVisible();
+    expect(screen.getByText(/重新选择同一文件夹.*不会重复上传已验证文件/)).toBeVisible();
+    expect(screen.getByText(/上传结果尚未确认.*已发布知识不会自动变化/)).toBeVisible();
+    expect(screen.getByText(/安全重试.*不会重复创建内容版本/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "重试" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => expect(uploadFolder).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("上传会话已失效，请重新选择项目文件夹")).toBeVisible();
+    expect(screen.getByText(/当前已发布知识不会自动变化/)).toBeVisible();
+    expect(screen.queryByText(/没有创建内容版本/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => expect(uploadFolder).toHaveBeenCalledTimes(3));
+
+    expect(connectRepository).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("内容版本已就绪")).toBeVisible();
   });
 });
 

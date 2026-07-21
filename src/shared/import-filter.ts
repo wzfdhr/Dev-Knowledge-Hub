@@ -1,5 +1,6 @@
 export const MAX_IMPORT_SOURCE_FILE_BYTES = 1024 * 1024;
 export const MAX_IMPORT_TABLE_WORKBOOK_BYTES = 50 * 1024 * 1024;
+export const MAX_UPLOAD_MANIFEST_METADATA_BYTES = 32 * 1024 * 1024;
 
 export type ImportIgnoreReason =
   | "binary"
@@ -23,7 +24,42 @@ const excludedDirectories = new Set([
   ".cache", ".parcel-cache", "out", "target", ".gradle", ".mvn", ".venv", "venv",
   "__pycache__", ".pytest_cache", ".mypy_cache", ".tox", ".ruff_cache", ".dart_tool", ".terraform"
 ]);
-const sourceExtensions = new Set(["ts", "tsx", "js", "jsx", "md", "json", "yaml", "yml", "csv", "xlsx"]);
+const sourceExtensions = new Set([
+  "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs",
+  "vue", "html", "css", "scss", "sass", "less", "svelte", "astro", "svg",
+  "md", "json", "yaml", "yml", "csv", "xlsx"
+]);
+const assetExtensions = new Set([
+  "avif", "gif", "ico", "jpeg", "jpg", "png", "webp",
+  "woff", "woff2", "ttf", "otf", "eot",
+  "mp3", "mp4", "ogg", "wav", "webm"
+]);
+
+const sourceLanguages: Record<string, string> = {
+  ts: "typescript",
+  mts: "typescript",
+  cts: "typescript",
+  tsx: "tsx",
+  js: "javascript",
+  mjs: "javascript",
+  cjs: "javascript",
+  jsx: "jsx",
+  vue: "vue",
+  html: "html",
+  css: "css",
+  scss: "scss",
+  sass: "sass",
+  less: "less",
+  svelte: "svelte",
+  astro: "astro",
+  svg: "svg",
+  md: "markdown",
+  json: "json",
+  yaml: "yaml",
+  yml: "yaml",
+  csv: "csv",
+  xlsx: "xlsx"
+};
 
 function basename(filePath: string): string {
   return filePath.split("/").at(-1) ?? filePath;
@@ -37,10 +73,20 @@ function hasSupportedExtension(filePath: string): boolean {
   const name = basename(filePath);
   if (name === ".env.example") return true;
   if (/^package(?:-lock)?\.json$/.test(name)) return true;
-  if (["pnpm-lock.yaml", "yarn.lock"].includes(name)) return true;
+  if (["pnpm-lock.yaml", "yarn.lock", "bun.lock"].includes(name)) return true;
   if (/^tsconfig(?:\.[^.]+)?\.json$/.test(name)) return true;
   if (/^(?:vitest|jest|playwright|cypress)\.config\.(?:ts|js|tsx|jsx)$/.test(name)) return true;
   return sourceExtensions.has(name.split(".").at(-1)?.toLowerCase() ?? "");
+}
+
+export function importLanguageForPath(filePath: string): string | null {
+  const extension = basename(filePath).split(".").at(-1)?.toLowerCase() ?? "";
+  return sourceLanguages[extension] ?? null;
+}
+
+export function isImportAssetPath(filePath: string): boolean {
+  const extension = basename(filePath).split(".").at(-1)?.toLowerCase() ?? "";
+  return assetExtensions.has(extension);
 }
 
 function isTableWorkbook(filePath: string): boolean {

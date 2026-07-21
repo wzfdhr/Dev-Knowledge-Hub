@@ -138,6 +138,378 @@
   white-space: nowrap;
 }
 
+.frontend-map-page {
+  position: relative;
+}
+
+.frontend-map-tabs {
+  min-height: 42px;
+  display: flex;
+  align-items: flex-end;
+  gap: 20px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+
+.frontend-map-tabs button {
+  min-height: 42px;
+  flex: 0 0 auto;
+  padding: 0 1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.frontend-map-tabs button[aria-selected="true"] {
+  border-bottom-color: var(--blue);
+  color: var(--blue);
+}
+
+.frontend-map-overview {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  margin-bottom: 18px;
+}
+
+.frontend-map-overview > div {
+  min-width: 0;
+  min-height: 96px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  border-right: 1px solid var(--border);
+}
+
+.frontend-map-overview > div:last-child {
+  border-right: 0;
+}
+
+.frontend-map-overview svg {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  padding: 8px;
+  border-radius: 6px;
+  background: #eef4fb;
+  color: #315f91;
+}
+
+.frontend-map-overview span,
+.frontend-entity-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.frontend-map-overview small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.frontend-map-overview strong {
+  font-size: 20px;
+}
+
+.frontend-preview-state,
+.frontend-comparison {
+  margin-bottom: 18px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.frontend-preview-state > header,
+.frontend-comparison > header {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.frontend-preview-state h2,
+.frontend-preview-state dd,
+.frontend-comparison h2,
+.frontend-comparison p {
+  margin: 0;
+}
+
+.frontend-preview-state h2,
+.frontend-comparison h2 {
+  font-size: 14px;
+}
+
+.frontend-preview-state > header span,
+.frontend-comparison > header span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.frontend-preview-state.is-success {
+  border-left: 3px solid #278154;
+}
+
+.frontend-preview-state.is-warning {
+  border-left: 3px solid #b7791f;
+}
+
+.frontend-preview-state.is-danger {
+  border-left: 3px solid #b23a48;
+}
+
+.frontend-preview-state dl,
+.frontend-comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+}
+
+.frontend-preview-state dl > div,
+.frontend-comparison-grid > div {
+  min-width: 0;
+  padding: 12px 16px;
+  border-right: 1px solid var(--border);
+}
+
+.frontend-preview-state dl > div:last-child,
+.frontend-comparison-grid > div:last-child {
+  border-right: 0;
+}
+
+.frontend-preview-state dt,
+.frontend-comparison-grid span {
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.frontend-preview-state dd,
+.frontend-comparison-grid strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.frontend-comparison > header p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.frontend-comparison-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.frontend-impact-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.frontend-impact-columns > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 14px 16px;
+}
+
+.frontend-impact-columns > div:first-child {
+  border-right: 1px solid var(--border);
+}
+
+.frontend-impact-columns h3 {
+  margin: 0 0 3px;
+  font-size: 11px;
+}
+
+.frontend-impact-columns code,
+.frontend-impact-columns span {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.frontend-map-section {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.frontend-map-section > header {
+  min-height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.frontend-map-section h2,
+.frontend-map-section p {
+  margin: 0;
+}
+
+.frontend-map-section h2 {
+  font-size: 14px;
+}
+
+.frontend-map-section p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.frontend-map-section > header > span {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.frontend-entity-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.frontend-entity-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #edf0f3;
+}
+
+.frontend-entity-row:last-child {
+  border-bottom: 0;
+}
+
+.frontend-entity-main {
+  flex: 1 1 240px;
+}
+
+.frontend-entity-main strong,
+.frontend-entity-main code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.frontend-entity-main code {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.frontend-kind {
+  width: fit-content;
+  color: #35658f;
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.frontend-relation-list {
+  min-width: 0;
+  display: flex;
+  flex: 1.4 1 320px;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.frontend-relation-list span {
+  max-width: 100%;
+  padding: 4px 6px;
+  border: 1px solid #dbe4ee;
+  border-radius: 4px;
+  color: #53657a;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.frontend-source-actions {
+  min-width: 0;
+  display: flex;
+  flex: 0 1 260px;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.frontend-source-actions button {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: #fff;
+  color: #40566f;
+  font-size: 10px;
+}
+
+.frontend-source-actions button svg {
+  width: 13px;
+  flex: 0 0 auto;
+}
+
+.frontend-source-actions button small {
+  color: var(--muted);
+}
+
+.frontend-preview-source {
+  position: fixed;
+  z-index: 30;
+  top: 0;
+  right: 0;
+  width: min(560px, 100vw);
+  height: 100vh;
+  padding: 22px;
+  border-left: 1px solid var(--border);
+  background: #fff;
+  box-shadow: -8px 0 24px rgba(26, 35, 49, 0.12);
+  overflow: auto;
+}
+
+.frontend-preview-source > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.frontend-preview-source h2 {
+  margin: 0;
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+
+.frontend-preview-source > p {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.frontend-preview-source pre {
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #f7f9fb;
+  font-size: 11px;
+  overflow: auto;
+}
+
 .project-center-metrics > div:last-child {
   border-right: 0;
 }

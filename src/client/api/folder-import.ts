@@ -1,7 +1,8 @@
-import { filterImportFile, isExcludedImportDirectory } from "../../shared/import-filter";
+import { filterImportFile, isExcludedImportDirectory, isImportAssetPath } from "../../shared/import-filter";
 import type { ImportProgress } from "./types";
 
 export const MAX_FOLDER_IMPORT_FILES = 50_000;
+export const MAX_FOLDER_MANIFEST_FILES = 100_000;
 export const MAX_FOLDER_IMPORT_EXPANDED_BYTES = 2 * 1024 * 1024 * 1024;
 
 export interface DirectoryFileHandle {
@@ -21,11 +22,13 @@ export type DirectoryHandle = DirectoryFileHandle | DirectoryDirectoryHandle;
 export interface FolderImportFile {
   path: string;
   file: File;
+  kind: "source" | "asset";
 }
 
 export interface FolderImportReport {
   totalFiles: number;
   acceptedFiles: FolderImportFile[];
+  assetFiles: FolderImportFile[];
   acceptedBytes: number;
   ignored: { total: number; reasons: Record<string, number> };
 }
@@ -45,6 +48,7 @@ function createReport(): FolderImportReport {
   return {
     totalFiles: 0,
     acceptedFiles: [],
+    assetFiles: [],
     acceptedBytes: 0,
     ignored: { total: 0, reasons: {} }
   };
@@ -70,6 +74,28 @@ async function addFile(
     totalFiles: report.totalFiles,
     detail: `正在读取 ${path}`
   });
+  if (path.split("/").some(isExcludedImportDirectory)) {
+    ignore(report, "excluded_directory");
+    options.onProgress?.({
+      phase: "filtering", status: "running", percent: 0,
+      processedFiles: report.totalFiles, totalFiles: report.totalFiles,
+      detail: `已过滤 ${path}`
+    });
+    return;
+  }
+  if (isImportAssetPath(path)) {
+    if (report.acceptedFiles.length + report.assetFiles.length >= MAX_FOLDER_MANIFEST_FILES) {
+      throw new FolderImportError("项目文件清单超过 100,000 个，无法导入");
+    }
+    report.assetFiles.push({ path, file, kind: "asset" });
+    options.onProgress?.({
+      phase: "filtering", status: "running", percent: 0,
+      processedFiles: report.totalFiles, totalFiles: report.totalFiles,
+      detail: `已登记资源 ${path}`
+    });
+    return;
+  }
+
   const preliminary = filterImportFile({ path, byteSize: file.size });
   if (!preliminary.accepted) {
     ignore(report, preliminary.reason);
@@ -96,12 +122,15 @@ async function addFile(
   if (report.acceptedFiles.length >= MAX_FOLDER_IMPORT_FILES) {
     throw new FolderImportError("可采集文件超过 50,000 个，无法导入");
   }
+  if (report.acceptedFiles.length + report.assetFiles.length >= MAX_FOLDER_MANIFEST_FILES) {
+    throw new FolderImportError("项目文件清单超过 100,000 个，无法导入");
+  }
 
   report.acceptedBytes += file.size;
   if (report.acceptedBytes > MAX_FOLDER_IMPORT_EXPANDED_BYTES) {
     throw new FolderImportError("可采集文件超过 2 GiB，无法导入");
   }
-  report.acceptedFiles.push({ path, file });
+  report.acceptedFiles.push({ path, file, kind: "source" });
   options.onProgress?.({
     phase: "filtering", status: "running", percent: 0,
     processedFiles: report.totalFiles, totalFiles: report.totalFiles,
@@ -149,7 +178,7 @@ export async function scanDirectory(
     phase: "filtering", status: "completed", percent: 100,
     processedFiles: report.totalFiles, totalFiles: report.totalFiles,
     processedBytes: report.acceptedBytes,
-    detail: `已完成过滤，准备上传 ${report.acceptedFiles.length} 个文件`
+    detail: `已完成过滤，准备上传 ${report.acceptedFiles.length} 个源码文件`
   });
   return report;
 }
@@ -177,7 +206,7 @@ export async function scanSelectedFiles(
     phase: "filtering", status: "completed", percent: 100,
     processedFiles: report.totalFiles, totalFiles: report.totalFiles,
     processedBytes: report.acceptedBytes,
-    detail: `已完成过滤，准备上传 ${report.acceptedFiles.length} 个文件`
+    detail: `已完成过滤，准备上传 ${report.acceptedFiles.length} 个源码文件`
   });
   return report;
 }

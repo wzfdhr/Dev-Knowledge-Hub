@@ -44,6 +44,14 @@ type PipelineWorkerStore = PipelineArtifactStore & {
 };
 
 const RETRYABLE_STAGES = new Set<BuildStage>(["convert", "graph", "index", "package"]);
+const PARSER_RUNTIME_ERROR_CODES = new Set([
+  "PARSER_RUNTIME_UNAVAILABLE",
+  "PARSER_TIMEOUT",
+  "PARSER_CANCELLED",
+  "PARSER_WORKER_CRASH",
+  "PARSER_OUTPUT_LIMIT",
+  "PARSER_INVALID_REQUEST"
+]);
 const MAX_STAGE_ATTEMPTS = 3;
 const RETRY_DELAYS_MS = [5_000, 30_000] as const;
 
@@ -53,6 +61,12 @@ function shouldRetry(run: PipelineStageRunRecord): boolean {
 
 function retryDelayMs(run: PipelineStageRunRecord): number {
   return RETRY_DELAYS_MS[run.attempt - 1] ?? RETRY_DELAYS_MS.at(-1)!;
+}
+
+function pipelineErrorCode(error: unknown): string {
+  if (error instanceof Error && "code" in error && typeof error.code === "string"
+    && PARSER_RUNTIME_ERROR_CODES.has(error.code)) return error.code;
+  return "PIPELINE_STAGE_FAILED";
 }
 
 export class PipelineStageWorker {
@@ -194,7 +208,7 @@ export class PipelineStageWorker {
           workspaceId: run.workspaceId,
           projectId: run.projectId,
           stageRunId: run.id,
-          errorCode: "PIPELINE_STAGE_FAILED",
+          errorCode: pipelineErrorCode(error),
           errorDetail: error instanceof Error ? error.message.slice(0, 4_000) : "Pipeline stage failed",
           ...(shouldRetry(run) ? { retry: {
             inputDigest: run.inputDigest,

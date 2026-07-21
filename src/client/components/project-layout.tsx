@@ -18,6 +18,7 @@ const sections = [
   ["imports", "资料上传"],
   ["knowledge", "知识浏览"],
   ["graph", "知识图谱"],
+  ["frontend-map", "前端地图"],
   ["versions", "知识版本"],
   ["collaboration", "团队协作"],
   ["codex", "Codex 接入"]
@@ -29,7 +30,7 @@ export function useProjectContext(): ProjectContextValue {
   return value;
 }
 
-export function ProjectLayout({ api }: { api: ApiClient }) {
+export function ProjectLayout({ api, workspaceRole }: { api: ApiClient; workspaceRole?: "admin" | "member" | "reader" }) {
   const { projectId = "" } = useParams();
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.listProjects });
   const project = projects.data?.projects.find((item) => item.id === projectId && !item.archivedAt);
@@ -49,7 +50,8 @@ export function ProjectLayout({ api }: { api: ApiClient }) {
         <div className="project-meta"><span>{project.slug}</span><span>团队知识持续更新</span></div>
       </header>
       <nav className="project-tabs" aria-label="项目导航">
-        {sections.map(([path, label]) => <NavLink key={path} to={`/projects/${projectId}/${path}`}>{label}</NavLink>)}
+        {sections.filter(([path]) => path !== "frontend-map" || workspaceRole === "admin")
+          .map(([path, label]) => <NavLink key={path} to={`/projects/${projectId}/${path}`}>{label}</NavLink>)}
       </nav>
       <Outlet />
     </div>

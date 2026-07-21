@@ -47,7 +47,8 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   const report = page.getByRole("region", { name: "过滤报告" });
   await expect(report).toBeVisible();
   await expect(report).toContainText("扫描文件5");
-  await expect(report).toContainText("准备上传3");
+  await expect(report).toContainText("源码上传3");
+  await expect(report).toContainText("资源登记0");
   await expect(report).toContainText("自动忽略2");
   await expect(report).toContainText("依赖或构建目录1");
   await expect(report).toContainText("敏感文件1");
@@ -94,16 +95,100 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   await page.setViewportSize({ width: 1440, height: 1024 });
   await page.goto(`/projects/${projectId}/versions`);
 
-  const shadowFailure = await request.post("/__test__/shadow-failure");
+  const releaseBeforeShadow = await page.evaluate(async (activeProjectId) => {
+    const response = await fetch("/api/releases/current", {
+      headers: { "x-devkh-project": activeProjectId }
+    });
+    return (await response.json()).release.id as string;
+  }, projectId);
+
+  const shadowFailure = await request.post("/__test__/parser-unavailable-shadow");
   expect(shadowFailure.ok()).toBeTruthy();
+  const shadowFailureBody = await shadowFailure.json();
+  expect(shadowFailureBody.releaseIdBefore).toBe(releaseBeforeShadow);
+  expect(shadowFailureBody.releaseIdAfter).toBe(releaseBeforeShadow);
+  const failedPreview = await page.evaluate(async (activeProjectId) => {
+    const response = await fetch(`/api/projects/${activeProjectId}/frontend-preview`);
+    return response.json();
+  }, projectId);
+  expect(failedPreview).toMatchObject({
+    status: "candidate_failed", failedStage: { stage: "extract", errorCode: "PARSER_RUNTIME_UNAVAILABLE" }
+  });
   await page.reload();
   const shadowPanel = page.getByRole("region", { name: "影子验证状态" });
   await expect(shadowPanel).toContainText("影子验证发现问题");
-  await expect(shadowPanel).toContainText("PIPELINE_STAGE_FAILED");
+  await expect(shadowPanel).toContainText("PARSER_RUNTIME_UNAVAILABLE");
   await expect(shadowPanel).toContainText("正式版本保持不变");
   await expect(page.getByText("1.0.0").first()).toBeVisible();
   await expect(page.getByText("构建失败", { exact: true })).toHaveCount(0);
   await page.screenshot({ path: "test-results/shadow-failure-1440x1024.png", fullPage: true });
+
+  const releaseAfterShadow = await page.evaluate(async (activeProjectId) => {
+    const response = await fetch("/api/releases/current", {
+      headers: { "x-devkh-project": activeProjectId }
+    });
+    return (await response.json()).release.id as string;
+  }, projectId);
+  expect(releaseAfterShadow).toBe(releaseBeforeShadow);
+
+  const frontendShadow = await request.post("/__test__/frontend-shadow");
+  expect(frontendShadow.ok()).toBeTruthy();
+  const frontendShadowBody = await frontendShadow.json();
+  expect(frontendShadowBody).toMatchObject({ stageCount: 10, releaseIdBefore: releaseBeforeShadow, releaseIdAfter: releaseBeforeShadow });
+  await page.setViewportSize({ width: 1440, height: 1024 });
+  await page.goto(`/projects/${projectId}/frontend-map`);
+  await expect(page.getByRole("heading", { name: "React 前端地图" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "候选包可供验收" })).toBeVisible();
+  const frontendSearch = await page.evaluate(async (activeProjectId) => {
+    const response = await fetch(`/api/projects/${activeProjectId}/frontend-preview/search?q=DashboardPage`);
+    return { status: response.status, body: await response.json() };
+  }, projectId);
+  expect(frontendSearch.status).toBe(200);
+  expect(frontendSearch.body.results[0]).toMatchObject({ entityKey: "component:DashboardPage" });
+  await expect(page.getByRole("region", { name: "新旧内核只读比较" })).toContainText("引用有效");
+  const impact = page.getByRole("region", { name: "变更影响与建议测试" });
+  await expect(impact).toContainText("src/app.tsx");
+  await expect(impact).toContainText("src/app.test.tsx");
+  await page.getByRole("tab", { name: "路由与页面" }).click();
+  await expect(page.getByText("DashboardPage").first()).toBeVisible();
+  await page.getByRole("tab", { name: "状态与数据" }).click();
+  await expect(page.getByText("loadDashboard").first()).toBeVisible();
+  await expect(page.getByText(/requests · loadDashboard/).first()).toBeVisible();
+  await page.getByRole("tab", { name: "可视化" }).click();
+  await expect(page.getByText("DashboardChart").first()).toBeVisible();
+  const sourceButton = page.getByRole("button", { name: /src\/chart\.tsx 第/ }).first();
+  await sourceButton.click();
+  await expect(page.getByRole("complementary", { name: "候选构建来源代码" })).toContainText("echarts.init");
+  await page.screenshot({ path: "test-results/frontend-map-1440x1024.png", fullPage: true });
+
+  for (const viewport of [{ width: 390, height: 844 }, { width: 320, height: 700 }]) {
+    await page.setViewportSize(viewport);
+    await page.goto(`/projects/${projectId}/frontend-map`);
+    await expect(page.getByRole("heading", { name: "React 前端地图" })).toBeVisible();
+    const layout = await page.evaluate(() => ({
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+      offenders: [...document.querySelectorAll("body *")].map((element) => {
+        const rect = element.getBoundingClientRect();
+        return { tag: element.tagName, className: element.className, parentClassName: element.parentElement?.className, text: element.textContent?.trim().slice(0, 40), left: rect.left, right: rect.right, width: rect.width };
+      }).filter((rect) => rect.right > document.documentElement.clientWidth + 0.5 || rect.left < -0.5).slice(0, 10),
+      internalOverflow: [...document.querySelectorAll("body *")].map((element) => ({
+        tag: element.tagName, className: element.className, text: element.textContent?.trim().slice(0, 30),
+        clientWidth: element.clientWidth, scrollWidth: element.scrollWidth,
+        overflowX: getComputedStyle(element).overflowX
+      })).filter((item) => item.scrollWidth > item.clientWidth + 1).slice(0, 15)
+    }));
+    expect(layout.overflow, JSON.stringify({ offenders: layout.offenders, internalOverflow: layout.internalOverflow })).toBeLessThanOrEqual(0);
+    await page.screenshot({ path: `test-results/frontend-map-${viewport.width}x${viewport.height}.png`, fullPage: true });
+  }
+  await page.setViewportSize({ width: 1440, height: 1024 });
+  await page.goto(`/projects/${projectId}/knowledge`);
+  await expect(page.getByRole("heading", { name: "知识库", level: 1 })).toBeVisible();
+  await expect(page.getByText("版本 1.0.0", { exact: true })).toBeVisible();
+  const retainedKnowledgePage = page.locator(".page-tree button").first();
+  await expect(retainedKnowledgePage).toBeVisible();
+  const retainedKnowledgeTitle = await retainedKnowledgePage.innerText();
+  await retainedKnowledgePage.click();
+  await expect(page.locator(".knowledge-document")).toContainText(retainedKnowledgeTitle);
 
   await page.goto(`/projects/${projectId}/codex`);
   await expect(page.getByRole("heading", { name: "Codex 接入" })).toBeVisible();
@@ -176,7 +261,7 @@ test("folder import, project release, Codex, and collaboration workflow", async 
 
   await page.goto("/projects");
   await expect(page.getByText("1.0.0").first()).toBeVisible();
-  await expect(page.getByText("3 个文件")).toBeVisible();
+  await expect(page.getByText("14 个文件")).toBeVisible();
   const activeNavigationStyle = await page.getByRole("link", { name: "项目中心" }).first().evaluate((link) => {
     const style = getComputedStyle(link);
     return { backgroundColor: style.backgroundColor, boxShadow: style.boxShadow };

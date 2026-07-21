@@ -61,6 +61,24 @@ import {
   PipelineComparisonUnavailableError
 } from "./knowledge/pipeline/build-comparison.js";
 import { loadPublishedKnowledgeGraph } from "./knowledge/pipeline/graph-query.js";
+import {
+  FRONTEND_KNOWLEDGE_MODES,
+  effectiveFrontendKnowledgeMode,
+  validateProjectFrontendMode,
+  type FrontendKnowledgeMode
+} from "./knowledge/frontend/rollout-mode.js";
+import {
+  FrontendPreviewUnavailableError,
+  loadFrontendCandidatePreview
+} from "./knowledge/frontend/preview.js";
+import { compareFrontendKnowledge } from "./knowledge/frontend/comparison.js";
+import { deriveFrontendChangeImpact } from "./knowledge/frontend/change-impact.js";
+import {
+  frontendSourceReferenceIsValid,
+  loadFrontendSourceDescriptors
+} from "./knowledge/frontend/reference-validation.js";
+import { frontendCandidateRunStatus } from "./knowledge/frontend/preview-status.js";
+import { searchFrontendKnowledge } from "./knowledge/frontend/search.js";
 import { exportKnowledgeGraph } from "./knowledge/pipeline/viz.js";
 import { legacyBuildStatus } from "./knowledge/pipeline/contracts.js";
 import {
@@ -81,14 +99,24 @@ import {
   DEFAULT_RATE_LIMITS,
   MAX_REQUEST_BODY_BYTES,
   registerHttpSecurity,
+  UploadBodyConcurrencyState,
   type RateLimitPolicy
 } from "./security/http.js";
 import {
   FolderUploadError,
   importFolderFiles,
-  MAX_FOLDER_UPLOAD_FILES,
+  MAX_FOLDER_SCAN_FILES,
+  removePendingSnapshotMarker,
+  removeReadOnlyTree,
   type FolderUploadFile
 } from "./uploads/folder-import.js";
+import {
+  UploadSessionError,
+  UploadSessionService,
+  UPLOAD_MANIFEST_PAGE_SIZE,
+  type ClientUploadManifestEntry
+} from "./uploads/upload-session.js";
+import type { SourceBlobStore } from "./uploads/source-blob-store.js";
 
 const SESSION_COOKIE = "devkh_session";
 const CSRF_COOKIE = "devkh_csrf";
@@ -160,6 +188,32 @@ const projectSchema = z.object({
   name: z.string().trim().min(1).max(120),
   slug: z.string().trim().toLowerCase().regex(/^[a-z0-9][a-z0-9-]{0,79}$/)
 });
+const uploadSessionCreateSchema = z.object({
+  repositoryId: z.uuid(),
+  entryCount: z.number().int().min(1).max(100_000)
+}).strict();
+const uploadManifestEntryBaseSchema = z.object({
+  ordinal: z.number().int().nonnegative(),
+  path: z.string().min(1).max(4096),
+  byteSize: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  mediaType: z.string().trim().min(1).max(255).nullable().optional()
+});
+const uploadManifestEntrySchema = z.discriminatedUnion("kind", [
+  uploadManifestEntryBaseSchema.extend({
+    kind: z.literal("source"),
+    contentHash: z.string().regex(/^[a-f0-9]{64}$/u)
+  }).strict(),
+  uploadManifestEntryBaseSchema.extend({
+    kind: z.literal("asset"),
+    contentHash: z.null()
+  }).strict()
+]);
+const uploadManifestPageSchema = z.object({
+  entries: z.array(uploadManifestEntrySchema).min(1).max(UPLOAD_MANIFEST_PAGE_SIZE)
+}).strict();
+const uploadCommitSchema = z.object({
+  manifestDigest: z.string().regex(/^[a-f0-9]{64}$/u)
+}).strict();
 const memberSchema = z.object({
   email: z.email().transform((value) => value.toLowerCase()),
   password: z.string().min(12),
@@ -185,11 +239,20 @@ const PROJECT_ACTIVITY_METADATA_KEYS = new Set([
   "status",
   "unchanged"
 ]);
+const FRONTEND_ROLLOUT_ACTIVITY_METADATA_KEYS = new Set([
+  "projectId", "fromMode", "toMode", "reason"
+]);
 
-function projectActivityMetadata(metadata: Record<string, unknown> | undefined): Record<string, string | number | boolean | null> {
+function projectActivityMetadata(
+  action: string,
+  metadata: Record<string, unknown> | undefined
+): Record<string, string | number | boolean | null> {
   if (!metadata) return {};
+  const allowedKeys = action === "frontend_rollout.changed"
+    ? FRONTEND_ROLLOUT_ACTIVITY_METADATA_KEYS
+    : PROJECT_ACTIVITY_METADATA_KEYS;
   return Object.fromEntries(Object.entries(metadata).flatMap(([key, value]) =>
-    PROJECT_ACTIVITY_METADATA_KEYS.has(key) && (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null)
+    allowedKeys.has(key) && (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null)
       ? [[key, value]]
       : []
   ));
@@ -216,6 +279,10 @@ export interface ServerOptions {
   sessionStore?: SessionStore;
   legacySessionReadUntil?: Date;
   qualityArtifactReader?: { getJson(manifest: ArtifactManifest): Promise<unknown> };
+  knowledgeKernelMode?: FrontendKnowledgeMode;
+  frontendKnowledgeMode?: FrontendKnowledgeMode;
+  sourceStorageMode?: "legacy" | "shadow" | "active";
+  sourceBlobStore?: SourceBlobStore;
 }
 
 async function loadQualityAssessment(input: {
@@ -358,9 +425,9 @@ function requestedProjectId(request: FastifyRequest): string | undefined {
 async function* directFolderParts(request: FastifyRequest): AsyncGenerator<FolderUploadFile> {
   for await (const part of request.parts({
     limits: {
-      files: MAX_FOLDER_UPLOAD_FILES,
+      files: MAX_FOLDER_SCAN_FILES,
       fields: 0,
-      parts: MAX_FOLDER_UPLOAD_FILES,
+      parts: MAX_FOLDER_SCAN_FILES,
       fileSize: MAX_IMPORT_TABLE_WORKBOOK_BYTES
     }
   })) {
@@ -378,6 +445,9 @@ async function* directFolderParts(request: FastifyRequest): AsyncGenerator<Folde
 export function buildServer(options: ServerOptions): FastifyInstance {
   const server = Fastify({
     bodyLimit: MAX_REQUEST_BODY_BYTES,
+    connectionTimeout: 10_000,
+    requestTimeout: 10 * 60_000,
+    trustProxy: 1,
     logger: options.nodeEnv === "test" || process.env.NODE_ENV === "test" ? false : {
       redact: {
         paths: [
@@ -393,7 +463,16 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
   const sessionStore = options.sessionStore ?? new MemorySessionStore();
+  const knowledgeKernelMode = options.knowledgeKernelMode ?? "legacy";
+  const frontendKnowledgeMode = options.frontendKnowledgeMode ?? "legacy";
   const stageSseConnections = new Map<string, number>();
+  const uploadSessions = new UploadSessionService({
+    store: options.store,
+    dataDir: options.dataDir,
+    sourceStorageMode: options.sourceStorageMode,
+    sourceBlobStore: options.sourceBlobStore
+  });
+  const uploadBodies = new UploadBodyConcurrencyState();
   registerHttpSecurity(server, options.rateLimits ?? DEFAULT_RATE_LIMITS);
   server.addContentTypeParser(
     "application/octet-stream",
@@ -413,11 +492,21 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   void server.register(multipart, {
     preservePath: true,
     limits: {
-      files: MAX_FOLDER_UPLOAD_FILES,
+      files: MAX_FOLDER_SCAN_FILES,
       fields: 0,
-      parts: MAX_FOLDER_UPLOAD_FILES,
+      parts: MAX_FOLDER_SCAN_FILES,
       fileSize: MAX_IMPORT_TABLE_WORKBOOK_BYTES
     }
+  });
+  const uploadCleanupTimer = setInterval(() => {
+    void uploadSessions.cleanupExpired().catch((error) => server.log.error({ err: error }, "Upload session cleanup failed"));
+  }, 60 * 60 * 1_000);
+  uploadCleanupTimer.unref();
+  server.addHook("onReady", async () => {
+    await uploadSessions.cleanupExpired();
+  });
+  server.addHook("onClose", async () => {
+    clearInterval(uploadCleanupTimer);
   });
   if (options.clientDir) {
     const clientEntrypointPath = path.join(options.clientDir, "index.html");
@@ -514,6 +603,37 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   const requireContributor = (request: FastifyRequest, reply: FastifyReply) =>
     requireRole("member", request, reply);
 
+  async function requireUploadContributor(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    if (!params.success) {
+      sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload request");
+      return;
+    }
+    await requireContributor(request, reply);
+    if (reply.sent) return;
+    await requireProjectRole("member", params.data.projectId, request, reply);
+  }
+
+  async function requireUploadReplacementAdmin(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+    const params = z.object({ repositoryId: z.uuid() }).safeParse(request.params);
+    if (!params.success) {
+      sendError(reply, 400, "INVALID_UPLOAD", "Invalid replacement folder upload");
+      return;
+    }
+    await requireAdmin(request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repositories = await options.store.listArchivedRepositories(admin.workspaceId);
+    const repository = repositories.find((candidate) =>
+      candidate.id === params.data.repositoryId && candidate.kind === "upload"
+    );
+    if (!repository) {
+      sendError(reply, 404, "UPLOAD_REPLACEMENT_NOT_FOUND", "Folder upload replacement was not found");
+      return;
+    }
+    await requireProjectRole("admin", repository.projectId, request, reply);
+  }
+
   async function requireProjectRole(
     role: TeamRole,
     projectId: string,
@@ -527,6 +647,23 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!access || !access.role || !roleAllows(access.role, role)) {
       sendError(reply, 403, "PROJECT_ACCESS_DENIED", "Insufficient project role");
     }
+  }
+
+  function uploadIdempotencyKey(request: FastifyRequest, reply: FastifyReply): string | null {
+    const key = request.headers["idempotency-key"];
+    if (typeof key !== "string" || key.length < 1 || key.length > 200) {
+      sendError(reply, 400, "IDEMPOTENCY_KEY_REQUIRED", "A bounded Idempotency-Key header is required");
+      return null;
+    }
+    return key;
+  }
+
+  function uploadSessionFailure(request: FastifyRequest, reply: FastifyReply, error: unknown) {
+    if (error instanceof UploadSessionError) {
+      return sendError(reply, error.statusCode, error.code, error.message);
+    }
+    request.log.error({ err: error }, "Upload session request failed");
+    return sendError(reply, 500, "UPLOAD_FAILED", "Unable to process upload session");
   }
 
   async function requireRepositoryRole(
@@ -752,8 +889,187 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
 
   server.post(
-    "/api/projects/:projectId/folder-import",
+    "/api/projects/:projectId/upload-sessions",
     { preHandler: requireContributor },
+    async (request, reply) => {
+      const key = uploadIdempotencyKey(request, reply);
+      if (!key) return;
+      const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+      const body = uploadSessionCreateSchema.safeParse(request.body);
+      if (!params.success || !body.success) {
+        return sendError(reply, 400, "INVALID_UPLOAD_MANIFEST", "Invalid upload session request");
+      }
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      const repository = await options.store.getRepository(admin.workspaceId, body.data.repositoryId);
+      if (!repository || repository.projectId !== params.data.projectId || repository.kind !== "upload") {
+        return sendError(reply, 404, "UPLOAD_REPOSITORY_NOT_FOUND", "Upload repository was not found");
+      }
+      await requireProjectRole(repository.archivedAt ? "admin" : "member", params.data.projectId, request, reply);
+      if (reply.sent) return;
+      try {
+        const session = await uploadSessions.createSession({
+          workspaceId: admin.workspaceId,
+          projectId: params.data.projectId,
+          repositoryId: repository.id,
+          actorId: admin.id,
+          sessionVersion: admin.sessionVersion,
+          entryCount: body.data.entryCount,
+          idempotencyKey: key
+        });
+        return reply.code(201).send(session);
+      } catch (error) {
+        return uploadSessionFailure(request, reply, error);
+      }
+    }
+  );
+
+  server.put(
+    "/api/projects/:projectId/upload-sessions/:sessionId/manifest-pages/:page",
+    { bodyLimit: 4 * 1024 * 1024, preHandler: requireContributor },
+    async (request, reply) => {
+      const key = uploadIdempotencyKey(request, reply);
+      if (!key) return;
+      const params = z.object({
+        projectId: z.uuid(),
+        sessionId: z.uuid(),
+        page: z.coerce.number().int().nonnegative()
+      }).safeParse(request.params);
+      const body = uploadManifestPageSchema.safeParse(request.body);
+      if (!params.success || !body.success) {
+        return sendError(reply, 400, "INVALID_UPLOAD_MANIFEST", "Invalid upload manifest page");
+      }
+      await requireProjectRole("member", params.data.projectId, request, reply);
+      if (reply.sent) return;
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      try {
+        const result = await uploadSessions.putManifestPage({
+          workspaceId: admin.workspaceId,
+          projectId: params.data.projectId,
+          actorId: admin.id,
+          sessionVersion: admin.sessionVersion,
+          sessionId: params.data.sessionId,
+          page: params.data.page,
+          entries: body.data.entries as ClientUploadManifestEntry[],
+          idempotencyKey: key
+        });
+        return reply.send(result);
+      } catch (error) {
+        return uploadSessionFailure(request, reply, error);
+      }
+    }
+  );
+
+  server.put(
+    "/api/projects/:projectId/upload-sessions/:sessionId/files/:ordinal",
+    {
+      onRequest: requireUploadContributor,
+      preParsing: async (request, reply, payload) => {
+        const params = z.object({ sessionId: z.uuid() }).safeParse(request.params);
+        if (!params.success) return payload;
+        const release = uploadBodies.acquire(request.ip, params.data.sessionId);
+        if (!release) {
+          reply.header("retry-after", 1).code(429).send({
+            error: { code: "UPLOAD_CONCURRENCY_LIMIT", message: "Too many concurrent upload bodies" }
+          });
+          return payload;
+        }
+        reply.raw.once("finish", release);
+        reply.raw.once("close", release);
+        return payload;
+      },
+      bodyLimit: MAX_IMPORT_TABLE_WORKBOOK_BYTES
+    },
+    async (request, reply) => {
+      const key = uploadIdempotencyKey(request, reply);
+      if (!key) return;
+      const params = z.object({
+        projectId: z.uuid(),
+        sessionId: z.uuid(),
+        ordinal: z.coerce.number().int().nonnegative()
+      }).safeParse(request.params);
+      if (!params.success || !Buffer.isBuffer(request.body)) {
+        return sendError(reply, 400, "INVALID_UPLOAD", "Upload bytes must use application/octet-stream");
+      }
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      try {
+        const result = await uploadSessions.putFile({
+          workspaceId: admin.workspaceId,
+          projectId: params.data.projectId,
+          actorId: admin.id,
+          sessionVersion: admin.sessionVersion,
+          sessionId: params.data.sessionId,
+          ordinal: params.data.ordinal,
+          bytes: request.body,
+          idempotencyKey: key
+        });
+        return reply.send(result);
+      } catch (error) {
+        return uploadSessionFailure(request, reply, error);
+      }
+    }
+  );
+
+  server.post(
+    "/api/projects/:projectId/upload-sessions/:sessionId/commit",
+    { preHandler: requireContributor },
+    async (request, reply) => {
+      const key = uploadIdempotencyKey(request, reply);
+      if (!key) return;
+      const params = z.object({ projectId: z.uuid(), sessionId: z.uuid() }).safeParse(request.params);
+      const body = uploadCommitSchema.safeParse(request.body);
+      if (!params.success || !body.success) {
+        return sendError(reply, 400, "INVALID_UPLOAD_MANIFEST", "Invalid upload commit request");
+      }
+      await requireProjectRole("member", params.data.projectId, request, reply);
+      if (reply.sent) return;
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      try {
+        const result = await uploadSessions.commit({
+          workspaceId: admin.workspaceId,
+          projectId: params.data.projectId,
+          actorId: admin.id,
+          sessionVersion: admin.sessionVersion,
+          sessionId: params.data.sessionId,
+          manifestDigest: body.data.manifestDigest,
+          idempotencyKey: key
+        });
+        return reply.code(result.unchanged ? 200 : 201).send(result);
+      } catch (error) {
+        return uploadSessionFailure(request, reply, error);
+      }
+    }
+  );
+
+  server.delete(
+    "/api/projects/:projectId/upload-sessions/:sessionId",
+    { preHandler: requireContributor },
+    async (request, reply) => {
+      const key = uploadIdempotencyKey(request, reply);
+      if (!key) return;
+      const params = z.object({ projectId: z.uuid(), sessionId: z.uuid() }).safeParse(request.params);
+      if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid upload session");
+      await requireProjectRole("member", params.data.projectId, request, reply);
+      if (reply.sent) return;
+      const admin = (request as AuthenticatedRequest).sessionAdmin;
+      try {
+        await uploadSessions.cancel({
+          workspaceId: admin.workspaceId,
+          projectId: params.data.projectId,
+          actorId: admin.id,
+          sessionVersion: admin.sessionVersion,
+          sessionId: params.data.sessionId,
+          idempotencyKey: key
+        });
+        return reply.code(204).send();
+      } catch (error) {
+        return uploadSessionFailure(request, reply, error);
+      }
+    }
+  );
+
+  server.post(
+    "/api/projects/:projectId/folder-import",
+    { onRequest: requireUploadContributor },
     async (request, reply) => {
       const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
       if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid project folder upload");
@@ -771,6 +1087,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         actorId: admin.id,
         sourceKind: repository.kind
       });
+      let pendingSnapshotId: string | null = null;
       try {
         const summary = await importFolderFiles({
           files: directFolderParts(request),
@@ -778,24 +1095,47 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           workspaceId: admin.workspaceId,
           repositoryId: repository.id,
           actorId: admin.id,
-          store: options.store
+          store: options.store,
+          pendingImportReportId: report.id,
+          sourceStorageMode: options.sourceStorageMode,
+          sourceBlobStore: options.sourceBlobStore
         });
-        await options.store.finishImportReport(admin.workspaceId, report.id, {
-          status: "succeeded",
-          collectedFileCount: summary.fileCount,
-          collectedTextBytes: summary.textBytes,
-          ignored: summary.ignored,
-          snapshotId: summary.snapshotId,
-          failureCode: null
+        pendingSnapshotId = summary.snapshotId;
+        const completed = await options.store.completeFolderImport({
+          workspaceId: admin.workspaceId,
+          projectId: params.data.projectId,
+          repositoryId: repository.id,
+          actorId: admin.id,
+          actorSessionVersion: admin.sessionVersion,
+          reportId: report.id,
+          activateReplacement: false,
+          expectedCurrentRepositoryId: repository.id,
+          report: {
+            status: "succeeded",
+            collectedFileCount: summary.fileCount,
+            collectedTextBytes: summary.textBytes,
+            ignored: summary.ignored,
+            snapshotId: summary.snapshotId,
+            failureCode: null
+          }
         });
+        if (!completed) throw new Error("Folder import completion was not persisted");
+        await removePendingSnapshotMarker(summary.storagePath).catch(() => undefined);
         return reply.code(summary.unchanged ? 200 : 201).send({
           snapshotId: summary.snapshotId,
           sourceVersion: summary.sourceVersion,
           fileCount: summary.fileCount,
+          textBytes: summary.textBytes,
           unchanged: summary.unchanged,
           ignored: summary.ignored
         });
       } catch (error) {
+        if (pendingSnapshotId) {
+          const storagePath = await options.store.discardPendingFolderImport(
+            admin.workspaceId, report.id, pendingSnapshotId
+          ).catch(() => null);
+          if (storagePath) await removeReadOnlyTree(path.dirname(storagePath)).catch(() => undefined);
+        }
         const code = error instanceof FolderUploadError ? error.code : "UPLOAD_FAILED";
         await options.store.finishImportReport(admin.workspaceId, report.id, {
           status: "failed",
@@ -817,18 +1157,25 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.post(
     "/api/repositories/:repositoryId/folder-import",
-    { preHandler: requireContributor },
+    { onRequest: requireUploadReplacementAdmin },
     async (request, reply) => {
       const params = z.object({ repositoryId: z.uuid() }).safeParse(request.params);
       if (!params.success) return sendError(reply, 400, "INVALID_UPLOAD", "Invalid replacement folder upload");
       const admin = (request as AuthenticatedRequest).sessionAdmin;
       const candidates = await options.store.listArchivedRepositories(admin.workspaceId);
       const repository = candidates.find((candidate) => candidate.id === params.data.repositoryId && candidate.kind === "upload");
-      if (!repository || await options.store.latestSnapshot(admin.workspaceId, repository.id)) {
+      if (!repository) {
         return sendError(reply, 404, "UPLOAD_REPLACEMENT_NOT_FOUND", "Folder upload replacement was not found");
       }
       await requireProjectRole("admin", repository.projectId, request, reply);
       if (reply.sent) return;
+      if (await options.store.latestSnapshot(admin.workspaceId, repository.id)) {
+        return sendError(reply, 409, "UPLOAD_SESSION_INVALIDATED", "Pending upload replacement was not found");
+      }
+      const expectedCurrentRepository = await options.store.currentRepository(admin.workspaceId, repository.projectId);
+      if (!expectedCurrentRepository) {
+        return sendError(reply, 409, "UPLOAD_SESSION_INVALIDATED", "The current upload source changed");
+      }
       const report = await options.store.createImportReport({
         workspaceId: admin.workspaceId,
         projectId: repository.projectId,
@@ -837,6 +1184,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         sourceKind: repository.kind
       });
       let activated = false;
+      let pendingSnapshotId: string | null = null;
       try {
         const summary = await importFolderFiles({
           files: directFolderParts(request),
@@ -844,27 +1192,48 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           workspaceId: admin.workspaceId,
           repositoryId: repository.id,
           actorId: admin.id,
-          store: options.store
+          store: options.store,
+          pendingImportReportId: report.id,
+          sourceStorageMode: options.sourceStorageMode,
+          sourceBlobStore: options.sourceBlobStore
         });
-        const replacement = await options.store.activateUploadReplacementWithAudit(admin.workspaceId, repository.id, admin.id);
-        if (!replacement) return sendError(reply, 409, "UPLOAD_REPLACEMENT_NOT_FOUND", "Folder upload replacement was not found");
+        pendingSnapshotId = summary.snapshotId;
+        const completed = await options.store.completeFolderImport({
+          workspaceId: admin.workspaceId,
+          projectId: repository.projectId,
+          repositoryId: repository.id,
+          actorId: admin.id,
+          actorSessionVersion: admin.sessionVersion,
+          reportId: report.id,
+          activateReplacement: true,
+          expectedCurrentRepositoryId: expectedCurrentRepository.id,
+          report: {
+            status: "succeeded",
+            collectedFileCount: summary.fileCount,
+            collectedTextBytes: summary.textBytes,
+            ignored: summary.ignored,
+            snapshotId: summary.snapshotId,
+            failureCode: null
+          }
+        });
+        if (!completed) throw new Error("Folder replacement completion was not persisted");
+        await removePendingSnapshotMarker(summary.storagePath).catch(() => undefined);
         activated = true;
-        await options.store.finishImportReport(admin.workspaceId, report.id, {
-          status: "succeeded",
-          collectedFileCount: summary.fileCount,
-          collectedTextBytes: summary.textBytes,
-          ignored: summary.ignored,
-          snapshotId: summary.snapshotId,
-          failureCode: null
-        });
         return reply.code(summary.unchanged ? 200 : 201).send({
           snapshotId: summary.snapshotId,
           sourceVersion: summary.sourceVersion,
           fileCount: summary.fileCount,
+          textBytes: summary.textBytes,
           unchanged: summary.unchanged,
           ignored: summary.ignored
         });
       } catch (error) {
+        if (pendingSnapshotId) {
+          const storagePath = await options.store.discardPendingFolderImport(
+            admin.workspaceId, report.id, pendingSnapshotId
+          ).catch(() => null);
+          if (storagePath) await removeReadOnlyTree(path.dirname(storagePath)).catch(() => undefined);
+        }
         const code = error instanceof FolderUploadError ? error.code : "UPLOAD_FAILED";
         await options.store.finishImportReport(admin.workspaceId, report.id, {
           status: "failed",
@@ -946,6 +1315,69 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return reply.code(201).send({ project: projectDto(project) });
   });
 
+  const frontendRolloutParamsSchema = z.object({ projectId: z.uuid() });
+  const frontendRolloutBodySchema = z.object({
+    mode: z.enum(FRONTEND_KNOWLEDGE_MODES),
+    reason: z.string().trim().min(1).max(500)
+  });
+  const frontendRolloutDto = (
+    rollout: Awaited<ReturnType<AppStore["getProjectFrontendRollout"]>>
+  ) => ({
+    kernelMode: knowledgeKernelMode,
+    systemMode: frontendKnowledgeMode,
+    projectMode: rollout?.mode ?? null,
+    effectiveMode: effectiveFrontendKnowledgeMode({
+      kernelMode: knowledgeKernelMode,
+      systemMode: frontendKnowledgeMode,
+      ...(rollout ? { projectMode: rollout.mode } : {})
+    }),
+    reason: rollout?.reason ?? null,
+    updatedBy: rollout?.updatedBy ?? null,
+    updatedAt: rollout?.updatedAt ?? null
+  });
+
+  server.get("/api/projects/:projectId/frontend-rollout", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = frontendRolloutParamsSchema.safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project");
+    await requireProjectRole("reader", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    return frontendRolloutDto(await options.store.getProjectFrontendRollout(
+      admin.workspaceId, params.data.projectId
+    ));
+  });
+
+  server.put("/api/projects/:projectId/frontend-rollout", { preHandler: requireAdministrator }, async (request, reply) => {
+    const params = frontendRolloutParamsSchema.safeParse(request.params);
+    const body = frontendRolloutBodySchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return sendError(reply, 400, "INVALID_REQUEST", "Invalid frontend rollout configuration");
+    }
+    try {
+      validateProjectFrontendMode({
+        kernelMode: knowledgeKernelMode,
+        systemMode: frontendKnowledgeMode,
+        projectMode: body.data.mode
+      });
+    } catch {
+      return sendError(reply, 409, "FRONTEND_MODE_NOT_ALLOWED", "Frontend mode exceeds the configured system cap");
+    }
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const access = await options.store.projectAccess(admin.workspaceId, params.data.projectId, admin.id);
+    if (!access || access.project.archivedAt !== null) {
+      return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    }
+    const rollout = await options.store.setProjectFrontendRollout({
+      workspaceId: admin.workspaceId,
+      projectId: params.data.projectId,
+      mode: body.data.mode,
+      reason: body.data.reason,
+      actorId: admin.id
+    });
+    if (!rollout) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    return frontendRolloutDto(rollout);
+  });
+
   server.get("/api/projects/:projectId/summary", { preHandler: requireAdmin }, async (request, reply) => {
     const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
     if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid project");
@@ -1017,7 +1449,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         action: event.action,
         resourceType: event.resourceType,
         resourceId: event.resourceId ?? null,
-        metadata: projectActivityMetadata(event.metadata),
+        metadata: projectActivityMetadata(event.action, event.metadata),
         createdAt: event.createdAt
       })),
       members: members.map(memberDto),
@@ -1064,6 +1496,226 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         ? deriveChangeImpact(change, metadata!, graph)
         : change
     };
+  });
+
+  server.get("/api/projects/:projectId/frontend-preview", { preHandler: requireAdministrator }, async (request, reply) => {
+    if (!options.qualityArtifactReader) {
+      return sendError(reply, 503, "FRONTEND_PREVIEW_UNAVAILABLE", "Frontend preview artifacts are unavailable");
+    }
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid frontend preview project");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const project = (await options.store.listProjects(admin.workspaceId))
+      .find((candidate) => candidate.id === params.data.projectId);
+    if (!project || project.archivedAt !== null) {
+      return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    }
+    const repository = await options.store.currentRepository(admin.workspaceId, project.id);
+    if (!repository) return { status: "source_missing", preview: null };
+    const build = (await options.store.listBuilds(admin.workspaceId, repository.id, { limit: 1, offset: 0 }))[0];
+    if (!build) return { status: "build_missing", preview: null };
+    if (build.status === "failed") {
+      return { status: "build_failed", preview: null, build: { id: build.id, status: build.status } };
+    }
+    const runs = await options.store.listPipelineStageRuns(admin.workspaceId, project.id, build.id);
+    const candidateStatus = frontendCandidateRunStatus(runs);
+    if (candidateStatus.status === "candidate_failed") {
+      return {
+        status: "candidate_failed", preview: null, build: { id: build.id, status: build.status },
+        failedStage: candidateStatus.failedStage
+      };
+    }
+    if (candidateStatus.status === "candidate_pending") {
+      return { status: "candidate_pending", preview: null, build: { id: build.id, status: build.status } };
+    }
+    try {
+      const preview = await loadFrontendCandidatePreview({
+        store: options.store,
+        reader: options.qualityArtifactReader,
+        workspaceId: admin.workspaceId,
+        projectId: project.id,
+        buildId: build.id
+      });
+      const [metadata, pages, searchDocuments, legacyGraph, change, latestSnapshot] = await Promise.all([
+        options.store.knowledgeMetadataForBuild(admin.workspaceId, build.id),
+        options.store.listKnowledgePagesForBuild(admin.workspaceId, build.id),
+        options.store.listPipelineSearchDocuments(admin.workspaceId, project.id, build.id),
+        options.store.getKnowledgeGraph(admin.workspaceId, project.id, build.id),
+        options.store.snapshotChangeSummary(admin.workspaceId, repository.id, build.snapshotId),
+        options.store.latestSnapshot(admin.workspaceId, repository.id)
+      ]);
+      const changedPaths = change ? [...change.added, ...change.modified, ...change.deleted] : [];
+      const legacyImpact = change
+        ? deriveChangeImpact(change, metadata, legacyGraph)
+        : null;
+      const candidateImpact = deriveFrontendChangeImpact({
+        changedPaths,
+        graph: {
+          schemaVersion: preview.graph.schemaVersion,
+          snapshotId: preview.graph.snapshotId,
+          analyzerManifestDigest: preview.graph.analyzerManifestDigest,
+          analyzerManifest: [],
+          entities: preview.graph.nodes,
+          edges: preview.graph.edges
+        }
+      });
+      const buildSnapshot = await options.store.findSnapshotById(admin.workspaceId, build.snapshotId);
+      if (!buildSnapshot) throw new FrontendPreviewUnavailableError("Frontend candidate snapshot is unavailable");
+      const pageRefs = preview.pages.flatMap((page) => [
+        ...page.citations,
+        ...page.items.flatMap((item) => item.sourceRefs),
+        ...page.chunks.flatMap((chunk) => chunk.citations)
+      ]);
+      const searchRefs = preview.search.flatMap((document) => document.citations);
+      const issueRefs = preview.quality.issues.flatMap((issue) => issue.sourceRefs);
+      const referencedPaths = new Set([
+        ...preview.graph.nodes.flatMap((node) => node.sourceRefs),
+        ...preview.graph.edges
+          .filter((edge) => edge.evidenceClass === "fact")
+          .flatMap((edge) => edge.sourceRefs),
+        ...pageRefs,
+        ...searchRefs,
+        ...issueRefs
+      ].map((reference) => reference.path));
+      const candidateSources = await loadFrontendSourceDescriptors({
+        snapshot: buildSnapshot,
+        files: (await options.store.listSnapshotFiles(admin.workspaceId, build.snapshotId))
+          .filter((file) => referencedPaths.has(file.path))
+      });
+      return {
+        status: "ready",
+        stale: latestSnapshot?.id !== build.snapshotId,
+        preview,
+        comparison: compareFrontendKnowledge({
+          legacy: {
+            entityKeys: metadata.symbols.map((symbol) => `${symbol.kind}:${symbol.path}:${symbol.name}`),
+            factKeys: metadata.dependencies.map((edge) => `${edge.kind}:${edge.path}->${edge.targetPath ?? edge.target}`),
+            pageKeys: pages.map((page) => page.slug),
+            searchKeys: searchDocuments.map((document) => document.documentKey),
+            impactPaths: legacyImpact?.affectedModules ?? [],
+            suggestedTestPaths: legacyImpact?.suggestedTests ?? [],
+            issueCount: 0
+          },
+          candidate: {
+            snapshotId: preview.build.snapshotId,
+            sources: candidateSources,
+            pageRefs,
+            searchRefs,
+            issueRefs,
+            entities: preview.graph.nodes,
+            edges: preview.graph.edges,
+            pageKeys: preview.pages.map((page) => page.slug),
+            searchKeys: preview.search.map((document) => document.documentKey),
+            impactPaths: candidateImpact.affectedPaths,
+            suggestedTestPaths: candidateImpact.suggestedTestPaths,
+            issueCount: preview.quality.issues.length
+          }
+        })
+      };
+    } catch (error) {
+      if (error instanceof FrontendPreviewUnavailableError || error instanceof z.ZodError) {
+        return sendError(reply, 409, "FRONTEND_PREVIEW_INVALID", "Frontend candidate package is incomplete or invalid");
+      }
+      throw error;
+    }
+  });
+
+  server.get("/api/projects/:projectId/frontend-preview/source", { preHandler: requireAdministrator }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    const query = z.object({
+      buildId: z.uuid(), path: z.string().min(1).max(500),
+      startLine: z.coerce.number().int().positive(), endLine: z.coerce.number().int().positive()
+    }).refine((value) => value.endLine >= value.startLine && value.endLine - value.startLine + 1 <= 500)
+      .safeParse(request.query);
+    if (!params.success || !query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid frontend preview source range");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const build = await options.store.getBuild(admin.workspaceId, query.data.buildId);
+    const repository = build ? await options.store.getRepository(admin.workspaceId, build.repositoryId) : null;
+    if (!build || !repository || repository.projectId !== params.data.projectId) {
+      return sendError(reply, 404, "BUILD_NOT_FOUND", "Build was not found");
+    }
+    const snapshot = await options.store.findSnapshotById(admin.workspaceId, build.snapshotId);
+    const sourceFile = await options.store.findSourceFile(admin.workspaceId, build.snapshotId, query.data.path);
+    if (!snapshot || !sourceFile) return sendError(reply, 404, "SOURCE_NOT_FOUND", "Source file was not found");
+    const root = await fs.realpath(snapshot.storagePath);
+    const candidate = await fs.realpath(path.resolve(root, query.data.path)).catch(() => null);
+    if (!candidate || (!candidate.startsWith(`${root}${path.sep}`) && candidate !== root)) {
+      return sendError(reply, 400, "INVALID_SOURCE_PATH", "Source path is outside the snapshot");
+    }
+    const bytes = await fs.readFile(candidate);
+    if (createHash("sha256").update(bytes).digest("hex") !== sourceFile.contentHash) {
+      return sendError(reply, 409, "SOURCE_CHANGED", "Snapshot source no longer matches its citation");
+    }
+    let content: string;
+    try {
+      content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      return sendError(reply, 409, "SOURCE_INVALID", "Snapshot source is not valid UTF-8 text");
+    }
+    const lines = content.split(/\r?\n/);
+    if (query.data.endLine > lines.length) return sendError(reply, 400, "INVALID_SOURCE_RANGE", "Source range exceeds the file");
+    return {
+      path: query.data.path, startLine: query.data.startLine, endLine: query.data.endLine,
+      commitSha: snapshot.commitSha, blobHash: sourceFile.contentHash,
+      content: lines.slice(query.data.startLine - 1, query.data.endLine).join("\n")
+    };
+  });
+
+  server.get("/api/projects/:projectId/frontend-preview/search", { preHandler: requireAdministrator }, async (request, reply) => {
+    if (!options.qualityArtifactReader) {
+      return sendError(reply, 503, "FRONTEND_PREVIEW_UNAVAILABLE", "Frontend preview artifacts are unavailable");
+    }
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    const query = z.object({ q: z.string().trim().min(1).max(500) }).safeParse(request.query);
+    if (!params.success || !query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid frontend preview search");
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const project = (await options.store.listProjects(admin.workspaceId))
+      .find((candidate) => candidate.id === params.data.projectId && candidate.archivedAt === null);
+    if (!project) return sendError(reply, 404, "PROJECT_NOT_FOUND", "Project was not found");
+    const repository = await options.store.currentRepository(admin.workspaceId, project.id);
+    const build = repository
+      ? (await options.store.listBuilds(admin.workspaceId, repository.id, { limit: 1, offset: 0 }))[0]
+      : null;
+    if (!build) return { results: [] };
+    try {
+      const preview = await loadFrontendCandidatePreview({
+        store: options.store,
+        reader: options.qualityArtifactReader,
+        workspaceId: admin.workspaceId,
+        projectId: project.id,
+        buildId: build.id
+      });
+      const results = searchFrontendKnowledge({
+        query: query.data.q,
+        documents: preview.search,
+        graph: { nodes: preview.graph.nodes, edges: preview.graph.edges },
+        access: {
+          canReadProject: true, visibility: "shadow", viewerRole: "admin",
+          buildId: build.id, currentReleaseBuildId: null
+        }
+      });
+      const snapshot = await options.store.findSnapshotById(admin.workspaceId, build.snapshotId);
+      if (!snapshot) throw new FrontendPreviewUnavailableError("Frontend candidate snapshot is unavailable");
+      const referencedPaths = new Set(results.flatMap((result) => result.citations.map((reference) => reference.path)));
+      const sources = await loadFrontendSourceDescriptors({
+        snapshot,
+        files: (await options.store.listSnapshotFiles(admin.workspaceId, build.snapshotId))
+          .filter((file) => referencedPaths.has(file.path))
+      });
+      if (results.some((result) => result.citations.some((reference) => !frontendSourceReferenceIsValid(
+        reference, build.snapshotId, sources
+      )))) {
+        throw new FrontendPreviewUnavailableError("Frontend candidate search citation is invalid");
+      }
+      return {
+        results
+      };
+    } catch (error) {
+      if (error instanceof FrontendPreviewUnavailableError || error instanceof z.ZodError) {
+        return sendError(reply, 409, "FRONTEND_PREVIEW_INVALID", "Frontend candidate package is incomplete or invalid");
+      }
+      throw error;
+    }
   });
 
   server.get("/api/projects/:projectId/graph", { preHandler: requireAdmin }, async (request, reply) => {
@@ -1612,6 +2264,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (parsed.data.kind === "upload") {
       const candidate = await options.store.prepareUploadReplacementWithAudit(
         admin.workspaceId,
+        current.projectId,
         parsed.data.name,
         admin.id
       );
@@ -1620,6 +2273,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
     const repository = await options.store.switchRepositoryWithAudit(
       admin.workspaceId,
+      current.projectId,
       repositoryInput(parsed.data, options.masterKey),
       admin.id
     );
@@ -1689,6 +2343,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
           dataDir: options.dataDir,
           store: options.store,
           actorId: admin.id,
+          sourceStorageMode: options.sourceStorageMode,
+          sourceBlobStore: options.sourceBlobStore,
           ...(encryptedCredential
             ? { token: decryptSecret(encryptedCredential, options.masterKey) }
             : {})

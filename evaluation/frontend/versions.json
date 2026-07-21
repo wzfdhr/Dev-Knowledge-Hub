@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "policy": "Changes require a separate technical review and committed fixture evidence.",
+  "currentRepository": {
+    "fixture": "repository-root",
+    "react": "19.2.7",
+    "reactDom": "19.2.7",
+    "vite": "8.1.4",
+    "typescript": "6.0.3"
+  },
+  "compatibilityFixtures": [
+    {
+      "fixture": "react-vite",
+      "react": "18.3.1",
+      "reactDom": "18.3.1",
+      "vite": "5.4.21",
+      "typescript": "5.4.5"
+    },
+    {
+      "fixture": "react-vite-held-out",
+      "react": "18.3.1",
+      "reactDom": "18.3.1",
+      "vite": "5.4.21",
+      "typescript": "5.4.5"
+    }
+  ],
+  "supportedRanges": {
+    "react": ["18.3.x", "19.2.x"],
+    "vite": ["5.4.x", "8.1.x"],
+    "typescript": ["5.4.x", "6.0.x"]
+  },
+  "parsers": {
+    "typescript": "6.0.3",
+    "html": { "status": "approved", "package": "parse5", "version": "8.0.1" },
+    "css": { "status": "approved", "package": "postcss", "version": "8.5.19" },
+    "selector": { "status": "approved", "package": "postcss-selector-parser", "version": "7.1.4" },
+    "sass": {
+      "status": "approved",
+      "package": "postcss-scss",
+      "version": "4.0.9",
+      "syntax": "scss",
+      "knownUnsupported": ["indented .sass syntax"]
+    },
+    "indentedSass": { "status": "deferred", "target": "V1 Trial", "reason": "no approved maintained parser" },
+    "less": { "status": "approved", "package": "postcss-less", "version": "6.0.0" }
+  },
+  "performanceBaseline": {
+    "runner": "github-actions-ubuntu-24.04-x64",
+    "cpu": "4-vcpu-x64",
+    "logicalCores": 4,
+    "memoryMiB": 16384,
+    "node": "22.13.0",
+    "dataset": "frontend-v1-core",
+    "datasetDigestAlgorithm": "sha256",
+    "datasetDigest": "8f3cffaebd83658b9287b073ef9f4796b89a9f7ce30a771ea65078db558518a0"
+  }
+}

@@ -33,8 +33,13 @@ The administration API uses JSON under `/api`. Except health, setup status, setu
 | GET | `/api/repositories/current` | Current sanitized repository |
 | GET | `/api/repositories/current/status` | Repository and latest snapshot |
 | POST | `/api/repositories/current/sync` | Create/reuse immutable snapshot |
-| POST | `/api/projects/:projectId/folder-import` | Multipart `files`: import a pre-filtered project folder into its active upload source |
-| POST | `/api/repositories/:repositoryId/folder-import` | Multipart `files`: import a pre-filtered pending replacement and atomically activate it |
+| POST | `/api/projects/:projectId/upload-sessions` | Create a 24-hour resumable session with `{repositoryId,entryCount}` and `Idempotency-Key` |
+| PUT | `/api/projects/:projectId/upload-sessions/:sessionId/manifest-pages/:page` | Submit up to 500 ordered source/asset manifest entries with `Idempotency-Key` |
+| PUT | `/api/projects/:projectId/upload-sessions/:sessionId/files/:ordinal` | Submit one server-required source file as `application/octet-stream` with `Idempotency-Key` |
+| POST | `/api/projects/:projectId/upload-sessions/:sessionId/commit` | Verify and commit `{manifestDigest}` with `Idempotency-Key` |
+| DELETE | `/api/projects/:projectId/upload-sessions/:sessionId` | Cancel an unfinished session with `Idempotency-Key` |
+| POST | `/api/projects/:projectId/folder-import` | Compatibility-only multipart folder import |
+| POST | `/api/repositories/:repositoryId/folder-import` | Compatibility-only multipart replacement import |
 | GET/POST | `/api/builds` | List newest-first or start `{snapshotId}` |
 | GET | `/api/builds/:id` | Build details |
 | GET | `/api/builds/:id/comparison` | Workspace-admin-only, read-only comparison of legacy and persisted shadow-pipeline output for one build |
@@ -59,11 +64,15 @@ Rate-limited write buckets are setup, login, MCP, folder upload, and feedback tr
 
 ## Folder uploads
 
-The console scans and filters the selected directory in the browser, then sends only the accepted source and documentation files as multipart file parts with validated relative paths. Dependency directories such as `node_modules`, build output, binary files, generated files, secrets, and files over 1 MiB are excluded before transfer and are not included in snapshots, builds, or knowledge algorithms. The server repeats the path and content filtering before creating a snapshot.
+The console scans and filters the selected directory before transfer. Dependency directories such as `node_modules`, build output, generated files, secrets, and oversized source files are excluded without reading their contents. Local pre-filter totals are shown for the current selection but are not persisted as trusted audit data; import report `ignored` totals contain only server-verified manifest filtering. Images, fonts, and media are represented only by path, byte size, and media type; their bytes are neither read nor uploaded, their content hash is `null`, and their trust is fixed to `client_unverified`. Asset metadata cannot create knowledge facts, Graph edges, or citations.
 
-Folder upload accepts at most 50,000 files and 2 GiB of accepted text. Every part must be named `files` and carry a safe, non-duplicate relative path. A successful response is `{snapshotId,sourceVersion,fileCount,unchanged,ignored}`, where `ignored` reports the server-side reason summary and `sourceVersion` is a deterministic 40-character hash of sorted accepted paths and contents. New snapshots return HTTP 201 and identical content returns HTTP 200. No ZIP archive is created or retained.
+The browser hashes accepted source files with Web Crypto in a module Worker, creates a session, submits manifest pages out of order if needed, and uploads only entries returned as `upload_required`. Every mutation is idempotent. The session is bound to workspace, project, repository, actor, session version, current source, and the latest published snapshot observed at creation; a stale session cannot replace newer imported content, while identical content reuses the published snapshot. Every request rechecks authorization, and disablement, membership removal, password/session rotation, cancellation, or expiry invalidates unfinished work. Browser resume hints contain only an idempotency key and creation time, never source bytes.
 
-The endpoint returns HTTP 409 `UPLOAD_REPOSITORY_REQUIRED` when no active repository exists or the active repository is not kind `upload`. A Git/local replacement is immediately archived and switched. An upload replacement first returns HTTP 202 with `{repository,pendingUpload:true}` while the existing repository remains current; send its accepted folder files to `/api/repositories/:repositoryId/folder-import` to atomically activate the candidate. Failed imports discard the empty candidate and leave the former repository current.
+Folder upload accepts at most 50,000 accepted source files, 100,000 total manifest entries, 32 MiB of canonical manifest metadata, and 2 GiB of accepted text. The browser uploads source decisions page by page instead of retaining the complete decision set. The server revalidates paths, content bytes, hashes, filters, and limits before creating a snapshot. A successful response is `{snapshotId,sourceVersion,fileCount,textBytes,unchanged,ignored,assetCount}`. `sourceVersion` is a deterministic 40-character hash of sorted accepted paths and contents. New snapshots return HTTP 201 and identical content returns HTTP 200. No ZIP archive is created or retained. Expired unfinished sessions and staged bytes are cleaned periodically.
+
+Production PostgreSQL pools must allow at least four connections. Upload body permits are acquired only after session and project authorization; incomplete requests are bounded by the server connection and request timeouts.
+
+An upload replacement first returns HTTP 202 with `{repository,pendingUpload:true}` while the existing repository remains current. Create the upload session with that repository ID; a successful commit atomically activates the candidate. Failed or interrupted imports leave the former repository current. The multipart routes remain temporarily available for compatibility, but the React console no longer uses them.
 
 ## Git outbound policy
 

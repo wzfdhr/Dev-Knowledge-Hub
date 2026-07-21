@@ -3,6 +3,8 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { validateRecoveryEvidenceFile } from "./backup/validate-recovery-evidence.mjs";
+
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const compose = ["compose", "-f", resolve(repositoryRoot, "docker-compose.yml")];
@@ -27,7 +29,8 @@ export const VERIFY_STEPS = Object.freeze([
 export const CONTAINER_STEPS = Object.freeze([
   { name: "container-build", command: "docker", args: ["build", "--target", "runtime", "-t", "devkh:ci", repositoryRoot] },
   { name: "compose-config", command: "docker", args: [...compose, "config", "--quiet"] },
-  { name: "compose-up", command: "docker", args: [...compose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "postgres", "app"] },
+  { name: "compose-up", command: "docker", args: [...compose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "postgres", "parser", "app"] },
+  { name: "parser-isolation", command: "node", args: [resolve(repositoryRoot, "scripts/security/verify-parser-container.mjs")] },
   {
     name: "application-health",
     command: "docker",
@@ -51,23 +54,53 @@ async function invalidateRecoveryEvidence(root, errorClass) {
   if (!root) return;
   await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true, mode: 0o700 });
-  await writeFile(join(root, "recovery-cleanup-failed.json"), `${JSON.stringify({
+  await writeFile(join(root, "recovery-verification-failed.json"), `${JSON.stringify({
     schemaVersion: 1,
-    operation: "restore-drill",
+    operation: errorClass === "container_verification_failed" ? "container-verification" : "restore-drill",
     result: "failed",
     errorClass,
-    retentionPath: root,
     finishedAt: new Date().toISOString()
   })}\n`, { mode: 0o600 });
 }
 
-async function finalizeRecoveryEvidence(root) {
+export async function finalizeRecoveryEvidence(root, options = {}) {
   if (!root) throw new Error("RECOVERY_EVIDENCE_DIR is required to finalize container recovery evidence");
   const { readdir, rename } = await import("node:fs/promises");
-  const entries = await readdir(root, { recursive: true });
-  const pending = entries.filter((entry) => entry.endsWith(".json.pending"));
-  if (pending.length !== 1) throw new Error(`Expected exactly one pending recovery evidence file, found ${pending.length}`);
-  await rename(join(root, pending[0]), join(root, pending[0].slice(0, -".pending".length)));
+  const renameFile = options.renameFile ?? rename;
+  const validateEvidence = options.validateEvidence ?? validateRecoveryEvidenceFile;
+  const removeArtifacts = async () => {
+    const current = await readdir(root, { recursive: true }).catch(() => []);
+    const artifacts = current.filter((entry) => {
+      const evidenceDirectoryEntry = entry.split(/[\\/]/).includes("recovery-evidence");
+      return evidenceDirectoryEntry && (
+        entry.endsWith(".json.pending")
+        || entry.endsWith(".source-blobs.ndjson.pending")
+        || entry.endsWith(".source-blobs.ndjson")
+        || entry.endsWith(".json")
+      );
+    });
+    await Promise.all(artifacts.map((entry) => rm(join(root, entry), { force: true })));
+  };
+
+  try {
+    const entries = await readdir(root, { recursive: true });
+    const pendingJson = entries.filter((entry) => entry.endsWith(".json.pending"));
+    const pendingSidecar = entries.filter((entry) => entry.endsWith(".source-blobs.ndjson.pending"));
+    if (pendingJson.length !== 1 || pendingSidecar.length !== 1) {
+      throw new Error(`Expected exactly one pending recovery evidence pair, found ${pendingJson.length} JSON and ${pendingSidecar.length} sidecar files`);
+    }
+    const jsonPendingPath = join(root, pendingJson[0]);
+    const sidecarPendingPath = join(root, pendingSidecar[0]);
+    const jsonFinalPath = jsonPendingPath.slice(0, -".pending".length);
+    const sidecarFinalPath = sidecarPendingPath.slice(0, -".pending".length);
+    await renameFile(sidecarPendingPath, sidecarFinalPath);
+    await renameFile(jsonPendingPath, jsonFinalPath);
+    await validateEvidence(jsonFinalPath);
+    return jsonFinalPath;
+  } catch (error) {
+    await removeArtifacts();
+    throw error;
+  }
 }
 
 export function parseReleaseScope(args) {
@@ -146,7 +179,7 @@ export async function runReleaseSteps(steps, options = {}) {
       const exitCode = Number.isInteger(error?.exitCode) ? error.exitCode : 1;
       throw Object.assign(
         new Error(`${step.name} failed with exit code ${exitCode}: ${commandText(step)}`),
-        { cause: error, exitCode }
+        { cause: error, exitCode, stepName: step.name }
       );
     }
     logger.log(`[release] PASS ${step.name}`);
@@ -158,6 +191,7 @@ export async function runContainerVerification(options = {}) {
   const execute = options.execute ?? executeStep;
   const logger = options.logger ?? console;
   const invalidateEvidence = options.invalidateEvidence ?? invalidateRecoveryEvidence;
+  const finalizeEvidence = options.finalizeEvidence ?? finalizeRecoveryEvidence;
 
   assertContainerIsolation(env);
   let failure;
@@ -169,6 +203,10 @@ export async function runContainerVerification(options = {}) {
 
   if (failure) {
     logger.error("[release] container verification failed; retaining the isolated Compose state for diagnosis");
+    const errorClass = failure.stepName === "recovery-drill"
+      ? "recovery_drill_failed"
+      : "container_verification_failed";
+    await invalidateEvidence(env.RECOVERY_EVIDENCE_DIR, errorClass);
     throw failure;
   }
 
@@ -180,7 +218,12 @@ export async function runContainerVerification(options = {}) {
   }
   if (failure) throw failure;
   if (env.RECOVERY_EVIDENCE_DEFER_FINALIZATION === "true") {
-    await finalizeRecoveryEvidence(env.RECOVERY_EVIDENCE_DIR);
+    try {
+      await finalizeEvidence(env.RECOVERY_EVIDENCE_DIR);
+    } catch (error) {
+      await invalidateEvidence(env.RECOVERY_EVIDENCE_DIR, "recovery_evidence_finalization_failed");
+      throw error;
+    }
   }
 }
 

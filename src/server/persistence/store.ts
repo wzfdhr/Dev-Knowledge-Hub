@@ -17,8 +17,14 @@ import type {
 import type { PipelineStageEvent } from "../knowledge/pipeline/events.js";
 import type { ImpactMindmap } from "../knowledge/pipeline/mindmap.js";
 import type { AGENT_FEEDBACK_STATUSES } from "../../shared/contracts.js";
-import type { LintIssue, SourceRef, TrustScore } from "../../shared/api-contracts.js";
+import type {
+  FrontendReleaseProvenance,
+  LintIssue,
+  SourceRef,
+  TrustScore
+} from "../../shared/api-contracts.js";
 import type { RemediationState } from "../knowledge/remediation.js";
+import type { FrontendKnowledgeMode } from "../knowledge/frontend/rollout-mode.js";
 
 export interface WorkspaceRecord {
   id: string;
@@ -111,6 +117,29 @@ export interface PipelineArtifactStore {
     manifest: ArtifactManifest,
     reason: "content_missing"
   ): Promise<void>;
+}
+
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+export interface SourceAnalysisArtifactKey {
+  workspaceId: string;
+  contentHash: string;
+  analyzerId: string;
+  analyzerVersion: string;
+  parserConfigDigest: string;
+}
+
+export interface SourceAnalysisArtifactRecord extends SourceAnalysisArtifactKey {
+  facts: { [key: string]: JsonValue };
+  factsDigest: string;
+  createdAt: Date;
+}
+
+export interface SourceAnalysisArtifactStore {
+  findSourceAnalysisArtifact(key: SourceAnalysisArtifactKey): Promise<SourceAnalysisArtifactRecord | null>;
+  putSourceAnalysisArtifact(
+    input: Omit<SourceAnalysisArtifactRecord, "createdAt">
+  ): Promise<SourceAnalysisArtifactRecord>;
 }
 
 export interface KnowledgeGraphRecord {
@@ -215,6 +244,16 @@ export interface ProjectRecord {
   slug: string;
   archivedAt: Date | null;
   createdAt: Date;
+}
+
+export interface ProjectFrontendRolloutRecord {
+  projectId: string;
+  workspaceId: string;
+  mode: FrontendKnowledgeMode;
+  reason: string;
+  updatedBy: string;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export type ProjectRole = TeamRole;
@@ -476,6 +515,126 @@ export interface SourceFileRecord {
   byteSize: number;
   contentHash: string;
   language: string | null;
+  sourceBlobId?: string | null;
+}
+
+export type SourceBlobStatus = "active" | "tombstoned" | "trash" | "deleted";
+
+export const SOURCE_BLOB_GC_CANDIDATE_LIMIT = 500;
+
+export function normalizeSourceBlobGcCandidateLimit(
+  limit = SOURCE_BLOB_GC_CANDIDATE_LIMIT
+): number {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > SOURCE_BLOB_GC_CANDIDATE_LIMIT) {
+    throw new RangeError(`Source blob GC candidate limit must be between 1 and ${SOURCE_BLOB_GC_CANDIDATE_LIMIT}`);
+  }
+  return limit;
+}
+
+export interface SourceBlobRecord {
+  id: string;
+  workspaceId: string;
+  contentHash: string;
+  generation: number;
+  byteSize: number;
+  status: SourceBlobStatus;
+  storageKey: string;
+  fencingToken: string | null;
+  tombstonedAt: Date | null;
+  trashedAt: Date | null;
+  deletedAt: Date | null;
+}
+
+export interface SourceBlobGcCursor {
+  workspaceId: string;
+  contentHash: string;
+  generation: number;
+  id: string;
+}
+
+export interface SourceBlobGcRunBoundary {
+  through: SourceBlobGcCursor;
+  creationCutoff: string;
+}
+
+export interface SourceBlobGcPageInput extends SourceBlobGcRunBoundary {
+  after?: SourceBlobGcCursor;
+  limit?: number;
+}
+
+export function sourceBlobGcCursor(record: SourceBlobRecord): SourceBlobGcCursor {
+  return {
+    workspaceId: record.workspaceId,
+    contentHash: record.contentHash,
+    generation: record.generation,
+    id: record.id
+  };
+}
+
+export function compareSourceBlobGcCursors(left: SourceBlobGcCursor, right: SourceBlobGcCursor): number {
+  return left.workspaceId.localeCompare(right.workspaceId)
+    || left.contentHash.localeCompare(right.contentHash)
+    || left.generation - right.generation
+    || left.id.localeCompare(right.id);
+}
+
+export interface CreateSourceBlobRecordInput {
+  workspaceId: string;
+  contentHash: string;
+  generation: number;
+  byteSize: number;
+  storageKey: string;
+}
+
+export interface LockedSourceBlobCatalog {
+  findActive(): Promise<SourceBlobRecord | null>;
+  findTombstoned(): Promise<SourceBlobRecord | null>;
+  findById(sourceBlobId: string): Promise<SourceBlobRecord | null>;
+  countReferences(sourceBlobId: string): Promise<number>;
+  nextGeneration(): Promise<number>;
+  create(input: CreateSourceBlobRecordInput): Promise<SourceBlobRecord>;
+  tombstoneIfUnreferenced(
+    sourceBlobId: string,
+    fencingToken: string,
+    at: Date
+  ): Promise<SourceBlobRecord | null>;
+  restoreTombstoned(sourceBlobId: string, fencingToken: string): Promise<SourceBlobRecord | null>;
+  markTrash(sourceBlobId: string, fencingToken: string, at: Date): Promise<SourceBlobRecord | null>;
+  markDeletedIfUnreferenced(
+    sourceBlobId: string,
+    fencingToken: string,
+    at: Date
+  ): Promise<SourceBlobRecord | null>;
+  recordGcInconsistency(sourceBlobId: string, reason: string): Promise<void>;
+}
+
+export interface SourceBlobGcLeaseCatalog {
+  findSourceBlobGcRunBoundary(): Promise<SourceBlobGcRunBoundary | null>;
+  listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]>;
+  withSourceBlobLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T>;
+}
+
+export interface SourceBlobCatalog {
+  findSourceBlobById(workspaceId: string, sourceBlobId: string): Promise<SourceBlobRecord | null>;
+  findSourceBlobGcRunBoundary(): Promise<SourceBlobGcRunBoundary | null>;
+  listSourceBlobGcCandidates(input: SourceBlobGcPageInput): Promise<SourceBlobRecord[]>;
+  withSourceBlobGcLease<T>(operation: (catalog: SourceBlobGcLeaseCatalog) => Promise<T>): Promise<
+    { acquired: true; value: T } | { acquired: false }
+  >;
+  withSourceBlobWriterLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T>;
+  withSourceBlobLock<T>(
+    workspaceId: string,
+    contentHash: string,
+    operation: (catalog: LockedSourceBlobCatalog) => Promise<T>
+  ): Promise<T>;
 }
 
 export interface SnapshotChangeSummary {
@@ -507,6 +666,133 @@ export interface ImportReportRecord {
   ignored: { total: number; reasons: Record<string, number> };
   snapshotId: string | null;
   failureCode: string | null;
+}
+
+export type UploadSessionStatus = "open" | "committing" | "committed" | "cancelled";
+export type UploadManifestEntryKind = "source" | "asset";
+export type UploadManifestDisposition = "upload_required" | "metadata_only" | "ignored";
+export type UploadManifestTrust = "pending" | "server_verified" | "client_unverified";
+export const MAX_UPLOAD_ACCEPTED_FILES = 50_000;
+export const MAX_UPLOAD_ACCEPTED_BYTES = 2 * 1024 * 1024 * 1024;
+
+export interface UploadSessionRecord {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  repositoryId: string;
+  actorId: string;
+  sessionVersion: number;
+  isReplacement: boolean;
+  expectedCurrentRepositoryId: string;
+  expectedLatestSnapshotId: string | null;
+  status: UploadSessionStatus;
+  entryCount: number;
+  manifestDigest: string | null;
+  snapshotId: string | null;
+  commitResponse: Record<string, unknown> | null;
+  expiresAt: Date;
+  committedAt: Date | null;
+  cancelledAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface CreateUploadSessionInput {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  repositoryId: string;
+  actorId: string;
+  sessionVersion: number;
+  isReplacement: boolean;
+  expectedCurrentRepositoryId: string;
+  entryCount: number;
+  expiresAt: Date;
+}
+
+export interface UploadManifestEntryInput {
+  ordinal: number;
+  path: string;
+  kind: UploadManifestEntryKind;
+  byteSize: number;
+  contentHash: string | null;
+  mediaType: string | null;
+  metadataByteSize: number;
+  disposition: UploadManifestDisposition;
+  trust: UploadManifestTrust;
+  ignoreReason: string | null;
+}
+
+export interface UploadSessionMutationIdentity {
+  workspaceId: string;
+  projectId: string;
+  sessionId: string;
+  actorId: string;
+  sessionVersion: number;
+}
+
+export interface UploadManifestEntryRecord extends UploadManifestEntryInput {
+  sessionId: string;
+  workspaceId: string;
+  uploadedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface UploadIdempotencyRecord {
+  workspaceId: string;
+  actorId: string;
+  idempotencyKey: string;
+  operation: string;
+  requestDigest: string;
+  sessionId: string | null;
+  responseStatus: number;
+  responseBody: Record<string, unknown>;
+  createdAt: Date;
+  expiresAt: Date;
+}
+
+export interface CompleteUploadSessionInput {
+  workspaceId: string;
+  projectId: string;
+  repositoryId: string;
+  sessionId: string;
+  actorId: string;
+  manifestDigest: string;
+  snapshotId: string;
+  reportId: string;
+  report: Pick<ImportReportRecord, "status" | "collectedFileCount" | "collectedTextBytes" | "ignored" | "snapshotId" | "failureCode">;
+  responseBody: Record<string, unknown>;
+}
+
+export interface CompleteFolderImportInput {
+  workspaceId: string;
+  projectId: string;
+  repositoryId: string;
+  actorId: string;
+  actorSessionVersion: number;
+  reportId: string;
+  activateReplacement: boolean;
+  expectedCurrentRepositoryId: string;
+  report: Pick<ImportReportRecord, "status" | "collectedFileCount" | "collectedTextBytes" | "ignored" | "snapshotId" | "failureCode">;
+}
+
+export interface ExpiredUploadSessionRecord {
+  id: string;
+  workspaceId: string;
+}
+
+export interface CancelUploadSessionResult {
+  session: UploadSessionRecord;
+  storagePaths: string[];
+}
+
+export interface CancelUploadSessionInput {
+  workspaceId: string;
+  projectId: string;
+  sessionId: string;
+  actorId: string;
+  sessionVersion: number;
 }
 
 export interface CreateSnapshotInput {
@@ -563,9 +849,16 @@ export interface ReleaseRecord {
   version: string;
   kernelMode: "legacy" | "pipeline";
   packageArtifactId: string | null;
+  releaseArtifactFamily: "knowledge-v1" | "frontend-v2";
+  packageStageRunId: string | null;
+  frontendIrSchemaVersion: number | null;
+  frontendGraphSchemaVersion: number | null;
+  analyzerManifestDigest: string | null;
   createdAt: Date;
   publishedAt: Date | null;
 }
+
+export type FrontendReleaseDraftProvenance = FrontendReleaseProvenance;
 
 export interface ReleaseRollbackResult {
   release: ReleaseRecord;
@@ -675,7 +968,8 @@ export interface KnowledgeStore {
     workspaceId: string,
     repositoryId: string,
     buildId: string,
-    version: string
+    version: string,
+    provenance?: FrontendReleaseDraftProvenance
   ): Promise<ReleaseRecord>;
   publishRelease(workspaceId: string, releaseId: string, channel?: string): Promise<ReleaseRecord>;
   rollbackReleaseToLegacy(
@@ -696,7 +990,7 @@ export interface KnowledgeStore {
   ): Promise<ReleaseRecord[]>;
 }
 
-export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, PipelineArtifactStore, PipelineSearchDocumentStore {
+export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, PipelineArtifactStore, PipelineSearchDocumentStore, SourceAnalysisArtifactStore, SourceBlobCatalog {
   listPipelineStageRuns(
     workspaceId: string,
     projectId: string,
@@ -756,6 +1050,17 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
     input: { name: string; slug: string },
     actorId: string
   ): Promise<ProjectRecord | null>;
+  getProjectFrontendRollout(
+    workspaceId: string,
+    projectId: string
+  ): Promise<ProjectFrontendRolloutRecord | null>;
+  setProjectFrontendRollout(input: {
+    workspaceId: string;
+    projectId: string;
+    mode: FrontendKnowledgeMode;
+    reason: string;
+    actorId: string;
+  }): Promise<ProjectFrontendRolloutRecord | null>;
   listAccessibleProjects(
     workspaceId: string,
     userId: string,
@@ -806,14 +1111,73 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
   ): Promise<AuditEventRecord[]>;
   countProjectActivity(workspaceId: string, projectId: string): Promise<number>;
   createImportReport(input: Omit<ImportReportRecord, "id" | "startedAt" | "finishedAt" | "status" | "collectedFileCount" | "collectedTextBytes" | "ignored" | "snapshotId" | "failureCode">): Promise<ImportReportRecord>;
+  createUploadSessionImportReport(
+    input: Omit<ImportReportRecord, "id" | "startedAt" | "finishedAt" | "status" | "collectedFileCount" | "collectedTextBytes" | "ignored" | "snapshotId" | "failureCode">,
+    sessionId: string
+  ): Promise<ImportReportRecord>;
   finishImportReport(
     workspaceId: string,
     reportId: string,
     input: Pick<ImportReportRecord, "status" | "collectedFileCount" | "collectedTextBytes" | "ignored" | "snapshotId" | "failureCode">
   ): Promise<ImportReportRecord | null>;
+  completeFolderImport(input: CompleteFolderImportInput): Promise<ImportReportRecord | null>;
   listImportReports(workspaceId: string, projectId: string, pagination?: Pagination): Promise<ImportReportRecord[]>;
   countImportReports(workspaceId: string, projectId: string): Promise<number>;
+  failStaleRunningImportReports(cutoff: Date): Promise<number>;
   deleteExpiredImportReports(cutoff: Date): Promise<number>;
+  createUploadSession(input: CreateUploadSessionInput): Promise<UploadSessionRecord>;
+  getUploadSession(workspaceId: string, sessionId: string): Promise<UploadSessionRecord | null>;
+  repositoryHasActiveUploadSession(workspaceId: string, repositoryId: string): Promise<boolean>;
+  getUploadSessionStagingOwner(sessionId: string): Promise<{
+    workspaceId: string;
+    active: boolean;
+  } | null>;
+  saveUploadManifestPage(
+    identity: UploadSessionMutationIdentity,
+    entries: UploadManifestEntryInput[]
+  ): Promise<UploadManifestEntryRecord[]>;
+  listUploadManifestEntries(
+    workspaceId: string,
+    sessionId: string,
+    pagination?: Pagination
+  ): Promise<UploadManifestEntryRecord[]>;
+  getUploadManifestEntry(
+    workspaceId: string,
+    sessionId: string,
+    ordinal: number
+  ): Promise<UploadManifestEntryRecord | null>;
+  verifyUploadManifestEntry(
+    identity: UploadSessionMutationIdentity,
+    ordinal: number,
+    input: { disposition: "upload_required" | "ignored"; trust: "server_verified"; ignoreReason: string | null }
+  ): Promise<UploadManifestEntryRecord | null>;
+  acquireUploadSessionLock(workspaceId: string, sessionId: string): Promise<() => Promise<void>>;
+  acquireUploadMutationLock(
+    workspaceId: string,
+    sessionId: string,
+    actorId: string,
+    idempotencyKey: string
+  ): Promise<() => Promise<void>>;
+  markUploadSessionCommitting(workspaceId: string, sessionId: string): Promise<UploadSessionRecord | null>;
+  completeUploadSessionCommit(input: CompleteUploadSessionInput): Promise<UploadSessionRecord | null>;
+  cancelUploadSession(input: CancelUploadSessionInput): Promise<CancelUploadSessionResult | null>;
+  uploadSnapshotExists(
+    workspaceId: string,
+    snapshotId: string,
+    sessionId: string
+  ): Promise<boolean>;
+  listExpiredUploadSessions(now: Date): Promise<ExpiredUploadSessionRecord[]>;
+  deleteExpiredUploadSession(workspaceId: string, sessionId: string, now: Date): Promise<string[] | null>;
+  findUploadIdempotencyKey(
+    workspaceId: string,
+    actorId: string,
+    idempotencyKey: string,
+    now: Date
+  ): Promise<UploadIdempotencyRecord | null>;
+  saveUploadIdempotencyKey(
+    input: Omit<UploadIdempotencyRecord, "createdAt">
+  ): Promise<UploadIdempotencyRecord>;
+  deleteExpiredUploadIdempotencyKeys(now: Date): Promise<number>;
   createMcpToken(input: CreateMcpTokenInput):
     Promise<McpTokenRecord>;
   createMcpTokenWithAudit(
@@ -910,16 +1274,19 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
   listArchivedRepositories(workspaceId: string): Promise<RepositoryRecord[]>;
   switchRepositoryWithAudit(
     workspaceId: string,
+    projectId: string,
     input: RepositoryConnectionInput,
     actorId: string
   ): Promise<RepositoryRecord | null>;
   prepareUploadReplacementWithAudit(
     workspaceId: string,
+    projectId: string,
     name: string,
     actorId: string
   ): Promise<RepositoryRecord | null>;
   activateUploadReplacementWithAudit(
     workspaceId: string,
+    projectId: string,
     repositoryId: string,
     actorId: string
   ): Promise<RepositoryRecord | null>;
@@ -927,8 +1294,21 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
   findSnapshotByCommit(
     workspaceId: string,
     repositoryId: string,
-    commitSha: string
+    commitSha: string,
+    pendingUploadSessionId?: string,
+    pendingImportReportId?: string
   ): Promise<SourceSnapshotRecord | null>;
+  discardPendingFolderImport(
+    workspaceId: string,
+    reportId: string,
+    snapshotId: string
+  ): Promise<string | null>;
+  discardStalePendingFolderImport(
+    workspaceId: string,
+    reportId: string,
+    snapshotId: string,
+    cutoff: Date
+  ): Promise<boolean>;
   findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null>;
   listSnapshotFiles(workspaceId: string, snapshotId: string): Promise<SourceFileRecord[]>;
   latestSnapshot(workspaceId: string, repositoryId: string): Promise<SourceSnapshotRecord | null>;
@@ -938,12 +1318,23 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
     snapshotId: string,
     path: string
   ): Promise<SourceFileRecord | null>;
+  findProjectSourceFile(
+    workspaceId: string,
+    projectId: string,
+    snapshotId: string,
+    path: string
+  ): Promise<SourceFileRecord | null>;
   createSnapshot(input: CreateSnapshotInput): Promise<SourceSnapshotRecord>;
   createSnapshotWithGitSynchronizationLease(
     input: CreateSnapshotInput,
     lease: GitSynchronizationLease
   ): Promise<SourceSnapshotRecord | null>;
-  createSnapshotWithAudit(input: CreateSnapshotInput, actorId: string): Promise<SourceSnapshotRecord>;
+  createSnapshotWithAudit(
+    input: CreateSnapshotInput,
+    actorId: string,
+    pendingUploadSessionId?: string,
+    pendingImportReportId?: string
+  ): Promise<SourceSnapshotRecord>;
   countSnapshotFiles(snapshotId: string): Promise<number>;
   snapshotTextBytes(snapshotId: string): Promise<number>;
   repositoryCredential(workspaceId: string, repositoryId: string): Promise<string | null>;

@@ -67,11 +67,16 @@ describe("core mutation audit atomicity", () => {
       version: "1.0.0",
       kernelMode: "legacy",
       packageArtifactId: null,
+      releaseArtifactFamily: "knowledge-v1",
+      packageStageRunId: null,
+      frontendIrSchemaVersion: null,
+      frontendGraphSchemaVersion: null,
+      analyzerManifestDigest: null,
       createdAt: new Date("2026-07-11T00:00:00.000Z"),
       publishedAt: new Date("2026-07-11T00:01:00.000Z")
     });
 
-    const replacement = await store.switchRepositoryWithAudit(setup!.workspace.id, {
+    const replacement = await store.switchRepositoryWithAudit(setup!.workspace.id, original!.projectId, {
       kind: "git",
       name: "Replacement",
       url: "https://example.com/replacement.git",
@@ -101,7 +106,7 @@ describe("core mutation audit atomicity", () => {
       path: "/original"
     });
 
-    await expect(store.switchRepositoryWithAudit(setup!.workspace.id, {
+    await expect(store.switchRepositoryWithAudit(setup!.workspace.id, original!.projectId, {
       kind: "git",
       name: "Replacement",
       url: "https://example.com/replacement.git",
@@ -152,6 +157,72 @@ describe("core mutation audit atomicity", () => {
     expect(store.sourceFiles).toEqual([]);
     expect(store.auditEvents.filter((event) => event.action === "repository.sync_succeeded"))
       .toEqual([]);
+  });
+
+  test("rolls back compatibility replacement activation when its atomic completion fails", async () => {
+    const store = new FailingAuditStore();
+    const setup = await store.createInitialSetup("admin@example.com", "hash");
+    const project = (await store.listProjects(setup!.workspace.id))[0]!;
+    const current = await store.createRepository(
+      setup!.workspace.id, { kind: "upload", name: "Current" }, project.id
+    );
+    const replacement = await store.prepareUploadReplacementWithAudit(
+      setup!.workspace.id, project.id, "Replacement", setup!.admin.id
+    );
+    const report = await store.createImportReport({
+      workspaceId: setup!.workspace.id, projectId: project.id,
+      repositoryId: replacement!.id, actorId: setup!.admin.id, sourceKind: "upload"
+    });
+    store.failedAction = "repository.switched";
+
+    await expect(store.completeFolderImport({
+      workspaceId: setup!.workspace.id, projectId: project.id,
+      repositoryId: replacement!.id, actorId: setup!.admin.id,
+      actorSessionVersion: setup!.admin.sessionVersion,
+      reportId: report.id, activateReplacement: true, expectedCurrentRepositoryId: current!.id,
+      report: {
+        status: "succeeded", collectedFileCount: 1, collectedTextBytes: 10,
+        ignored: { total: 0, reasons: {} }, snapshotId: null, failureCode: null
+      }
+    })).rejects.toThrow("audit unavailable");
+
+    await expect(store.currentRepository(setup!.workspace.id, project.id)).resolves.toMatchObject({ id: current!.id });
+    await expect(store.listImportReports(setup!.workspace.id, project.id)).resolves.toContainEqual(
+      expect.objectContaining({ id: report.id, status: "running" })
+    );
+  });
+
+  test("rejects a compatibility import when its current source changed during upload", async () => {
+    const store = new MemoryAppStore();
+    const setup = await store.createInitialSetup("admin@example.com", "hash");
+    const project = (await store.listProjects(setup!.workspace.id))[0]!;
+    const current = await store.createRepository(
+      setup!.workspace.id, { kind: "upload", name: "Current" }, project.id
+    );
+    const report = await store.createImportReport({
+      workspaceId: setup!.workspace.id, projectId: project.id,
+      repositoryId: current!.id, actorId: setup!.admin.id, sourceKind: "upload"
+    });
+    const replacement = await store.prepareUploadReplacementWithAudit(
+      setup!.workspace.id, project.id, "Replacement", setup!.admin.id
+    );
+    await store.activateUploadReplacementWithAudit(
+      setup!.workspace.id, project.id, replacement!.id, setup!.admin.id
+    );
+
+    await expect(store.completeFolderImport({
+      workspaceId: setup!.workspace.id, projectId: project.id,
+      repositoryId: current!.id, actorId: setup!.admin.id,
+      actorSessionVersion: setup!.admin.sessionVersion,
+      reportId: report.id, activateReplacement: false, expectedCurrentRepositoryId: current!.id,
+      report: {
+        status: "succeeded", collectedFileCount: 1, collectedTextBytes: 10,
+        ignored: { total: 0, reasons: {} }, snapshotId: null, failureCode: null
+      }
+    })).resolves.toBeNull();
+    await expect(store.listImportReports(setup!.workspace.id, project.id)).resolves.toContainEqual(
+      expect.objectContaining({ id: report.id, status: "running" })
+    );
   });
 });
 

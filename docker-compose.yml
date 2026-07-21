@@ -36,17 +36,53 @@ services:
       DEVKH_SESSION_SECRET: ${DEVKH_SESSION_SECRET:?set DEVKH_SESSION_SECRET}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://${DEVKH_DOMAIN:?set DEVKH_DOMAIN}}
       DEVKH_KNOWLEDGE_KERNEL_MODE: ${DEVKH_KNOWLEDGE_KERNEL_MODE:-legacy}
+      DEVKH_FRONTEND_KNOWLEDGE_MODE: ${DEVKH_FRONTEND_KNOWLEDGE_MODE:-legacy}
+      DEVKH_SOURCE_STORAGE_MODE: ${DEVKH_SOURCE_STORAGE_MODE:-legacy}
+      DEVKH_PARSER_SOCKET_PATH: /run/devkh-parser/parser.sock
     volumes:
       - snapshot_data:/var/lib/devkh/snapshots
       - repository_mirrors:/var/lib/devkh/repos
       - uploaded_sources:/var/lib/devkh/uploads
       - artifact_data:/var/lib/devkh/artifacts
+      - parser_runtime:/run/devkh-parser:ro
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
     read_only: true
     security_opt:
       - no-new-privileges:true
     stop_grace_period: 30s
+
+  parser:
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    init: true
+    command: ["node", "dist/server/server/knowledge/frontend/runtime/parser-main.js"]
+    environment:
+      NODE_ENV: production
+      DEVKH_PARSER_SOCKET_PATH: /run/devkh-parser/parser.sock
+    volumes:
+      - parser_runtime:/run/devkh-parser
+    network_mode: none
+    read_only: true
+    user: node
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD", "node", "-e", "const fs=require('node:fs');process.exit(fs.statSync('/run/devkh-parser/parser.sock').isSocket()?0:1)"]
+      interval: 5s
+      timeout: 3s
+      start_period: 10s
+      retries: 6
+    stop_grace_period: 10s
 
   caddy:
     image: caddy:2-alpine
@@ -93,5 +129,6 @@ volumes:
   repository_mirrors:
   uploaded_sources:
   artifact_data:
+  parser_runtime:
   caddy_data:
   caddy_config:

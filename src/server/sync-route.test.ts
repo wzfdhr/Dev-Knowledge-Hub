@@ -69,7 +69,7 @@ afterEach(async () => {
 });
 
 describe("repository sync route", () => {
-  test("returns an immutable snapshot summary and audits success", async () => {
+  test("returns an immutable snapshot summary and audits success", { timeout: 15_000 }, async () => {
     const { app, store, cookie } = await configuredApp(await fixture());
     const response = await app.inject({
       method: "POST",

@@ -1,17 +1,22 @@
 import {
   boolean,
+  bigint,
   bigserial,
+  check,
   foreignKey,
   index,
   integer,
   jsonb,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid
 } from "drizzle-orm/pg-core";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 import {
@@ -28,6 +33,14 @@ export { AGENT_FEEDBACK_STATUSES, BUILD_JOB_STATUSES } from "../shared/contracts
 export const buildJobStatus = pgEnum("build_job_status", BUILD_JOB_STATUSES);
 export const agentFeedbackStatus = pgEnum("agent_feedback_status", AGENT_FEEDBACK_STATUSES);
 export const teamRole = pgEnum("team_role", ["admin", "member", "reader"]);
+
+function uploadSessionWorkspaceKey(): [AnyPgColumn, AnyPgColumn] {
+  return [uploadSessions.id, uploadSessions.workspaceId];
+}
+
+function importReportScopeKey(): [AnyPgColumn, AnyPgColumn, AnyPgColumn] {
+  return [importReports.id, importReports.workspaceId, importReports.repositoryId];
+}
 
 const timestamps = {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -80,6 +93,27 @@ export const projects = pgTable("projects", {
   index("projects_workspace_active_idx").on(table.workspaceId, table.archivedAt)
 ]);
 
+export const projectFrontendRollouts = pgTable("project_frontend_rollouts", {
+  projectId: uuid("project_id").primaryKey(),
+  workspaceId: uuid("workspace_id").notNull(),
+  mode: text("mode").$type<"legacy" | "shadow" | "active">().notNull().default("legacy"),
+  reason: text("reason").notNull(),
+  updatedBy: uuid("updated_by").notNull(),
+  ...timestamps
+}, (table) => [
+  index("project_frontend_rollouts_workspace_mode_idx").on(table.workspaceId, table.mode, table.projectId),
+  foreignKey({
+    columns: [table.projectId, table.workspaceId],
+    foreignColumns: [projects.id, projects.workspaceId],
+    name: "project_frontend_rollouts_project_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.updatedBy, table.workspaceId],
+    foreignColumns: [adminUsers.id, adminUsers.workspaceId],
+    name: "project_frontend_rollouts_actor_workspace_fk"
+  }).onDelete("restrict")
+]);
+
 export const repositories = pgTable("repositories", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
@@ -93,6 +127,7 @@ export const repositories = pgTable("repositories", {
   ...timestamps
 }, (table) => [
   uniqueIndex("repositories_id_workspace_idx").on(table.id, table.workspaceId),
+  uniqueIndex("repositories_id_workspace_project_idx").on(table.id, table.workspaceId, table.projectId),
   uniqueIndex("repositories_project_current_unique_idx")
     .on(table.projectId)
     .where(sql`${table.archivedAt} IS NULL`)
@@ -155,16 +190,63 @@ export const sourceSnapshots = pgTable("source_snapshots", {
   remoteUrl: text("remote_url"),
   commitTimestamp: timestamp("commit_timestamp", { withTimezone: true }).notNull(),
   storagePath: text("storage_path").notNull(),
+  pendingUploadSessionId: uuid("pending_upload_session_id"),
+  pendingImportReportId: uuid("pending_import_report_id"),
   ...timestamps
 }, (table) => [
   uniqueIndex("source_snapshots_id_workspace_idx").on(table.id, table.workspaceId),
+  uniqueIndex("source_snapshots_id_workspace_repository_idx").on(table.id, table.workspaceId, table.repositoryId),
   index("source_snapshots_workspace_repo_idx").on(table.workspaceId, table.repositoryId),
-  uniqueIndex("source_snapshots_repo_commit_idx").on(table.repositoryId, table.commitSha),
+  uniqueIndex("source_snapshots_repo_commit_idx").on(table.repositoryId, table.commitSha)
+    .where(sql`${table.pendingUploadSessionId} IS NULL AND ${table.pendingImportReportId} IS NULL`),
+  uniqueIndex("source_snapshots_pending_upload_session_unique_idx")
+    .on(table.pendingUploadSessionId)
+    .where(sql`${table.pendingUploadSessionId} IS NOT NULL`),
+  uniqueIndex("source_snapshots_pending_import_report_unique_idx")
+    .on(table.pendingImportReportId)
+    .where(sql`${table.pendingImportReportId} IS NOT NULL`),
   foreignKey({
     columns: [table.repositoryId, table.workspaceId],
     foreignColumns: [repositories.id, repositories.workspaceId],
     name: "source_snapshots_repository_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.pendingUploadSessionId, table.workspaceId],
+    foreignColumns: uploadSessionWorkspaceKey(),
+    name: "source_snapshots_pending_upload_session_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.pendingImportReportId, table.workspaceId, table.repositoryId],
+    foreignColumns: importReportScopeKey(),
+    name: "source_snapshots_pending_import_report_scope_fk"
   }).onDelete("cascade")
+]);
+
+export const sourceBlobs = pgTable("source_blobs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  contentHash: text("content_hash").notNull(),
+  generation: integer("generation").notNull(),
+  byteSize: bigint("byte_size", { mode: "number" }).notNull(),
+  status: text("status").$type<"active" | "tombstoned" | "trash" | "deleted">().notNull().default("active"),
+  storageKey: text("storage_key").notNull(),
+  fencingToken: uuid("fencing_token"),
+  tombstonedAt: timestamp("tombstoned_at", { withTimezone: true }),
+  trashedAt: timestamp("trashed_at", { withTimezone: true }),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  ...timestamps
+}, (table) => [
+  unique("source_blobs_workspace_hash_generation_unique")
+    .on(table.workspaceId, table.contentHash, table.generation),
+  unique("source_blobs_id_workspace_unique").on(table.id, table.workspaceId),
+  uniqueIndex("source_blobs_live_workspace_hash_idx")
+    .on(table.workspaceId, table.contentHash)
+    .where(sql`${table.status} IN ('active', 'tombstoned')`),
+  index("source_blobs_workspace_status_idx").on(table.workspaceId, table.status, table.updatedAt),
+  check("source_blobs_content_hash_check", sql`${table.contentHash} ~ '^[0-9a-f]{64}$'`),
+  check("source_blobs_generation_check", sql`${table.generation} > 0`),
+  check("source_blobs_byte_size_check", sql`${table.byteSize} >= 0`),
+  check("source_blobs_status_check", sql`${table.status} IN ('active', 'tombstoned', 'trash', 'deleted')`)
 ]);
 
 export const sourceFiles = pgTable("source_files", {
@@ -175,6 +257,7 @@ export const sourceFiles = pgTable("source_files", {
   language: text("language"),
   contentHash: text("content_hash").notNull(),
   byteSize: integer("byte_size").notNull(),
+  sourceBlobId: uuid("source_blob_id"),
   ...timestamps
 }, (table) => [
   uniqueIndex("source_files_id_workspace_idx").on(table.id, table.workspaceId),
@@ -183,7 +266,213 @@ export const sourceFiles = pgTable("source_files", {
     columns: [table.snapshotId, table.workspaceId],
     foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId],
     name: "source_files_snapshot_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.sourceBlobId, table.workspaceId],
+    foreignColumns: [sourceBlobs.id, sourceBlobs.workspaceId],
+    name: "source_files_source_blob_workspace_fk"
+  }).onDelete("restrict"),
+  index("source_files_source_blob_idx").on(table.sourceBlobId)
+]);
+
+export const uploadSessions = pgTable("upload_sessions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  projectId: uuid("project_id").notNull(),
+  repositoryId: uuid("repository_id").notNull(),
+  actorId: uuid("actor_id").notNull(),
+  sessionVersion: integer("session_version").notNull(),
+  isReplacement: boolean("is_replacement").notNull(),
+  expectedCurrentRepositoryId: uuid("expected_current_repository_id").notNull(),
+  expectedLatestSnapshotId: uuid("expected_latest_snapshot_id"),
+  status: text("status").$type<"open" | "committing" | "committed" | "cancelled">().notNull().default("open"),
+  entryCount: integer("entry_count").notNull(),
+  manifestDigest: text("manifest_digest"),
+  snapshotId: uuid("snapshot_id"),
+  commitResponse: jsonb("commit_response").$type<Record<string, unknown>>(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  committedAt: timestamp("committed_at", { withTimezone: true }),
+  cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+  ...timestamps
+}, (table) => [
+  uniqueIndex("upload_sessions_id_workspace_idx").on(table.id, table.workspaceId),
+  unique("upload_sessions_scope_unique").on(
+    table.id, table.workspaceId, table.projectId, table.repositoryId, table.actorId
+  ),
+  index("upload_sessions_expiry_idx").on(table.expiresAt)
+    .where(sql`${table.status} IN ('open', 'committing', 'committed', 'cancelled')`),
+  index("upload_sessions_project_created_idx").on(table.workspaceId, table.projectId, table.createdAt.desc()),
+  check("upload_sessions_status_check", sql`${table.status} IN ('open', 'committing', 'committed', 'cancelled')`),
+  check("upload_sessions_entry_count_check", sql`${table.entryCount} BETWEEN 1 AND 100000`),
+  check("upload_sessions_manifest_digest_check", sql`${table.manifestDigest} IS NULL OR ${table.manifestDigest} ~ '^[0-9a-f]{64}$'`),
+  check("upload_sessions_terminal_shape_check", sql`
+    (${table.status} = 'committed' AND ${table.manifestDigest} IS NOT NULL
+      AND ${table.snapshotId} IS NOT NULL AND ${table.commitResponse} IS NOT NULL
+      AND ${table.committedAt} IS NOT NULL)
+    OR (${table.status} = 'cancelled' AND ${table.cancelledAt} IS NOT NULL)
+    OR ${table.status} IN ('open', 'committing')
+  `),
+  foreignKey({
+    columns: [table.projectId, table.workspaceId],
+    foreignColumns: [projects.id, projects.workspaceId],
+    name: "upload_sessions_project_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.repositoryId, table.workspaceId, table.projectId],
+    foreignColumns: [repositories.id, repositories.workspaceId, repositories.projectId],
+    name: "upload_sessions_repository_scope_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.expectedCurrentRepositoryId, table.workspaceId, table.projectId],
+    foreignColumns: [repositories.id, repositories.workspaceId, repositories.projectId],
+    name: "upload_sessions_expected_current_repository_scope_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.expectedLatestSnapshotId, table.workspaceId, table.repositoryId],
+    foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId, sourceSnapshots.repositoryId],
+    name: "upload_sessions_expected_latest_snapshot_scope_fk"
+  }).onDelete("restrict"),
+  foreignKey({
+    columns: [table.actorId, table.workspaceId],
+    foreignColumns: [adminUsers.id, adminUsers.workspaceId],
+    name: "upload_sessions_actor_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.snapshotId, table.workspaceId, table.repositoryId],
+    foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId, sourceSnapshots.repositoryId],
+    name: "upload_sessions_snapshot_repository_fk"
+  }).onDelete("restrict")
+]);
+
+export const uploadSessionEntries = pgTable("upload_session_entries", {
+  sessionId: uuid("session_id").notNull(),
+  workspaceId: uuid("workspace_id").notNull(),
+  ordinal: integer("ordinal").notNull(),
+  path: text("path").notNull(),
+  kind: text("kind").$type<"source" | "asset">().notNull(),
+  byteSize: bigint("byte_size", { mode: "number" }).notNull(),
+  contentHash: text("content_hash"),
+  mediaType: text("media_type"),
+  metadataByteSize: integer("metadata_byte_size").notNull(),
+  disposition: text("disposition").$type<"upload_required" | "metadata_only" | "ignored">().notNull(),
+  trust: text("trust").$type<"pending" | "server_verified" | "client_unverified">().notNull(),
+  ignoreReason: text("ignore_reason"),
+  uploadedAt: timestamp("uploaded_at", { withTimezone: true }),
+  ...timestamps
+}, (table) => [
+  primaryKey({ columns: [table.sessionId, table.ordinal], name: "upload_session_entries_pkey" }),
+  unique("upload_session_entries_path_unique").on(table.sessionId, table.path),
+  foreignKey({
+    columns: [table.sessionId, table.workspaceId],
+    foreignColumns: [uploadSessions.id, uploadSessions.workspaceId],
+    name: "upload_session_entries_session_workspace_fk"
+  }).onDelete("cascade"),
+  check("upload_session_entries_ordinal_check", sql`${table.ordinal} >= 0`),
+  check("upload_session_entries_path_check", sql`octet_length(${table.path}) BETWEEN 1 AND 4096`),
+  check("upload_session_entries_kind_check", sql`${table.kind} IN ('source', 'asset')`),
+  check("upload_session_entries_byte_size_check", sql`${table.byteSize} >= 0`),
+  check("upload_session_entries_metadata_byte_size_check", sql`${table.metadataByteSize} > 0`),
+  check("upload_session_entries_content_hash_check", sql`
+    (${table.kind} = 'source' AND ${table.contentHash} ~ '^[0-9a-f]{64}$')
+    OR (${table.kind} = 'asset' AND ${table.contentHash} IS NULL)
+  `),
+  check("upload_session_entries_disposition_check", sql`${table.disposition} IN ('upload_required', 'metadata_only', 'ignored')`),
+  check("upload_session_entries_trust_check", sql`${table.trust} IN ('pending', 'server_verified', 'client_unverified')`),
+  check("upload_session_entries_state_check", sql`
+    (${table.disposition} = 'upload_required' AND ${table.trust} IN ('pending', 'server_verified') AND ${table.ignoreReason} IS NULL)
+    OR (${table.disposition} = 'metadata_only' AND ${table.trust} = 'client_unverified' AND ${table.ignoreReason} IS NULL)
+    OR (${table.disposition} = 'ignored' AND ${table.ignoreReason} IS NOT NULL)
+  `)
+]);
+
+export const uploadIdempotencyKeys = pgTable("upload_idempotency_keys", {
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  actorId: uuid("actor_id").notNull(),
+  idempotencyKey: text("idempotency_key").notNull(),
+  operation: text("operation").notNull(),
+  requestDigest: text("request_digest").notNull(),
+  sessionId: uuid("session_id"),
+  responseStatus: integer("response_status").notNull(),
+  responseBody: jsonb("response_body").$type<Record<string, unknown>>().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull()
+}, (table) => [
+  primaryKey({
+    columns: [table.workspaceId, table.actorId, table.idempotencyKey],
+    name: "upload_idempotency_keys_pkey"
+  }),
+  index("upload_idempotency_keys_expiry_idx").on(table.expiresAt),
+  check("upload_idempotency_keys_key_check", sql`char_length(${table.idempotencyKey}) BETWEEN 1 AND 200`),
+  check("upload_idempotency_keys_request_digest_check", sql`${table.requestDigest} ~ '^[0-9a-f]{64}$'`),
+  check("upload_idempotency_keys_response_status_check", sql`${table.responseStatus} BETWEEN 200 AND 599`),
+  foreignKey({
+    columns: [table.actorId, table.workspaceId],
+    foreignColumns: [adminUsers.id, adminUsers.workspaceId],
+    name: "upload_idempotency_keys_actor_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.sessionId, table.workspaceId],
+    foreignColumns: [uploadSessions.id, uploadSessions.workspaceId],
+    name: "upload_idempotency_keys_session_workspace_fk"
   }).onDelete("cascade")
+]);
+
+export const importReports = pgTable("import_reports", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+  repositoryId: uuid("repository_id").references(() => repositories.id, { onDelete: "set null" }),
+  actorId: uuid("actor_id").references(() => adminUsers.id, { onDelete: "set null" }),
+  sourceKind: text("source_kind").notNull(),
+  status: text("status").$type<"running" | "succeeded" | "failed" | "cancelled">().notNull(),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  collectedFileCount: integer("collected_file_count").notNull().default(0),
+  collectedTextBytes: bigint("collected_text_bytes", { mode: "number" }).notNull().default(0),
+  ignored: jsonb("ignored").$type<{ total: number; reasons: Record<string, number> }>().notNull().default({ total: 0, reasons: {} }),
+  snapshotId: uuid("snapshot_id").references(() => sourceSnapshots.id, { onDelete: "set null" }),
+  failureCode: text("failure_code"),
+  uploadSessionId: uuid("upload_session_id")
+}, (table) => [
+  index("import_reports_project_started_idx").on(
+    table.workspaceId, table.projectId, table.startedAt.desc(), table.id.desc()
+  ),
+  index("import_reports_retention_idx").on(table.status, table.finishedAt)
+    .where(sql`${table.status} IN ('failed', 'cancelled')`),
+  uniqueIndex("import_reports_id_workspace_repository_idx")
+    .on(table.id, table.workspaceId, table.repositoryId),
+  check("import_reports_status_check", sql`${table.status} IN ('running', 'succeeded', 'failed', 'cancelled')`),
+  uniqueIndex("import_reports_upload_session_unique_idx")
+    .on(table.uploadSessionId)
+    .where(sql`${table.uploadSessionId} IS NOT NULL`),
+  foreignKey({
+    columns: [table.uploadSessionId, table.workspaceId, table.projectId, table.repositoryId, table.actorId],
+    foreignColumns: [uploadSessions.id, uploadSessions.workspaceId, uploadSessions.projectId, uploadSessions.repositoryId, uploadSessions.actorId],
+    name: "import_reports_upload_session_scope_fk"
+  })
+]);
+
+export const sourceAnalysisArtifacts = pgTable("source_analysis_artifacts", {
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  contentHash: text("content_hash").notNull(),
+  analyzerId: text("analyzer_id").notNull(),
+  analyzerVersion: text("analyzer_version").notNull(),
+  parserConfigDigest: text("parser_config_digest").notNull(),
+  facts: jsonb("facts").$type<Record<string, unknown>>().notNull(),
+  factsDigest: text("facts_digest").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+}, (table) => [
+  primaryKey({
+    columns: [table.workspaceId, table.contentHash, table.analyzerId, table.analyzerVersion, table.parserConfigDigest],
+    name: "source_analysis_artifacts_pkey"
+  }),
+  check("source_analysis_artifacts_content_hash_check", sql`${table.contentHash} ~ '^[0-9a-f]{64}$'`),
+  check("source_analysis_artifacts_analyzer_id_check", sql`${table.analyzerId} ~ '^[a-z0-9][a-z0-9._-]{0,127}$'`),
+  check("source_analysis_artifacts_analyzer_version_check", sql`${table.analyzerVersion} ~ '^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}$'`),
+  check("source_analysis_artifacts_parser_config_digest_check", sql`${table.parserConfigDigest} ~ '^[0-9a-f]{64}$'`),
+  check("source_analysis_artifacts_facts_object_check", sql`jsonb_typeof(${table.facts}) = 'object'`),
+  check("source_analysis_artifacts_facts_size_check", sql`octet_length(${table.facts}::text) <= 8388608`),
+  check("source_analysis_artifacts_facts_digest_check", sql`${table.factsDigest} ~ '^[0-9a-f]{64}$'`)
 ]);
 
 export const codeSymbols = pgTable("code_symbols", {
@@ -278,6 +567,86 @@ export const buildJobs = pgTable("build_jobs", {
   })
 ]);
 
+export const buildStageRuns = pgTable("build_stage_runs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  projectId: uuid("project_id").notNull(),
+  snapshotId: uuid("snapshot_id").notNull(),
+  buildJobId: uuid("build_job_id").notNull(),
+  stage: text("stage").notNull(),
+  attempt: integer("attempt").notNull(),
+  status: text("status").notNull().default("queued"),
+  inputDigest: text("input_digest").notNull(),
+  outputManifestIds: uuid("output_manifest_ids").array().notNull().default(sql`ARRAY[]::uuid[]`),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  errorCode: text("error_code"),
+  errorDetail: text("error_detail"),
+  ...timestamps
+}, (table) => [
+  uniqueIndex("build_stage_runs_build_stage_attempt_idx").on(table.buildJobId, table.stage, table.attempt),
+  index("build_stage_runs_claim_idx").on(table.workspaceId, table.projectId, table.status, table.createdAt, table.id),
+  index("build_stage_runs_build_idx").on(table.workspaceId, table.buildJobId, table.stage, table.attempt),
+  foreignKey({
+    columns: [table.projectId, table.workspaceId],
+    foreignColumns: [projects.id, projects.workspaceId],
+    name: "build_stage_runs_project_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.snapshotId, table.workspaceId],
+    foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId],
+    name: "build_stage_runs_snapshot_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.buildJobId, table.workspaceId],
+    foreignColumns: [buildJobs.id, buildJobs.workspaceId],
+    name: "build_stage_runs_build_workspace_fk"
+  }).onDelete("cascade")
+]);
+
+export const knowledgeArtifacts = pgTable("knowledge_artifacts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  projectId: uuid("project_id").notNull(),
+  snapshotId: uuid("snapshot_id").notNull(),
+  buildJobId: uuid("build_job_id").notNull(),
+  stage: text("stage").notNull(),
+  kind: text("kind").notNull(),
+  schemaVersion: integer("schema_version").notNull(),
+  inputDigest: text("input_digest").notNull(),
+  contentDigest: text("content_digest").notNull(),
+  storageKey: text("storage_key").notNull(),
+  sourceRefs: jsonb("source_refs").$type<SourceRef[]>().notNull().default([]),
+  producer: text("producer").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+}, (table) => [
+  uniqueIndex("knowledge_artifacts_cache_unique_idx").on(
+    table.projectId, table.snapshotId, table.stage, table.kind, table.inputDigest
+  ),
+  uniqueIndex("knowledge_artifacts_storage_key_idx").on(table.storageKey),
+  index("knowledge_artifacts_build_idx").on(
+    table.workspaceId, table.projectId, table.buildJobId, table.stage, table.createdAt
+  ),
+  index("knowledge_artifacts_cache_idx").on(
+    table.workspaceId, table.projectId, table.snapshotId, table.stage, table.kind, table.inputDigest
+  ),
+  foreignKey({
+    columns: [table.projectId, table.workspaceId],
+    foreignColumns: [projects.id, projects.workspaceId],
+    name: "knowledge_artifacts_project_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.snapshotId, table.workspaceId],
+    foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId],
+    name: "knowledge_artifacts_snapshot_workspace_fk"
+  }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.buildJobId, table.workspaceId],
+    foreignColumns: [buildJobs.id, buildJobs.workspaceId],
+    name: "knowledge_artifacts_build_workspace_fk"
+  }).onDelete("restrict")
+]);
+
 export const knowledgePages = pgTable("knowledge_pages", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
@@ -368,7 +737,12 @@ export const releases = pgTable("releases", {
   snapshotId: uuid("snapshot_id").notNull(),
   version: text("version").notNull(),
   kernelMode: text("kernel_mode").notNull().default("legacy"),
-  packageArtifactId: uuid("package_artifact_id"),
+  packageArtifactId: uuid("package_artifact_id").references(() => knowledgeArtifacts.id, { onDelete: "restrict" }),
+  releaseArtifactFamily: text("release_artifact_family").notNull().default("knowledge-v1"),
+  packageStageRunId: uuid("package_stage_run_id").references(() => buildStageRuns.id, { onDelete: "restrict" }),
+  frontendIrSchemaVersion: integer("frontend_ir_schema_version"),
+  frontendGraphSchemaVersion: integer("frontend_graph_schema_version"),
+  analyzerManifestDigest: text("analyzer_manifest_digest"),
   publishedAt: timestamp("published_at", { withTimezone: true }),
   ...timestamps
 }, (table) => [
@@ -388,7 +762,30 @@ export const releases = pgTable("releases", {
     columns: [table.snapshotId, table.workspaceId],
     foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId],
     name: "releases_snapshot_workspace_fk"
-  }).onDelete("restrict")
+  }).onDelete("restrict"),
+  check("releases_artifact_family_check", sql`${table.releaseArtifactFamily} IN ('knowledge-v1', 'frontend-v2')`),
+  check("releases_frontend_provenance_shape_check", sql`
+    (${table.releaseArtifactFamily} = 'knowledge-v1'
+      AND ${table.packageStageRunId} IS NULL
+      AND ${table.frontendIrSchemaVersion} IS NULL
+      AND ${table.frontendGraphSchemaVersion} IS NULL
+      AND ${table.analyzerManifestDigest} IS NULL)
+    OR
+    (${table.releaseArtifactFamily} = 'frontend-v2'
+      AND ${table.packageStageRunId} IS NOT NULL
+      AND ${table.packageArtifactId} IS NOT NULL
+      AND ${table.frontendIrSchemaVersion} = 2
+      AND ${table.frontendGraphSchemaVersion} = 2
+      AND ${table.analyzerManifestDigest} ~ '^[0-9a-f]{64}$')
+  `)
+]);
+
+export const releaseArtifacts = pgTable("release_artifacts", {
+  releaseId: uuid("release_id").notNull().references(() => releases.id, { onDelete: "cascade" }),
+  artifactId: uuid("artifact_id").notNull().references(() => knowledgeArtifacts.id, { onDelete: "restrict" })
+}, (table) => [
+  primaryKey({ columns: [table.releaseId, table.artifactId] }),
+  index("release_artifacts_artifact_idx").on(table.artifactId, table.releaseId)
 ]);
 
 export const buildEvents = pgTable("build_events", {

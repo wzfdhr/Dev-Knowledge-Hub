@@ -20,6 +20,7 @@ import { derivePrimaryAction, ProjectVersionsPage as OverviewPage } from "./page
 import { ApiError, type ApiClient } from "./api/client";
 import { App } from "./app";
 import { ErrorState } from "./components/ui";
+import { AppShell } from "./components/app-shell";
 import { ImportProgress } from "./components/import-progress";
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -59,6 +60,17 @@ function renderAppAt(api: ApiClient, path: string) {
 }
 
 describe("shared console copy", () => {
+  test("hides workspace administration from non-admin navigation and labels the real role", () => {
+    renderPage(<Routes><Route element={<AppShell email="member@example.com" role="member" onLogout={() => {}} />}>
+      <Route index element={<p>Workspace</p>} />
+    </Route></Routes>);
+
+    expect(screen.getByRole("link", { name: "项目中心" })).toBeVisible();
+    expect(screen.queryByRole("link", { name: "成员" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "设置" })).not.toBeInTheDocument();
+    expect(screen.getByText("成员", { selector: "footer strong" })).toBeVisible();
+  });
+
   test("marks only completed import stages before upload confirmation", () => {
     const { container } = renderPage(<ImportProgress progress={{
       phase: "filtering", status: "completed", percent: 100,
@@ -478,6 +490,34 @@ describe("overview primary command", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Build state unavailable");
     expect(screen.queryByRole("button", { name: /sync repository|start knowledge build|review ready build|publish release/i })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重试总览数据" })).toBeVisible();
+  });
+
+  test("keeps knowledge versions read-only for a project reader", async () => {
+    const api = {
+      getRepository: vi.fn().mockResolvedValue({ repository: {
+        id: "repo", projectId: "project-1", kind: "upload", name: "Fixture", defaultBranch: "upload"
+      } }),
+      getRepositoryStatus: vi.fn().mockResolvedValue({
+        repository: { id: "repo" },
+        latestSnapshot: { id: "snap", commitSha: "a".repeat(40), ref: "upload", commitTimestamp: "2026-07-20" }
+      }),
+      listBuilds: vi.fn().mockResolvedValue({ builds: [{
+        id: "build", status: "ready", snapshotId: "snap", commitSha: "a".repeat(40),
+        warnings: [], cancelRequested: false
+      }], total: 1, nextOffset: null }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [], total: 0, nextOffset: null }),
+      listFeedback: vi.fn().mockResolvedValue({ feedback: [], total: 0, nextOffset: null }),
+      session: vi.fn().mockResolvedValue({ admin: { id: "reader-1", email: "reader@example.com", role: "reader" } }),
+      listProjectMembers: vi.fn().mockResolvedValue({ members: [{
+        id: "reader-1", email: "reader@example.com", role: "reader"
+      }] }),
+      getBuildStages: vi.fn().mockResolvedValue({ stages: [], pipelineStatus: "ready" })
+    } as unknown as ApiClient;
+
+    renderPageAt(<Routes><Route path="/projects/:projectId/versions" element={<OverviewPage api={api} />} /></Routes>, "/projects/project-1/versions");
+
+    expect(await screen.findByRole("heading", { name: "最近构建" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "审核就绪构建" })).not.toBeInTheDocument();
   });
 
   test("review mode keeps exactly one blue primary command", async () => {

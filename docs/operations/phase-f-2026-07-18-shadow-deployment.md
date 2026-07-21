@@ -33,11 +33,48 @@ included in the same production image.
    - the running app reports `shadow` mode; and
    - the production SPA serves `index-lhSdNtuU.js`, which contains the graph UI.
 
-## Follow-up
+## Post-fix deployment
 
-The corrected application restart occurred at `2026-07-18T03:07:04Z`. The F04
-24-hour observation therefore starts from that restart. Before F04 can be
-accepted, run a representative authorized shadow build through all ten stages,
-perform desktop and mobile browser acceptance, and complete the project-role
-observation without a terminal shadow-stage failure. `active` remains forbidden
-until F05 receives separate authorization.
+PR #11 was merged through the trusted merge workflow at `2f11bab`; its fresh
+`verify` and `container-smoke` jobs both passed. The server was then synchronized
+from that exact `main` commit. The first Compose rebuild retained the old app
+container, so the app alone was deliberately recreated with both Compose files.
+The resulting container started at `2026-07-18T04:26:54Z` and is healthy in
+`shadow` mode. The server-local Nginx HTTPS route returned the public health
+payload with `200`.
+
+An authorized, temporary project-admin session then used the public application
+API, a CSRF-protected session, and the existing default-project snapshot to
+create build `19f860a1-e5c9-4536-a073-fa923527f61c`. All ten pipeline stages
+(`convert` through `package`) completed as `reused`, including `graph` and the
+previously failing `synthesize` stage. The legacy build became `ready`; no
+release was created. The temporary account's sessions and memberships were
+removed and the account was disabled; its audit history is intentionally
+retained.
+
+## 24-hour technical observation
+
+At `2026-07-19T23:49:56Z`, more than 43 hours after the corrected app restart,
+the production system was checked again without changing data or configuration:
+
+- `/var/lib/devkh-monitor/status.json` reported `result=success` with no
+  failures for the scheduled run completed at `2026-07-19T23:45:08.972Z`;
+- the running app still reported `DEVKH_KNOWLEDGE_KERNEL_MODE=shadow`;
+- both the loopback application health endpoint and the server-local public
+  HTTPS route returned the expected health payload, with the public route
+  returning `200`;
+- the preceding 24-hour window contained zero builds with a failed shadow stage;
+  and
+- post-fix build `19f860a1-e5c9-4536-a073-fa923527f61c` still had ten stage
+  runs, all ten successful or reused, and zero failed stages.
+
+This closes the strict 24-hour shadow technical-observation gate. It does not by
+itself prove the complete F04 role rollout: desktop/mobile browser acceptance
+and evidence from one real project covering administrator, member, and reader
+flows continuously for 24 hours remain required. After that project-level gate
+passes, all non-critical projects must complete a separate 24-hour observation.
+Expansion to the whole workspace requires explicit user confirmation. Any
+permission leak, data corruption, invalid citation, golden-flow failure, or two
+consecutive new-kernel build failures triggers an immediate rollback to `shadow`
+and the last legacy release. `active` therefore remains forbidden until every
+F04 rollout layer is accepted and F05 receives separate authorization.

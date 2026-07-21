@@ -12,6 +12,10 @@ import { createBackfillConfig, runBackfill } from "./backfill-source-blobs.mjs";
 
 const roots = [];
 
+async function resetIntegrationDatabase(pool) {
+  if (process.env.TEST_DATABASE_URL) await pool.query("TRUNCATE workspaces CASCADE");
+}
+
 function hash(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
@@ -1109,6 +1113,7 @@ test("real PostgreSQL rescans a snapshot committed behind the cursor during the 
     const schema = await pool.query("SELECT to_regclass('source_blobs')::text AS source_blobs");
     assert.equal(schema.rows[0]?.source_blobs, "source_blobs",
       "integration schema must be migrated before the backfill test");
+    await resetIntegrationDatabase(pool);
     await pool.query("INSERT INTO workspaces (id, name, slug) VALUES ($1, $2, $3)",
       [workspaceId, "FK16 final rescan", `fk16-rescan-${workspaceId}`]);
     await pool.query("INSERT INTO projects (id, workspace_id, name, slug) VALUES ($1, $2, $3, $4)",
@@ -1184,6 +1189,7 @@ test("runs the snapshot backfill against PostgreSQL atomically", {
     const schema = await pool.query("SELECT to_regclass('source_blobs')::text AS source_blobs");
     assert.equal(schema.rows[0]?.source_blobs, "source_blobs",
       "integration schema must be migrated before the backfill test");
+    await resetIntegrationDatabase(pool);
     await mkdir(path.join(legacyView, "src"), { recursive: true });
     await Promise.all(sourceRows.map((source) => writeFile(path.join(legacyView, source.path), source.bytes)));
     await pool.query("INSERT INTO workspaces (id, name, slug) VALUES ($1, $2, $3)",
@@ -1420,7 +1426,10 @@ test("runs the snapshot backfill against PostgreSQL atomically", {
       snapshotId
     });
     const repeated = await runBackfill({ pool, dataDir, batchSize: 1 });
-    assert.deepEqual(repeated, { ...report, completedAt: repeated.completedAt });
+    assert.deepEqual(
+      { ...repeated, completionCheckedAt: null, completedAt: null },
+      { ...report, completionCheckedAt: null, completedAt: null }
+    );
   } finally {
     await pool.query("DELETE FROM releases WHERE workspace_id = $1", [workspaceId]).catch(() => undefined);
     await pool.query("DELETE FROM build_jobs WHERE workspace_id = $1", [workspaceId]).catch(() => undefined);

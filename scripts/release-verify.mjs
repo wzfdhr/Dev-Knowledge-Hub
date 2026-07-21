@@ -12,7 +12,8 @@ import { validateRecoveryEvidenceFile } from "./backup/validate-recovery-evidenc
 import { validatePostContractBaselineGrammar } from "./verify-post-contract-database.mjs";
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const verifierRepositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const repositoryRoot = resolve(process.env.DEVKH_RELEASE_CANDIDATE_ROOT || verifierRepositoryRoot);
 const compose = ["compose", "-f", resolve(repositoryRoot, "docker-compose.yml")];
 const postContractCompose = [
   ...compose,
@@ -46,44 +47,44 @@ export const CONTAINER_STEPS = Object.freeze([
   { name: "compose-infrastructure", command: "docker", args: [...compose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "postgres", "parser"] },
   { name: "source-blob-contract-migration", command: "docker", args: [...compose, "--profile", "source-blob-contract", "run", "--rm", "--build", "contract-migrate"] },
   { name: "compose-app", command: "docker", args: [...compose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "app"] },
-  { name: "parser-isolation", command: "node", args: [resolve(repositoryRoot, "scripts/security/verify-parser-container.mjs")] },
+  { name: "parser-isolation", command: "node", args: [resolve(verifierRepositoryRoot, "scripts/security/verify-parser-container.mjs")] },
   {
     name: "application-health",
     command: "docker",
     args: [...compose, "exec", "-T", "app", "node", "-e",
       "fetch('http://127.0.0.1:3000/api/health').then(async(response)=>{console.log(await response.text());process.exit(response.ok?0:1)}).catch(()=>process.exit(1))"]
   },
-  { name: "recovery-drill", command: "bash", args: [resolve(repositoryRoot, "scripts/backup/ci-recovery-drill.sh")] }
+  { name: "recovery-drill", command: "bash", args: [resolve(verifierRepositoryRoot, "scripts/backup/ci-recovery-drill.sh")] }
 ]);
 
 export const STANDARD_CONTAINER_STEPS = Object.freeze([
   { name: "container-build", command: "docker", args: ["build", "--target", "runtime", "-t", "devkh:ci", repositoryRoot] },
   { name: "compose-config", command: "docker", args: [...compose, "config", "--quiet"] },
   { name: "compose-up", command: "docker", args: [...compose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "postgres", "parser", "app"] },
-  { name: "parser-isolation", command: "node", args: [resolve(repositoryRoot, "scripts/security/verify-parser-container.mjs")] },
+  { name: "parser-isolation", command: "node", args: [resolve(verifierRepositoryRoot, "scripts/security/verify-parser-container.mjs")] },
   {
     name: "application-health",
     command: "docker",
     args: [...compose, "exec", "-T", "app", "node", "-e",
       "fetch('http://127.0.0.1:3000/api/health').then(async(response)=>{console.log(await response.text());process.exit(response.ok?0:1)}).catch(()=>process.exit(1))"]
   },
-  { name: "recovery-drill", command: "bash", args: [resolve(repositoryRoot, "scripts/backup/ci-recovery-drill.sh")] }
+  { name: "recovery-drill", command: "bash", args: [resolve(verifierRepositoryRoot, "scripts/backup/ci-recovery-drill.sh")] }
 ]);
 
 export const POST_CONTRACT_CONTAINER_STEPS = Object.freeze([
   { name: "container-build", command: "docker", args: ["build", "--target", "runtime", "-t", "devkh:ci", repositoryRoot] },
   { name: "post-contract-compose-config", command: "docker", args: [...postContractCompose, "config", "--quiet"] },
   { name: "post-contract-compose-infrastructure", command: "docker", args: [...postContractCompose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "postgres", "parser"] },
-  { name: "post-contract-database-audit", command: "node", args: [resolve(repositoryRoot, "scripts/verify-post-contract-database.mjs")] },
+  { name: "post-contract-database-audit", command: "node", args: [resolve(verifierRepositoryRoot, "scripts/verify-post-contract-database.mjs")] },
   { name: "post-contract-compose-app", command: "docker", args: [...postContractCompose, "up", "-d", "--build", "--wait", "--wait-timeout", "120", "app"] },
-  { name: "parser-isolation", command: "node", args: [resolve(repositoryRoot, "scripts/security/verify-parser-container.mjs")] },
+  { name: "parser-isolation", command: "node", args: [resolve(verifierRepositoryRoot, "scripts/security/verify-parser-container.mjs")] },
   {
     name: "application-health",
     command: "docker",
     args: [...postContractCompose, "exec", "-T", "app", "node", "-e",
       "fetch('http://127.0.0.1:3000/api/health').then(async(response)=>{console.log(await response.text());process.exit(response.ok?0:1)}).catch(()=>process.exit(1))"]
   },
-  { name: "recovery-drill", command: "bash", args: [resolve(repositoryRoot, "scripts/backup/ci-recovery-drill.sh")] }
+  { name: "recovery-drill", command: "bash", args: [resolve(verifierRepositoryRoot, "scripts/backup/ci-recovery-drill.sh")] }
 ]);
 
 const cleanupStep = {
@@ -513,7 +514,8 @@ export function assertTrustedRuntimeMaterialIdentity(material) {
 export function validatePhaseMergeApprovalProvenance(provenance, expected) {
   requireExactFields(provenance, [
     "schemaVersion", "kind", "repository", "approvedCommit", "approvedHead", "approvedBase",
-    "contractBlob", "baselineBlob", "workflowBlob", "workflowRunId", "workflowRunAttempt", "issuedAt"
+    "contractBlob", "baselineBlob", "workflowBlob", "trustedBootstrapCommit", "trustedVerifierBlob",
+    "trustedDatabaseVerifierBlob", "workflowRunId", "workflowRunAttempt", "issuedAt"
   ], "Phase Merge approval provenance");
   if (provenance.schemaVersion !== 1 || provenance.kind !== "devkh-phase-merge-approval") {
     throw new Error("Post-contract runtime CI Phase Merge approval provenance is invalid");
@@ -521,9 +523,17 @@ export function validatePhaseMergeApprovalProvenance(provenance, expected) {
   if (provenance.repository !== expected.repository || provenance.approvedCommit !== expected.approvedCommit) {
     throw new Error("Post-contract runtime CI Phase Merge approval does not bind the trusted predecessor");
   }
-  for (const field of ["approvedCommit", "approvedHead", "approvedBase", "contractBlob", "baselineBlob", "workflowBlob"]) {
+  for (const field of [
+    "approvedCommit", "approvedHead", "approvedBase", "contractBlob", "baselineBlob", "workflowBlob",
+    "trustedBootstrapCommit", "trustedVerifierBlob", "trustedDatabaseVerifierBlob"
+  ]) {
     if (!/^[a-f0-9]{40}$/.test(provenance[field] ?? "")) {
       throw new Error(`Post-contract runtime CI Phase Merge approval ${field} is invalid`);
+    }
+  }
+  for (const field of ["trustedBootstrapCommit", "trustedVerifierBlob", "trustedDatabaseVerifierBlob"]) {
+    if (expected[field] && provenance[field] !== expected[field]) {
+      throw new Error(`Post-contract runtime CI Phase Merge approval ${field} does not match the trusted bootstrap`);
     }
   }
   if (!Number.isSafeInteger(provenance.workflowRunId) || provenance.workflowRunId <= 0
@@ -641,7 +651,13 @@ export async function loadPhaseMergeApprovalProvenance(approvedCommit, options) 
   if (text !== `${JSON.stringify(provenance)}\n`) {
     throw new Error("Post-contract runtime CI Phase Merge approval is not canonical JSON");
   }
-  validatePhaseMergeApprovalProvenance(provenance, { repository, approvedCommit });
+  validatePhaseMergeApprovalProvenance(provenance, {
+    repository,
+    approvedCommit,
+    trustedBootstrapCommit: options.trustedBootstrapCommit,
+    trustedVerifierBlob: options.trustedVerifierBlob,
+    trustedDatabaseVerifierBlob: options.trustedDatabaseVerifierBlob
+  });
   if (provenance.workflowRunId !== run.id || provenance.workflowRunAttempt !== run.run_attempt) {
     throw new Error("Post-contract runtime CI Phase Merge approval workflow run does not match its artifact");
   }
@@ -655,6 +671,74 @@ export async function loadPhaseMergeApprovalProvenance(approvedCommit, options) 
     throw new Error("Post-contract runtime CI Phase Merge approval timestamps are incoherent");
   }
   return provenance;
+}
+
+export function assertTrustedVerifierBootstrap(env, options = {}) {
+  const trustedBootstrapCommit = env.DEVKH_FK17_TRUSTED_BOOTSTRAP_COMMIT?.trim();
+  const currentWorkflowCommit = env.DEVKH_FK17_CURRENT_WORKFLOW_SHA?.trim();
+  const currentWorkflowPath = env.DEVKH_FK17_CURRENT_WORKFLOW_PATH?.trim();
+  if (!/^[a-f0-9]{40}$/.test(trustedBootstrapCommit ?? "")
+    || !/^[a-f0-9]{40}$/.test(currentWorkflowCommit ?? "")
+    || !/^\.github\/workflows\/(?:ci|phase-merge)\.yml$/.test(currentWorkflowPath ?? "")) {
+    throw new Error("FK17 gate requires an exact trusted bootstrap commit and active workflow identity");
+  }
+  const output = options.gitOutput ?? gitOutput;
+  let trustedVerifierBlob;
+  let trustedDatabaseVerifierBlob;
+  let trustedWorkflowBlob;
+  let currentWorkflowBlob;
+  let executingVerifierBlob;
+  let executingDatabaseVerifierBlob;
+  try {
+    output(["merge-base", "--is-ancestor", trustedBootstrapCommit, "HEAD"]);
+    trustedVerifierBlob = output(["rev-parse", `${trustedBootstrapCommit}:scripts/release-verify.mjs`]);
+    trustedDatabaseVerifierBlob = output(["rev-parse", `${trustedBootstrapCommit}:scripts/verify-post-contract-database.mjs`]);
+    trustedWorkflowBlob = output(["rev-parse", `${trustedBootstrapCommit}:${currentWorkflowPath}`]);
+    currentWorkflowBlob = output(["rev-parse", `${currentWorkflowCommit}:${currentWorkflowPath}`]);
+    executingVerifierBlob = output(["hash-object", resolve(verifierRepositoryRoot, "scripts/release-verify.mjs")]);
+    executingDatabaseVerifierBlob = output(["hash-object", resolve(verifierRepositoryRoot, "scripts/verify-post-contract-database.mjs")]);
+  } catch (error) {
+    throw new Error("FK17 gate could not resolve trusted bootstrap material", { cause: error });
+  }
+  if (executingVerifierBlob !== trustedVerifierBlob
+    || executingDatabaseVerifierBlob !== trustedDatabaseVerifierBlob) {
+    throw new Error("FK17 gate is not executing the trusted bootstrap verifier blobs");
+  }
+  if (currentWorkflowBlob !== trustedWorkflowBlob) {
+    throw new Error("FK17 gate active workflow differs from the trusted bootstrap workflow blob");
+  }
+  const phaseMergeWorkflowBlob = output([
+    "rev-parse", `${trustedBootstrapCommit}:.github/workflows/phase-merge.yml`
+  ]);
+  const trustedCiWorkflowBlob = output([
+    "rev-parse", `${trustedBootstrapCommit}:.github/workflows/ci.yml`
+  ]);
+  let candidateCiWorkflowBlob;
+  let candidatePhaseMergeWorkflowBlob;
+  let candidateVerifierBlob;
+  let candidateDatabaseVerifierBlob;
+  try {
+    candidateCiWorkflowBlob = output(["rev-parse", "HEAD:.github/workflows/ci.yml"]);
+    candidatePhaseMergeWorkflowBlob = output(["rev-parse", "HEAD:.github/workflows/phase-merge.yml"]);
+    candidateVerifierBlob = output(["rev-parse", "HEAD:scripts/release-verify.mjs"]);
+    candidateDatabaseVerifierBlob = output(["rev-parse", "HEAD:scripts/verify-post-contract-database.mjs"]);
+  } catch (error) {
+    throw new Error("FK17 candidate is missing a trusted gate workflow", { cause: error });
+  }
+  if (candidateCiWorkflowBlob !== trustedCiWorkflowBlob
+    || candidatePhaseMergeWorkflowBlob !== phaseMergeWorkflowBlob) {
+    throw new Error("FK17 candidate gate workflow differs from the trusted bootstrap");
+  }
+  if (candidateVerifierBlob !== trustedVerifierBlob
+    || candidateDatabaseVerifierBlob !== trustedDatabaseVerifierBlob) {
+    throw new Error("FK17 candidate verifier differs from the trusted bootstrap verifier blobs");
+  }
+  return {
+    trustedBootstrapCommit,
+    trustedVerifierBlob,
+    trustedDatabaseVerifierBlob,
+    phaseMergeWorkflowBlob
+  };
 }
 
 export async function stageTrustedBaseline(sql, root = tmpdir()) {
@@ -769,14 +853,22 @@ export async function assertPostContractRuntimeCi(env, options = {}) {
     trustedBaselineBlob,
     candidateBaselineBlob: checkedOutBaselineBlob
   });
+  const trustedBootstrap = options.trustedBootstrapMaterial
+    ?? (env.DEVKH_FK17_TRUSTED_BOOTSTRAP_COMMIT ? assertTrustedVerifierBootstrap(env) : undefined);
   const loadApproval = options.loadApprovalProvenance ?? loadPhaseMergeApprovalProvenance;
   const approval = await loadApproval(trustedContractCommit, {
     repository: env.GITHUB_REPOSITORY,
-    token: env.GITHUB_TOKEN
+    token: env.GITHUB_TOKEN,
+    trustedBootstrapCommit: trustedBootstrap?.trustedBootstrapCommit,
+    trustedVerifierBlob: trustedBootstrap?.trustedVerifierBlob,
+    trustedDatabaseVerifierBlob: trustedBootstrap?.trustedDatabaseVerifierBlob
   });
   validatePhaseMergeApprovalProvenance(approval, {
     repository: env.GITHUB_REPOSITORY,
-    approvedCommit: trustedContractCommit
+    approvedCommit: trustedContractCommit,
+    trustedBootstrapCommit: trustedBootstrap?.trustedBootstrapCommit,
+    trustedVerifierBlob: trustedBootstrap?.trustedVerifierBlob,
+    trustedDatabaseVerifierBlob: trustedBootstrap?.trustedDatabaseVerifierBlob
   });
   if (approval.contractBlob !== trustedContractBlob || approval.baselineBlob !== trustedBaselineBlob) {
     throw new Error("Post-contract runtime CI trusted material does not match Phase Merge approval provenance");
@@ -784,7 +876,7 @@ export async function assertPostContractRuntimeCi(env, options = {}) {
   let approvedWorkflowBlob;
   try {
     approvedWorkflowBlob = gitOutput([
-      "rev-parse", `${approval.approvedBase}:.github/workflows/phase-merge.yml`
+      "rev-parse", `${approval.trustedBootstrapCommit}:.github/workflows/phase-merge.yml`
     ]);
     execFileSync("git", ["merge-base", "--is-ancestor", approval.approvedBase, trustedContractCommit], {
       cwd: repositoryRoot,
@@ -794,7 +886,7 @@ export async function assertPostContractRuntimeCi(env, options = {}) {
     throw new Error("Post-contract runtime CI Phase Merge approval base is not trusted commit ancestry");
   }
   if (approval.workflowBlob !== approvedWorkflowBlob) {
-    throw new Error("Post-contract runtime CI Phase Merge approval workflow blob does not match its approved base");
+    throw new Error("Post-contract runtime CI Phase Merge approval workflow blob does not match its trusted bootstrap");
   }
   validatePostContractBaselineGrammar(trustedBaseline, expectedMigrations);
   let materialized = {};
@@ -912,9 +1004,15 @@ export async function runContainerVerification(options = {}) {
 
 export async function main(args = process.argv.slice(2)) {
   const scope = parseReleaseScope(args);
+  const trustedBootstrap = (process.env.GITHUB_ACTIONS === "true"
+    || scope === "container" || scope === "runtime-container" || scope === "all")
+    ? assertTrustedVerifierBootstrap(process.env)
+    : undefined;
   if (scope === "verify" || scope === "all") await runReleaseSteps(VERIFY_STEPS);
   if (scope === "runtime-container") {
-    const runtime = await assertPostContractRuntimeCi(process.env);
+    const runtime = await assertPostContractRuntimeCi(process.env, { trustedBootstrapMaterial: trustedBootstrap });
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
     process.env.DEVKH_POST_CONTRACT_BASELINE_PATH = runtime.baselinePath;
     process.env.DEVKH_POST_CONTRACT_EXPECTED_MIGRATIONS = JSON.stringify(runtime.expectedMigrations);
     try {

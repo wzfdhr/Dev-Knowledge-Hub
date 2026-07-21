@@ -14,12 +14,14 @@ import {
   assertContainerIsolation,
   assertPostContractRuntimeCi,
   assertSourceBlobContractReleaseGates,
+  assertTrustedVerifierBootstrap,
   assertTrustedRuntimeMaterialIdentity,
   finalizeRecoveryEvidence,
   loadPhaseMergeApprovalProvenance,
   parseReleaseScope,
   runContainerVerification,
   runReleaseSteps,
+  validatePhaseMergeApprovalProvenance,
   validateSourceBlobContractGateManifest
 } from "./release-verify.mjs";
 import { validatePostContractBaselineGrammar } from "./verify-post-contract-database.mjs";
@@ -136,6 +138,39 @@ function createSyntheticDescendant(parent) {
   return result.stdout.trim();
 }
 
+function createSyntheticTrustedBaselineCommit(parent) {
+  const root = mkdtempSync(join(tmpdir(), "devkh-trusted-baseline-tree-"));
+  const index = join(root, "index");
+  const env = { ...process.env, GIT_INDEX_FILE: index };
+  try {
+    execFileSync("git", ["read-tree", parent], { env });
+    const baselineBlob = execFileSync("git", ["hash-object", "-w", "docker/post-contract-ci-baseline.sql"], {
+      encoding: "utf8"
+    }).trim();
+    execFileSync("git", [
+      "update-index", "--add", "--cacheinfo", `100644,${baselineBlob},docker/post-contract-ci-baseline.sql`
+    ], { env });
+    const tree = execFileSync("git", ["write-tree"], { env, encoding: "utf8" }).trim();
+    const result = spawnSync("git", ["commit-tree", tree, "-p", parent], {
+      encoding: "utf8",
+      input: "trusted minimal post-contract baseline fixture\n",
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "DevKH Test",
+        GIT_AUTHOR_EMAIL: "devkh-test@example.invalid",
+        GIT_AUTHOR_DATE: "2026-07-21T00:00:00Z",
+        GIT_COMMITTER_NAME: "DevKH Test",
+        GIT_COMMITTER_EMAIL: "devkh-test@example.invalid",
+        GIT_COMMITTER_DATE: "2026-07-21T00:00:00Z"
+      }
+    });
+    if (result.status !== 0) throw new Error(result.stderr);
+    return result.stdout.trim();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function createPhaseMergeApproval(approvedCommit, repository = "example/devkh") {
   const blob = (path) => spawnSync("git", ["rev-parse", `${approvedCommit}:${path}`], { encoding: "utf8" }).stdout.trim();
   const approvedBase = spawnSync("git", ["rev-parse", `${approvedCommit}^`], { encoding: "utf8" }).stdout.trim();
@@ -148,7 +183,10 @@ function createPhaseMergeApproval(approvedCommit, repository = "example/devkh") 
     approvedBase,
     contractBlob: blob("drizzle/0035_source_blobs_contract.sql"),
     baselineBlob: blob("docker/post-contract-ci-baseline.sql"),
-    workflowBlob: spawnSync("git", ["rev-parse", `${approvedBase}:.github/workflows/phase-merge.yml`], { encoding: "utf8" }).stdout.trim(),
+    workflowBlob: blob(".github/workflows/phase-merge.yml"),
+    trustedBootstrapCommit: approvedCommit,
+    trustedVerifierBlob: blob("scripts/release-verify.mjs"),
+    trustedDatabaseVerifierBlob: blob("scripts/verify-post-contract-database.mjs"),
     workflowRunId: 12345,
     workflowRunAttempt: 1,
     issuedAt: "2026-07-21T00:00:00.000Z"
@@ -301,7 +339,8 @@ describe("release verification orchestrator", () => {
       repository: { full_name: "example/devkh" }
     }), "push"]
   ])("allows ordinary runtime verification for %s", async (_label, eventFactory, eventName) => {
-    const trustedCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    const head = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    const trustedCommit = createSyntheticTrustedBaselineCommit(head);
     const candidateCommit = createSyntheticDescendant(trustedCommit);
     const loadApprovalProvenance = vi.fn(async (commit) => createPhaseMergeApproval(commit));
     await expect(assertPostContractRuntimeCi({
@@ -357,6 +396,9 @@ describe("release verification orchestrator", () => {
       contractBlob: "d".repeat(40),
       baselineBlob: "e".repeat(40),
       workflowBlob: "f".repeat(40),
+      trustedBootstrapCommit: "9".repeat(40),
+      trustedVerifierBlob: "8".repeat(40),
+      trustedDatabaseVerifierBlob: "7".repeat(40),
       workflowRunId: 12345,
       workflowRunAttempt: 1,
       issuedAt: "2026-07-21T00:00:30.000Z"
@@ -405,8 +447,64 @@ describe("release verification orchestrator", () => {
     }
   });
 
+  test("rejects legacy approval provenance that is not bound to the trusted bootstrap verifier", () => {
+    const approvedCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    const legacy = { ...createPhaseMergeApproval(approvedCommit) };
+    delete legacy.trustedBootstrapCommit;
+    delete legacy.trustedVerifierBlob;
+    delete legacy.trustedDatabaseVerifierBlob;
+    expect(() => validatePhaseMergeApprovalProvenance(legacy, {
+      repository: "example/devkh",
+      approvedCommit,
+      trustedBootstrapCommit: "9".repeat(40),
+      trustedVerifierBlob: "8".repeat(40),
+      trustedDatabaseVerifierBlob: "7".repeat(40)
+    })).toThrow(/bootstrap|fields|verifier/i);
+  });
+
+  test.each([
+    ["executing verifier", { executingVerifier: "0".repeat(40) }],
+    ["candidate verifier", { candidateVerifier: "0".repeat(40) }],
+    ["candidate workflow", { candidateCiWorkflow: "0".repeat(40) }]
+  ])("rejects a candidate-replaced %s before gate enforcement", (_label, override) => {
+    const bootstrap = "9".repeat(40);
+    const currentWorkflow = "8".repeat(40);
+    const blobs = {
+      trustedVerifier: "1".repeat(40),
+      trustedDatabaseVerifier: "2".repeat(40),
+      ciWorkflow: "3".repeat(40),
+      phaseMergeWorkflow: "4".repeat(40),
+      ...override
+    };
+    const gitOutput = vi.fn((args) => {
+      const value = args.join(" ");
+      if (value === `merge-base --is-ancestor ${bootstrap} HEAD`) return "";
+      if (value.includes(`${bootstrap}:scripts/release-verify.mjs`)) return blobs.trustedVerifier;
+      if (value.includes(`${bootstrap}:scripts/verify-post-contract-database.mjs`)) return blobs.trustedDatabaseVerifier;
+      if (value.includes(`${bootstrap}:.github/workflows/ci.yml`)) return blobs.ciWorkflow;
+      if (value.includes(`${bootstrap}:.github/workflows/phase-merge.yml`)) return blobs.phaseMergeWorkflow;
+      if (value.includes(`${currentWorkflow}:.github/workflows/ci.yml`)) return blobs.ciWorkflow;
+      if (value.includes("HEAD:scripts/release-verify.mjs")) return blobs.candidateVerifier ?? blobs.trustedVerifier;
+      if (value.includes("HEAD:scripts/verify-post-contract-database.mjs")) return blobs.trustedDatabaseVerifier;
+      if (value.includes("HEAD:.github/workflows/ci.yml")) return blobs.candidateCiWorkflow ?? blobs.ciWorkflow;
+      if (value.includes("HEAD:.github/workflows/phase-merge.yml")) return blobs.phaseMergeWorkflow;
+      if (args[0] === "hash-object" && value.includes("verify-post-contract-database.mjs")) {
+        return blobs.trustedDatabaseVerifier;
+      }
+      if (args[0] === "hash-object") return blobs.executingVerifier ?? blobs.trustedVerifier;
+      throw new Error(`unexpected git call: ${value}`);
+    });
+
+    expect(() => assertTrustedVerifierBootstrap({
+      DEVKH_FK17_TRUSTED_BOOTSTRAP_COMMIT: bootstrap,
+      DEVKH_FK17_CURRENT_WORKFLOW_SHA: currentWorkflow,
+      DEVKH_FK17_CURRENT_WORKFLOW_PATH: ".github/workflows/ci.yml"
+    }, { gitOutput })).toThrow(/trusted bootstrap verifier|candidate gate workflow/i);
+  });
+
   test("allows a codex/mvp push only when its prior commit already contains the unchanged contract", async () => {
-    const priorCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    const head = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    const priorCommit = createSyntheticTrustedBaselineCommit(head);
     const currentCommit = createSyntheticDescendant(priorCommit);
     await expect(assertPostContractRuntimeCi({
       GITHUB_ACTIONS: "true",
@@ -482,7 +580,11 @@ describe("release verification orchestrator", () => {
   test.each([
     ["CTE-wrapped write", "WITH injected AS (INSERT INTO public.workspaces (name, slug) VALUES ('x', 'x') RETURNING id) SELECT * FROM injected;"],
     ["no-op application delete", "DELETE FROM public.workspaces WHERE false;"],
-    ["table-as-select write", "CREATE TABLE public.injected AS SELECT * FROM public.workspaces;"]
+    ["table-as-select write", "CREATE TABLE public.injected AS SELECT * FROM public.workspaces;"],
+    ["anonymous code block", "DO $$ BEGIN DELETE FROM public.workspaces; END $$;"],
+    ["stored procedure call", "CALL public.injected();"],
+    ["user-defined function", "CREATE FUNCTION public.injected() RETURNS void LANGUAGE sql AS $$ INSERT INTO public.workspaces (name, slug) VALUES ('x', 'x') $$;"],
+    ["trigger", "CREATE TRIGGER injected BEFORE INSERT ON public.workspaces FOR EACH ROW EXECUTE FUNCTION public.injected();"]
   ])("rejects arbitrary executable baseline DML: %s", (_label, statement) => {
     const baseline = readFileSync("docker/post-contract-ci-baseline.sql", "utf8");
     const expectedMigrations = readdirSync("drizzle")

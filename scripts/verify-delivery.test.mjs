@@ -51,17 +51,43 @@ describe("delivery database isolation", () => {
     expect(baseline).toMatch(/source_blob_id uuid NOT NULL/);
     expect(baseline).toContain("source_files_source_blob_identity_fk");
     expect(baseline).toMatch(/INSERT INTO .*schema_migrations.*0035_source_blobs_contract\.sql/is);
-    expect(ordinaryCommands).toContain("npm run release:verify -- --scope runtime-container");
+    expect(ordinaryCommands).toContain("/tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope runtime-container");
     expect(ordinaryCommands).not.toContain("--scope container");
-    expect(introducingCommands).toContain("npm run release:verify -- --scope container");
+    expect(introducingCommands).toContain("/tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope container");
     expect(phaseMerge.jobs.merge.steps.some((step) => step.uses === "actions/upload-artifact@v4")).toBe(true);
     expect(introducingCommands).not.toContain("phase-merge-approval");
     const mergeCommands = phaseMerge.jobs.merge.steps.map((step) => step.run).filter(Boolean).join("\n");
     expect(mergeCommands).toContain("phase-merge-approval.json");
     expect(mergeCommands).toContain("git rev-parse HEAD");
-    expect(mergeCommands).toContain("$APPROVED_BASE:.github/workflows/phase-merge.yml");
+    expect(mergeCommands).toContain("$TRUSTED_BOOTSTRAP:.github/workflows/phase-merge.yml");
+    expect(mergeCommands).toContain("trustedBootstrapCommit");
+    expect(mergeCommands).toContain("trustedVerifierBlob");
     expect(ci.jobs["container-smoke"].env).not.toHaveProperty("DEVKH_RELEASE_APPROVED_BASE");
     expect(ci.jobs["container-smoke"].env).not.toHaveProperty("DEVKH_SOURCE_BLOB_CONTRACT_GATE_MANIFEST");
+  });
+
+  test("executes gate verifiers and dependencies only from the reviewed bootstrap revision", async () => {
+    const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
+    const phaseMerge = parse(await readFile(".github/workflows/phase-merge.yml", "utf8"));
+    const jobs = [ci.jobs.verify, ci.jobs["container-smoke"], phaseMerge.jobs.verify, phaseMerge.jobs["container-smoke"]];
+
+    for (const job of jobs) {
+      const commands = job.steps.map((step) => step.run).filter(Boolean).join("\n");
+      expect(commands).toContain("DEVKH_FK17_BOOTSTRAP_COMMIT");
+      expect(commands).toContain("git archive");
+      expect(commands).toContain("/tmp/devkh-fk17-trusted");
+      expect(commands).toContain("npm ci --ignore-scripts");
+      expect(commands).toMatch(/node \/tmp\/devkh-fk17-trusted\/scripts\/release-verify\.mjs --scope (?:verify|container|runtime-container)/);
+      expect(commands).not.toContain("npm run release:verify");
+    }
+    expect(JSON.stringify(ci)).toContain("${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}");
+    expect(JSON.stringify(phaseMerge)).toContain("${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}");
+    for (const checkout of [
+      ...ci.jobs.verify.steps.filter((step) => step.uses === "actions/checkout@v4"),
+      ...ci.jobs["container-smoke"].steps.filter((step) => step.uses === "actions/checkout@v4")
+    ]) {
+      expect(checkout.with?.["persist-credentials"]).toBe(false);
+    }
   });
 
   test("documents the public HTTPS base URL required by the Compose application", async () => {
@@ -151,9 +177,9 @@ describe("delivery database isolation", () => {
     expect(ci.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DEFER_FINALIZATION).toBe("true");
     expect(phaseMerge.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DEFER_FINALIZATION).toBe("true");
     expect(verifySteps).toContain("npx playwright install --with-deps chromium");
-    expect(verifySteps).toContain("npm run release:verify -- --scope verify");
+    expect(verifySteps).toContain("node /tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope verify");
     expect(smokeSteps).toContain("apt-get install -y restic");
-    expect(smokeSteps).toContain("npm run release:verify -- --scope runtime-container");
+    expect(smokeSteps).toContain("node /tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope runtime-container");
     expect(ci.jobs["container-smoke"].steps).toEqual(expect.arrayContaining([
       expect.objectContaining({ uses: "actions/upload-artifact@v4", if: "always()" })
     ]));

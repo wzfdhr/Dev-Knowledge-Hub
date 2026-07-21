@@ -79,4 +79,16 @@ describe.runIf(dockerAvailable)("post-contract trusted baseline container", () =
     await expect(verifyPostContractDatabase({ containerId: container, expectedMigrations }))
       .rejects.toThrow(/application data.*workspaces/i);
   }, 60_000);
+
+  test("rejects a dormant user function and trigger after real PostgreSQL initialization", async () => {
+    const baseline = `${readFileSync("docker/post-contract-ci-baseline.sql", "utf8")}\n`
+      + "CREATE FUNCTION public.injected_workspace_write() RETURNS trigger LANGUAGE plpgsql AS $$\n"
+      + "BEGIN INSERT INTO public.workspaces (name, slug) VALUES ('Injected', 'injected'); RETURN NEW; END\n$$;\n"
+      + "CREATE TRIGGER injected_workspace_write BEFORE INSERT ON public.source_files "
+      + "FOR EACH ROW EXECUTE FUNCTION public.injected_workspace_write();\n";
+    const { container } = await initialize(baseline);
+
+    await expect(verifyPostContractDatabase({ containerId: container, expectedMigrations }))
+      .rejects.toThrow(/user-defined function|trigger/i);
+  }, 60_000);
 });

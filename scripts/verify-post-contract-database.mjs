@@ -2,7 +2,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const verifierRepositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const repositoryRoot = resolve(process.env.DEVKH_RELEASE_CANDIDATE_ROOT || verifierRepositoryRoot);
 const auditSql = String.raw`
 BEGIN;
 CREATE TEMP TABLE devkh_application_rows (table_name text PRIMARY KEY);
@@ -31,6 +32,28 @@ $audit$;
 SELECT json_build_object(
   'applicationDataTables', COALESCE((SELECT json_agg(table_name ORDER BY table_name) FROM devkh_application_rows), '[]'::json),
   'ledger', COALESCE((SELECT json_agg(name ORDER BY name) FROM public.schema_migrations), '[]'::json),
+  'userFunctions', COALESCE((
+    SELECT json_agg(namespace.nspname || '.' || procedure.proname ORDER BY namespace.nspname, procedure.proname)
+    FROM pg_catalog.pg_proc procedure
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure.pronamespace
+    WHERE namespace.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND namespace.nspname !~ '^pg_toast'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_depend dependency
+        WHERE dependency.classid = 'pg_proc'::regclass
+          AND dependency.objid = procedure.oid
+          AND dependency.deptype = 'e'
+      )
+  ), '[]'::json),
+  'userTriggers', COALESCE((
+    SELECT json_agg(namespace.nspname || '.' || class.relname || '.' || trigger.tgname
+      ORDER BY namespace.nspname, class.relname, trigger.tgname)
+    FROM pg_catalog.pg_trigger trigger
+    JOIN pg_catalog.pg_class class ON class.oid = trigger.tgrelid
+    JOIN pg_catalog.pg_namespace namespace ON namespace.oid = class.relnamespace
+    WHERE NOT trigger.tgisinternal
+  ), '[]'::json),
   'sourceBlobNotNull', COALESCE((
     SELECT attribute.attnotnull
     FROM pg_catalog.pg_attribute attribute
@@ -205,11 +228,9 @@ export function validatePostContractBaselineGrammar(sql, expectedMigrations) {
       || /^CREATE EXTENSION IF NOT EXISTS (?:pg_trgm|pgcrypto) WITH SCHEMA public$/.test(compact)
       || /^COMMENT ON EXTENSION (?:pg_trgm|pgcrypto) IS '[^']*'$/.test(compact)
       || /^CREATE TYPE public\.[a-z0-9_]+ AS ENUM \(/.test(compact)
-      || /^CREATE FUNCTION public\.[a-z0-9_]+\(/.test(compact)
       || /^CREATE TABLE public\.[a-z0-9_]+ \(/.test(compact)
       || /^CREATE SEQUENCE public\.[a-z0-9_]+(?: |$)/.test(compact)
       || /^CREATE (?:UNIQUE )?INDEX [a-z0-9_]+ ON public\.[a-z0-9_]+ /.test(compact)
-      || /^CREATE TRIGGER [a-z0-9_]+ .+ ON public\.[a-z0-9_]+ /.test(compact)
       || /^ALTER TABLE (?:ONLY )?public\.[a-z0-9_]+ /.test(compact)
       || /^ALTER SEQUENCE public\.[a-z0-9_]+ /.test(compact);
     if (!allowed) {
@@ -224,11 +245,20 @@ export function validatePostContractBaselineGrammar(sql, expectedMigrations) {
 export function assertPostContractDatabaseAudit(audit, expectedMigrations) {
   validateExpectedMigrations(expectedMigrations);
   if (!audit || Object.keys(audit).sort().join(",")
-    !== ["applicationDataTables", "identityForeignKey", "identityUnique", "ledger", "sourceBlobNotNull"].sort().join(",")) {
+    !== [
+      "applicationDataTables", "identityForeignKey", "identityUnique", "ledger", "sourceBlobNotNull",
+      "userFunctions", "userTriggers"
+    ].sort().join(",")) {
     throw new Error("Post-contract runtime database audit result is invalid");
   }
   if (!Array.isArray(audit.applicationDataTables) || audit.applicationDataTables.length > 0) {
     throw new Error(`Post-contract runtime baseline contains application data: ${audit.applicationDataTables?.join(", ") ?? "invalid audit"}`);
+  }
+  if (!Array.isArray(audit.userFunctions) || audit.userFunctions.length > 0) {
+    throw new Error(`Post-contract runtime baseline contains a user-defined function: ${audit.userFunctions?.join(", ") ?? "invalid audit"}`);
+  }
+  if (!Array.isArray(audit.userTriggers) || audit.userTriggers.length > 0) {
+    throw new Error(`Post-contract runtime baseline contains a trigger: ${audit.userTriggers?.join(", ") ?? "invalid audit"}`);
   }
   if (JSON.stringify(audit.ledger) !== JSON.stringify(expectedMigrations)) {
     throw new Error(`Post-contract runtime baseline migration ledger is incomplete or unexpected: expected ${JSON.stringify(expectedMigrations)}, received ${JSON.stringify(audit.ledger)}`);

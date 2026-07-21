@@ -89,176 +89,36 @@ CREATE TYPE public.team_role AS ENUM (
 -- Name: enforce_knowledge_graph_fact_edge(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.enforce_knowledge_graph_fact_edge() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF NOT NEW.candidate AND NOT EXISTS (
-    SELECT 1
-    FROM knowledge_graph_nodes
-    WHERE build_job_id = NEW.build_job_id AND node_id = NEW.to_node_id
-  ) THEN
-    RAISE EXCEPTION 'Graph fact edge has a dangling node';
-  END IF;
-  RETURN NEW;
-END;
-$$;
 
 
 --
 -- Name: enforce_pipeline_release_provenance(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.enforce_pipeline_release_provenance() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF NEW.release_artifact_family = 'knowledge-v1' THEN
-    IF NEW.package_stage_run_id IS NOT NULL
-      OR NEW.frontend_ir_schema_version IS NOT NULL
-      OR NEW.frontend_graph_schema_version IS NOT NULL
-      OR NEW.analyzer_manifest_digest IS NOT NULL THEN
-      RAISE EXCEPTION 'Knowledge v1 release cannot contain frontend v2 provenance';
-    END IF;
-    IF NEW.kernel_mode = 'legacy' THEN
-      IF NEW.package_artifact_id IS NOT NULL THEN
-        RAISE EXCEPTION 'Legacy release cannot reference a package artifact';
-      END IF;
-      RETURN NEW;
-    END IF;
-    IF NEW.package_artifact_id IS NULL OR NOT EXISTS (
-      SELECT 1 FROM knowledge_artifacts artifact
-      WHERE artifact.id = NEW.package_artifact_id
-        AND artifact.workspace_id = NEW.workspace_id
-        AND artifact.build_job_id = NEW.build_job_id
-        AND artifact.stage = 'package'
-        AND artifact.kind = 'pipeline-package'
-        AND artifact.schema_version = 1
-    ) THEN
-      RAISE EXCEPTION 'Pipeline release must reference a matching package artifact';
-    END IF;
-    RETURN NEW;
-  END IF;
-
-  IF NEW.kernel_mode <> 'pipeline' OR NOT EXISTS (
-    SELECT 1
-    FROM repositories repository
-    JOIN build_jobs build
-      ON build.id = NEW.build_job_id
-      AND build.workspace_id = NEW.workspace_id
-      AND build.repository_id = NEW.repository_id
-      AND build.snapshot_id = NEW.snapshot_id
-      AND build.status = 'ready'
-    JOIN source_snapshots snapshot
-      ON snapshot.id = NEW.snapshot_id
-      AND snapshot.workspace_id = NEW.workspace_id
-      AND snapshot.repository_id = NEW.repository_id
-    JOIN build_stage_runs run
-      ON run.id = NEW.package_stage_run_id
-      AND run.workspace_id = NEW.workspace_id
-      AND run.project_id = repository.project_id
-      AND run.build_job_id = NEW.build_job_id
-      AND run.snapshot_id = NEW.snapshot_id
-      AND run.stage = 'package'
-      AND run.status IN ('succeeded', 'reused')
-    JOIN knowledge_artifacts artifact
-      ON artifact.id = NEW.package_artifact_id
-      AND artifact.id = ANY(run.output_manifest_ids)
-      AND artifact.workspace_id = run.workspace_id
-      AND artifact.project_id = run.project_id
-      AND artifact.snapshot_id = run.snapshot_id
-      AND artifact.stage = 'package'
-      AND artifact.kind = 'frontend-pipeline-package'
-      AND artifact.schema_version = 2
-    WHERE repository.id = NEW.repository_id
-      AND repository.workspace_id = NEW.workspace_id
-  ) THEN
-    RAISE EXCEPTION 'Frontend v2 release must reference its terminal package stage output';
-  END IF;
-  RETURN NEW;
-END;
-$$;
 
 
 --
 -- Name: enforce_pipeline_search_document_scope(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.enforce_pipeline_search_document_scope() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1
-    FROM knowledge_artifacts artifact
-    WHERE artifact.id = NEW.source_artifact_id
-      AND artifact.workspace_id = NEW.workspace_id
-      AND artifact.project_id = NEW.project_id
-      AND artifact.snapshot_id = NEW.snapshot_id
-  ) THEN
-    RAISE EXCEPTION 'Pipeline search document does not match its source artifact scope';
-  END IF;
-  RETURN NEW;
-END;
-$$;
 
 
 --
 -- Name: enforce_release_provenance_immutable(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.enforce_release_provenance_immutable() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF NEW.kernel_mode IS DISTINCT FROM OLD.kernel_mode
-    OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
-    OR NEW.repository_id IS DISTINCT FROM OLD.repository_id
-    OR NEW.build_job_id IS DISTINCT FROM OLD.build_job_id
-    OR NEW.snapshot_id IS DISTINCT FROM OLD.snapshot_id
-    OR NEW.package_artifact_id IS DISTINCT FROM OLD.package_artifact_id
-    OR NEW.release_artifact_family IS DISTINCT FROM OLD.release_artifact_family
-    OR NEW.package_stage_run_id IS DISTINCT FROM OLD.package_stage_run_id
-    OR NEW.frontend_ir_schema_version IS DISTINCT FROM OLD.frontend_ir_schema_version
-    OR NEW.frontend_graph_schema_version IS DISTINCT FROM OLD.frontend_graph_schema_version
-    OR NEW.analyzer_manifest_digest IS DISTINCT FROM OLD.analyzer_manifest_digest THEN
-    RAISE EXCEPTION 'Release frontend provenance is immutable';
-  END IF;
-  RETURN NEW;
-END;
-$$;
 
 
 --
 -- Name: prevent_published_artifact_delete(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.prevent_published_artifact_delete() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  IF EXISTS (
-    SELECT 1 FROM releases
-    WHERE build_job_id = OLD.build_job_id AND workspace_id = OLD.workspace_id AND published_at IS NOT NULL
-  ) THEN
-    RAISE EXCEPTION 'Cannot delete artifacts from a published build';
-  END IF;
-  RETURN OLD;
-END;
-$$;
 
 
 --
 -- Name: reject_source_analysis_artifact_update(); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.reject_source_analysis_artifact_update() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-  RAISE EXCEPTION 'source analysis artifacts are immutable';
-END;
-$$;
 
 
 SET default_tablespace = '';
@@ -2241,42 +2101,36 @@ CREATE UNIQUE INDEX workspaces_slug_idx ON public.workspaces USING btree (slug);
 -- Name: knowledge_artifacts knowledge_artifacts_prevent_published_delete; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER knowledge_artifacts_prevent_published_delete BEFORE DELETE ON public.knowledge_artifacts FOR EACH ROW EXECUTE FUNCTION public.prevent_published_artifact_delete();
 
 
 --
 -- Name: knowledge_graph_edges knowledge_graph_fact_edge_integrity; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER knowledge_graph_fact_edge_integrity BEFORE INSERT OR UPDATE ON public.knowledge_graph_edges FOR EACH ROW EXECUTE FUNCTION public.enforce_knowledge_graph_fact_edge();
 
 
 --
 -- Name: pipeline_search_documents pipeline_search_documents_scope_integrity; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER pipeline_search_documents_scope_integrity BEFORE INSERT OR UPDATE ON public.pipeline_search_documents FOR EACH ROW EXECUTE FUNCTION public.enforce_pipeline_search_document_scope();
 
 
 --
 -- Name: releases releases_pipeline_provenance_immutable; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER releases_pipeline_provenance_immutable BEFORE UPDATE OF workspace_id, repository_id, build_job_id, snapshot_id, kernel_mode, package_artifact_id, release_artifact_family, package_stage_run_id, frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest ON public.releases FOR EACH ROW EXECUTE FUNCTION public.enforce_release_provenance_immutable();
 
 
 --
 -- Name: releases releases_pipeline_provenance_integrity; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER releases_pipeline_provenance_integrity BEFORE INSERT OR UPDATE OF kernel_mode, package_artifact_id, release_artifact_family, package_stage_run_id, frontend_ir_schema_version, frontend_graph_schema_version, analyzer_manifest_digest, workspace_id, repository_id, build_job_id, snapshot_id ON public.releases FOR EACH ROW EXECUTE FUNCTION public.enforce_pipeline_release_provenance();
 
 
 --
 -- Name: source_analysis_artifacts source_analysis_artifacts_immutable; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER source_analysis_artifacts_immutable BEFORE UPDATE ON public.source_analysis_artifacts FOR EACH ROW EXECUTE FUNCTION public.reject_source_analysis_artifact_update();
 
 
 --

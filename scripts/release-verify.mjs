@@ -2,7 +2,8 @@ import { spawn } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, existsSync } from "node:fs";
-import { mkdir, open, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -417,19 +418,24 @@ export async function assertSourceBlobContractReleaseGates(env, options = {}) {
   const contractMigrationPresent = options.contractMigrationPresent
     ?? existsSync(sourceBlobContractMigration);
   if (!contractMigrationPresent) return null;
+  const checkedOutCommit = options.checkedOutCommit ?? execFileSync(
+    "git", ["rev-parse", "HEAD"], { cwd: repositoryRoot, encoding: "utf8" }
+  ).trim();
   const approvedBase = env.DEVKH_RELEASE_APPROVED_BASE?.trim();
   if (approvedBase) {
     if (!/^[a-f0-9]{40}$/.test(approvedBase)) {
       throw new Error("Source blob contract approved base commit is invalid");
     }
     try {
-      execFileSync("git", ["cat-file", "-e", `${approvedBase}:drizzle/0035_source_blobs_contract.sql`], {
-        cwd: repositoryRoot,
-        stdio: "ignore"
-      });
-      return { authorizedByApprovedBase: approvedBase };
+      const approvedBlob = gitOutput([
+        "rev-parse", `${approvedBase}:drizzle/0035_source_blobs_contract.sql`
+      ]);
+      const candidateBlob = gitOutput([
+        "rev-parse", `${checkedOutCommit}:drizzle/0035_source_blobs_contract.sql`
+      ]);
+      if (approvedBlob === candidateBlob) return { authorizedByApprovedBase: approvedBase };
     } catch {
-      // The approved base does not contain the contract; this candidate must prove every gate.
+      // A missing or changed contract is an introducing candidate and must prove every gate.
     }
   }
   const manifestPath = env.DEVKH_SOURCE_BLOB_CONTRACT_GATE_MANIFEST?.trim();
@@ -439,9 +445,6 @@ export async function assertSourceBlobContractReleaseGates(env, options = {}) {
   if (!manifestPath || !expectedDigest || !expectedCandidateCommit || !expectedApprover) {
     throw new Error("Source blob contract release requires a gate manifest, digest, candidate commit, and approver");
   }
-  const checkedOutCommit = options.checkedOutCommit ?? execFileSync(
-    "git", ["rev-parse", "HEAD"], { cwd: repositoryRoot, encoding: "utf8" }
-  ).trim();
   if (expectedCandidateCommit !== checkedOutCommit) {
     throw new Error("Source blob contract candidate commit does not match the checked-out commit");
   }
@@ -474,6 +477,64 @@ function gitOutput(args) {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"]
   }).trim();
+}
+
+function gitFile(commit, path) {
+  return execFileSync("git", ["show", `${commit}:${path}`], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    maxBuffer: 4 * 1024 * 1024
+  });
+}
+
+export function assertTrustedRuntimeMaterialIdentity(material) {
+  if (material.trustedContractBlob !== material.candidateContractBlob) {
+    throw new Error("Post-contract runtime CI checkout changed 0035 from the trusted base");
+  }
+  if (material.trustedBaselineBlob !== material.candidateBaselineBlob) {
+    throw new Error("Post-contract runtime CI checkout changed the baseline from the trusted base");
+  }
+}
+
+export function validatePostContractBaseline(sql, expectedMigrations) {
+  if (typeof sql !== "string" || !Array.isArray(expectedMigrations)
+    || expectedMigrations.length === 0
+    || expectedMigrations.at(-1) !== "0035_source_blobs_contract.sql") {
+    throw new Error("Post-contract runtime baseline migration ledger expectation is invalid");
+  }
+  const dataSections = [...sql.matchAll(/^-- Data for Name: ([^;]+);/gm)].map((match) => match[1]);
+  if (JSON.stringify(dataSections) !== JSON.stringify(["schema_migrations"])) {
+    throw new Error("Post-contract runtime baseline contains application data");
+  }
+  if (/^\s*(?:UPDATE |DELETE FROM |MERGE INTO |TRUNCATE |DO \$|SELECT pg_catalog\.setval)/m.test(sql)) {
+    throw new Error("Post-contract runtime baseline contains application data");
+  }
+  const dataStatements = sql.split("\n").filter((line) => /^\s*(?:COPY |INSERT INTO )/.test(line));
+  const ledgerPattern = /^\s*INSERT INTO public\.schema_migrations \(name, applied_at\) VALUES \('([^']+)', '[^']+'\);$/;
+  const ledger = [];
+  for (const statement of dataStatements) {
+    const match = statement.match(ledgerPattern);
+    if (!match) throw new Error("Post-contract runtime baseline contains application data");
+    ledger.push(match[1]);
+  }
+  if (JSON.stringify(ledger) !== JSON.stringify(expectedMigrations)) {
+    throw new Error("Post-contract runtime baseline migration ledger is incomplete or unexpected");
+  }
+  if (!/CREATE TABLE public\.source_files \([\s\S]*?source_blob_id uuid NOT NULL[\s\S]*?\);/.test(sql)) {
+    throw new Error("Post-contract runtime baseline does not enforce source_blob_id NOT NULL");
+  }
+  if (!/ADD CONSTRAINT source_blobs_reference_identity_unique UNIQUE \(id, workspace_id, content_hash, byte_size\);/.test(sql)
+    || !/ADD CONSTRAINT source_files_source_blob_identity_fk FOREIGN KEY \(source_blob_id, workspace_id, content_hash, byte_size\) REFERENCES public\.source_blobs\(id, workspace_id, content_hash, byte_size\) ON DELETE RESTRICT;/.test(sql)) {
+    throw new Error("Post-contract runtime baseline does not enforce source blob identity constraints");
+  }
+}
+
+async function materializeTrustedBaseline(sql, root = tmpdir()) {
+  const directory = await mkdtemp(join(root, "devkh-post-contract-baseline-"));
+  const path = join(directory, "post-contract-ci-baseline.sql");
+  await writeFile(path, sql, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  return { baselineDirectory: directory, baselinePath: path };
 }
 
 export async function assertPostContractRuntimeCi(env, options = {}) {
@@ -511,9 +572,8 @@ export async function assertPostContractRuntimeCi(env, options = {}) {
     if (event?.after !== checkedOutCommit) {
       throw new Error("Post-contract runtime CI push does not match the checkout");
     }
-    if (event?.ref === "refs/heads/main") {
-      trustedContractCommit = checkedOutCommit;
-    } else if (event?.ref === "refs/heads/codex/mvp" && /^[a-f0-9]{40}$/.test(event?.before ?? "")) {
+    if ((event?.ref === "refs/heads/main" || event?.ref === "refs/heads/codex/mvp")
+      && /^[a-f0-9]{40}$/.test(event?.before ?? "")) {
       trustedContractCommit = event.before;
       try {
         execFileSync("git", ["merge-base", "--is-ancestor", trustedContractCommit, checkedOutCommit], {
@@ -528,8 +588,16 @@ export async function assertPostContractRuntimeCi(env, options = {}) {
     }
   }
 
+  if (trustedContractCommit === checkedOutCommit) {
+    throw new Error("Post-contract runtime CI requires a distinct trusted predecessor");
+  }
+
   let trustedContractBlob;
   let checkedOutContractBlob;
+  let trustedBaselineBlob;
+  let checkedOutBaselineBlob;
+  let trustedBaseline;
+  let expectedMigrations;
   try {
     trustedContractBlob = gitOutput([
       "rev-parse", `${trustedContractCommit}:drizzle/0035_source_blobs_contract.sql`
@@ -537,13 +605,33 @@ export async function assertPostContractRuntimeCi(env, options = {}) {
     checkedOutContractBlob = gitOutput([
       "rev-parse", `${checkedOutCommit}:drizzle/0035_source_blobs_contract.sql`
     ]);
+    trustedBaselineBlob = gitOutput([
+      "rev-parse", `${trustedContractCommit}:docker/post-contract-ci-baseline.sql`
+    ]);
+    checkedOutBaselineBlob = gitOutput([
+      "rev-parse", `${checkedOutCommit}:docker/post-contract-ci-baseline.sql`
+    ]);
+    trustedBaseline = gitFile(trustedContractCommit, "docker/post-contract-ci-baseline.sql");
+    expectedMigrations = gitOutput([
+      "ls-tree", "-r", "--name-only", trustedContractCommit, "--", "drizzle"
+    ]).split("\n").map((name) => basename(name)).filter((name) =>
+      name.endsWith(".sql") && name <= "0035_source_blobs_contract.sql"
+    ).sort();
   } catch {
-    throw new Error("Post-contract runtime CI trusted base does not contain 0035");
+    throw new Error("Post-contract runtime CI trusted base does not contain 0035 and its baseline");
   }
-  if (trustedContractBlob !== checkedOutContractBlob) {
-    throw new Error("Post-contract runtime CI checkout changed 0035 from the trusted contract base");
+  assertTrustedRuntimeMaterialIdentity({
+    trustedContractBlob,
+    candidateContractBlob: checkedOutContractBlob,
+    trustedBaselineBlob,
+    candidateBaselineBlob: checkedOutBaselineBlob
+  });
+  validatePostContractBaseline(trustedBaseline, expectedMigrations);
+  let materialized = {};
+  if (options.materializeBaseline !== false) {
+    materialized = await materializeTrustedBaseline(trustedBaseline, env.RUNNER_TEMP || tmpdir());
   }
-  return { eventName, trustedContractCommit };
+  return { eventName, trustedContractCommit, ...materialized };
 }
 
 function executeCommand(step) {
@@ -656,8 +744,14 @@ export async function main(args = process.argv.slice(2)) {
   const scope = parseReleaseScope(args);
   if (scope === "verify" || scope === "all") await runReleaseSteps(VERIFY_STEPS);
   if (scope === "runtime-container") {
-    await assertPostContractRuntimeCi(process.env);
-    await runContainerVerification({ steps: POST_CONTRACT_CONTAINER_STEPS });
+    const runtime = await assertPostContractRuntimeCi(process.env);
+    process.env.DEVKH_POST_CONTRACT_BASELINE_PATH = runtime.baselinePath;
+    try {
+      await runContainerVerification({ steps: POST_CONTRACT_CONTAINER_STEPS });
+    } finally {
+      delete process.env.DEVKH_POST_CONTRACT_BASELINE_PATH;
+      await rm(runtime.baselineDirectory, { recursive: true, force: true });
+    }
   }
   if (scope === "container" || scope === "all") {
     const gates = await assertSourceBlobContractReleaseGates(process.env);

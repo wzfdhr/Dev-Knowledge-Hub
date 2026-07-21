@@ -14,10 +14,12 @@ import {
   assertContainerIsolation,
   assertPostContractRuntimeCi,
   assertSourceBlobContractReleaseGates,
+  assertTrustedRuntimeMaterialIdentity,
   finalizeRecoveryEvidence,
   parseReleaseScope,
   runContainerVerification,
   runReleaseSteps,
+  validatePostContractBaseline,
   validateSourceBlobContractGateManifest
 } from "./release-verify.mjs";
 
@@ -112,6 +114,25 @@ function createContractGateFixture(root, overrides = {}) {
     manifestPath: join(root, manifestReference.file),
     manifestDigest: manifestReference.sha256
   };
+}
+
+function createSyntheticDescendant(parent) {
+  const tree = spawnSync("git", ["rev-parse", `${parent}^{tree}`], { encoding: "utf8" }).stdout.trim();
+  const result = spawnSync("git", ["commit-tree", tree, "-p", parent], {
+    encoding: "utf8",
+    input: "post-contract runtime fixture\n",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "DevKH Test",
+      GIT_AUTHOR_EMAIL: "devkh-test@example.invalid",
+      GIT_AUTHOR_DATE: "2026-07-21T00:00:00Z",
+      GIT_COMMITTER_NAME: "DevKH Test",
+      GIT_COMMITTER_EMAIL: "devkh-test@example.invalid",
+      GIT_COMMITTER_DATE: "2026-07-21T00:00:00Z"
+    }
+  });
+  if (result.status !== 0) throw new Error(result.stderr);
+  return result.stdout.trim();
 }
 
 describe("release verification orchestrator", () => {
@@ -234,35 +255,49 @@ describe("release verification orchestrator", () => {
     })).resolves.toEqual({ authorizedByApprovedBase: currentCommit });
   });
 
+  test("does not inherit approved-base authorization from a different same-named 0035", async () => {
+    const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    await expect(assertSourceBlobContractReleaseGates({
+      DEVKH_RELEASE_APPROVED_BASE: "79c833b7bcd88c5147ff7ee7aba9786bf89032ed"
+    }, {
+      contractMigrationPresent: true,
+      checkedOutCommit: currentCommit
+    })).rejects.toThrow(/gate manifest, digest, candidate commit, and approver/i);
+  });
+
   test.each([
-    ["a pull request whose trusted base already contains the unchanged contract", (commit) => ({
+    ["a pull request whose trusted base already contains the unchanged contract", (trusted, candidate) => ({
       repository: { full_name: "example/devkh" },
-      pull_request: { base: { sha: commit, repo: { full_name: "example/devkh" } } }
+      pull_request: { base: { sha: trusted, repo: { full_name: "example/devkh" } } },
+      after: candidate
     }), "pull_request"],
-    ["a protected main push containing the contracted runtime", (commit) => ({
+    ["a protected main push whose predecessor already contains the contracted runtime", (trusted, candidate) => ({
       ref: "refs/heads/main",
-      after: commit,
+      before: trusted,
+      after: candidate,
       repository: { full_name: "example/devkh" }
     }), "push"]
   ])("allows ordinary runtime verification for %s", async (_label, eventFactory, eventName) => {
-    const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    const trustedCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    const candidateCommit = createSyntheticDescendant(trustedCommit);
     await expect(assertPostContractRuntimeCi({
       GITHUB_ACTIONS: "true",
       GITHUB_WORKFLOW: "ci",
       GITHUB_EVENT_NAME: eventName,
       GITHUB_REPOSITORY: "example/devkh"
     }, {
-      checkedOutCommit: currentCommit,
-      event: eventFactory(currentCommit)
-    })).resolves.toEqual({
+      checkedOutCommit: candidateCommit,
+      event: eventFactory(trustedCommit, candidateCommit),
+      materializeBaseline: false
+    })).resolves.toMatchObject({
       eventName,
-      trustedContractCommit: currentCommit
+      trustedContractCommit: trustedCommit
     });
   });
 
   test("allows a codex/mvp push only when its prior commit already contains the unchanged contract", async () => {
-    const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
-    const priorCommit = spawnSync("git", ["rev-parse", "HEAD^"], { encoding: "utf8" }).stdout.trim();
+    const priorCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    const currentCommit = createSyntheticDescendant(priorCommit);
     await expect(assertPostContractRuntimeCi({
       GITHUB_ACTIONS: "true",
       GITHUB_WORKFLOW: "ci",
@@ -275,11 +310,75 @@ describe("release verification orchestrator", () => {
         before: priorCommit,
         after: currentCommit,
         repository: { full_name: "example/devkh" }
-      }
-    })).resolves.toEqual({
+      },
+      materializeBaseline: false
+    })).resolves.toMatchObject({
       eventName: "push",
       trustedContractCommit: priorCommit
     });
+  });
+
+  test("rejects an introducing protected-main push whose predecessor lacks 0035", async () => {
+    const candidateCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    const introducingBase = spawnSync(
+      "git", ["rev-parse", "79c833b7bcd88c5147ff7ee7aba9786bf89032ed^"], { encoding: "utf8" }
+    ).stdout.trim();
+    await expect(assertPostContractRuntimeCi({
+      GITHUB_ACTIONS: "true",
+      GITHUB_WORKFLOW: "ci",
+      GITHUB_EVENT_NAME: "push",
+      GITHUB_REPOSITORY: "example/devkh"
+    }, {
+      checkedOutCommit: candidateCommit,
+      event: {
+        ref: "refs/heads/main",
+        before: introducingBase,
+        after: candidateCommit,
+        repository: { full_name: "example/devkh" }
+      },
+      materializeBaseline: false
+    })).rejects.toThrow(/trusted.*base.*0035/i);
+  });
+
+  test("rejects protected-main runtime self-authorization when before equals the candidate", async () => {
+    const candidateCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    await expect(assertPostContractRuntimeCi({
+      GITHUB_ACTIONS: "true",
+      GITHUB_WORKFLOW: "ci",
+      GITHUB_EVENT_NAME: "push",
+      GITHUB_REPOSITORY: "example/devkh"
+    }, {
+      checkedOutCommit: candidateCommit,
+      event: {
+        ref: "refs/heads/main",
+        before: candidateCommit,
+        after: candidateCommit,
+        repository: { full_name: "example/devkh" }
+      },
+      materializeBaseline: false
+    })).rejects.toThrow(/distinct trusted predecessor/i);
+  });
+
+  test("rejects candidate baseline edits even when 0035 is unchanged", () => {
+    expect(() => assertTrustedRuntimeMaterialIdentity({
+      trustedContractBlob: "a".repeat(40),
+      candidateContractBlob: "a".repeat(40),
+      trustedBaselineBlob: "b".repeat(40),
+      candidateBaselineBlob: "c".repeat(40)
+    })).toThrow(/baseline/i);
+  });
+
+  test.each([
+    ["application data", (sql) => `${sql}\n  INSERT INTO public.users (id) VALUES ('bad');\n`, /application data/i],
+    ["application data mutation", (sql) => `${sql}\nUPDATE public.users SET disabled = false;\n`, /application data/i],
+    ["nullable source blob references", (sql) => sql.replace("source_blob_id uuid NOT NULL", "source_blob_id uuid"), /NOT NULL/i],
+    ["an incomplete migration ledger", (sql) => sql.replace(/^INSERT INTO public\.schema_migrations.*0035_source_blobs_contract\.sql.*\n/m, ""), /migration ledger/i]
+  ])("rejects a post-contract baseline containing %s", (_label, mutate, pattern) => {
+    const baseline = readFileSync("docker/post-contract-ci-baseline.sql", "utf8");
+    const expectedMigrations = readdirSync("drizzle")
+      .filter((name) => name.endsWith(".sql") && name <= "0035_source_blobs_contract.sql")
+      .sort();
+    expect(() => validatePostContractBaseline(mutate(baseline), expectedMigrations)).toThrow(pattern);
   });
 
   test("does not let caller flags turn an introducing contract PR into ordinary runtime CI", async () => {

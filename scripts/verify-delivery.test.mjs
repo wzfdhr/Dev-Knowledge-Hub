@@ -46,7 +46,7 @@ describe("delivery database isolation", () => {
       .map((step) => step.run).filter(Boolean).join("\n");
 
     expect(override.services.postgres.volumes).toContain(
-      "./docker/post-contract-ci-baseline.sql:/docker-entrypoint-initdb.d/20-post-contract-baseline.sql:ro"
+      "${DEVKH_POST_CONTRACT_BASELINE_PATH:?trusted baseline required}:/docker-entrypoint-initdb.d/20-post-contract-baseline.sql:ro"
     );
     expect(baseline).toMatch(/source_blob_id uuid NOT NULL/);
     expect(baseline).toContain("source_files_source_blob_identity_fk");
@@ -265,9 +265,18 @@ describe("delivery database isolation", () => {
     const verifyCommands = workflow.jobs.verify.steps.map((step) => step.run).filter(Boolean).join("\n");
     const containerCommands = workflow.jobs["container-smoke"].steps
       .map((step) => step.run).filter(Boolean).join("\n");
+    const contractDetection = workflow.jobs["container-smoke"].steps.find(
+      (step) => step.name === "Detect source blob contract gate"
+    );
     expect(verifyCommands).toContain("git merge-base --is-ancestor");
     expect(containerCommands).toContain("git merge-base --is-ancestor");
     expect(containerCommands).toContain("gh run download");
+    expect(containerCommands).toContain("git rev-parse \"$APPROVED_BASE:drizzle/0035_source_blobs_contract.sql\"");
+    expect(containerCommands).toContain("git rev-parse \"$APPROVED_HEAD:drizzle/0035_source_blobs_contract.sql\"");
+    expect(contractDetection.env).toMatchObject({
+      APPROVED_BASE: "${{ inputs.approved_base }}",
+      APPROVED_HEAD: "${{ inputs.approved_head }}"
+    });
     expect(containerCommands).toContain("SOURCE_BLOB_GATE_ARTIFACT_RUN_ID");
     expect(containerCommands).toContain("SOURCE_BLOB_GATE_ARTIFACT_NAME");
     expect(workflow.jobs["container-smoke"].if).toContain("inputs.user_approved");

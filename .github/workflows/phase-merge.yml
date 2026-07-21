@@ -135,9 +135,12 @@ jobs:
         id: source-blob-contract
         env:
           APPROVED_BASE: ${{ inputs.approved_base }}
+          APPROVED_HEAD: ${{ inputs.approved_head }}
         run: |
           set -euo pipefail
-          if git cat-file -e "$APPROVED_BASE:drizzle/0035_source_blobs_contract.sql" 2>/dev/null; then
+          base_contract="$(git rev-parse "$APPROVED_BASE:drizzle/0035_source_blobs_contract.sql" 2>/dev/null || true)"
+          head_contract="$(git rev-parse "$APPROVED_HEAD:drizzle/0035_source_blobs_contract.sql" 2>/dev/null || true)"
+          if [[ -n "$base_contract" && "$base_contract" == "$head_contract" ]]; then
             echo "required=false" >> "$GITHUB_OUTPUT"
           else
             test -f drizzle/0035_source_blobs_contract.sql

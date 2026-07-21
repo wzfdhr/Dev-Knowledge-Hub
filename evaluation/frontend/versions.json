@@ -29,6 +29,23 @@
     "vite": ["5.4.x", "8.1.x"],
     "typescript": ["5.4.x", "6.0.x"]
   },
+  "trialCapabilities": {
+    "redux-toolkit": { "status": "implemented-gated", "target": "V1 Trial" },
+    "tanstack-query": { "status": "implemented-gated", "target": "V1 Trial" },
+    "openapi-graphql": { "status": "implemented-gated", "target": "V1 Trial" },
+    "complex-form-validation": { "status": "implemented-gated", "target": "V1 Trial" },
+    "permission-guards": { "status": "implemented-gated", "target": "V1 Trial" },
+    "storybook": { "status": "implemented-gated", "target": "V1 Trial" },
+    "design-system": { "status": "implemented-gated", "target": "V1 Trial" }
+  },
+  "secondaryCapabilities": {
+    "webpack-rspack-rollup": { "status": "basic-recognition", "target": "V1.1" },
+    "nx-turbo": { "status": "basic-recognition", "target": "V1.1" },
+    "i18n": { "status": "basic-recognition", "target": "V1.1" },
+    "accessibility": { "status": "basic-recognition", "target": "V1.1" },
+    "error-monitoring": { "status": "basic-recognition", "target": "V1.1" },
+    "web-vitals": { "status": "basic-recognition", "target": "V1.1" }
+  },
   "parsers": {
     "typescript": "6.0.3",
     "html": { "status": "approved", "package": "parse5", "version": "8.0.1" },

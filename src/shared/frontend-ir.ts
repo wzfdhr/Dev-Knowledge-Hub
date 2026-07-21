@@ -90,7 +90,7 @@ export const frontendEntitySchema = z.discriminatedUnion("kind", [
 const commonEdgeFields = {
   schemaVersion: z.literal(2),
   id: digestSchema,
-  kind: z.enum(["contains", "imports", "exports", "renders", "routes_to", "lazy_loads", "provides", "injects", "reads_state", "writes_state", "requests", "subscribes", "styles", "visualizes", "tests", "configures", "depends_on"]),
+  kind: z.enum(["contains", "imports", "exports", "renders", "routes_to", "lazy_loads", "provides", "injects", "reads_state", "writes_state", "dispatches", "selects", "requests", "invalidates", "subscribes", "styles", "uses_token", "visualizes", "tests", "documents", "validates", "guards", "wraps", "configures", "depends_on"]),
   fromEntityId: digestSchema,
   toEntityId: digestSchema,
   canonicalEvidenceKey: z.string().min(1),

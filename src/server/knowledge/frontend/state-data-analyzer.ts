@@ -17,7 +17,7 @@ import type { TypeScriptAnalyzerInput } from "./typescript-analyzer.js";
 
 const ANALYZER_ID = "state-data-core";
 const ANALYZER_VERSION = "1.0.0";
-const PARSER_CONFIG_DIGEST = frontendAnalyzerConfigDigest(ANALYZER_ID, ANALYZER_VERSION, `typescript@${ts.version}:state-data-v1`);
+const PARSER_CONFIG_DIGEST = frontendAnalyzerConfigDigest(ANALYZER_ID, ANALYZER_VERSION, `typescript@${ts.version}:state-data-v2`);
 
 function scriptKind(sourcePath: string): ts.ScriptKind {
   const extension = path.posix.extname(sourcePath).toLowerCase();
@@ -124,6 +124,53 @@ function stringProperty(object: ts.ObjectLiteralExpression | undefined, name: st
   return item && ts.isStringLiteralLike(item.initializer) ? item.initializer.text : null;
 }
 
+function objectProperty(object: ts.ObjectLiteralExpression | null | undefined, name: string): ts.Expression | null {
+  if (!object) return null;
+  const item = object.properties.find((property): property is ts.PropertyAssignment | ts.ShorthandPropertyAssignment =>
+    (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property))
+    && property.name.getText().replace(/^['"]|['"]$/gu, "") === name
+  );
+  if (!item) return null;
+  return ts.isPropertyAssignment(item) ? item.initializer : item.name;
+}
+
+function objectLiteral(value: ts.Expression | null | undefined): ts.ObjectLiteralExpression | null {
+  return value && ts.isObjectLiteralExpression(value) ? value : null;
+}
+
+function staticKey(value: ts.Expression | null): string[] | null {
+  if (!value || !ts.isArrayLiteralExpression(value)) return null;
+  const result: string[] = [];
+  for (const item of value.elements) {
+    if (ts.isStringLiteralLike(item) || ts.isNumericLiteral(item)) result.push(item.text);
+    else if (ts.isIdentifier(item)) result.push(`:${item.text}`);
+    else return null;
+  }
+  return result;
+}
+
+function calledFunctionName(value: ts.Expression | null): string | null {
+  if (!value) return null;
+  if (ts.isIdentifier(value) || ts.isPropertyAccessExpression(value)) return value.getText();
+  if (ts.isArrowFunction(value) || ts.isFunctionExpression(value)) {
+    const body = ts.isBlock(value.body)
+      ? value.body.statements.find((statement): statement is ts.ReturnStatement => ts.isReturnStatement(statement))?.expression
+      : value.body;
+    return body && ts.isCallExpression(body) ? body.expression.getText() : null;
+  }
+  return null;
+}
+
+function selectedField(node: ts.Expression): string | null {
+  let current: ts.Expression = node;
+  let value: string | null = null;
+  while (ts.isPropertyAccessExpression(current)) {
+    value ??= current.name.text;
+    current = current.expression;
+  }
+  return value;
+}
+
 type ExecutableFunction = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction | ts.MethodDeclaration;
 
 function enclosingFunction(node: ts.Node): ExecutableFunction | null {
@@ -148,6 +195,10 @@ export function analyzeStateDataSource(inputValue: TypeScriptAnalyzerInput): Fro
   const entities = new Map<string, FrontendEntity>();
   const edges = new Map<string, FrontendEdge>();
   const stores = new Map<string, FrontendEntity>();
+  const reduxSlices = new Map<string, FrontendEntity>();
+  const reduxActions = new Map<string, FrontendEntity>();
+  const reduxSelectors = new Map<string, FrontendEntity>();
+  const dataQueries = new Map<string, { entity: FrontendEntity; key: string[] | null; node: ts.Node; queryKind: "query" | "mutation" }>();
   const functions = new Map<string, { node: ts.FunctionLikeDeclaration; entity: FrontendEntity }>();
   const browserChannels: Array<Record<string, unknown>> = [];
   const importedSymbols = new Map<string, string>();
@@ -232,7 +283,7 @@ export function analyzeStateDataSource(inputValue: TypeScriptAnalyzerInput): Fro
   };
   collectFunctions(source);
 
-  const addStore = (name: string, library: "zustand" | "react-context", node: ts.VariableDeclaration, object: ts.ObjectLiteralExpression | null) => {
+  const addStore = (name: string, library: string, node: ts.VariableDeclaration, object: ts.ObjectLiteralExpression | null) => {
     const store = makeEntity(
       input,
       "state_store",
@@ -268,10 +319,97 @@ export function analyzeStateDataSource(inputValue: TypeScriptAnalyzerInput): Fro
     }
   };
 
+  const addReduxSlice = (name: string, node: ts.VariableDeclaration, call: ts.CallExpression): void => {
+    const options = objectLiteral(call.arguments[0]);
+    const sliceName = stringProperty(options ?? undefined, "name") ?? name;
+    const initialState = objectLiteral(objectProperty(options, "initialState"));
+    const reducers = objectLiteral(objectProperty(options, "reducers"));
+    const store = makeEntity(
+      input,
+      "state_store",
+      input.path,
+      name,
+      `state-store:${name}`,
+      node,
+      options ? "complete" : "partial",
+      { factory: "redux-toolkit", sliceName },
+      { library: { state: "known", value: "redux-toolkit" } }
+    );
+    entities.set(store.id, store);
+    stores.set(name, store);
+    reduxSlices.set(name, store);
+    for (const property of initialState?.properties ?? []) {
+      if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) continue;
+      const fieldName = property.name.getText(source).replace(/^['"]|['"]$/gu, "");
+      const initializer = ts.isPropertyAssignment(property) ? property.initializer : property.name;
+      const field = makeEntity(
+        input,
+        "state_field",
+        input.path,
+        fieldName,
+        `state-field:${name}:${fieldName}`,
+        property,
+        "complete",
+        { storeName: name, sliceName },
+        { fieldType: { state: "known", value: fieldType(initializer) } }
+      );
+      entities.set(field.id, field);
+      const relation = makeEdge(input, "contains", store.id, field.id, property, `field:${fieldName}`);
+      edges.set(relation.id, relation);
+    }
+    for (const property of reducers?.properties ?? []) {
+      if (!property.name) continue;
+      const actionName = property.name.getText(source).replace(/^['"]|['"]$/gu, "");
+      const action = makeEntity(
+        input,
+        "state_field",
+        input.path,
+        actionName,
+        `state-action:${sliceName}:${actionName}`,
+        property,
+        "complete",
+        { role: "action", sliceName, reducer: true, actionType: `${sliceName}/${actionName}` },
+        { fieldType: { state: "known", value: "action" } }
+      );
+      entities.set(action.id, action);
+      reduxActions.set(actionName, action);
+      const relation = makeEdge(input, "contains", store.id, action.id, property, `action:${actionName}`);
+      edges.set(relation.id, relation);
+    }
+  };
+
   const collectStores = (node: ts.Node): void => {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && ts.isCallExpression(node.initializer)) {
       const callee = node.initializer.expression.getText(source);
       if (callee === "create") addStore(node.name.text, "zustand", node, objectFromFactory(node.initializer));
+      if (callee === "createSlice") addReduxSlice(node.name.text, node, node.initializer);
+      if (callee === "configureStore") {
+        const options = objectLiteral(node.initializer.arguments[0]);
+        const store = makeEntity(
+          input,
+          "state_store",
+          input.path,
+          node.name.text,
+          `state-store:${node.name.text}`,
+          node,
+          options ? "complete" : "partial",
+          { factory: "redux-toolkit", configuredSlices: [] },
+          { library: { state: "known", value: "redux-toolkit" } }
+        );
+        entities.set(store.id, store);
+        stores.set(node.name.text, store);
+        const reducer = objectLiteral(objectProperty(options, "reducer"));
+        const configuredSlices: string[] = [];
+        for (const property of reducer?.properties ?? []) {
+          if (!ts.isPropertyAssignment(property) || !ts.isPropertyAccessExpression(property.initializer)) continue;
+          const slice = ts.isIdentifier(property.initializer.expression) ? reduxSlices.get(property.initializer.expression.text) : undefined;
+          if (!slice) continue;
+          configuredSlices.push(slice.name);
+          const relation = makeEdge(input, "configures", store.id, slice.id, property, slice.name);
+          edges.set(relation.id, relation);
+        }
+        store.facets[ANALYZER_ID] = { factory: "redux-toolkit", configuredSlices: configuredSlices.sort() };
+      }
       if (callee === "createContext") {
         const initial = node.initializer.arguments[0];
         addStore(node.name.text, "react-context", node, initial && ts.isObjectLiteralExpression(initial) ? initial : null);
@@ -280,6 +418,89 @@ export function analyzeStateDataSource(inputValue: TypeScriptAnalyzerInput): Fro
     ts.forEachChild(node, collectStores);
   };
   collectStores(source);
+
+  const collectReduxSelectors = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && /^select[A-Z\d_]/u.test(node.name.text)
+      && node.initializer && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
+      const body = ts.isBlock(node.initializer.body)
+        ? node.initializer.body.statements.find((statement): statement is ts.ReturnStatement => ts.isReturnStatement(statement))?.expression
+        : node.initializer.body;
+      const field = body ? selectedField(body) : null;
+      const selector = makeEntity(
+        input,
+        "state_field",
+        input.path,
+        node.name.text,
+        `state-selector:${node.name.text}`,
+        node,
+        field ? "complete" : "partial",
+        { role: "selector", selector: true, selectedField: field },
+        { fieldType: { state: "known", value: "selector" } }
+      );
+      entities.set(selector.id, selector);
+      reduxSelectors.set(node.name.text, selector);
+    }
+    ts.forEachChild(node, collectReduxSelectors);
+  };
+  collectReduxSelectors(source);
+
+  const collectDataQueries = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && ts.isCallExpression(node.initializer)) {
+      const callee = node.initializer.expression.getText(source);
+      const queryKind = callee === "useQuery" ? "query" as const : callee === "useMutation" ? "mutation" as const : null;
+      if (queryKind) {
+        const options = objectLiteral(node.initializer.arguments[0]);
+        const key = staticKey(objectProperty(options, queryKind === "query" ? "queryKey" : "mutationKey"));
+        const fetcher = calledFunctionName(objectProperty(options, queryKind === "query" ? "queryFn" : "mutationFn"));
+        const query = makeEntity(
+          input,
+          "api_operation",
+          input.path,
+          node.name.text,
+          `data-query:${queryKind}:${node.name.text}`,
+          node,
+          options ? "complete" : "partial",
+          { queryKind, queryKey: key, fetcher },
+          {
+            method: { state: "known", value: queryKind.toUpperCase() },
+            path: key ? { state: "known", value: key.join("/") } : { state: "unknown", reason: "dynamic" }
+          }
+        );
+        entities.set(query.id, query);
+        dataQueries.set(node.name.text, { entity: query, key, node, queryKind });
+        const ownerNode = enclosingFunction(node);
+        const ownerName = ownerNode ? functionName(ownerNode) : null;
+        const owner = ownerName ? functions.get(ownerName)?.entity : module;
+        if (owner) {
+          const relation = makeEdge(input, "requests", owner.id, query.id, node, `${queryKind}:${node.name.text}`);
+          edges.set(relation.id, relation);
+        }
+      }
+    }
+    ts.forEachChild(node, collectDataQueries);
+  };
+  collectDataQueries(source);
+
+  const collectInvalidations = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === "invalidateQueries") {
+      const options = objectLiteral(node.arguments[0]);
+      const invalidatedKey = staticKey(objectProperty(options, "queryKey"));
+      const mutation = [...dataQueries.values()].find((item) => item.queryKind === "mutation"
+        && node.pos >= item.node.pos && node.end <= item.node.end);
+      if (mutation && invalidatedKey) {
+        for (const query of dataQueries.values()) {
+          if (query.queryKind !== "query" || !query.key) continue;
+          if (invalidatedKey.every((item, index) => query.key?.[index] === item)) {
+            const relation = makeEdge(input, "invalidates", mutation.entity.id, query.entity.id, node, invalidatedKey.join(":"));
+            edges.set(relation.id, relation);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, collectInvalidations);
+  };
+  collectInvalidations(source);
 
   let operationOrdinal = 0;
   const requestFunctions = new Set<string>();
@@ -348,6 +569,20 @@ export function analyzeStateDataSource(inputValue: TypeScriptAnalyzerInput): Fro
       if (owner && store) {
         const relation = makeEdge(input, "reads_state", owner.id, store.id, node, node.expression.text);
         edges.set(relation.id, relation);
+      }
+      if (owner && node.expression.text === "useSelector" && node.arguments[0] && ts.isIdentifier(node.arguments[0])) {
+        const selector = reduxSelectors.get(node.arguments[0].text);
+        if (selector) {
+          const relation = makeEdge(input, "selects", owner.id, selector.id, node, selector.name);
+          edges.set(relation.id, relation);
+        }
+      }
+      if (owner && node.arguments[0] && ts.isCallExpression(node.arguments[0]) && ts.isIdentifier(node.arguments[0].expression)) {
+        const action = reduxActions.get(node.arguments[0].expression.text);
+        if (action) {
+          const relation = makeEdge(input, "dispatches", owner.id, action.id, node, action.name);
+          edges.set(relation.id, relation);
+        }
       }
       if (owner && requestFunctions.has(node.expression.text)) {
         const requested = functions.get(node.expression.text)?.entity;

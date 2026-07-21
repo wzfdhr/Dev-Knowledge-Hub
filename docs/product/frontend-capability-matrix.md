@@ -53,11 +53,11 @@
 | Vitest/Jest/Testing Library | 部分 test-of/import 关系 | 深度支持 | suite、case、fixture、render target、mock | 测试地图、影响建议、覆盖缺口 | V1 Core |
 | Playwright/Cypress | 配置键和通用符号 | 深度支持 | scenario、route/page、locator、fixture、network mock | 黄金流程、变更相关 E2E | V1 Core |
 | Vite | 配置文件通用 AST | 深度支持 | entry、alias、plugin、chunk、env、dev proxy | 构建地图、别名解析、配置影响 | V1 Core |
-| Webpack/Rspack/Rollup | 配置文件通用 AST | 深度支持 | entry、alias、plugin、chunk、env、dev server | 构建地图、代码分割与影响 | V1.1 |
+| Webpack/Rspack/Rollup | 配置文件通用 AST | 基础识别 | config 采用、主要入口和插件 | 工具采用与文件引用 | V1.1 |
 | Babel/SWC/esbuild | 无专用语义 | 基础识别 | transform target、plugin/preset、loader | 编译链和配置清单 | V1 Core |
-| Nx/Turborepo | 只有 config 文档事实 | 深度支持 | task、target、dependency、cache input/output | 任务图、包影响、运行建议 | V1.1 |
-| i18n | 无专用语义 | 深度支持 | locale key、definition、consumer、missing key | 文案来源、遗漏与影响 | V1.1 |
-| 可访问性 | 无专项 | 深度支持（静态） | landmark、name/role/state、label/alt、keyboard candidate | 静态诊断、引用、修复入口 | V1.1 |
+| Nx/Turborepo | 只有 config 文档事实 | 基础识别 | config 采用、workspace 和主要 target | 工具采用与文件引用 | V1.1 |
+| i18n | 无专用语义 | 基础识别 | locale 库采用、配置和入口 | 采用清单与文件引用 | V1.1 |
+| 可访问性 | 无专项 | 基础识别 | a11y 工具采用、landmark 和主要属性 | 静态事实与文件引用 | V1.1 |
 | Web Vitals/性能监测 | 无专项 | 基础识别 | metric、reporter、boundary、lazy/chunk config | 采集点、性能模式和静态风险 | V1.1 |
 | 错误监控 | 无专项 | 基础识别 | error boundary、capture/report call、source-map config | 错误处理地图和遗漏候选 | V1.1 |
 | Browser Storage | 只有通用 call edge | 深度支持 | local/session storage、IndexedDB、cookie key、reader/writer | 本地状态、隐私/变更影响 | V1.1 |
@@ -69,6 +69,12 @@
 | 微信/多端小程序 | 无 | 暂不支持 | - | 需独立平台语义与 fixture 立项 | 后续 |
 
 上表的“目标等级”是交付目标，不是当前已上线状态。管理端和 MCP 只能根据当前 release 持久化的 analyzer manifest 与已通过评测门禁显示“深度支持”；不得根据本目标矩阵提前宣称能力。
+
+## FK18 本地交付状态
+
+Redux Toolkit、TanStack Query、OpenAPI/GraphQL、复杂表单校验、权限守卫、Storybook 和设计令牌/组件库封装在本地标记为 `implemented-gated`。这一状态只表示 analyzer、IR、fixture 和分割评测证据已就绪；在当前 release 对应的 analyzer manifest 同时通过实体 F1、事实边 precision、引用、知识页/Graph/检索/影响及零泄漏横向门禁前，产品不显示“深度支持”。
+
+Webpack/Rspack/Rollup、Nx/Turbo、i18n、可访问性、错误监控和 Web Vitals 在 V1.1 仍仅基础识别，不纳入 V1 Trial 交付承诺。
 
 2026-07-19 产品决策：V1 Demo 的 FK06 只接入经客户端和服务端共同验证的前端文本与 SVG。图片、字体和媒体继续在读取内容前过滤；其 `client_unverified` 资产清单随 FK14 的分页 manifest 上传合同在 V1 Trial 交付，避免在缺少持久化信任字段时伪造 source file。
 

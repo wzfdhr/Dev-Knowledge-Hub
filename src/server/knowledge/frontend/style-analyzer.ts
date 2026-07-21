@@ -26,7 +26,7 @@ const ANALYZER_VERSION = "1.0.0";
 const PARSER_CONFIG_DIGEST = frontendAnalyzerConfigDigest(
   ANALYZER_ID,
   ANALYZER_VERSION,
-  "postcss@8.5.19:selector@7.1.4:scss@4.0.9:less@6.0.0"
+  "postcss@8.5.19:selector@7.1.4:scss@4.0.9:less@6.0.0:token-links-v2"
 );
 
 function parseStyle(input: FrontendAnalyzerSourceInput): Root {
@@ -112,6 +112,31 @@ function containsEdge(
   };
 }
 
+function usesTokenEdge(
+  input: FrontendAnalyzerSourceInput,
+  fromEntityId: string,
+  toEntityId: string,
+  node: ChildNode,
+  tokenName: string
+): FrontendEdge {
+  const base = {
+    kind: "uses_token" as const,
+    fromEntityId,
+    toEntityId,
+    canonicalEvidenceKey: `${input.path}:${node.source?.start?.offset ?? 0}:uses-token:${tokenName}`
+  };
+  const [start, end] = nodeOffsets(input, node);
+  return {
+    schemaVersion: 2,
+    id: createFrontendEdgeId(base),
+    ...base,
+    evidenceClass: "fact",
+    confidence: 1,
+    sourceRefs: [frontendSourceRef(input, start, end)],
+    provenance: frontendAnalyzerProvenance(input, ANALYZER_ID, ANALYZER_VERSION, PARSER_CONFIG_DIGEST)
+  };
+}
+
 function partialStyleOutput(
   input: FrontendAnalyzerSourceInput,
   reason: "parse-error" | "unsupported-indented-sass"
@@ -158,6 +183,7 @@ export function analyzeStyleSource(inputValue: FrontendAnalyzerSourceInput): Fro
   const edges: FrontendEdge[] = [];
   let ordinal = 0;
   const scopeByNode = new Map<object, FrontendEntity>();
+  const tokensByName = new Map<string, FrontendEntity>();
 
   root.walkRules((rule: Rule) => {
     let facts: ReturnType<typeof selectorFacts>;
@@ -205,6 +231,7 @@ export function analyzeStyleSource(inputValue: FrontendAnalyzerSourceInput): Fro
       );
       ordinal += 1;
       entities.push(token);
+      tokensByName.set(token.name, token);
       return;
     }
     if (["media", "container"].includes(lowerName)) {
@@ -241,6 +268,7 @@ export function analyzeStyleSource(inputValue: FrontendAnalyzerSourceInput): Fro
     );
     ordinal += 1;
     entities.push(token);
+    tokensByName.set(token.name, token);
     let parent: object | undefined = declaration.parent ?? undefined;
     while (parent && !scopeByNode.has(parent)) {
       parent = "parent" in parent && typeof parent.parent === "object" && parent.parent
@@ -249,6 +277,19 @@ export function analyzeStyleSource(inputValue: FrontendAnalyzerSourceInput): Fro
     }
     const scope = parent ? scopeByNode.get(parent) : undefined;
     if (scope) edges.push(containsEdge(input, scope.id, token.id, declaration, ordinal));
+  });
+
+  root.walkRules((rule) => {
+    const scope = scopeByNode.get(rule);
+    if (!scope) return;
+    const used = new Set<string>();
+    rule.walkDecls((declaration) => {
+      for (const match of declaration.value.matchAll(/var\(\s*(--[\w-]+)/gu)) used.add(match[1]!);
+    });
+    for (const tokenName of [...used].sort()) {
+      const token = tokensByName.get(tokenName);
+      if (token) edges.push(usesTokenEdge(input, scope.id, token.id, rule, tokenName));
+    }
   });
 
   return {

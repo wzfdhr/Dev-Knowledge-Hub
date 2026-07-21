@@ -972,6 +972,30 @@ integration("PostgreSQL cited knowledge integration", () => {
       inputDigest: "e".repeat(64)
     }, setup!.admin.id)).resolves.toMatchObject({ id: artifact.id });
 
+    const concurrentContentDigest = "f".repeat(64);
+    const concurrentStorageKey = `${repository!.projectId}/${snapshotId}/convert/${concurrentContentDigest}.json`;
+    const concurrentResults = await Promise.all([
+      store.createArtifactWithAudit({
+        ...artifact,
+        id: randomUUID(),
+        inputDigest: "1".repeat(64),
+        contentDigest: concurrentContentDigest,
+        storageKey: concurrentStorageKey
+      }, setup!.admin.id),
+      store.createArtifactWithAudit({
+        ...artifact,
+        id: randomUUID(),
+        inputDigest: "2".repeat(64),
+        contentDigest: concurrentContentDigest,
+        storageKey: concurrentStorageKey
+      }, setup!.admin.id)
+    ]);
+    expect(concurrentResults[0]!.id).toBe(concurrentResults[1]!.id);
+    await expect(pool.query(
+      "SELECT count(*)::int AS count FROM knowledge_artifacts WHERE storage_key = $1",
+      [concurrentStorageKey]
+    )).resolves.toMatchObject({ rows: [{ count: 1 }] });
+
     const searchDocument = {
       documentKey: "overview:0", kind: "page" as const, title: "Overview", content: "Pipeline overview",
       citations: [], metadata: { source: "integration" }

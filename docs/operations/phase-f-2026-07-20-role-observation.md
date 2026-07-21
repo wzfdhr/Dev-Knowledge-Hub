@@ -39,7 +39,8 @@ The timer does not create builds, releases, publications, members, uploads, or f
 
 - Window start: `2026-07-20T01:24:08Z`.
 - Window deadline: `2026-07-21T01:24:08Z`.
-- Initial accepted runs: 2 passed, 0 failed, 24 checks per run.
+- Final result: the deadline passed and `latest.json` is `window_complete` at `2026-07-21T01:51:50Z`.
+- The recorded runs remained passed with 0 failed checks and 24 checks per run; the final accepted run at `2026-07-21T01:21:11Z` passed all checks.
 - Evidence: `/var/lib/devkh-monitor/f04-role-observation/results.jsonl` and `latest.json`, both root-only.
 
-This observation is in progress. After the deadline, the full window must be reviewed for failures, the three identities must be disabled with sessions revoked, and the technical-manager and product-manager reviews must both approve before the project-level F04 gate can be marked complete. `active` remains forbidden.
+After the deadline, the three identities were disabled in one database transaction, their session versions were incremented, any remaining sessions were revoked, and three `member.disabled` audit events were recorded with observation id `f04-roles-20260720T004205Z`. A post-cleanup query found zero active sessions for the identities. The technical-manager and product-manager reviews are the remaining project-level F04 gate. `active` remains forbidden.

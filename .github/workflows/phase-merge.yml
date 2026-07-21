@@ -19,6 +19,26 @@ on:
         description: User explicitly approved this exact head
         required: true
         type: boolean
+      source_blob_contract_gate_manifest:
+        description: Manifest basename inside the immutable FK17 gate artifact
+        required: false
+        default: ""
+        type: string
+      source_blob_contract_gate_manifest_sha256:
+        description: Reviewed SHA-256 of the exact FK17 gate manifest
+        required: false
+        default: ""
+        type: string
+      source_blob_contract_gate_artifact_run_id:
+        description: Workflow run containing the immutable FK17 gate artifact bundle
+        required: false
+        default: ""
+        type: string
+      source_blob_contract_gate_artifact_name:
+        description: Immutable artifact name containing the FK17 gate manifest and references
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: phase-merge-pr-${{ inputs.pr_number }}
@@ -79,7 +99,9 @@ jobs:
   container-smoke:
     permissions:
       contents: read
+      actions: read
     runs-on: ubuntu-latest
+    if: ${{ inputs.user_approved && github.actor == github.repository_owner }}
     env:
       POSTGRES_PASSWORD: devkh-container-password
       DEVKH_MASTER_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
@@ -92,6 +114,12 @@ jobs:
       DEVKH_CONTAINER_SMOKE: "true"
       RECOVERY_EVIDENCE_DIR: /tmp/devkh-recovery-evidence
       RECOVERY_EVIDENCE_DEFER_FINALIZATION: "true"
+      DEVKH_SOURCE_STORAGE_MODE: shadow
+      DEVKH_RELEASE_APPROVED_BASE: ${{ inputs.approved_base }}
+      DEVKH_SOURCE_BLOB_CONTRACT_GATE_MANIFEST: /tmp/devkh-source-blob-contract-gate/${{ inputs.source_blob_contract_gate_manifest }}
+      DEVKH_SOURCE_BLOB_CONTRACT_GATE_MANIFEST_SHA256: ${{ inputs.source_blob_contract_gate_manifest_sha256 }}
+      DEVKH_SOURCE_BLOB_CONTRACT_CANDIDATE_COMMIT: ${{ inputs.approved_head }}
+      DEVKH_SOURCE_BLOB_CONTRACT_EXPECTED_APPROVER: ${{ github.actor }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -103,6 +131,36 @@ jobs:
           APPROVED_BASE: ${{ inputs.approved_base }}
           APPROVED_HEAD: ${{ inputs.approved_head }}
         run: git merge-base --is-ancestor "$APPROVED_BASE" "$APPROVED_HEAD"
+      - name: Detect source blob contract gate
+        id: source-blob-contract
+        env:
+          APPROVED_BASE: ${{ inputs.approved_base }}
+        run: |
+          set -euo pipefail
+          if git cat-file -e "$APPROVED_BASE:drizzle/0035_source_blobs_contract.sql" 2>/dev/null; then
+            echo "required=false" >> "$GITHUB_OUTPUT"
+          else
+            test -f drizzle/0035_source_blobs_contract.sql
+            echo "required=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download immutable source blob contract gate
+        if: ${{ steps.source-blob-contract.outputs.required == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_BLOB_GATE_ARTIFACT_RUN_ID: ${{ inputs.source_blob_contract_gate_artifact_run_id }}
+          SOURCE_BLOB_GATE_ARTIFACT_NAME: ${{ inputs.source_blob_contract_gate_artifact_name }}
+          SOURCE_BLOB_GATE_MANIFEST: ${{ inputs.source_blob_contract_gate_manifest }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_BLOB_GATE_ARTIFACT_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_BLOB_GATE_ARTIFACT_NAME" =~ ^[A-Za-z0-9._-]+$ ]]
+          [[ "$SOURCE_BLOB_GATE_MANIFEST" =~ ^[A-Za-z0-9._-]+\.json$ ]]
+          install -d -m 0700 /tmp/devkh-source-blob-contract-gate
+          gh run download "$SOURCE_BLOB_GATE_ARTIFACT_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$SOURCE_BLOB_GATE_ARTIFACT_NAME" \
+            --dir /tmp/devkh-source-blob-contract-gate
+          test -f "/tmp/devkh-source-blob-contract-gate/$SOURCE_BLOB_GATE_MANIFEST"
       - uses: actions/setup-node@v4
         with:
           node-version: 22.13.0

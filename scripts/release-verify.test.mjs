@@ -1,5 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -7,12 +8,15 @@ import { pathToFileURL } from "node:url";
 
 import {
   CONTAINER_STEPS,
+  STANDARD_CONTAINER_STEPS,
   VERIFY_STEPS,
   assertContainerIsolation,
+  assertSourceBlobContractReleaseGates,
   finalizeRecoveryEvidence,
   parseReleaseScope,
   runContainerVerification,
-  runReleaseSteps
+  runReleaseSteps,
+  validateSourceBlobContractGateManifest
 } from "./release-verify.mjs";
 
 function createPendingEvidence(root) {
@@ -34,6 +38,80 @@ function createPendingEvidence(root) {
   };
 }
 
+function writeCanonicalJson(root, name, value) {
+  const bytes = `${JSON.stringify(value)}\n`;
+  const file = join(root, name);
+  writeFileSync(file, bytes, { mode: 0o600 });
+  return { file: name, sha256: createHash("sha256").update(bytes).digest("hex") };
+}
+
+function createContractGateFixture(root, overrides = {}) {
+  const candidateCommit = overrides.candidateCommit ?? "a".repeat(40);
+  const approver = overrides.approver ?? "release-owner";
+  const common = { schemaVersion: 1, candidateCommit, result: "passed" };
+  const references = {
+    preflight: writeCanonicalJson(root, "preflight.json", {
+      ...common,
+      operation: "source-blob-active-preflight",
+      finishedAt: "2026-07-08T00:00:00.000Z",
+      unboundSourceFiles: overrides.unboundSourceFiles ?? 0,
+      invalidSourceBlobReferences: 0,
+      duplicateActiveGenerations: 0,
+      verifiedSnapshotReferences: 2
+    }),
+    observation: writeCanonicalJson(root, "observation.json", {
+      ...common,
+      operation: "source-blob-dual-read-observation",
+      startedAt: overrides.observationStartedAt ?? "2026-07-01T00:00:00.000Z",
+      finishedAt: "2026-07-08T00:00:00.000Z",
+      incidentCount: 0
+    }),
+    capacity: writeCanonicalJson(root, "capacity.json", {
+      ...common,
+      operation: "source-blob-capacity",
+      measuredAt: "2026-07-08T00:00:00.000Z",
+      availableBytes: overrides.availableBytes ?? "2000000",
+      requiredBytes: "1000000"
+    }),
+    historicReleases: writeCanonicalJson(root, "historic-releases.json", {
+      ...common,
+      operation: "source-blob-historic-release-dependencies",
+      verifiedAt: "2026-07-08T00:00:00.000Z",
+      retainedReleaseCount: 3,
+      unresolvedDependencies: overrides.unresolvedDependencies ?? 0
+    }),
+    approval: writeCanonicalJson(root, "approval.json", {
+      schemaVersion: 1,
+      operation: "source-blob-contract-approval",
+      candidateCommit,
+      result: "approved",
+      approvedAt: "2026-07-08T00:00:00.000Z",
+      approver,
+      authorizationId: "fk17-review-1"
+    }),
+    recovery: writeCanonicalJson(root, "recovery.json", {
+      schemaVersion: 3,
+      operation: "restore-drill",
+      result: "success",
+      finishedAt: "2026-07-08T00:00:00.000Z"
+    })
+  };
+  const manifest = {
+    schemaVersion: 1,
+    kind: "devkh-source-blob-contract-gate",
+    candidateCommit,
+    createdAt: "2026-07-08T00:00:00.000Z",
+    references
+  };
+  const manifestReference = writeCanonicalJson(root, "gate-manifest.json", manifest);
+  return {
+    candidateCommit,
+    approver,
+    manifestPath: join(root, manifestReference.file),
+    manifestDigest: manifestReference.sha256
+  };
+}
+
 describe("release verification orchestrator", () => {
   test("keeps the release checks in the approved order", () => {
     expect(VERIFY_STEPS.map((step) => step.name)).toEqual([
@@ -41,9 +119,18 @@ describe("release verification orchestrator", () => {
       "typecheck", "lint", "unit", "postgres-integration", "build", "acceptance", "knowledge-quality", "e2e"
     ]);
     expect(CONTAINER_STEPS.map((step) => step.name)).toEqual([
+      "container-build", "compose-config", "compose-infrastructure", "source-blob-contract-migration",
+      "compose-app", "parser-isolation", "application-health", "recovery-drill"
+    ]);
+    expect(CONTAINER_STEPS.find((step) => step.name === "compose-infrastructure")?.args).not.toContain("app");
+    expect(CONTAINER_STEPS.find((step) => step.name === "source-blob-contract-migration")?.args)
+      .toEqual(expect.arrayContaining(["--profile", "source-blob-contract", "run", "--rm", "contract-migrate"]));
+    expect(CONTAINER_STEPS.findIndex((step) => step.name === "source-blob-contract-migration"))
+      .toBeLessThan(CONTAINER_STEPS.findIndex((step) => step.name === "compose-app"));
+    expect(STANDARD_CONTAINER_STEPS.map((step) => step.name)).toEqual([
       "container-build", "compose-config", "compose-up", "parser-isolation", "application-health", "recovery-drill"
     ]);
-    expect(CONTAINER_STEPS.find((step) => step.name === "compose-up")?.args).toContain("--wait");
+    expect(STANDARD_CONTAINER_STEPS.map((step) => step.name)).not.toContain("source-blob-contract-migration");
     const repositoryRoot = process.cwd();
     const composeFile = join(repositoryRoot, "docker-compose.yml");
     expect(isAbsolute(repositoryRoot)).toBe(true);
@@ -92,6 +179,111 @@ describe("release verification orchestrator", () => {
       DEVKH_CONTAINER_SMOKE: "true",
       COMPOSE_PROJECT_NAME: "devkh-ci"
     })).not.toThrow();
+  });
+
+  test("accepts only a digest-bound semantic gate manifest for the exact candidate and approver", async () => {
+    const root = mkdtempSync(join(tmpdir(), "devkh-contract-gate-"));
+    const fixture = createContractGateFixture(root);
+    try {
+      await expect(validateSourceBlobContractGateManifest(fixture.manifestPath, {
+        expectedDigest: fixture.manifestDigest,
+        expectedCandidateCommit: fixture.candidateCommit,
+        expectedApprover: fixture.approver,
+        now: new Date("2026-07-08T12:00:00.000Z"),
+        validateRecoveryEvidence: async (path) => JSON.parse(readFileSync(path, "utf8"))
+      })).resolves.toMatchObject({
+        candidateCommit: fixture.candidateCommit,
+        approver: fixture.approver,
+        recoveryEvidencePath: join(root, "recovery.json")
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects legacy caller flags when no immutable gate manifest is supplied", async () => {
+    await expect(assertSourceBlobContractReleaseGates({
+      DEVKH_SOURCE_BLOB_ACTIVE_PREFLIGHT: "passed",
+      DEVKH_SOURCE_BLOB_OBSERVATION_COMPLETE: "true",
+      DEVKH_SOURCE_BLOB_DISK_CAPACITY_VALIDATED: "true",
+      DEVKH_SOURCE_BLOB_HISTORIC_RELEASES_VALIDATED: "true",
+      DEVKH_SOURCE_BLOB_OPERATOR_APPROVED: "true"
+    }, {
+      contractMigrationPresent: true,
+      checkedOutCommit: "a".repeat(40)
+    })).rejects.toThrow(/gate manifest, digest, candidate commit, and approver/i);
+  });
+
+  test("keeps the migration-only container path when the approved base contains the contract", async () => {
+    const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    await expect(assertSourceBlobContractReleaseGates({
+      DEVKH_RELEASE_APPROVED_BASE: currentCommit
+    }, {
+      contractMigrationPresent: true
+    })).resolves.toEqual({ authorizedByApprovedBase: currentCommit });
+  });
+
+  test.each([
+    ["candidate commit", { expectedCandidateCommit: "b".repeat(40) }, /candidate commit/i],
+    ["approver", { expectedApprover: "different-owner" }, /approver/i]
+  ])("rejects a gate manifest bound to the wrong %s", async (_label, option, pattern) => {
+    const root = mkdtempSync(join(tmpdir(), "devkh-contract-gate-"));
+    const fixture = createContractGateFixture(root);
+    try {
+      await expect(validateSourceBlobContractGateManifest(fixture.manifestPath, {
+        expectedDigest: fixture.manifestDigest,
+        expectedCandidateCommit: fixture.candidateCommit,
+        expectedApprover: fixture.approver,
+        ...option,
+        now: new Date("2026-07-08T12:00:00.000Z"),
+        validateRecoveryEvidence: async (path) => JSON.parse(readFileSync(path, "utf8"))
+      })).rejects.toThrow(pattern);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    ["preflight", { unboundSourceFiles: 1 }, /preflight/i],
+    ["seven-day observation", { observationStartedAt: "2026-07-01T00:00:00.001Z" }, /seven days/i],
+    ["capacity", { availableBytes: "999999" }, /capacity/i],
+    ["canonical capacity byte counts", { availableBytes: 2000000 }, /byte counts/i],
+    ["historic releases", { unresolvedDependencies: 1 }, /historic release/i]
+  ])("rejects gate evidence that does not prove %s", async (_label, fixtureOptions, pattern) => {
+    const root = mkdtempSync(join(tmpdir(), "devkh-contract-gate-"));
+    const fixture = createContractGateFixture(root, fixtureOptions);
+    try {
+      await expect(validateSourceBlobContractGateManifest(fixture.manifestPath, {
+        expectedDigest: fixture.manifestDigest,
+        expectedCandidateCommit: fixture.candidateCommit,
+        expectedApprover: fixture.approver,
+        now: new Date("2026-07-08T12:00:00.000Z"),
+        validateRecoveryEvidence: async (path) => JSON.parse(readFileSync(path, "utf8"))
+      })).rejects.toThrow(pattern);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects a tampered evidence reference even when caller flags claim success", async () => {
+    const root = mkdtempSync(join(tmpdir(), "devkh-contract-gate-"));
+    const fixture = createContractGateFixture(root);
+    writeFileSync(join(root, "capacity.json"), '{"fabricated":true}\n', { mode: 0o600 });
+    try {
+      await expect(validateSourceBlobContractGateManifest(fixture.manifestPath, {
+        expectedDigest: fixture.manifestDigest,
+        expectedCandidateCommit: fixture.candidateCommit,
+        expectedApprover: fixture.approver,
+        now: new Date("2026-07-08T12:00:00.000Z"),
+        validateRecoveryEvidence: async (path) => JSON.parse(readFileSync(path, "utf8")),
+        env: {
+          DEVKH_SOURCE_BLOB_ACTIVE_PREFLIGHT: "passed",
+          DEVKH_SOURCE_BLOB_DISK_CAPACITY_VALIDATED: "true"
+        }
+      })).rejects.toThrow(/digest/i);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("retains the outer Compose state when the recovery drill fails", async () => {

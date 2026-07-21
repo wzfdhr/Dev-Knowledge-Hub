@@ -16,6 +16,8 @@ Record these values from the separately approved FK17 release candidate before a
 | Migration | `drizzle/0035_source_blobs_contract.sql` from the same commit |
 | Approver | User identity and timestamp from the separate authorization |
 
+The gate manifest cannot be committed inside the candidate because embedding the candidate SHA would change that SHA. Generate it only after the candidate commit is fixed, place it and every referenced JSON/NDJSON file in one immutable GitHub Actions artifact, and record the artifact workflow run ID, artifact name, manifest basename, and manifest SHA-256 in the separately authorized `phase-merge` dispatch.
+
 ## Required Gate Evidence
 
 Every row must be backed by timestamped command output or an immutable artifact. A checkbox or environment value is not evidence by itself.
@@ -68,23 +70,29 @@ FROM (
 
 The filesystem pass must call `SourceBlobStore.verifySnapshotReference` for every reference selected by the same database snapshot. Any inaccessible path, noncanonical snapshot path, writable/tampered file, hash or size mismatch, inactive generation, or device/inode mismatch blocks the release and preserves diagnostics.
 
-## Release Interlock
+## Machine-Readable Gate
 
-The release entrypoint refuses to build a container containing `0035` unless all FK17 gate variables are exact, storage remains `shadow`, the observation timestamp is at least seven days old, and the strict recovery evidence path is absolute and fresh. Set those values only from reviewed evidence:
+The canonical LF-terminated gate manifest has this exact shape. Each reference is a basename in the same immutable artifact and its digest is the SHA-256 of canonical LF-terminated JSON bytes.
 
-```text
-DEVKH_SOURCE_BLOB_CONTRACT_AUTHORIZED=true
-DEVKH_SOURCE_BLOB_FORWARD_COMPATIBLE_HEALTHY=true
-DEVKH_SOURCE_BLOB_BACKFILL_COMPLETE=true
-DEVKH_SOURCE_BLOB_ACTIVE_PREFLIGHT=passed
-DEVKH_SOURCE_BLOB_DISK_CAPACITY_VALIDATED=true
-DEVKH_SOURCE_BLOB_HISTORIC_RELEASES_VALIDATED=true
-DEVKH_SOURCE_STORAGE_MODE=shadow
-DEVKH_SOURCE_BLOB_DUAL_READ_STARTED_AT=<UTC ISO timestamp>
-DEVKH_SOURCE_BLOB_RECOVERY_EVIDENCE_PATH=<absolute schema-v3 JSON path>
+```json
+{"schemaVersion":1,"kind":"devkh-source-blob-contract-gate","candidateCommit":"<40 lowercase hex>","createdAt":"<UTC ISO>","references":{"preflight":{"file":"preflight.json","sha256":"<64 lowercase hex>"},"observation":{"file":"observation.json","sha256":"<64 lowercase hex>"},"capacity":{"file":"capacity.json","sha256":"<64 lowercase hex>"},"historicReleases":{"file":"historic-releases.json","sha256":"<64 lowercase hex>"},"approval":{"file":"approval.json","sha256":"<64 lowercase hex>"},"recovery":{"file":"recovery.json","sha256":"<64 lowercase hex>"}}}
 ```
 
-Only after the interlock, independent review, and explicit user authorization may the migration session receive `-c devkh.source_blob_contract_authorized=true`. The migrator wraps the authorization check, locked revalidation, composite foreign key, and `NOT NULL` change in one transaction. Any error rolls back the SQL and leaves the forward-compatible application in `shadow`.
+The verifier opens the manifest and references with no-follow semantics, requires canonical JSON and exact fields, and checks every digest before interpreting evidence. The five FK17-specific evidence files must bind to the same candidate commit and prove:
+
+- `preflight`: zero unbound/invalid/duplicate-active records and at least one pinned hash/inode snapshot reference.
+- `observation`: a continuous interval of at least seven full days with zero incidents.
+- `capacity`: decimal-string available and required byte counts with available capacity at least the required headroom.
+- `historicReleases`: at least one retained release and zero unresolved dependencies.
+- `approval`: `result=approved`, the exact candidate, the dispatching repository owner, timestamp, and non-empty authorization ID.
+
+`recovery` must be the existing strict schema-v3 evidence with its referenced source-blob NDJSON sidecar in the same bundle. It is revalidated without `--allow-legacy-v2` and must be no older than 24 hours.
+
+## Release Interlock
+
+The `phase-merge` dispatch provides the approved head/base, immutable artifact run ID and name, manifest basename, and reviewed manifest SHA-256. The owner-approved `container-smoke` job downloads that exact artifact. `scripts/release-verify.mjs` independently compares the checked-out HEAD, manifest candidate, approver, manifest digest, all reference digests, and semantic gate facts before any image build.
+
+Container verification starts only PostgreSQL and the parser, runs the profiled `contract-migrate` service, and starts the normal application only after that service exits successfully. Only `contract-migrate` receives `PGOPTIONS=-c devkh.source_blob_contract_authorized=true`; the app receives no authorization setting. The migrator wraps the authorization check, locked revalidation, composite foreign key, and `NOT NULL` change in one transaction. Any error rolls back SQL and prevents app startup. Once an approved base already contains `0035`, the external gate manifest is no longer required for later candidates, but fresh container databases still use the explicit migration-only service before app startup.
 
 ## Post-Commit Boundary
 

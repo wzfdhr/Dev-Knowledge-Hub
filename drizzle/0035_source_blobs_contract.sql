@@ -17,6 +17,19 @@ BEGIN
   IF EXISTS (
     SELECT 1
     FROM source_files file
+    JOIN source_blobs blob ON blob.id = file.source_blob_id
+    WHERE blob.status <> 'active'
+       OR blob.fencing_token IS NOT NULL
+       OR blob.tombstoned_at IS NOT NULL
+       OR blob.trashed_at IS NOT NULL
+       OR blob.deleted_at IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION 'source blob contract blocked: referenced source blob is non-active or fenced';
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM source_files file
     LEFT JOIN source_blobs blob ON blob.id = file.source_blob_id
     WHERE blob.id IS NULL
        OR blob.workspace_id <> file.workspace_id

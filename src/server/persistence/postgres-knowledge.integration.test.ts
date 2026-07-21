@@ -744,6 +744,29 @@ integration("PostgreSQL cited knowledge integration", () => {
       await expect(runAllMigrations(authorizedPool, contractRoot)).rejects.toThrow(/identity mismatch/i);
       await scopedPool.query("UPDATE source_files SET content_hash = $2 WHERE id = $1", [sourceFileId, contentHash]);
 
+      const fencingToken = randomUUID();
+      await scopedPool.query(
+        `UPDATE source_blobs
+         SET status = 'tombstoned', fencing_token = $2, tombstoned_at = now()
+         WHERE id = $1`,
+        [sourceBlobId, fencingToken]
+      );
+      await expect(runAllMigrations(authorizedPool, contractRoot))
+        .rejects.toThrow(/referenced source blob is non-active or fenced/i);
+      expect((await scopedPool.query(
+        "SELECT 1 FROM schema_migrations WHERE name = $1", [migrationName]
+      )).rows).toHaveLength(0);
+      expect((await scopedPool.query<{ is_nullable: string }>(
+        `SELECT is_nullable FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'source_files' AND column_name = 'source_blob_id'`
+      )).rows[0]?.is_nullable).toBe("YES");
+      await scopedPool.query(
+        `UPDATE source_blobs
+         SET status = 'active', fencing_token = NULL, tombstoned_at = NULL
+         WHERE id = $1`,
+        [sourceBlobId]
+      );
+
       await expect(runAllMigrations(authorizedPool, contractRoot)).resolves.toEqual([migrationName]);
       expect((await scopedPool.query<{ is_nullable: string }>(
         `SELECT is_nullable FROM information_schema.columns

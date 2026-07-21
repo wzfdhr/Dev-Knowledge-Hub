@@ -21,6 +21,20 @@ describe("delivery database isolation", () => {
     expect(ci.jobs.verify.env.TEST_DATABASE_URL).toContain("/devkh_test");
   });
 
+  test("isolates source blob contract authorization to an explicit migration-only service", async () => {
+    const compose = parse(await readFile("docker-compose.yml", "utf8"));
+    const migration = compose.services["contract-migrate"];
+
+    expect(migration.profiles).toEqual(["source-blob-contract"]);
+    expect(migration.command).toEqual(["node", "dist/server/db/migrate.js"]);
+    expect(migration.environment.PGOPTIONS).toBe("-c devkh.source_blob_contract_authorized=true");
+    expect(migration.environment.DATABASE_URL).toContain("/dev_knowledge_hub");
+    expect(migration.restart).toBe("no");
+    expect(migration.read_only).toBe(true);
+    expect(migration).not.toHaveProperty("volumes");
+    expect(compose.services.app.environment).not.toHaveProperty("PGOPTIONS");
+  });
+
   test("documents the public HTTPS base URL required by the Compose application", async () => {
     const environment = await readFile(".env.example", "utf8");
     const readme = await readFile("README.md", "utf8");
@@ -199,9 +213,14 @@ describe("delivery database isolation", () => {
 
     expect(workflow.on).toHaveProperty("workflow_dispatch");
     expect(workflow.on.workflow_dispatch.inputs).toHaveProperty("approved_base");
+    expect(workflow.on.workflow_dispatch.inputs).toHaveProperty("source_blob_contract_gate_manifest");
+    expect(workflow.on.workflow_dispatch.inputs).toHaveProperty("source_blob_contract_gate_manifest_sha256");
+    expect(workflow.on.workflow_dispatch.inputs).toHaveProperty("source_blob_contract_gate_artifact_run_id");
+    expect(workflow.on.workflow_dispatch.inputs).toHaveProperty("source_blob_contract_gate_artifact_name");
     expect(workflow.permissions.contents).toBe("read");
     expect(workflow.jobs.verify.permissions.contents).toBe("read");
     expect(workflow.jobs["container-smoke"].permissions.contents).toBe("read");
+    expect(workflow.jobs["container-smoke"].permissions.actions).toBe("read");
     expect(mergeJob.permissions.contents).toBe("write");
     expect(mergeJob.permissions["pull-requests"]).toBe("read");
     expect(mergeJob.needs).toEqual(["verify", "container-smoke"]);
@@ -225,6 +244,17 @@ describe("delivery database isolation", () => {
       .map((step) => step.run).filter(Boolean).join("\n");
     expect(verifyCommands).toContain("git merge-base --is-ancestor");
     expect(containerCommands).toContain("git merge-base --is-ancestor");
+    expect(containerCommands).toContain("gh run download");
+    expect(containerCommands).toContain("SOURCE_BLOB_GATE_ARTIFACT_RUN_ID");
+    expect(containerCommands).toContain("SOURCE_BLOB_GATE_ARTIFACT_NAME");
+    expect(workflow.jobs["container-smoke"].if).toContain("inputs.user_approved");
+    expect(workflow.jobs["container-smoke"].if).toContain("github.actor == github.repository_owner");
+    expect(workflow.jobs["container-smoke"].env).toMatchObject({
+      DEVKH_SOURCE_BLOB_CONTRACT_GATE_MANIFEST: "/tmp/devkh-source-blob-contract-gate/${{ inputs.source_blob_contract_gate_manifest }}",
+      DEVKH_SOURCE_BLOB_CONTRACT_GATE_MANIFEST_SHA256: "${{ inputs.source_blob_contract_gate_manifest_sha256 }}",
+      DEVKH_SOURCE_BLOB_CONTRACT_CANDIDATE_COMMIT: "${{ inputs.approved_head }}",
+      DEVKH_SOURCE_BLOB_CONTRACT_EXPECTED_APPROVER: "${{ github.actor }}"
+    });
     const mergeCommands = mergeJob.steps.map((step) => step.run).filter(Boolean).join("\n");
     expect(mergeJob.steps).toEqual(expect.arrayContaining([
       expect.objectContaining({

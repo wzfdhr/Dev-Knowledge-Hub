@@ -67,7 +67,7 @@ done
 write_checksums "$stage"
 
 git_revision="$(git -C "$COMPOSE_DIR" rev-parse HEAD 2>/dev/null || printf unknown)"
-node -e 'const fs=require("node:fs"); const [directory,createdAt,gitRevision]=process.argv.slice(1); fs.writeFileSync(`${directory}/manifest.json`,JSON.stringify({schemaVersion:2,createdAt,gitRevision,files:["database.pgdump","snapshots.tgz","repositories.tgz","sources.tgz","artifacts.tgz","checksums.sha256"]})+"\n",{mode:0o600});' "$stage" "$started_at" "$git_revision"
+node -e 'const fs=require("node:fs"); const [directory,createdAt,gitRevision]=process.argv.slice(1); fs.writeFileSync(`${directory}/manifest.json`,JSON.stringify({schemaVersion:2,createdAt,gitRevision,contracts:["SourceProvenance@1","frontend-project-profile@1","frontend-pattern-candidates@1","FrontendSolutionContext@1"],files:["database.pgdump","snapshots.tgz","repositories.tgz","sources.tgz","artifacts.tgz","checksums.sha256"]})+"\n",{mode:0o600});' "$stage" "$started_at" "$git_revision"
 
 (
   cd "$COMPOSE_DIR"

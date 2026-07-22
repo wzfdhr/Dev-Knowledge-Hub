@@ -345,6 +345,8 @@ export interface ServerOptions {
   frontendKnowledgeMode?: FrontendKnowledgeMode;
   sourceStorageMode?: "legacy" | "shadow" | "active";
   sourceBlobStore?: SourceBlobStore;
+  workspaceSolutionPlanningEnabled?: boolean;
+  frontendExperienceRecommendationsEnabled?: boolean;
 }
 
 async function loadQualityAssessment(input: {
@@ -528,6 +530,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   const experienceGovernance = new FrontendExperienceGovernance(options.store);
   const knowledgeKernelMode = options.knowledgeKernelMode ?? "legacy";
   const frontendKnowledgeMode = options.frontendKnowledgeMode ?? "legacy";
+  const workspaceSolutionPlanningEnabled = options.workspaceSolutionPlanningEnabled ?? true;
+  const frontendExperienceRecommendationsEnabled = options.frontendExperienceRecommendationsEnabled ?? true;
   const stageSseConnections = new Map<string, number>();
   const uploadSessions = new UploadSessionService({
     store: options.store,
@@ -935,7 +939,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       const context = await buildSolutionContext({
         context: {
           store: options.store, workspaceId: actor.workspaceId, userId: actor.id,
-          scopes: [...WORKSPACE_MCP_TOKEN_SCOPES], artifactReader: options.qualityArtifactReader
+          scopes: [...WORKSPACE_MCP_TOKEN_SCOPES], artifactReader: options.qualityArtifactReader,
+          recommendationsEnabled: frontendExperienceRecommendationsEnabled
         },
         currentProjectId: query.data.currentProjectId,
         task: query.data.query || "frontend engineering experience",
@@ -973,12 +978,17 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
     await requireProjectRole("reader", params.data.projectId, request, reply);
     if (reply.sent) return;
+    if (!workspaceSolutionPlanningEnabled) {
+      return sendError(reply, 503, "SOLUTION_PLANNING_DISABLED", "Workspace solution planning is disabled by rollback policy");
+    }
     const actor = (request as AuthenticatedRequest).sessionAdmin;
     try {
       const context = await buildSolutionContext({
         context: {
           store: options.store, workspaceId: actor.workspaceId, userId: actor.id,
-          scopes: [...WORKSPACE_MCP_TOKEN_SCOPES], artifactReader: options.qualityArtifactReader
+          scopes: [...WORKSPACE_MCP_TOKEN_SCOPES], artifactReader: options.qualityArtifactReader,
+          solutionPlanningEnabled: workspaceSolutionPlanningEnabled,
+          recommendationsEnabled: frontendExperienceRecommendationsEnabled
         },
         currentProjectId: params.data.projectId,
         task: body.data.task,
@@ -3377,6 +3387,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     const mcp = createRegisteredWorkspaceMcpServer({
       store: options.store, workspaceId: token.workspaceId, userId: token.userId,
       scopes: token.scopes, artifactReader: options.qualityArtifactReader,
+      solutionPlanningEnabled: workspaceSolutionPlanningEnabled,
+      recommendationsEnabled: frontendExperienceRecommendationsEnabled,
       authorize: createWorkspaceMcpAuthorizationGuard(options.store, match![1]),
       onUnauthorized: () => { setImmediate(() => void mcp.close()); }
     });

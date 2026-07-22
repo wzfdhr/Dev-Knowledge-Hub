@@ -28,6 +28,7 @@ export type WorkspaceToolErrorCode =
   | "WORKSPACE_TOKEN_EXPIRED"
   | "EXPERIENCE_EVIDENCE_REVOKED"
   | "CITATIONS_MISSING"
+  | "SOLUTION_PLANNING_DISABLED"
   | "UNAUTHORIZED"
   | "INTERNAL_ERROR";
 
@@ -45,6 +46,8 @@ export interface WorkspaceMcpToolContext {
   artifactReader?: { getJson(manifest: ArtifactManifest): Promise<unknown> };
   authorize?: () => Promise<boolean>;
   onUnauthorized?: () => Promise<void> | void;
+  solutionPlanningEnabled?: boolean;
+  recommendationsEnabled?: boolean;
 }
 
 const safePathSchema = z.string().trim().min(1).max(500).refine((value) =>
@@ -173,7 +176,7 @@ export async function buildSolutionContext(input: {
 }): Promise<FrontendSolutionContext> {
   const selected = await resolveCurrentProject(input);
   const profile = profileContext(selected.profile);
-  const experiences = selected.profile
+  const experiences = selected.profile && input.context.recommendationsEnabled !== false
     ? await queryExperienceProjection({
       store: input.context.store, workspaceId: input.context.workspaceId,
       userId: input.context.userId, currentProjectId: input.currentProjectId,
@@ -214,6 +217,9 @@ export async function executeWorkspaceTool(
     : "workspace.patterns.read";
   if (!context.scopes.includes(requiredScope)) {
     throw new WorkspaceToolError("UNAUTHORIZED", "Workspace token scope is insufficient");
+  }
+  if (name === "dkh_plan_frontend_solution" && context.solutionPlanningEnabled === false) {
+    throw new WorkspaceToolError("SOLUTION_PLANNING_DISABLED", "Workspace solution planning is disabled by rollback policy");
   }
   const schema = name === "dkh_plan_frontend_solution" ? solutionInputSchema : findInputSchema;
   const parsed = schema.safeParse(rawInput);

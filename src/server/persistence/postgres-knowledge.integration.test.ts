@@ -44,6 +44,7 @@ import {
   EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
   createVerifiedFrontendReleaseDraft
 } from "../knowledge/frontend/compatibility";
+import { frontendProjectProfileDigest } from "../../shared/frontend-project-profile";
 import {
   createFrontendShadowStageExecutor,
   createFrontendShadowStageInputPlanner,
@@ -123,8 +124,11 @@ async function createSourceBlobContractFixture() {
     const contentHash = "a".repeat(64);
     await scopedPool.query(
       `INSERT INTO source_snapshots
-         (id, workspace_id, repository_id, commit_sha, ref, commit_timestamp, storage_path)
-       VALUES ($1, $2, $3, $4, 'upload', now(), '/tmp/source-blob-contract')`,
+         (id, workspace_id, repository_id, commit_sha, ref, commit_timestamp, storage_path,
+          source_kind, git_commit_sha, content_version, attestation,
+          linked_git_commit_sha, remote_identity_digest)
+       VALUES ($1, $2, $3, $4, 'upload', now(), '/tmp/source-blob-contract',
+          'upload', NULL, $4, 'unverified', NULL, NULL)`,
       [snapshotId, setup!.workspace.id, repository!.id, "b".repeat(40)]
     );
     await scopedPool.query(
@@ -854,8 +858,11 @@ integration("PostgreSQL cited knowledge integration", () => {
       const contentHash = "a".repeat(64);
       await scopedPool.query(
         `INSERT INTO source_snapshots
-           (id, workspace_id, repository_id, commit_sha, ref, commit_timestamp, storage_path)
-         VALUES ($1, $2, $3, $4, 'upload', now(), '/tmp/source-blob-contract')`,
+           (id, workspace_id, repository_id, commit_sha, ref, commit_timestamp, storage_path,
+            source_kind, git_commit_sha, content_version, attestation,
+            linked_git_commit_sha, remote_identity_digest)
+         VALUES ($1, $2, $3, $4, 'upload', now(), '/tmp/source-blob-contract',
+            'upload', NULL, $4, 'unverified', NULL, NULL)`,
         [snapshotId, setup!.workspace.id, repository!.id, "b".repeat(40)]
       );
       await scopedPool.query(
@@ -1628,7 +1635,12 @@ integration("PostgreSQL cited knowledge integration", () => {
         ]);
       for (const run of firstRuns) {
         const manifests = await Promise.all(run.outputManifestIds.map((id) => store.findArtifactById(id)));
-        expect(manifests).toHaveLength(run.stage === "convert" ? 1 : 2);
+        const expectedManifestCount = run.stage === "convert"
+          ? 1
+          : run.stage === "synthesize" || run.stage === "index"
+            ? 3
+            : 2;
+        expect(manifests).toHaveLength(expectedManifestCount);
         for (const family of ["knowledge-v1", "frontend-v2"] as const) {
           const expected = ARTIFACT_KINDS[run.stage][family];
           expect(manifests).toEqual(expect.arrayContaining([
@@ -2574,6 +2586,61 @@ integration("PostgreSQL cited knowledge integration", () => {
       };
 
       const first = await createReadyBuildAndRun();
+      const unknownProfileValue = { state: "unknown" as const, reason: "unresolved" as const };
+      const projectProfilePayload = {
+        schemaVersion: 1 as const,
+        snapshotId,
+        sourceProvenance: {
+          schemaVersion: 1 as const,
+          kind: "upload" as const,
+          gitCommitSha: null,
+          contentVersion: "f".repeat(40),
+          ref: "upload" as const,
+          attestation: "unverified" as const
+        },
+        analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+        framework: unknownProfileValue,
+        rendering: unknownProfileValue,
+        router: unknownProfileValue,
+        state: unknownProfileValue,
+        data: unknownProfileValue,
+        formLibrary: unknownProfileValue,
+        tooling: unknownProfileValue,
+        styles: unknownProfileValue,
+        visualizations: unknownProfileValue,
+        tests: unknownProfileValue,
+        workspace: unknownProfileValue,
+        sourceRefs: []
+      };
+      const projectProfile = {
+        ...projectProfilePayload,
+        profileDigest: frontendProjectProfileDigest(projectProfilePayload)
+      };
+      const savedProjectProfile = await artifactStore.putJson({
+        manifest: {
+          id: randomUUID(), workspaceId: setup!.workspace.id, projectId: repository!.projectId,
+          snapshotId, buildId: first.build.id, stage: "synthesize", kind: "frontend-project-profile",
+          schemaVersion: 1, inputDigest: "6".repeat(64), contentDigest: "0".repeat(64),
+          storageKey: "pending", sourceRefs: [], producer: "deterministic",
+          createdAt: new Date().toISOString()
+        },
+        value: projectProfile
+      });
+      const savedPatternCandidates = await artifactStore.putJson({
+        manifest: {
+          id: randomUUID(), workspaceId: setup!.workspace.id, projectId: repository!.projectId,
+          snapshotId, buildId: first.build.id, stage: "index", kind: "frontend-pattern-candidates",
+          schemaVersion: 1, inputDigest: "7".repeat(64), contentDigest: "0".repeat(64),
+          storageKey: "pending", sourceRefs: [], producer: "deterministic",
+          createdAt: new Date().toISOString()
+        },
+        value: {
+          schemaVersion: 1, snapshotId,
+          analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+          profileDigest: projectProfile.profileDigest,
+          candidates: []
+        }
+      });
       const packagedArtifacts = Object.fromEntries(await Promise.all(BUILD_STAGES.map(async (stage) => {
         const families = stage === "package"
           ? ["knowledge-v1"] as const
@@ -2596,9 +2663,14 @@ integration("PostgreSQL cited knowledge integration", () => {
             analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
             upstreamManifestIds: [], sourceArtifactId: "integration-validation-source",
             valid: true, pageCount: 1, issueCount: 0,
-            graphReferenceCount: 1, checkedReferenceCount: 1, invalidReferenceCount: 0
+            graphReferenceCount: 1, checkedReferenceCount: 1, invalidReferenceCount: 0,
+            projectProfileArtifactId: savedProjectProfile.manifest.id,
+            projectProfileDigest: projectProfile.profileDigest,
+            patternCandidatesArtifactId: savedPatternCandidates.manifest.id
           } : { schemaVersion: expected.schemaVersion, stage, kind: expected.kind }
         })).manifest));
+        if (stage === "synthesize") manifests.push(savedProjectProfile.manifest);
+        if (stage === "index") manifests.push(savedPatternCandidates.manifest);
         if (stage !== "package") {
           const stageRun = await store.createStageRun({
             workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId,
@@ -2627,6 +2699,9 @@ integration("PostgreSQL cited knowledge integration", () => {
           upstreamManifestIds: packagedArtifacts.validate,
           sourceArtifactId: packagedArtifacts.package[0]!,
           irSchemaVersion: 2, graphSchemaVersion: 2,
+          projectProfileArtifactId: savedProjectProfile.manifest.id,
+          projectProfileDigest: projectProfile.profileDigest,
+          patternCandidatesArtifactId: savedPatternCandidates.manifest.id,
           artifacts: packagedArtifacts
         }
       });

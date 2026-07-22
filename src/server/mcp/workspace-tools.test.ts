@@ -5,6 +5,26 @@ import { executeWorkspaceTool } from "./workspace-tools";
 import { frontendProjectProfileDigest } from "../../shared/frontend-project-profile";
 
 describe("workspace MCP tools", () => {
+  test("rollback disables solution planning without disabling workspace pattern access", async () => {
+    const store = new MemoryAppStore();
+    const setup = await store.createInitialSetup("admin@example.com", "hash");
+    const [project] = await store.listProjects(setup!.workspace.id);
+    const context = {
+      store, workspaceId: setup!.workspace.id, userId: setup!.admin.id,
+      scopes: ["workspace.patterns.read" as const, "workspace.solutions.read" as const],
+      solutionPlanningEnabled: false,
+      recommendationsEnabled: false
+    };
+
+    await expect(executeWorkspaceTool(context, "dkh_plan_frontend_solution", {
+      currentProjectId: project!.id, task: "cache"
+    })).rejects.toMatchObject({ code: "SOLUTION_PLANNING_DISABLED" });
+    const patterns = await executeWorkspaceTool(context, "dkh_find_prior_implementations", {
+      currentProjectId: project!.id, query: "cache"
+    });
+    expect(patterns.isError).not.toBe(true);
+  });
+
   test("returns typed no-release context instead of a transport error", async () => {
     const store = new MemoryAppStore();
     const setup = await store.createInitialSetup("admin@example.com", "hash");

@@ -28,4 +28,7 @@ EX01-EX11 只允许在本地或完全隔离的 staging 中执行。EX12 只产�
 
 ## 回滚
 
-回滚关闭 `/mcp/workspace` 方案编排和默认推荐，恢复“当前项目事实 + 历史实现参考”。回滚不删除不可变 release、审核历史、结果事件或恢复证据。
+回滚设置 `DEVKH_WORKSPACE_SOLUTION_PLANNING=disabled` 与
+`DEVKH_FRONTEND_EXPERIENCE_RECOMMENDATIONS=disabled`，关闭 `/mcp/workspace` 方案编排和默认推荐，
+恢复“当前项目事实 + 历史实现参考”。回滚不删除不可变 release、审核历史、结果事件或恢复证据；完整步骤见
+`docs/operations/frontend-experience-kernel-rollout.md`。

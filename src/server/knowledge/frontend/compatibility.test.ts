@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { describe, expect, test, vi } from "vitest";
 
+import { frontendProjectProfileDigest } from "../../../shared/frontend-project-profile.js";
 import { BUILD_STAGES, type ArtifactManifest } from "../pipeline/contracts.js";
 import type { PipelineStageRunRecord } from "../../persistence/store.js";
 
@@ -18,6 +19,35 @@ import {
 } from "./compatibility.js";
 
 const root = process.cwd();
+
+function projectProfile(snapshotId: string, analyzerManifestDigest: string) {
+  const payload = {
+    schemaVersion: 1 as const,
+    snapshotId,
+    sourceProvenance: {
+      schemaVersion: 1 as const,
+      kind: "git" as const,
+      gitCommitSha: "1".repeat(40),
+      contentVersion: "2".repeat(40),
+      ref: "origin/main",
+      remoteIdentityDigest: "3".repeat(64)
+    },
+    analyzerManifestDigest,
+    framework: { state: "unknown" as const, reason: "unresolved" as const },
+    rendering: { state: "unknown" as const, reason: "unresolved" as const },
+    router: { state: "unknown" as const, reason: "unresolved" as const },
+    state: { state: "unknown" as const, reason: "unresolved" as const },
+    data: { state: "unknown" as const, reason: "unresolved" as const },
+    formLibrary: { state: "unknown" as const, reason: "unresolved" as const },
+    tooling: { state: "unknown" as const, reason: "unresolved" as const },
+    styles: { state: "unknown" as const, reason: "unresolved" as const },
+    visualizations: { state: "unknown" as const, reason: "unresolved" as const },
+    tests: { state: "unknown" as const, reason: "unresolved" as const },
+    workspace: { state: "unknown" as const, reason: "unresolved" as const },
+    sourceRefs: []
+  };
+  return { ...payload, profileDigest: frontendProjectProfileDigest(payload) };
+}
 
 function releaseFixture() {
   const workspaceId = "workspace-1";
@@ -53,6 +83,17 @@ function releaseFixture() {
       finishedAt: "2026-07-18T00:00:01.000Z", errorCode: null, errorDetail: null
     });
   }
+  const profileArtifactId = "frontend-project-profile-1";
+  const profileValue = projectProfile(snapshotId, EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST);
+  manifests.set(profileArtifactId, {
+    id: profileArtifactId, workspaceId, projectId, snapshotId, buildId, stage: "synthesize",
+    kind: "frontend-project-profile", schemaVersion: 1,
+    inputDigest: "a".repeat(64), contentDigest: "b".repeat(64),
+    storageKey: `synthesize/${profileArtifactId}.json`, sourceRefs: [], producer: "deterministic",
+    createdAt: "2026-07-18T00:00:00.000Z"
+  });
+  artifacts.synthesize.push(profileArtifactId);
+  runs.find((run) => run.stage === "synthesize")!.outputManifestIds.push(profileArtifactId);
   const packageArtifactId = "frontend-package";
   manifests.set(packageArtifactId, {
     id: packageArtifactId, workspaceId, projectId, snapshotId, buildId, stage: "package",
@@ -66,7 +107,10 @@ function releaseFixture() {
     schemaVersion: 2 as const, family: "frontend-v2" as const, stage: "package" as const, snapshotId,
     analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
     upstreamManifestIds: artifacts.validate, sourceArtifactId: artifacts.package[0]!,
-    irSchemaVersion: 2 as const, graphSchemaVersion: 2 as const, artifacts
+    irSchemaVersion: 2 as const, graphSchemaVersion: 2 as const,
+    projectProfileArtifactId: profileArtifactId,
+    projectProfileDigest: profileValue.profileDigest,
+    artifacts
   };
   const createReleaseDraft = vi.fn(async () => ({ id: "release-1" }) as never);
   const store = {
@@ -79,13 +123,16 @@ function releaseFixture() {
   const artifactReader = {
     getJson: vi.fn(async (manifest: ArtifactManifest): Promise<unknown> => {
       if (manifest.id === packageArtifactId) return packageValue;
+      if (manifest.id === profileArtifactId) return profileValue;
       if (manifest.id === artifacts.validate[1]) {
         return {
           schemaVersion: 2, family: "frontend-v2", stage: "validate", snapshotId,
           analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
           upstreamManifestIds: artifacts.viz, sourceArtifactId: artifacts.validate[0],
           valid: true, pageCount: 1, issueCount: 0,
-          graphReferenceCount: 2, checkedReferenceCount: 5, invalidReferenceCount: 0
+          graphReferenceCount: 2, checkedReferenceCount: 5, invalidReferenceCount: 0,
+          projectProfileArtifactId: profileArtifactId,
+          projectProfileDigest: profileValue.profileDigest
         };
       }
       return { ok: true };
@@ -132,10 +179,12 @@ describe("frontend v2 compatibility contracts", () => {
       analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
       upstreamManifestIds: ["validate-v1", "validate-v2"], sourceArtifactId: "package-v1",
       irSchemaVersion: 2, graphSchemaVersion: 2,
+      projectProfileArtifactId: "frontend-project-profile-v1",
+      projectProfileDigest: "a".repeat(64),
       artifacts: {
         convert: ["convert-v1"], extract: ["extract-v1", "extract-v2"],
         tables: ["tables-v1", "tables-v2"], graph: ["graph-v1", "graph-v2"],
-        synthesize: ["synthesize-v1", "synthesize-v2"], index: ["index-v1", "index-v2"],
+        synthesize: ["synthesize-v1", "synthesize-v2", "frontend-project-profile-v1"], index: ["index-v1", "index-v2"],
         lint: ["lint-v1", "lint-v2"], viz: ["viz-v1", "viz-v2"],
         validate: ["validate-v1", "validate-v2"], package: ["package-v1"]
       }
@@ -150,6 +199,10 @@ describe("frontend v2 compatibility contracts", () => {
       ...value,
       artifacts: { ...value.artifacts, graph: ["graph-v1"] }
     })).toThrow();
+    const packageWithoutProfile: Record<string, unknown> = { ...value };
+    delete packageWithoutProfile.projectProfileArtifactId;
+    delete packageWithoutProfile.projectProfileDigest;
+    expect(() => frontendPipelinePackageSchema.parse(packageWithoutProfile)).toThrow("frontend project profile");
   });
 
   test("freezes a graph v2 artifact independently from the legacy graph", () => {
@@ -211,6 +264,7 @@ describe("frontend v2 compatibility contracts", () => {
   test("rejects a release package whose frontend validation lacks complete Graph evidence", async () => {
     const fixture = releaseFixture();
     const validationId = fixture.artifacts.validate[1]!;
+    const original = fixture.artifactReader.getJson.getMockImplementation()!;
     fixture.artifactReader.getJson.mockImplementation(async (manifest) => {
       if (manifest.id === fixture.releaseInput.packageArtifactId) return fixture.packageValue;
       if (manifest.id === validationId) {
@@ -221,7 +275,7 @@ describe("frontend v2 compatibility contracts", () => {
           valid: true, pageCount: 1, issueCount: 0
         };
       }
-      return { ok: true };
+      return original(manifest);
     });
 
     await expect(createVerifiedFrontendReleaseDraft(fixture.releaseInput))

@@ -364,6 +364,14 @@ export interface FrontendCandidatePreview {
   build: { id: string; snapshotId: string; commitSha: string; status: BuildStatus };
   graph: { schemaVersion: 2; snapshotId: string; analyzerManifestDigest: string; nodes: FrontendPreviewEntity[]; edges: FrontendPreviewEdge[] };
   pages: FrontendPreviewPage[];
+  projectProfile: {
+    schemaVersion: 1;
+    snapshotId: string;
+    analyzerManifestDigest: string;
+    profileDigest: string;
+    framework: { state: "known" | "unknown" | "unsupported"; value?: { name: string; version: string; supported: boolean }; reason?: string };
+    [key: string]: unknown;
+  };
   search: Array<{ documentKey: string; kind: string; title: string; content: string; citations: GraphSourceRef[]; metadata: Record<string, string | number | boolean> }>;
   quality: {
     summary: { entities: number; factEdges: number; candidateEdges: number; citedEntities: number; components: number; testedComponents: number; routes: number; visualizations: number };

@@ -109,6 +109,42 @@ export function sourceProvenanceForSnapshot(
   };
 }
 
+export function sourceProvenanceForSnapshotIdentity(
+  snapshot: SourceSnapshotRecord
+): SourceProvenance {
+  const normalized = normalizeSnapshotProvenance(snapshot);
+  if (normalized.sourceKind === "upload") {
+    if (!normalized.contentVersion || !normalized.attestation) {
+      throw new Error("Upload snapshot provenance is incomplete");
+    }
+    if (normalized.attestation === "git_linked"
+      && (!normalized.linkedGitCommitSha || !normalized.remoteIdentityDigest)) {
+      throw new Error("Git-linked upload provenance is incomplete");
+    }
+    return {
+      schemaVersion: 1,
+      kind: "upload",
+      gitCommitSha: null,
+      contentVersion: normalized.contentVersion,
+      ref: "upload",
+      attestation: normalized.attestation,
+      ...(normalized.linkedGitCommitSha ? { linkedGitCommitSha: normalized.linkedGitCommitSha } : {}),
+      ...(normalized.remoteIdentityDigest ? { remoteIdentityDigest: normalized.remoteIdentityDigest } : {})
+    };
+  }
+  if (!normalized.gitCommitSha || !normalized.contentVersion || !normalized.remoteIdentityDigest) {
+    throw new Error("Git snapshot provenance is incomplete");
+  }
+  return {
+    schemaVersion: 1,
+    kind: "git",
+    gitCommitSha: normalized.gitCommitSha,
+    contentVersion: normalized.contentVersion,
+    ref: normalized.ref,
+    remoteIdentityDigest: normalized.remoteIdentityDigest
+  };
+}
+
 export function linkUploadSnapshotToGit({
   uploadSnapshot,
   gitSnapshot

@@ -1403,6 +1403,30 @@ describe("repository replacement", () => {
     expect(connectRepository).toHaveBeenCalledTimes(1);
     expect(await screen.findByText("内容版本已就绪")).toBeVisible();
   });
+
+  test.each(["UPLOAD_SESSION_STATE", "IDEMPOTENCY_KEY_REUSED"])("requires a new folder selection for terminal %s upload errors", async (code) => {
+    const user = userEvent.setup();
+    const uploadFolder = vi.fn().mockRejectedValue(new ApiError(409, code, "terminal upload error"));
+    const api = {
+      getRepository: vi.fn().mockResolvedValue({ repository: {
+        id: "upload", projectId: "project", kind: "upload", name: "Uploaded project", defaultBranch: "upload"
+      } }),
+      listImportReports: vi.fn().mockResolvedValue({ reports: [], total: 0, limit: 20, offset: 0 }),
+      uploadFolder
+    } as unknown as ApiClient;
+
+    renderPage(<ProjectImportsPage api={api} projectId="project" />);
+    const uploadInput = await screen.findByLabelText("项目文件夹", { selector: 'input[type="file"]' }) as HTMLInputElement;
+    await user.upload(uploadInput, new File(["export {};"], "main.ts", { type: "text/typescript" }));
+    await user.click(await screen.findByRole("button", { name: "确认并开始上传" }));
+
+    expect(await screen.findByText("上传会话已失效，请重新选择项目文件夹")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认并开始上传" })).not.toBeInTheDocument();
+
+    await user.upload(uploadInput, new File(["export {};"], "main.ts", { type: "text/typescript" }));
+    expect(await screen.findByRole("button", { name: "确认并开始上传" })).toBeVisible();
+  });
 });
 
 describe("MCP token disclosure", () => {

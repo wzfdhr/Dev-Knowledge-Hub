@@ -12,6 +12,15 @@ set -uo pipefail
 : "${MAX_IMPORT_FAILURE_RATE_PERCENT:?missing MAX_IMPORT_FAILURE_RATE_PERCENT}"
 : "${MAX_SHADOW_PIPELINE_FAILURES_24H:?missing MAX_SHADOW_PIPELINE_FAILURES_24H}"
 
+observation_project_filter=""
+if [[ -n "${OBSERVATION_PROJECT_ID:-}" ]]; then
+  [[ "$OBSERVATION_PROJECT_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]] || {
+    printf 'OBSERVATION_PROJECT_ID must be a UUID\n' >&2
+    exit 64
+  }
+  observation_project_filter=" AND project_id = '${OBSERVATION_PROJECT_ID}'::uuid"
+fi
+
 [[ "$COMPOSE_DIR" == /* ]] || {
   printf 'COMPOSE_DIR must be an absolute path\n' >&2
   exit 64
@@ -31,8 +40,11 @@ write_status() {
 
   mkdir -p "$MONITOR_STATE_DIR"
   chmod 700 "$MONITOR_STATE_DIR"
-  STATUS_PATH="$temporary" node -e 'const fs=require("node:fs"); const [result,startedAt,...failures]=process.argv.slice(1); fs.writeFileSync(process.env.STATUS_PATH,JSON.stringify({schemaVersion:1,result,startedAt,finishedAt:new Date().toISOString(),failures})+"\n",{mode:0o600});' \
-    "${status_args[@]}"
+  if ! STATUS_PATH="$temporary" HISTORY_PATH="$MONITOR_STATE_DIR/results.jsonl" node -e 'const fs=require("node:fs"); const [result,startedAt,...failures]=process.argv.slice(1); const status={schemaVersion:1,result,startedAt,finishedAt:new Date().toISOString(),failures}; if(process.env.OBSERVATION_PROJECT_ID) status.observationProjectId=process.env.OBSERVATION_PROJECT_ID; const serialized=JSON.stringify(status)+"\n"; fs.writeFileSync(process.env.STATUS_PATH,serialized,{mode:0o600}); fs.appendFileSync(process.env.HISTORY_PATH,serialized,{encoding:"utf8",mode:0o600}); fs.chmodSync(process.env.HISTORY_PATH,0o600);' \
+    "${status_args[@]}"; then
+    printf 'failed to write monitor evidence\n' >&2
+    return 1
+  fi
   chmod 600 "$temporary"
   mv "$temporary" "$MONITOR_STATE_DIR/status.json"
 }
@@ -70,7 +82,7 @@ check_backup() {
 
 check_import_failure_rate() {
   local counts failed total
-  counts="$(docker compose -f "$COMPOSE_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" exec -T postgres psql -U devkh -d dev_knowledge_hub -Atqc "SELECT count(*) FILTER (WHERE status = 'failed') || '|' || count(*) FROM import_reports WHERE started_at >= now() - interval '24 hours'")" || { failures+=("import_report_query"); return; }
+  counts="$(docker compose -f "$COMPOSE_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" exec -T postgres psql -U devkh -d dev_knowledge_hub -Atqc "SELECT count(*) FILTER (WHERE status = 'failed') || '|' || count(*) FROM import_reports WHERE started_at >= now() - interval '24 hours'${observation_project_filter}")" || { failures+=("import_report_query"); return; }
   IFS='|' read -r failed total <<< "$counts"
   [[ "$failed" =~ ^[0-9]+$ && "$total" =~ ^[0-9]+$ ]] || { failures+=("import_report_query"); return; }
   (( total < 4 || failed * 100 <= total * MAX_IMPORT_FAILURE_RATE_PERCENT )) || failures+=("import_failure_rate")
@@ -82,7 +94,7 @@ check_shadow_pipeline_failures() {
     WITH latest_stage_attempt AS (
       SELECT DISTINCT ON (build_job_id, stage) build_job_id, stage, status
       FROM build_stage_runs
-      WHERE updated_at >= now() - interval '24 hours'
+      WHERE updated_at >= now() - interval '24 hours'${observation_project_filter}
       ORDER BY build_job_id, stage, attempt DESC
     )
     SELECT count(*)

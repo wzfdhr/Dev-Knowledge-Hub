@@ -15,6 +15,17 @@ export const EXPERIENCE_FEEDBACK_EVENTS = [
 export const experienceStateSchema = z.enum(EXPERIENCE_STATES);
 export const experienceSourceEligibilitySchema = z.enum(EXPERIENCE_SOURCE_ELIGIBILITY);
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
+export const projectPredicateKeySchema = z.enum([
+  "framework.name", "framework.version", "rendering.modes", "router.libraries",
+  "state.libraries", "data.libraries", "formLibrary.libraries", "tooling.buildTools",
+  "styles.systems", "styles.componentLibraries", "visualizations.libraries", "tests.tools",
+  "workspace.kind", "workspace.packageManager"
+]);
+export const projectPredicateSchema = z.object({
+  key: projectPredicateKeySchema,
+  operator: z.enum(["equals", "not_equals", "includes", "semver_satisfies"]),
+  value: z.string().trim().min(1).max(240)
+}).strict();
 
 export const observedPatternEvidenceInputSchema = z.object({
   id: z.string().min(1),
@@ -50,10 +61,10 @@ export const declaredDecisionInputSchema = z.object({
   reason: z.string().min(1).max(2_000),
   basisEvidenceIds: z.array(z.string().min(1)).min(1),
   applicability: z.object({
-    required: z.array(z.record(z.string(), z.unknown())),
-    forbidden: z.array(z.record(z.string(), z.unknown())),
-    preferred: z.array(z.record(z.string(), z.unknown())),
-    unsupportedWhenUnknown: z.array(z.string().min(1))
+    required: z.array(projectPredicateSchema),
+    forbidden: z.array(projectPredicateSchema),
+    preferred: z.array(projectPredicateSchema),
+    unsupportedWhenUnknown: z.array(projectPredicateKeySchema)
   }).strict()
 }).strict();
 
@@ -145,6 +156,8 @@ export const workspaceStandardSchema = workspaceStandardInputSchema.extend({
 
 export type ExperienceState = z.infer<typeof experienceStateSchema>;
 export type ExperienceSourceEligibility = z.infer<typeof experienceSourceEligibilitySchema>;
+export type ProjectPredicateKey = z.infer<typeof projectPredicateKeySchema>;
+export type ProjectPredicate = z.infer<typeof projectPredicateSchema>;
 export type ObservedPatternEvidenceInput = z.input<typeof observedPatternEvidenceInputSchema>;
 export type ObservedPatternEvidence = z.infer<typeof observedPatternEvidenceSchema>;
 export type DeclaredDecisionInput = z.input<typeof declaredDecisionInputSchema>;

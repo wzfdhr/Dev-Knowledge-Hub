@@ -25,6 +25,7 @@ import type {
 } from "../../shared/api-contracts.js";
 import type { RemediationState } from "../knowledge/remediation.js";
 import type { FrontendKnowledgeMode } from "../knowledge/frontend/rollout-mode.js";
+import type { VisibleExperienceCandidate } from "../knowledge/frontend/experience-query.js";
 import type {
   DeclaredDecisionEvidence,
   DeclaredDecisionInput,
@@ -1018,6 +1019,11 @@ export interface ExperienceStore {
   recordExperienceOutcome(input: VerifiedOutcomeInput): Promise<VerifiedOutcomeEvidence>;
   createExperienceReviewItem(input: ExperienceReviewItemInput): Promise<ExperienceReviewItem>;
   listExperienceReviewItems(workspaceId: string, patternGroupId?: string): Promise<ExperienceReviewItem[]>;
+  listVisibleExperienceCandidates(input: {
+    workspaceId: string;
+    userId: string;
+    currentProjectId: string;
+  }): Promise<VisibleExperienceCandidate[]>;
   transitionExperienceWithAudit(input: ExperienceTransitionInput): Promise<ExperienceReviewEvent>;
   listExperienceReviewEvents(workspaceId: string, patternGroupId: string): Promise<ExperienceReviewEvent[]>;
   createWorkspaceStandardWithAudit(input: WorkspaceStandardInput): Promise<WorkspaceStandard>;

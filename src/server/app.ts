@@ -16,6 +16,7 @@ import { z } from "zod";
 import { AGENT_FEEDBACK_STATUSES, SERVICE_NAME } from "../shared/contracts.js";
 import { lintIssueSchema, trustScoreSchema, type ArtifactManifest } from "../shared/api-contracts.js";
 import { MAX_IMPORT_TABLE_WORKBOOK_BYTES } from "../shared/import-filter.js";
+import { projectPredicateKeySchema, projectPredicateSchema } from "../shared/frontend-experience.js";
 import {
   FeedbackNotAcknowledgedError,
   InvalidLegacyReleaseRollbackError,
@@ -179,10 +180,10 @@ const remediationTransitionSchema = z.object({
 });
 const experienceIdParamsSchema = z.object({ experienceId: z.uuid() }).strict();
 const applicabilityInputSchema = z.object({
-  required: z.array(z.record(z.string(), z.unknown())).max(100),
-  forbidden: z.array(z.record(z.string(), z.unknown())).max(100),
-  preferred: z.array(z.record(z.string(), z.unknown())).max(100),
-  unsupportedWhenUnknown: z.array(z.string().trim().min(1).max(120)).max(100)
+  required: z.array(projectPredicateSchema).max(100),
+  forbidden: z.array(projectPredicateSchema).max(100),
+  preferred: z.array(projectPredicateSchema).max(100),
+  unsupportedWhenUnknown: z.array(projectPredicateKeySchema).max(100)
 }).strict();
 const experienceDecisionBodySchema = z.object({
   id: z.uuid().optional(),

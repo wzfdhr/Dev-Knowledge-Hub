@@ -18,6 +18,7 @@ function governanceStore(): ExperienceStore {
     listExperienceReviewEvents: vi.fn(async () => []),
     createExperienceReviewItem: vi.fn(async (input) => ({ ...input, createdAt: new Date() })),
     listExperienceReviewItems: vi.fn(async () => []),
+    listVisibleExperienceCandidates: vi.fn(async () => []),
     createWorkspaceStandardWithAudit: vi.fn(async (input) => ({ ...input, createdAt: new Date() })),
     listExperienceProjection: vi.fn(async () => [])
   };

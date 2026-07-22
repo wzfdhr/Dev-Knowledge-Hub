@@ -152,6 +152,7 @@ import {
   type WorkspaceStandardInput
 } from "../../shared/frontend-experience.js";
 import { transitionExperience } from "../knowledge/frontend/experience-lifecycle.js";
+import type { VisibleExperienceCandidate } from "../knowledge/frontend/experience-query.js";
 
 export class MemoryAppStore implements AppStore {
   private workspace: WorkspaceRecord | null = null;
@@ -3702,6 +3703,82 @@ export class MemoryAppStore implements AppStore {
       item.workspaceId === workspaceId && (!patternGroupId || item.patternGroupId === patternGroupId)
     ).sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime()
       || left.id.localeCompare(right.id)).map((item) => structuredClone(item));
+  }
+
+  async listVisibleExperienceCandidates(input: {
+    workspaceId: string;
+    userId: string;
+    currentProjectId: string;
+  }): Promise<VisibleExperienceCandidate[]> {
+    const projects = await this.listAccessibleProjects(input.workspaceId, input.userId, { limit: 100 });
+    const accessibleProjectIds = new Set(projects.filter((project) =>
+      project.archivedAt === null && project.id !== input.currentProjectId
+    ).map((project) => project.id));
+    return this.experienceGroups.filter((group) => group.workspaceId === input.workspaceId).flatMap((group) => {
+      const evidence = this.experienceEvidence.filter((item) =>
+        item.workspaceId === input.workspaceId && item.patternGroupId === group.id
+        && item.revokedAt === null && accessibleProjectIds.has(item.projectId)
+      ).flatMap((item) => {
+        const sourceRelease = this.releases.find((release) =>
+          release.id === item.releaseId && release.workspaceId === input.workspaceId
+          && release.publishedAt !== null
+        );
+        if (!sourceRelease?.publishedAt) return [];
+        const repository = this.repositories.find((candidate) =>
+          candidate.id === sourceRelease.repositoryId && candidate.workspaceId === input.workspaceId
+          && candidate.projectId === item.projectId && candidate.archivedAt === null
+        );
+        if (!repository) return [];
+        const snapshots = this.sourceSnapshots.filter((snapshot) =>
+          snapshot.workspaceId === input.workspaceId && snapshot.repositoryId === repository.id
+        ).sort((left, right) => right.commitTimestamp.getTime() - left.commitTimestamp.getTime()
+          || right.id.localeCompare(left.id));
+        return [{
+          id: item.id, projectId: item.projectId, releaseId: item.releaseId,
+          sourceEligibility: item.sourceEligibility, title: item.title,
+          observedFact: item.observedFact, contentVersion: item.contentVersion,
+          citations: item.citations, releasePublishedAt: sourceRelease.publishedAt,
+          fresh: snapshots.length === 0 || snapshots[0]!.id === item.snapshotId
+        }];
+      });
+      if (evidence.length === 0) return [];
+      const visibleEvidenceIds = new Set(evidence.map((item) => item.id));
+      const decisions = this.experienceDecisions.filter((decision) =>
+        decision.workspaceId === input.workspaceId && decision.patternGroupId === group.id
+        && decision.basisEvidenceIds.every((id) => visibleEvidenceIds.has(id))
+      ).map((decision) => ({
+        id: decision.id, decision: decision.decision,
+        basisEvidenceIds: [...decision.basisEvidenceIds], applicability: structuredClone(decision.applicability),
+        createdAt: decision.createdAt
+      }));
+      const outcomes = this.experienceOutcomes.filter((outcome) =>
+        outcome.workspaceId === input.workspaceId && outcome.patternGroupId === group.id
+        && outcome.evidenceId !== null && visibleEvidenceIds.has(outcome.evidenceId)
+      ).map((outcome) => ({
+        authority: outcome.authority, outcome: outcome.outcome,
+        evidenceId: outcome.evidenceId, sourceVersion: outcome.sourceVersion
+      }));
+      const standards = this.workspaceStandards.filter((standard) =>
+        standard.workspaceId === input.workspaceId && standard.patternGroupId === group.id
+        && standard.supersededById === null
+      ).map((standard) => ({
+        id: standard.id, title: standard.title, body: standard.body, createdAt: standard.createdAt
+      }));
+      const visibleDecisionIds = new Set(decisions.map((item) => item.id));
+      const reviews = this.experienceReviews.filter((review) =>
+        review.workspaceId === input.workspaceId && review.patternGroupId === group.id
+        && review.basisEvidenceIds.every((id) => visibleEvidenceIds.has(id))
+        && (review.decisionId === null || visibleDecisionIds.has(review.decisionId))
+      ).map((review) => ({
+        id: review.id, fromState: review.fromState, toState: review.toState,
+        basisEvidenceIds: [...review.basisEvidenceIds], decisionId: review.decisionId,
+        createdAt: review.createdAt
+      }));
+      return [{
+        experienceId: group.id, capability: group.capability, state: group.state,
+        supersededById: group.supersededById, evidence, decisions, outcomes, standards, reviews
+      }];
+    }).sort((left, right) => left.experienceId.localeCompare(right.experienceId));
   }
 
   async transitionExperienceWithAudit(input: ExperienceTransitionInput): Promise<ExperienceReviewEvent> {

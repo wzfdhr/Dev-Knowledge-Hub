@@ -22,3 +22,10 @@ export function classifyFrontendExperienceIntent(query: string): FrontendExperie
     keywords[capability].some((keyword) => normalized.includes(keyword))
   );
 }
+
+export function frontendExperienceIntentDigest(query: string): string {
+  const normalized = query.trim().replace(/\s+/gu, " ").toLocaleLowerCase();
+  const capabilities = classifyFrontendExperienceIntent(normalized);
+  return createHash("sha256").update(JSON.stringify({ normalized, capabilities }), "utf8").digest("hex");
+}
+import { createHash } from "node:crypto";

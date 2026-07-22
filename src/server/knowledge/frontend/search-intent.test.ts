@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { classifyFrontendExperienceIntent } from "./search-intent";
+import { classifyFrontendExperienceIntent, frontendExperienceIntentDigest } from "./search-intent";
 
 describe("frontend experience search intent", () => {
   test.each([
@@ -9,5 +9,10 @@ describe("frontend experience search intent", () => {
     ["how should this component be tested", "frontend_testing"]
   ])("classifies %s", (query, capability) => {
     expect(classifyFrontendExperienceIntent(query)).toContain(capability);
+  });
+
+  test("normalizes equivalent query intent cache identities", () => {
+    expect(frontendExperienceIntentDigest("  ECharts   下钻 "))
+      .toBe(frontendExperienceIntentDigest("echarts 下钻"));
   });
 });

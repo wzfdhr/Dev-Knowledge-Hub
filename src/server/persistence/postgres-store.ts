@@ -41,6 +41,7 @@ import {
   type WorkspaceStandardInput
 } from "../../shared/frontend-experience.js";
 import { transitionExperience } from "../knowledge/frontend/experience-lifecycle.js";
+import type { VisibleExperienceCandidate } from "../knowledge/frontend/experience-query.js";
 
 import type {
   AdminRecord,
@@ -6493,6 +6494,144 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       currentProjectId: row.current_project_id, sourceVersion: row.source_version,
       taskSummary: row.task_summary, createdAt: row.created_at
     }));
+  }
+
+  async listVisibleExperienceCandidates(input: {
+    workspaceId: string;
+    userId: string;
+    currentProjectId: string;
+  }): Promise<VisibleExperienceCandidate[]> {
+    const evidenceResult = await this.pool.query<{
+      experience_id: string; capability: string; state: ExperienceState; superseded_by_id: string | null;
+      evidence_id: string; project_id: string; release_id: string;
+      source_eligibility: ObservedPatternEvidence["sourceEligibility"]; title: string;
+      observed_fact: string; content_version: string; citations: ObservedPatternEvidence["citations"];
+      release_published_at: Date; fresh: boolean;
+    }>(
+      `SELECT pattern.id AS experience_id, pattern.capability, pattern.state, pattern.superseded_by_id,
+              evidence.id AS evidence_id, evidence.project_id, evidence.release_id,
+              evidence.source_eligibility, evidence.title, evidence.observed_fact,
+              evidence.content_version, evidence.citations, release.published_at AS release_published_at,
+              NOT EXISTS (
+                SELECT 1 FROM source_snapshots newer
+                JOIN repositories newer_repository
+                  ON newer_repository.id = newer.repository_id AND newer_repository.workspace_id = newer.workspace_id
+                WHERE newer.workspace_id = evidence.workspace_id
+                  AND newer_repository.project_id = evidence.project_id
+                  AND (newer.created_at > snapshot.created_at
+                    OR (newer.created_at = snapshot.created_at AND newer.id > snapshot.id))
+              ) AS fresh
+       FROM workspace_pattern_groups pattern
+       JOIN workspace_pattern_evidence evidence
+         ON evidence.pattern_group_id = pattern.id AND evidence.workspace_id = pattern.workspace_id
+       JOIN projects project
+         ON project.id = evidence.project_id AND project.workspace_id = evidence.workspace_id
+       JOIN repositories repository
+         ON repository.project_id = evidence.project_id AND repository.workspace_id = evidence.workspace_id
+        AND repository.archived_at IS NULL
+       JOIN releases release
+         ON release.id = evidence.release_id AND release.workspace_id = evidence.workspace_id
+        AND release.repository_id = repository.id
+       JOIN source_snapshots snapshot
+         ON snapshot.id = evidence.snapshot_id AND snapshot.workspace_id = evidence.workspace_id
+       JOIN workspace_members member
+         ON member.workspace_id = evidence.workspace_id AND member.user_id = $2
+       LEFT JOIN project_members project_member
+         ON project_member.workspace_id = evidence.workspace_id
+        AND project_member.project_id = evidence.project_id AND project_member.user_id = $2
+       WHERE pattern.workspace_id = $1 AND evidence.project_id <> $3
+         AND evidence.revoked_at IS NULL AND project.archived_at IS NULL
+         AND release.published_at IS NOT NULL
+         AND (member.role = 'admin' OR project_member.user_id IS NOT NULL)
+       ORDER BY pattern.id, evidence.created_at, evidence.id`,
+      [input.workspaceId, input.userId, input.currentProjectId]
+    );
+    if (evidenceResult.rows.length === 0) return [];
+    const groupIds = [...new Set(evidenceResult.rows.map((row) => row.experience_id))];
+    const evidenceIds = evidenceResult.rows.map((row) => row.evidence_id);
+    const [decisionResult, outcomeResult, standardResult, reviewResult] = await Promise.all([
+      this.pool.query<{
+        id: string; pattern_group_id: string; decision: DeclaredDecisionEvidence["decision"];
+        basis_evidence_ids: string[]; applicability: DeclaredDecisionEvidence["applicability"];
+        created_at: Date;
+      }>(
+        `SELECT id, pattern_group_id, decision, basis_evidence_ids, applicability, created_at
+         FROM workspace_decisions
+         WHERE workspace_id = $1 AND pattern_group_id = ANY($2::uuid[])
+           AND basis_evidence_ids <@ $3::uuid[]
+         ORDER BY created_at, id`,
+        [input.workspaceId, groupIds, evidenceIds]
+      ),
+      this.pool.query<{
+        pattern_group_id: string; authority: VerifiedOutcomeEvidence["authority"];
+        outcome: VerifiedOutcomeEvidence["outcome"]; evidence_id: string | null; source_version: string;
+      }>(
+        `SELECT pattern_group_id, authority, outcome, evidence_id, source_version
+         FROM workspace_outcomes
+         WHERE workspace_id = $1 AND pattern_group_id = ANY($2::uuid[])
+           AND evidence_id = ANY($3::uuid[])
+         ORDER BY created_at, id`,
+        [input.workspaceId, groupIds, evidenceIds]
+      ),
+      this.pool.query<{
+        id: string; pattern_group_id: string; title: string; body: string; created_at: Date;
+      }>(
+        `SELECT id, pattern_group_id, title, body, created_at
+         FROM workspace_standards
+         WHERE workspace_id = $1 AND pattern_group_id = ANY($2::uuid[])
+           AND superseded_by_id IS NULL
+         ORDER BY created_at, id`,
+        [input.workspaceId, groupIds]
+      ),
+      this.pool.query<{
+        id: string; pattern_group_id: string; from_state: ExperienceState; to_state: ExperienceState;
+        basis_evidence_ids: string[]; decision_id: string | null; created_at: Date;
+      }>(
+        `SELECT id, pattern_group_id, from_state, to_state, basis_evidence_ids, decision_id, created_at
+         FROM workspace_experience_reviews
+         WHERE workspace_id = $1 AND pattern_group_id = ANY($2::uuid[])
+           AND basis_evidence_ids <@ $3::uuid[]
+         ORDER BY created_at, id`,
+        [input.workspaceId, groupIds, evidenceIds]
+      )
+    ]);
+    const groups = new Map<string, VisibleExperienceCandidate>();
+    for (const row of evidenceResult.rows) {
+      let group = groups.get(row.experience_id);
+      if (!group) {
+        group = {
+          experienceId: row.experience_id, capability: row.capability, state: row.state,
+          supersededById: row.superseded_by_id, evidence: [], decisions: [], outcomes: [], standards: [], reviews: []
+        };
+        groups.set(row.experience_id, group);
+      }
+      group.evidence.push({
+        id: row.evidence_id, projectId: row.project_id, releaseId: row.release_id,
+        sourceEligibility: row.source_eligibility, title: row.title,
+        observedFact: row.observed_fact, contentVersion: row.content_version,
+        citations: row.citations, releasePublishedAt: row.release_published_at, fresh: row.fresh
+      });
+    }
+    for (const row of decisionResult.rows) groups.get(row.pattern_group_id)?.decisions.push({
+      id: row.id, decision: row.decision, basisEvidenceIds: row.basis_evidence_ids,
+      applicability: row.applicability, createdAt: row.created_at
+    });
+    for (const row of outcomeResult.rows) groups.get(row.pattern_group_id)?.outcomes.push({
+      authority: row.authority, outcome: row.outcome,
+      evidenceId: row.evidence_id, sourceVersion: row.source_version
+    });
+    for (const row of standardResult.rows) groups.get(row.pattern_group_id)?.standards.push({
+      id: row.id, title: row.title, body: row.body, createdAt: row.created_at
+    });
+    const visibleDecisionIds = new Set(decisionResult.rows.map((row) => row.id));
+    for (const row of reviewResult.rows) {
+      if (row.decision_id !== null && !visibleDecisionIds.has(row.decision_id)) continue;
+      groups.get(row.pattern_group_id)?.reviews?.push({
+        id: row.id, fromState: row.from_state, toState: row.to_state,
+        basisEvidenceIds: row.basis_evidence_ids, decisionId: row.decision_id, createdAt: row.created_at
+      });
+    }
+    return [...groups.values()].sort((left, right) => left.experienceId.localeCompare(right.experienceId));
   }
 
   async transitionExperienceWithAudit(input: ExperienceTransitionInput): Promise<ExperienceReviewEvent> {

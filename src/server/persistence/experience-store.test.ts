@@ -5,6 +5,7 @@ import { describe, expect, test, vi } from "vitest";
 import type { ReleaseRecord } from "./store";
 import { MemoryAppStore } from "./memory-store";
 import { PostgresAppStore } from "./postgres-store";
+import { queryExperienceProjection } from "../knowledge/frontend/experience-query";
 
 function release(input: {
   workspaceId: string; repositoryId: string; snapshotId: string; id?: string;
@@ -78,11 +79,17 @@ describe("MemoryAppStore frontend experience", () => {
     const secretProject = await store.createProject(
       setup!.workspace.id, { name: "Secret", slug: "secret" }, setup!.admin.id
     );
+    const currentProject = await store.createProject(
+      setup!.workspace.id, { name: "Current", slug: "current" }, setup!.admin.id
+    );
     const reader = await store.createTeamMember(setup!.workspace.id, {
       email: "reader@example.com", passwordHash: "hash", role: "reader"
     }, setup!.admin.id);
     await store.addProjectMember(
       setup!.workspace.id, visibleProject!.id, reader!.id, "reader", setup!.admin.id
+    );
+    await store.addProjectMember(
+      setup!.workspace.id, currentProject!.id, reader!.id, "reader", setup!.admin.id
     );
     const visibleRepository = await store.createRepository(
       setup!.workspace.id, { kind: "upload", name: "Visible" }, visibleProject!.id
@@ -109,17 +116,61 @@ describe("MemoryAppStore frontend experience", () => {
           blobHash: "c".repeat(64)
         }]
       });
-    await save(visibleProject!.id, visibleRelease, "Visible chart pattern");
-    await save(secretProject!.id, secretRelease, "secret-symbol chart pattern");
+    const visibleEvidence = await save(visibleProject!.id, visibleRelease, "Visible chart pattern");
+    const secretEvidence = await save(secretProject!.id, secretRelease, "secret-symbol chart pattern");
+    await store.transitionExperienceWithAudit({
+      workspaceId: setup!.workspace.id, patternGroupId: groupId, to: "verified",
+      actorId: setup!.admin.id, reason: "visible basis", basisEvidenceIds: [visibleEvidence.id],
+      decisionId: null
+    });
+    const visibleDecision = await store.createExperienceDecisionWithAudit({
+      id: randomUUID(), workspaceId: setup!.workspace.id, patternGroupId: groupId,
+      actorId: setup!.admin.id, decision: "approve", reason: "visible approval",
+      basisEvidenceIds: [visibleEvidence.id],
+      applicability: { required: [], forbidden: [], preferred: [], unsupportedWhenUnknown: [] }
+    });
+    await store.transitionExperienceWithAudit({
+      workspaceId: setup!.workspace.id, patternGroupId: groupId, to: "recommended",
+      actorId: setup!.admin.id, reason: "visible recommendation",
+      basisEvidenceIds: [visibleEvidence.id], decisionId: visibleDecision.id
+    });
+    await store.transitionExperienceWithAudit({
+      workspaceId: setup!.workspace.id, patternGroupId: groupId, to: "deprecated",
+      actorId: setup!.admin.id, reason: "secret-only supersession",
+      basisEvidenceIds: [secretEvidence.id], decisionId: null, supersededById: null
+    });
+    await store.recordExperienceOutcome({
+      id: randomUUID(), workspaceId: setup!.workspace.id, patternGroupId: groupId,
+      evidenceId: secretEvidence.id, authority: "signed_ci", outcome: "failed",
+      sourceVersion: "content-1", checks: [], reportDigest: null, recordedBy: setup!.admin.id
+    });
 
     const projection = await store.listExperienceProjection({
       workspaceId: setup!.workspace.id,
       userId: reader!.id,
-      currentProjectId: visibleProject!.id,
+      currentProjectId: currentProject!.id,
       query: "chart"
     });
 
     expect(JSON.stringify(projection)).not.toContain("secret-symbol");
+    expect(projection).toEqual([expect.objectContaining({
+      title: "Visible chart pattern", evidenceCount: 1
+    })]);
+    const candidates = await store.listVisibleExperienceCandidates({
+      workspaceId: setup!.workspace.id, userId: reader!.id, currentProjectId: currentProject!.id
+    });
+    expect(JSON.stringify(candidates)).not.toContain("secret-symbol");
+    expect(candidates[0]?.evidence).toHaveLength(1);
+    const applicable = await queryExperienceProjection({
+      store, workspaceId: setup!.workspace.id, userId: reader!.id,
+      currentProjectId: currentProject!.id,
+      currentProfile: { profileDigest: "d".repeat(64) } as never,
+      query: "chart"
+    });
+    expect(applicable.applicableExperiences).toEqual([
+      expect.objectContaining({ id: groupId, title: "Visible chart pattern", evidenceCount: 1 })
+    ]);
+    expect(JSON.stringify(applicable)).not.toContain("secret-symbol");
   });
 
   test("pauses only evidence with a matching trusted negative outcome", async () => {
@@ -175,6 +226,35 @@ describe("MemoryAppStore frontend experience", () => {
 });
 
 describe("PostgresAppStore frontend experience", () => {
+  test("loads candidate details only through live ACL-filtered evidence", async () => {
+    const query = vi.fn(async (sqlText: string) => {
+      if (sqlText.includes("FROM workspace_pattern_groups pattern")) return { rows: [{
+        experience_id: "group-1", capability: "forms", state: "recommended",
+        superseded_by_id: null, evidence_id: "evidence-1", project_id: "prior-project",
+        release_id: "release-1", source_eligibility: "git", title: "Visible form",
+        observed_fact: "Visible cited fact", content_version: "content-v1", citations: [],
+        release_published_at: new Date(), fresh: true
+      }] };
+      return { rows: [] };
+    });
+    const store = new PostgresAppStore({ query } as never);
+
+    const candidates = await store.listVisibleExperienceCandidates({
+      workspaceId: "workspace-1", userId: "user-1", currentProjectId: "current-project"
+    });
+
+    expect(candidates).toEqual([expect.objectContaining({
+      experienceId: "group-1",
+      evidence: [expect.objectContaining({ title: "Visible form", fresh: true })]
+    })]);
+    const sql = String(query.mock.calls[0]?.[0]);
+    expect(sql).toContain("JOIN workspace_members");
+    expect(sql).toContain("LEFT JOIN project_members");
+    expect(sql).toContain("evidence.project_id <> $3");
+    expect(sql).toContain("evidence.revoked_at IS NULL");
+    expect(sql).toContain("release.published_at IS NOT NULL");
+  });
+
   test("builds projections only from live per-user project ACL joins", async () => {
     const query = vi.fn(async (sqlText: string, values?: unknown[]) => {
       void sqlText;

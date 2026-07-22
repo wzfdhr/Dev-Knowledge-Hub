@@ -35,10 +35,17 @@ export function ImportProgress({
 }: {
   progress: ImportProgressValue | null;
 }) {
-  const activeIndex = progress ? stages.findIndex((stage) => stage.phase === progress.phase) : -1;
+  if (!progress || progress.status === "idle") {
+    return <section className="import-progress-idle" aria-label="导入状态">
+      <Circle aria-hidden="true" />
+      <span><strong>选择资料来源后开始导入</strong>扫描、过滤和上传进度会显示在这里。</span>
+    </section>;
+  }
+
+  const activeIndex = stages.findIndex((stage) => stage.phase === progress.phase);
   const rate = formatRate(progress?.bytesPerSecond);
   const eta = formatEta(progress?.estimatedSeconds);
-  const transfer = progress?.processedFiles !== undefined && progress.totalFiles !== undefined
+  const transfer = progress.processedFiles !== undefined && progress.totalFiles !== undefined
     ? `${progress.processedFiles}/${progress.totalFiles} 个文件${
       progress.processedBytes !== undefined && progress.totalBytes !== undefined
         ? ` · ${formatBytes(progress.processedBytes)}/${formatBytes(progress.totalBytes)}`
@@ -46,24 +53,24 @@ export function ImportProgress({
     }`
     : null;
 
-  return <section className="import-progress-panel" aria-labelledby="import-progress-title">
+  return <section className="import-progress-compact" aria-labelledby="import-progress-title" role={progress.status === "failed" ? "alert" : undefined}>
     <div className="import-section-heading">
       <div><p className="eyebrow">处理流程</p><h2 id="import-progress-title">导入进度</h2></div>
-      {progress && <strong className="import-percent">{progress.percent}%</strong>}
+      <strong className="import-percent">{progress.percent}%</strong>
     </div>
-    <div className="import-stage-list" aria-label="导入阶段">
+    <Progress percent={progress.percent} showInfo={false} status={progress.status === "failed" ? "exception" : undefined} />
+    <div className="import-stage-track" aria-label="导入阶段">
       {stages.map((stage, index) => {
-        const complete = activeIndex > index || (progress?.status === "completed" && activeIndex === index);
-        const active = activeIndex === index;
-        return <div key={stage.phase} className={`import-stage${complete ? " complete" : active ? " active" : ""}`}>
+        const complete = activeIndex > index || (progress.status === "completed" && activeIndex === index);
+        const active = activeIndex === index && !complete;
+        return <span key={stage.phase} className={`import-stage${complete ? " complete" : active ? " active" : ""}`}>
           <span className="import-stage-icon" aria-hidden="true">{complete ? <Check /> : <Circle />}</span>
           <span className="import-stage-label">{stage.label}</span>
-        </div>;
+        </span>;
       })}
     </div>
-    <Progress percent={progress?.percent ?? 0} showInfo={false} status={progress?.status === "failed" ? "exception" : undefined} />
     <div className="import-progress-meta" aria-live="polite">
-      <span>{progress?.detail ?? "选择项目文件夹后，将在本机完成读取和过滤，仅上传可采集文件。"}</span>
+      <span>{progress.detail ?? "正在处理导入内容。"}</span>
       {(transfer || rate || eta) && <span>{[transfer, rate, eta].filter(Boolean).join(" · ")}</span>}
     </div>
   </section>;

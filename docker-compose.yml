@@ -52,6 +52,28 @@ services:
       - no-new-privileges:true
     stop_grace_period: 30s
 
+  contract-migrate:
+    profiles: [source-blob-contract]
+    build:
+      context: .
+      target: runtime
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["node", "dist/server/db/migrate.js"]
+    environment:
+      DATABASE_URL: postgres://devkh:${POSTGRES_PASSWORD}@postgres:5432/dev_knowledge_hub
+      PGOPTIONS: -c devkh.source_blob_contract_authorized=true
+    read_only: true
+    user: node
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+
   parser:
     build:
       context: .

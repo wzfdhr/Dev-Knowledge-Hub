@@ -74,3 +74,21 @@ test("expands workspace source blobs without contracting legacy snapshot storage
   expect(sql).not.toMatch(/source_blob_id uuid NOT NULL/);
   expect(sql).not.toMatch(/DROP COLUMN|DROP TABLE|DELETE FROM source_files/);
 });
+
+test("contracts source blob references only after an authorized locked revalidation", async () => {
+  const sql = await readFile(path.join(resolveMigrationDirectory(), "0035_source_blobs_contract.sql"), "utf8");
+
+  expect(sql).toMatch(/current_setting\('devkh\.source_blob_contract_authorized', true\)/);
+  expect(sql).toMatch(/source blob contract migration is not authorized/i);
+  expect(sql).toMatch(/LOCK TABLE source_files, source_blobs/);
+  expect(sql).toMatch(/source_blob_id IS NULL/);
+  expect(sql).toMatch(/blob\.workspace_id <> file\.workspace_id/);
+  expect(sql).toMatch(/blob\.content_hash <> file\.content_hash/);
+  expect(sql).toMatch(/blob\.byte_size <> file\.byte_size/);
+  expect(sql).toMatch(/blob\.generation < 1/);
+  expect(sql).toMatch(/blob\.status <> 'active'/);
+  expect(sql).toMatch(/source_blobs_reference_identity_unique/);
+  expect(sql).toMatch(/FOREIGN KEY \(source_blob_id, workspace_id, content_hash, byte_size\)/);
+  expect(sql).toMatch(/ALTER COLUMN source_blob_id SET NOT NULL/);
+  expect(sql).not.toMatch(/DROP COLUMN|DROP TABLE|DELETE FROM|TRUNCATE/);
+});

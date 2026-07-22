@@ -105,3 +105,20 @@ test("separates Git commit identity from upload content versions", async () => {
   expect(sql).toMatch(/kind IN \('git', 'local'\)/);
   expect(sql).not.toMatch(/DROP COLUMN|DROP TABLE|DELETE FROM|TRUNCATE/);
 });
+
+test("creates workspace-isolated frontend experience contracts", async () => {
+  const sql = await readFile(path.join(resolveMigrationDirectory(), "0037_frontend_experience_contracts.sql"), "utf8");
+
+  for (const table of [
+    "workspace_pattern_groups", "workspace_pattern_evidence", "workspace_decisions",
+    "workspace_outcomes", "workspace_experience_reviews", "workspace_standards"
+  ]) expect(sql).toContain(`CREATE TABLE ${table}`);
+  expect(sql).toMatch(/workspace_pattern_groups_state_check/);
+  expect(sql).toMatch(/workspace_pattern_evidence_source_eligibility_check/);
+  expect(sql).toMatch(/workspace_decisions_basis_check/);
+  expect(sql).toMatch(/workspace_experience_reviews_basis_check/);
+  expect(sql).toMatch(/workspace_pattern_groups_no_self_supersession_check/);
+  expect(sql).toMatch(/workspace_decisions_validate_basis_trigger/);
+  expect(sql).toMatch(/workspace_experience_reviews_append_only_trigger/);
+  expect(sql).not.toMatch(/DROP COLUMN|DROP TABLE|TRUNCATE/);
+});

@@ -25,6 +25,20 @@ import type {
 } from "../../shared/api-contracts.js";
 import type { RemediationState } from "../knowledge/remediation.js";
 import type { FrontendKnowledgeMode } from "../knowledge/frontend/rollout-mode.js";
+import type {
+  DeclaredDecisionEvidence,
+  DeclaredDecisionInput,
+  ExperienceProjection,
+  ExperienceProjectionInput,
+  ExperienceReviewEvent,
+  ExperienceTransitionInput,
+  ObservedPatternEvidence,
+  ObservedPatternEvidenceInput,
+  VerifiedOutcomeEvidence,
+  VerifiedOutcomeInput,
+  WorkspaceStandard,
+  WorkspaceStandardInput
+} from "../../shared/frontend-experience.js";
 
 export interface WorkspaceRecord {
   id: string;
@@ -996,7 +1010,17 @@ export interface KnowledgeStore {
   ): Promise<ReleaseRecord[]>;
 }
 
-export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, PipelineArtifactStore, PipelineSearchDocumentStore, SourceAnalysisArtifactStore, SourceBlobCatalog {
+export interface ExperienceStore {
+  saveObservedPatternEvidence(input: ObservedPatternEvidenceInput): Promise<ObservedPatternEvidence>;
+  createExperienceDecisionWithAudit(input: DeclaredDecisionInput): Promise<DeclaredDecisionEvidence>;
+  recordExperienceOutcome(input: VerifiedOutcomeInput): Promise<VerifiedOutcomeEvidence>;
+  transitionExperienceWithAudit(input: ExperienceTransitionInput): Promise<ExperienceReviewEvent>;
+  listExperienceReviewEvents(workspaceId: string, patternGroupId: string): Promise<ExperienceReviewEvent[]>;
+  createWorkspaceStandardWithAudit(input: WorkspaceStandardInput): Promise<WorkspaceStandard>;
+  listExperienceProjection(input: ExperienceProjectionInput): Promise<ExperienceProjection[]>;
+}
+
+export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, PipelineArtifactStore, PipelineSearchDocumentStore, SourceAnalysisArtifactStore, SourceBlobCatalog, ExperienceStore {
   listPipelineStageRuns(
     workspaceId: string,
     projectId: string,

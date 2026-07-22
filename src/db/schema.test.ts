@@ -15,6 +15,12 @@ describe("schema exports", () => {
         "sourceFiles",
         "sourceBlobs",
         "sourceAnalysisArtifacts",
+        "workspacePatternGroups",
+        "workspacePatternEvidence",
+        "workspaceDecisions",
+        "workspaceOutcomes",
+        "workspaceExperienceReviews",
+        "workspaceStandards",
         "uploadSessions",
         "uploadSessionEntries",
         "uploadIdempotencyKeys",
@@ -121,6 +127,23 @@ describe("schema exports", () => {
       "remote_identity_digest"
     ]));
     expect(config.checks.map((check) => check.name)).toContain("source_snapshots_provenance_shape_check");
+  });
+
+  test("keeps frontend experience rows workspace scoped and lifecycle constrained", () => {
+    const groups = getTableConfig(schema.workspacePatternGroups);
+    const evidence = getTableConfig(schema.workspacePatternEvidence);
+    const reviews = getTableConfig(schema.workspaceExperienceReviews);
+
+    expect(groups.checks.map((item) => item.name)).toEqual(expect.arrayContaining([
+      "workspace_pattern_groups_state_check",
+      "workspace_pattern_groups_no_self_supersession_check"
+    ]));
+    expect(evidence.foreignKeys.map((key) => key.getName())).toEqual(expect.arrayContaining([
+      "workspace_pattern_evidence_group_workspace_fk",
+      "workspace_pattern_evidence_project_workspace_fk",
+      "workspace_pattern_evidence_release_workspace_fk"
+    ]));
+    expect(reviews.checks.map((item) => item.name)).toContain("workspace_experience_reviews_basis_check");
   });
 
   test("keeps source analysis cache workspace-scoped and content-addressed", () => {

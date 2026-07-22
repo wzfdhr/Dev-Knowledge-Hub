@@ -16,6 +16,27 @@ import {
 } from "./store.js";
 import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledge/trust.js";
 import { normalizeSnapshotProvenance } from "../source-provenance.js";
+import {
+  declaredDecisionInputSchema,
+  experienceReviewEventSchema,
+  observedPatternEvidenceInputSchema,
+  verifiedOutcomeInputSchema,
+  workspaceStandardInputSchema,
+  type DeclaredDecisionEvidence,
+  type DeclaredDecisionInput,
+  type ExperienceProjection,
+  type ExperienceProjectionInput,
+  type ExperienceReviewEvent,
+  type ExperienceState,
+  type ExperienceTransitionInput,
+  type ObservedPatternEvidence,
+  type ObservedPatternEvidenceInput,
+  type VerifiedOutcomeEvidence,
+  type VerifiedOutcomeInput,
+  type WorkspaceStandard,
+  type WorkspaceStandardInput
+} from "../../shared/frontend-experience.js";
+import { transitionExperience } from "../knowledge/frontend/experience-lifecycle.js";
 
 import type {
   AdminRecord,
@@ -6244,6 +6265,322 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       citations: row.citations,
       trust: calculateSearchResultTrust(row.page_id, row.citations)
     })).filter((result) => result.trust.score >= MIN_SEARCH_RESULT_TRUST);
+  }
+
+  async saveObservedPatternEvidence(
+    input: ObservedPatternEvidenceInput
+  ): Promise<ObservedPatternEvidence> {
+    const parsed = observedPatternEvidenceInputSchema.parse(input);
+    if (parsed.sourceEligibility === "unverified_upload") {
+      throw new Error("Unverified upload evidence cannot enter workspace experience");
+    }
+    return this.transaction(async (client) => {
+      const owner = await client.query(
+        `SELECT 1
+         FROM releases release
+         JOIN repositories repository
+           ON repository.id = release.repository_id AND repository.workspace_id = release.workspace_id
+         WHERE release.workspace_id = $1 AND release.id = $2 AND release.snapshot_id = $3
+           AND repository.project_id = $4 AND release.published_at IS NOT NULL`,
+        [parsed.workspaceId, parsed.releaseId, parsed.snapshotId, parsed.projectId]
+      );
+      if (owner.rowCount !== 1) {
+        throw new Error("Experience evidence must reference a published release in the same workspace project");
+      }
+      await client.query(
+        `INSERT INTO workspace_pattern_groups (id, workspace_id, capability)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (id) DO NOTHING`,
+        [parsed.patternGroupId, parsed.workspaceId, parsed.capability]
+      );
+      const group = await client.query(
+        `SELECT 1 FROM workspace_pattern_groups
+         WHERE id = $1 AND workspace_id = $2 AND capability = $3`,
+        [parsed.patternGroupId, parsed.workspaceId, parsed.capability]
+      );
+      if (group.rowCount !== 1) {
+        throw new Error("Experience pattern group crosses workspace or capability boundaries");
+      }
+      const inserted = await client.query<{
+        id: string; workspace_id: string; pattern_group_id: string; project_id: string;
+        release_id: string; snapshot_id: string; source_eligibility: ObservedPatternEvidence["sourceEligibility"];
+        title: string; observed_fact: string; profile_digest: string; content_version: string;
+        citations: ObservedPatternEvidence["citations"]; revoked_at: Date | null; created_at: Date;
+      }>(
+        `INSERT INTO workspace_pattern_evidence
+          (id, workspace_id, pattern_group_id, project_id, release_id, snapshot_id,
+           source_eligibility, title, observed_fact, profile_digest, content_version, citations)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
+         ON CONFLICT (id) DO NOTHING
+         RETURNING id, workspace_id, pattern_group_id, project_id, release_id, snapshot_id,
+                   source_eligibility, title, observed_fact, profile_digest, content_version,
+                   citations, revoked_at, created_at`,
+        [
+          parsed.id, parsed.workspaceId, parsed.patternGroupId, parsed.projectId,
+          parsed.releaseId, parsed.snapshotId, parsed.sourceEligibility, parsed.title,
+          parsed.observedFact, parsed.profileDigest, parsed.contentVersion, JSON.stringify(parsed.citations)
+        ]
+      );
+      const result = inserted.rows[0] ?? (await client.query<typeof inserted.rows[number]>(
+        `SELECT id, workspace_id, pattern_group_id, project_id, release_id, snapshot_id,
+                source_eligibility, title, observed_fact, profile_digest, content_version,
+                citations, revoked_at, created_at
+         FROM workspace_pattern_evidence WHERE id = $1 AND workspace_id = $2`,
+        [parsed.id, parsed.workspaceId]
+      )).rows[0];
+      if (!result) throw new Error("Experience evidence id belongs to another workspace");
+      return {
+        id: result.id, workspaceId: result.workspace_id, patternGroupId: result.pattern_group_id,
+        projectId: result.project_id, releaseId: result.release_id, snapshotId: result.snapshot_id,
+        capability: parsed.capability, sourceEligibility: result.source_eligibility,
+        title: result.title, observedFact: result.observed_fact, profileDigest: result.profile_digest,
+        contentVersion: result.content_version, citations: result.citations,
+        revokedAt: result.revoked_at, createdAt: result.created_at
+      };
+    });
+  }
+
+  async createExperienceDecisionWithAudit(
+    input: DeclaredDecisionInput
+  ): Promise<DeclaredDecisionEvidence> {
+    const parsed = declaredDecisionInputSchema.parse(input);
+    const basisIds = [...new Set(parsed.basisEvidenceIds)];
+    return this.transaction(async (client) => {
+      const basis = await client.query(
+        `SELECT evidence.id
+         FROM workspace_pattern_evidence evidence
+         JOIN workspace_pattern_groups pattern
+           ON pattern.id = evidence.pattern_group_id AND pattern.workspace_id = evidence.workspace_id
+         JOIN workspace_members actor
+           ON actor.workspace_id = evidence.workspace_id AND actor.user_id = $4
+         WHERE evidence.workspace_id = $1 AND evidence.pattern_group_id = $2
+           AND evidence.id = ANY($3::uuid[]) AND actor.role = 'admin' AND evidence.revoked_at IS NULL`,
+        [parsed.workspaceId, parsed.patternGroupId, basisIds, parsed.actorId]
+      );
+      if (basis.rowCount !== basisIds.length) {
+        throw new Error("Experience decision basis is inaccessible or incomplete");
+      }
+      const result = await client.query<{
+        id: string; workspace_id: string; pattern_group_id: string; actor_id: string;
+        decision: DeclaredDecisionEvidence["decision"]; reason: string; basis_evidence_ids: string[];
+        applicability: DeclaredDecisionEvidence["applicability"]; created_at: Date;
+      }>(
+        `INSERT INTO workspace_decisions
+          (id, workspace_id, pattern_group_id, actor_id, decision, reason, basis_evidence_ids, applicability)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::uuid[], $8::jsonb)
+         RETURNING id, workspace_id, pattern_group_id, actor_id, decision, reason,
+                   basis_evidence_ids, applicability, created_at`,
+        [parsed.id, parsed.workspaceId, parsed.patternGroupId, parsed.actorId, parsed.decision,
+          parsed.reason, basisIds, JSON.stringify(parsed.applicability)]
+      );
+      await this.insertAudit(client, {
+        workspaceId: parsed.workspaceId, actorId: parsed.actorId,
+        action: "experience.decision_created", resourceType: "experience", resourceId: parsed.patternGroupId,
+        metadata: { decisionId: parsed.id, decision: parsed.decision }
+      });
+      const row = result.rows[0]!;
+      return {
+        id: row.id, workspaceId: row.workspace_id, patternGroupId: row.pattern_group_id,
+        actorId: row.actor_id, decision: row.decision, reason: row.reason,
+        basisEvidenceIds: row.basis_evidence_ids, applicability: row.applicability, createdAt: row.created_at
+      };
+    });
+  }
+
+  async recordExperienceOutcome(input: VerifiedOutcomeInput): Promise<VerifiedOutcomeEvidence> {
+    const parsed = verifiedOutcomeInputSchema.parse(input);
+    const { rows } = await this.pool.query<{
+      id: string; workspace_id: string; pattern_group_id: string; evidence_id: string | null;
+      authority: VerifiedOutcomeEvidence["authority"]; outcome: VerifiedOutcomeEvidence["outcome"];
+      source_version: string; checks: VerifiedOutcomeEvidence["checks"]; report_digest: string | null;
+      recorded_by: string; created_at: Date;
+    }>(
+      `INSERT INTO workspace_outcomes
+        (id, workspace_id, pattern_group_id, evidence_id, authority, outcome,
+         source_version, checks, report_digest, recorded_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
+       RETURNING id, workspace_id, pattern_group_id, evidence_id, authority, outcome,
+                 source_version, checks, report_digest, recorded_by, created_at`,
+      [parsed.id, parsed.workspaceId, parsed.patternGroupId, parsed.evidenceId, parsed.authority,
+        parsed.outcome, parsed.sourceVersion, JSON.stringify(parsed.checks), parsed.reportDigest, parsed.recordedBy]
+    );
+    const row = rows[0]!;
+    return {
+      id: row.id, workspaceId: row.workspace_id, patternGroupId: row.pattern_group_id,
+      evidenceId: row.evidence_id, authority: row.authority, outcome: row.outcome,
+      sourceVersion: row.source_version, checks: row.checks, reportDigest: row.report_digest,
+      recordedBy: row.recorded_by, createdAt: row.created_at
+    };
+  }
+
+  async transitionExperienceWithAudit(input: ExperienceTransitionInput): Promise<ExperienceReviewEvent> {
+    return this.transaction(async (client) => {
+      const group = await client.query<{
+        id: string; state: ExperienceState;
+      }>(
+        `SELECT id, state FROM workspace_pattern_groups
+         WHERE workspace_id = $1 AND id = $2 FOR UPDATE`,
+        [input.workspaceId, input.patternGroupId]
+      );
+      const current = group.rows[0];
+      if (!current) throw new Error("Experience transition is not authorized");
+      if (input.supersededById === current.id) throw new Error("Experience cannot supersede itself");
+      const evidence = await client.query<{
+        id: string; source_eligibility: ObservedPatternEvidence["sourceEligibility"];
+        revoked_at: Date | null;
+      }>(
+        `SELECT id, source_eligibility, revoked_at FROM workspace_pattern_evidence
+         WHERE workspace_id = $1 AND pattern_group_id = $2`,
+        [input.workspaceId, input.patternGroupId]
+      );
+      const decisions = await client.query<{
+        id: string; decision: DeclaredDecisionEvidence["decision"]; basis_evidence_ids: string[];
+      }>(
+        `SELECT id, decision, basis_evidence_ids FROM workspace_decisions
+         WHERE workspace_id = $1 AND pattern_group_id = $2`,
+        [input.workspaceId, input.patternGroupId]
+      );
+      transitionExperience({
+        state: current.state,
+        evidence: evidence.rows.map((row) => ({
+          id: row.id, sourceEligibility: row.source_eligibility, revokedAt: row.revoked_at
+        })),
+        decisions: decisions.rows.map((row) => ({
+          id: row.id, decision: row.decision, basisEvidenceIds: row.basis_evidence_ids
+        }))
+      }, input);
+      const updated = await client.query(
+        `UPDATE workspace_pattern_groups
+         SET state = $3, superseded_by_id = COALESCE($4, superseded_by_id), updated_at = now()
+         WHERE workspace_id = $1 AND id = $2
+           AND EXISTS (
+             SELECT 1 FROM workspace_members
+             WHERE workspace_id = $1 AND user_id = $5 AND role = 'admin'
+           )`,
+        [input.workspaceId, input.patternGroupId, input.to, input.supersededById ?? null, input.actorId]
+      );
+      if (updated.rowCount !== 1) throw new Error("Experience transition is not authorized");
+      const review = await client.query<{
+        id: string; workspace_id: string; pattern_group_id: string; actor_id: string;
+        from_state: ExperienceState; to_state: ExperienceState; reason: string;
+        basis_evidence_ids: string[]; decision_id: string | null; created_at: Date;
+      }>(
+        `INSERT INTO workspace_experience_reviews
+          (workspace_id, pattern_group_id, actor_id, from_state, to_state, reason,
+           basis_evidence_ids, decision_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::uuid[], $8)
+         RETURNING id, workspace_id, pattern_group_id, actor_id, from_state, to_state,
+                   reason, basis_evidence_ids, decision_id, created_at`,
+        [input.workspaceId, input.patternGroupId, input.actorId, current.state, input.to,
+          input.reason, [...new Set(input.basisEvidenceIds)], input.decisionId]
+      );
+      await this.insertAudit(client, {
+        workspaceId: input.workspaceId, actorId: input.actorId,
+        action: "experience.transitioned", resourceType: "experience", resourceId: input.patternGroupId,
+        metadata: { fromState: current.state, toState: input.to, reviewId: review.rows[0]!.id }
+      });
+      const row = review.rows[0]!;
+      return experienceReviewEventSchema.parse({
+        id: row.id, workspaceId: row.workspace_id, patternGroupId: row.pattern_group_id,
+        actorId: row.actor_id, fromState: row.from_state, toState: row.to_state,
+        reason: row.reason, basisEvidenceIds: row.basis_evidence_ids,
+        decisionId: row.decision_id, createdAt: row.created_at
+      });
+    });
+  }
+
+  async listExperienceReviewEvents(
+    workspaceId: string,
+    patternGroupId: string
+  ): Promise<ExperienceReviewEvent[]> {
+    const { rows } = await this.pool.query<{
+      id: string; workspace_id: string; pattern_group_id: string; actor_id: string;
+      from_state: ExperienceState; to_state: ExperienceState; reason: string;
+      basis_evidence_ids: string[]; decision_id: string | null; created_at: Date;
+    }>(
+      `SELECT id, workspace_id, pattern_group_id, actor_id, from_state, to_state,
+              reason, basis_evidence_ids, decision_id, created_at
+       FROM workspace_experience_reviews
+       WHERE workspace_id = $1 AND pattern_group_id = $2
+       ORDER BY created_at, id`,
+      [workspaceId, patternGroupId]
+    );
+    return rows.map((row) => experienceReviewEventSchema.parse({
+      id: row.id, workspaceId: row.workspace_id, patternGroupId: row.pattern_group_id,
+      actorId: row.actor_id, fromState: row.from_state, toState: row.to_state,
+      reason: row.reason, basisEvidenceIds: row.basis_evidence_ids,
+      decisionId: row.decision_id, createdAt: row.created_at
+    }));
+  }
+
+  async createWorkspaceStandardWithAudit(input: WorkspaceStandardInput): Promise<WorkspaceStandard> {
+    const parsed = workspaceStandardInputSchema.parse(input);
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<{
+        id: string; workspace_id: string; pattern_group_id: string; title: string; body: string;
+        authored_by: string; superseded_by_id: string | null; created_at: Date;
+      }>(
+        `INSERT INTO workspace_standards
+          (id, workspace_id, pattern_group_id, title, body, authored_by, superseded_by_id)
+         SELECT $1, $2, $3, $4, $5, $6, $7
+         WHERE EXISTS (
+           SELECT 1 FROM workspace_members
+           WHERE workspace_id = $2 AND user_id = $6 AND role = 'admin'
+         )
+         RETURNING id, workspace_id, pattern_group_id, title, body,
+                   authored_by, superseded_by_id, created_at`,
+        [parsed.id, parsed.workspaceId, parsed.patternGroupId, parsed.title, parsed.body,
+          parsed.authoredBy, parsed.supersededById]
+      );
+      if (!rows[0]) throw new Error("Workspace standard is not authorized");
+      await this.insertAudit(client, {
+        workspaceId: parsed.workspaceId, actorId: parsed.authoredBy,
+        action: "experience.standard_created", resourceType: "experience", resourceId: parsed.patternGroupId,
+        metadata: { standardId: parsed.id }
+      });
+      const row = rows[0];
+      return {
+        id: row.id, workspaceId: row.workspace_id, patternGroupId: row.pattern_group_id,
+        title: row.title, body: row.body, authoredBy: row.authored_by,
+        supersededById: row.superseded_by_id, createdAt: row.created_at
+      };
+    });
+  }
+
+  async listExperienceProjection(input: ExperienceProjectionInput): Promise<ExperienceProjection[]> {
+    const { rows } = await this.pool.query<{
+      experience_id: string; capability: string; state: ExperienceState; title: string;
+      observed_facts: string[]; evidence_count: string | number;
+    }>(
+      `SELECT pattern.id AS experience_id, pattern.capability, pattern.state,
+              (array_agg(evidence.title ORDER BY evidence.created_at, evidence.id))[1] AS title,
+              array_agg(evidence.observed_fact ORDER BY evidence.created_at, evidence.id) AS observed_facts,
+              count(*) AS evidence_count
+       FROM workspace_pattern_groups pattern
+       JOIN workspace_pattern_evidence evidence
+         ON evidence.pattern_group_id = pattern.id AND evidence.workspace_id = pattern.workspace_id
+       JOIN projects project
+         ON project.id = evidence.project_id AND project.workspace_id = evidence.workspace_id
+       JOIN releases release
+         ON release.id = evidence.release_id AND release.workspace_id = evidence.workspace_id
+       JOIN workspace_members member
+         ON member.workspace_id = evidence.workspace_id AND member.user_id = $2
+       LEFT JOIN project_members project_member
+         ON project_member.workspace_id = evidence.workspace_id
+        AND project_member.project_id = evidence.project_id AND project_member.user_id = $2
+       WHERE pattern.workspace_id = $1 AND evidence.project_id <> $3
+         AND evidence.revoked_at IS NULL AND project.archived_at IS NULL
+         AND release.published_at IS NOT NULL
+         AND (member.role = 'admin' OR project_member.user_id IS NOT NULL)
+         AND ($4 = '' OR lower(evidence.title || E'\n' || evidence.observed_fact) LIKE '%' || lower($4) || '%')
+       GROUP BY pattern.id, pattern.capability, pattern.state
+       ORDER BY title, pattern.id`,
+      [input.workspaceId, input.userId, input.currentProjectId, input.query.trim()]
+    );
+    return rows.map((row) => ({
+      experienceId: row.experience_id, capability: row.capability, state: row.state,
+      title: row.title, observedFacts: row.observed_facts, evidenceCount: Number(row.evidence_count)
+    }));
   }
 
   async knowledgeMetadata(workspaceId: string, releaseId: string): Promise<KnowledgeMetadata> {

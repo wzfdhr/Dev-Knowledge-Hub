@@ -218,3 +218,82 @@ The full test run emitted the repository's existing jsdom `getComputedStyle()` p
 - Passing local evaluation does not promote product claims. All seven candidates remain `implemented-gated` until the separate release gates authorize activation.
 - V1.1 Webpack/Rspack/Rollup, Nx/Turbo, i18n, accessibility, error monitoring, and Web Vitals remain parser-backed basic recognition only.
 - No unresolved functional concern was found in the authorized local scope.
+
+---
+
+# FK18 Important Review Findings Follow-up (2026-07-22)
+
+## Status and Boundaries
+
+All five Important review findings are resolved locally on `codex/frontend-experience-kernel-design`. The implementation remains inside the user-approved FK18 scope expansion. No push, merge, deployment, production access, credential operation, active worktree switch, or `DEVKH_FRONTEND_KNOWLEDGE_MODE=active` change was performed.
+
+The seven V1 Trial capabilities remain `implemented-gated`. Webpack/Rspack/Rollup, Nx/Turbo, i18n, accessibility, error monitoring, and Web Vitals remain `basic-recognition` with target `V1.1`.
+
+## Findings Resolved
+
+### Normal shadow pipeline registration
+
+- Added `react-ecosystem-core` to the analyzer list issued by the normal frontend shadow extract stage.
+- Changed the B02 shadow/active pipeline fixture to contain a real GraphQL tagged document.
+- The B02 end-to-end test now proves that the normal stage request includes the analyzer and that the persisted `frontend-ir-v2` artifact contains both its analyzer manifest entry and its GraphQL operation fact.
+
+### Capability-scoped evaluation gates
+
+- Added capability-scoped train, held-out, and aggregate reports for each of the seven `trialCapability` values.
+- The CLI validates every scoped report against its scoped cases, applies the existing quality thresholds independently to all 21 reports, and writes them as `trialCapabilityReports` in the committed-fixture evaluation artifact.
+- Existing aggregate `train`, `heldOut`, and `all` gates remain unchanged and are still enforced.
+- Added an end-to-end regression that runs the actual CLI, removes the held-out Storybook observation from the real artifact evidence, recomputes the same capability reports, and proves that `trialCapability.storybook.heldOut` fails while an unaffected capability remains green.
+
+### Redux Toolkit and TanStack Query import provenance
+
+- State-data extraction now records local name, exported name, package specifier, and resolution for imports.
+- Complete Redux Toolkit slice and store facts require `createSlice` and `configureStore` exports from `@reduxjs/toolkit`, including aliased imports.
+- Redux selector extraction requires an established Redux slice in the source. `selects` edges require `useSelector` from `react-redux`, and `dispatches` edges require a local dispatcher created by the imported `useDispatch` export.
+- Complete TanStack query/mutation facts require `useQuery` or `useMutation` from `@tanstack/react-query`, including aliases.
+- Invalidation edges require the receiver to be a local query client created by the imported `useQueryClient` export.
+- Spoofed local factories, hooks, dispatchers, and invalidators produce no complete Redux/TanStack deep facts or deep relation edges.
+
+### Deterministic canonical refinement and facet conflicts
+
+- React canonical refinement is now restricted to `react-core`, `react-ecosystem-core`, `typescript-core`, and `state-data-core`; unrelated core contributors cannot enter the exception.
+- Facet namespaces are checked for disagreement before canonical refinement. Conflicting values from the same analyzer across different source hashes now produce `FRONTEND_FACET_CONFLICT` instead of selecting a value through manifest/source-hash order.
+- Added an order-reversal regression that supplies conflicting `state-data-core` facets from two source hashes after React refinement and verifies identical invalid results in both input orders.
+- The stricter check exposed a real duplicate ecosystem facet: an imported component in a story and its source definition claimed different `react-ecosystem-core` values. Imported story components now contribute canonical provenance without a competing ecosystem facet; the defining source remains the owner of wrapper details.
+
+### Permission and Storybook completeness
+
+- Guard-shaped names begin as partial recognition. A guard becomes complete only after a literal JSX `permission` value is observed; a `guards` fact edge likewise requires that static key.
+- Dynamic permission expressions and name-only `Guard`/`ProtectedRoute` functions remain partial.
+- Story extraction now requires a named export. Unexported object literals are ignored as stories.
+- Exported objects require a recognized CSF property (`args`, `render`, `play`, `decorators`, `parameters`, `loaders`, or `tags`) before becoming complete `storybook-csf` facts and emitting `documents` edges.
+- Exported object candidates without a proven CSF shape remain partial with unknown fixture kind.
+
+## TDD Record
+
+1. Added all review regressions before implementation and ran the five-file focused suite.
+2. RED: 5 files ran 48 tests; 11 failed exactly at the requested boundaries: 2 B02 pipeline cases, 2 evaluation cases, 3 state-data provenance cases, 2 registry cases, and 2 ecosystem false-positive cases.
+3. Implemented the normal-stage analyzer request, per-capability report/gate path, state-data import binding checks, contributor/facet merge policy, and guard/story completeness rules.
+4. The first GREEN attempt surfaced the previously hidden imported-story-component facet conflict. Removed the duplicate producer facet and preserved definition-owned deep details.
+5. GREEN: the five-file suite passed all 48 tests.
+6. Broadened focused verification passed 8 files and 67 tests, covering the runtime worker, registry, ecosystem/state/tooling/style analyzers, evaluation CLI, and B02 pipeline.
+
+## Final Verification
+
+All final commands ran from `/Users/start/Desktop/知识库系统/dev-knowledge-hub/.worktrees/frontend-experience-kernel-design` after the last code change.
+
+| Command | Result |
+|---|---|
+| `npm test -- src/server/knowledge/frontend/runtime/analyzer-worker.test.ts src/server/knowledge/frontend/analyzer-registry.test.ts src/server/knowledge/frontend/react-ecosystem-analyzer.test.ts src/server/knowledge/frontend/state-data-analyzer.test.ts src/server/knowledge/frontend/tooling-test-analyzer.test.ts src/server/knowledge/frontend/style-analyzer.test.ts src/server/knowledge/frontend/evaluation.test.ts src/server/knowledge/pipeline/b02-shadow-pipeline.test.ts` | PASS: 8 files, 67 tests |
+| `npm test` | PASS: 154 files passed, 1 skipped; 987 tests passed, 34 skipped |
+| `npm run typecheck` | PASS: client and node TypeScript projects |
+| `npm run lint` | PASS: ESLint exit 0 |
+| `npm run evaluate:frontend` | PASS: 336 cases; aggregate plus 21 capability-scoped gates passed |
+| `git diff --check` | PASS: no whitespace errors |
+
+The first full test attempt had one unrelated 5-second timeout in `src/client/app.test.tsx` for `loads token records after the first one hundred`. The isolated retry passed in 2.37 seconds, and the subsequent full-suite rerun passed all 987 executed tests. The existing jsdom `getComputedStyle()` pseudo-element warnings remained non-failing.
+
+## Residual Concerns
+
+- Per-capability evidence is intentionally small, with one positive case per split for most trial capabilities. The gate now prevents aggregate masking, but future evidence growth would improve statistical confidence.
+- Passing local gates does not promote or release these capabilities; `implemented-gated` remains the required status.
+- No unresolved functional defect remains within the approved local FK18 expansion.

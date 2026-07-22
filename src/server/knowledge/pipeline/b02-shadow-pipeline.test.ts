@@ -84,7 +84,12 @@ describe("B02 shadow pipeline", () => {
     const blobRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-b02-blobs-"));
     directories.push(snapshotRoot, artifactRoot, blobRoot);
     const sourcePath = "src/app.ts";
-    const source = "export const answer = 42;\n";
+    const source = [
+      "import gql from 'graphql-tag';",
+      "export const DashboardOverview = gql`query DashboardOverview { dashboard { title } }`;",
+      "export const answer = 42;",
+      ""
+    ].join("\n");
     await mkdir(path.join(snapshotRoot, "src"), { recursive: true });
     await writeFile(path.join(snapshotRoot, sourcePath), source);
 
@@ -172,6 +177,7 @@ describe("B02 shadow pipeline", () => {
         "html-core",
         "style-core",
         "react-core",
+        "react-ecosystem-core",
         "react-router-core",
         "state-data-core",
         "visualization-core",
@@ -216,10 +222,16 @@ describe("B02 shadow pipeline", () => {
     });
     await expect(artifactStore.getJson(frontendExtractManifest)).resolves.toMatchObject({
       entities: expect.arrayContaining([
-        expect.objectContaining({ kind: "symbol", name: "answer", canonicalPath: sourcePath })
+        expect.objectContaining({ kind: "symbol", name: "answer", canonicalPath: sourcePath }),
+        expect.objectContaining({
+          kind: "api_operation",
+          name: "DashboardOverview",
+          facets: { "react-ecosystem-core": expect.objectContaining({ protocol: "graphql" }) }
+        })
       ]),
       analyzerManifest: expect.arrayContaining([
-        expect.objectContaining({ analyzerId: "typescript-core" })
+        expect.objectContaining({ analyzerId: "typescript-core" }),
+        expect.objectContaining({ analyzerId: "react-ecosystem-core" })
       ])
     });
     const frontendValue = async (stage: string, kind: string) => {

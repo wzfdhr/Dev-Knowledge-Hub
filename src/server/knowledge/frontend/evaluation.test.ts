@@ -6,14 +6,17 @@ import { promisify } from "node:util";
 import { describe, expect, test } from "vitest";
 
 import {
+  FRONTEND_TRIAL_CAPABILITIES,
   assertFrontendEvaluationReport,
   assertFrontendQualityGate,
   collectFrontendQualityGateFailures,
   digestFrontendEvaluationDatasets,
   evaluateFrontendKnowledge,
   evaluateFrontendKnowledgeBySplit,
+  evaluateFrontendTrialCapabilities,
   observeFrontendEvaluationCase,
   parseFrontendEvaluationDatasets,
+  type FrontendEvaluationObservation,
   type FrontendEvaluationInput,
   validateFrontendEvaluationSuite,
   validateFrontendCompatibilityFixtures,
@@ -213,6 +216,7 @@ describe("frontend knowledge evaluation protocol", () => {
       status: string;
       qualityGateReports: string[];
       observations: Array<{ caseId: string }>;
+      trialCapabilityReports: Record<string, { train: { denominators: { totalCases: number } }; heldOut: { denominators: { totalCases: number } }; all: { denominators: { totalCases: number } } }>;
       suite: { trialCapabilities?: Array<{ capability: string }> };
     };
 
@@ -220,6 +224,37 @@ describe("frontend knowledge evaluation protocol", () => {
     expect(artifact.qualityGateReports).toEqual(["train", "heldOut", "all"]);
     expect(artifact.observations.filter((item) => item.caseId.startsWith("react-trial-"))).toHaveLength(18);
     expect(artifact.suite.trialCapabilities).toHaveLength(7);
+    expect(Object.keys(artifact.trialCapabilityReports)).toEqual(FRONTEND_TRIAL_CAPABILITIES);
+    for (const reports of Object.values(artifact.trialCapabilityReports)) {
+      expect(reports.train.denominators.totalCases).toBeGreaterThan(0);
+      expect(reports.heldOut.denominators.totalCases).toBeGreaterThan(0);
+      expect(reports.all.denominators.totalCases).toBeGreaterThan(0);
+    }
+  }, 30_000);
+
+  test("fails the real FK18 gate when one trial capability's evidence regresses", async () => {
+    await execFileAsync(process.execPath, ["--import", "tsx", "scripts/evaluate-frontend-knowledge.mjs"], {
+      cwd: root,
+      maxBuffer: 10 * 1024 * 1024
+    });
+    const artifact = JSON.parse(await readFile(path.join(root, "artifacts/frontend-knowledge-evaluation.json"), "utf8")) as {
+      observations: FrontendEvaluationObservation[];
+    };
+    const inputs = await Promise.all([
+      ["train", "evaluation/frontend/train/react-trial.jsonl"],
+      ["held-out", "evaluation/frontend/held-out/react-trial.jsonl"]
+    ].map(async ([split, filename]) => ({
+      name: filename!, split: split as "train" | "held-out", content: await readFile(path.join(root, filename!), "utf8")
+    })));
+    const cases = parseFrontendEvaluationDatasets(inputs);
+    const regressed = artifact.observations.map((observation) => observation.caseId === "react-trial-storybook-held-out-01"
+      ? { ...observation, entityIds: [], factEdgeIds: [], searchResults: [], impactEntityIds: [] }
+      : observation);
+    const reports = evaluateFrontendTrialCapabilities(cases, regressed);
+    const failures = collectFrontendQualityGateFailures({}, reports);
+
+    expect(failures.some((error) => error.message.includes("trialCapability.storybook.heldOut"))).toBe(true);
+    expect(failures.every((error) => !error.message.includes("trialCapability.redux-toolkit"))).toBe(true);
   }, 30_000);
 
   test("calculates entity, edge, retrieval, citation, and impact metrics", () => {

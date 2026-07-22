@@ -575,6 +575,15 @@ export function evaluateFrontendKnowledgeBySplit(cases, observations) {
   };
 }
 
+export function evaluateFrontendTrialCapabilities(cases, observations) {
+  return Object.fromEntries(FRONTEND_TRIAL_CAPABILITIES.map((capability) => {
+    const scopedCases = cases.filter((item) => item.trialCapability === capability);
+    const caseIds = new Set(scopedCases.map((item) => item.id));
+    const scopedObservations = observations.filter((item) => caseIds.has(item.caseId));
+    return [capability, evaluateFrontendKnowledgeBySplit(scopedCases, scopedObservations)];
+  }));
+}
+
 function close(left, right) {
   return Number.isFinite(left) && Number.isFinite(right) && Math.abs(left - right) < 1e-12;
 }
@@ -657,13 +666,28 @@ export function assertFrontendQualityGate(report) {
   }
 }
 
-export function collectFrontendQualityGateFailures(reports) {
+export function collectFrontendQualityGateFailures(reports, trialCapabilityReports = null) {
   const failures = [];
   for (const [name, report] of Object.entries(reports)) {
     try {
       assertFrontendQualityGate(report);
     } catch (error) {
       failures.push(new Error(`Frontend evaluation ${name} quality gate failed: ${error.message}`, { cause: error }));
+    }
+  }
+  if (trialCapabilityReports) {
+    for (const capability of FRONTEND_TRIAL_CAPABILITIES) {
+      const scoped = trialCapabilityReports[capability] ?? {};
+      for (const split of ["train", "heldOut", "all"]) {
+        try {
+          assertFrontendQualityGate(scoped[split]);
+        } catch (error) {
+          failures.push(new Error(
+            `Frontend evaluation trialCapability.${capability}.${split} quality gate failed: ${error.message}`,
+            { cause: error }
+          ));
+        }
+      }
     }
   }
   return failures;
@@ -786,7 +810,19 @@ export async function main() {
       throw new Error(`Frontend evaluation ${split} report is invalid: ${error.message}`, { cause: error });
     }
   }
-  const [qualityGateError = null] = collectFrontendQualityGateFailures(splitReports);
+  const trialCapabilityReports = evaluateFrontendTrialCapabilities(cases, observations);
+  for (const [capability, reports] of Object.entries(trialCapabilityReports)) {
+    for (const [split, report] of Object.entries(reports)) {
+      const scopedCases = cases.filter((item) => item.trialCapability === capability
+        && (split === "all" || item.split === (split === "heldOut" ? "held-out" : split)));
+      try {
+        assertFrontendEvaluationReport(report, scopedCases);
+      } catch (error) {
+        throw new Error(`Frontend evaluation trialCapability.${capability}.${split} report is invalid: ${error.message}`, { cause: error });
+      }
+    }
+  }
+  const [qualityGateError = null] = collectFrontendQualityGateFailures(splitReports, trialCapabilityReports);
   const output = {
     dataset: "frontend-v1-core",
     datasetDigest,
@@ -797,6 +833,7 @@ export async function main() {
     suite,
     observations,
     splitReports,
+    trialCapabilityReports,
     report: splitReports.all
   };
   const outputPath = path.join(root, "artifacts/frontend-knowledge-evaluation.json");

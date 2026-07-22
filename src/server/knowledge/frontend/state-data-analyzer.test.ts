@@ -80,4 +80,68 @@ describe("analyzeStateDataSource", () => {
       ])
     });
   });
+
+  test("follows approved Redux Toolkit and React Redux aliases", () => {
+    const content = [
+      "import { configureStore as buildStore, createSlice as defineSlice } from '@reduxjs/toolkit';",
+      "import { useDispatch as useAppDispatch, useSelector as readStore } from 'react-redux';",
+      "const counterSlice = defineSlice({ name: 'counter', initialState: { value: 0 }, reducers: { increment(state) { state.value += 1; } } });",
+      "const selectValue = (state) => state.counter.value;",
+      "export const store = buildStore({ reducer: { counter: counterSlice.reducer } });",
+      "export function Counter() { const dispatch = useAppDispatch(); const value = readStore(selectValue); dispatch(increment()); return <b>{value}</b>; }"
+    ].join("\n");
+    const output = analyzeStateDataSource(input(content, "apps/web/src/counter.tsx"));
+
+    expect(output.entities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "state_store", name: "counterSlice", completeness: "complete" }),
+      expect.objectContaining({ kind: "state_store", name: "store", completeness: "complete" }),
+      expect.objectContaining({ kind: "state_field", name: "selectValue", completeness: "complete" })
+    ]));
+    expect(output.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "selects" }),
+      expect.objectContaining({ kind: "dispatches" })
+    ]));
+  });
+
+  test("follows TanStack Query aliases and proven query-client invalidation", () => {
+    const content = [
+      "import { useMutation as mutate, useQuery as query, useQueryClient as queryClient } from '@tanstack/react-query';",
+      "export function useProjects() {",
+      "  const client = queryClient();",
+      "  const projects = query({ queryKey: ['projects'], queryFn: loadProjects });",
+      "  const createProject = mutate({ mutationKey: ['projects', 'create'], mutationFn: saveProject, onSuccess: () => client.invalidateQueries({ queryKey: ['projects'] }) });",
+      "  return { projects, createProject };",
+      "}"
+    ].join("\n");
+    const output = analyzeStateDataSource(input(content));
+
+    expect(output.entities.filter((entity) => entity.kind === "api_operation" && entity.completeness === "complete")).toHaveLength(2);
+    expect(output.edges).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "invalidates" })]));
+  });
+
+  test("does not emit complete Redux or TanStack facts for spoofed local bindings", () => {
+    const content = [
+      "const createSlice = (options) => options;",
+      "const configureStore = (options) => options;",
+      "const useSelector = (selector) => selector({});",
+      "const useDispatch = () => (action) => action;",
+      "const useQuery = (options) => options;",
+      "const useMutation = (options) => options;",
+      "const useQueryClient = () => ({ invalidateQueries() {} });",
+      "const fakeSlice = createSlice({ name: 'fake', initialState: { value: 0 }, reducers: { increment() {} } });",
+      "const fakeStore = configureStore({ reducer: { fake: fakeSlice.reducer } });",
+      "const selectValue = (state) => state.fake.value;",
+      "export function Spoofed() { const client = useQueryClient(); const query = useQuery({ queryKey: ['fake'] }); const mutation = useMutation({ onSuccess: () => client.invalidateQueries({ queryKey: ['fake'] }) }); const dispatch = useDispatch(); useSelector(selectValue); dispatch(increment()); return query; }"
+    ].join("\n");
+    const output = analyzeStateDataSource(input(content, "apps/web/src/spoofed.tsx"));
+    const deepFacts = output.entities.filter((entity) => entity.completeness === "complete" && (
+      ("library" in entity.attributes && entity.attributes.library?.state === "known"
+        && entity.attributes.library.value === "redux-toolkit")
+      || entity.facets["state-data-core"]?.queryKind
+      || ["selector", "action"].includes(String(entity.facets["state-data-core"]?.role))
+    ));
+
+    expect(deepFacts).toEqual([]);
+    expect(output.edges.filter((edge) => ["selects", "dispatches", "invalidates"].includes(edge.kind))).toEqual([]);
+  });
 });

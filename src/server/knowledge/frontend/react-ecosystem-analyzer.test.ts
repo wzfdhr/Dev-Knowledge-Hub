@@ -298,6 +298,44 @@ describe("FK18 React trial analyzer coverage", () => {
     expect(output.edges.filter((edge) => ["validates", "wraps"].includes(edge.kind))).toEqual([]);
   });
 
+  test("keeps named guards partial without static permission evidence", async () => {
+    const content = [
+      "export function PermissionGuard({ permission, children }) { return canAccess(permission) ? children : null; }",
+      "export function DynamicPage({ permission }) { return <PermissionGuard permission={permission}><main /></PermissionGuard>; }",
+      "export function NameOnlyProtectedRoute({ children }) { return children; }"
+    ].join("\n");
+    const output = await analyzeEcosystem("src/guard-lookalikes.tsx", content);
+    const guards = output.entities.filter((entity) => entity.facets["react-ecosystem-core"]?.role === "permission-guard");
+
+    expect(guards).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "PermissionGuard", completeness: "partial" }),
+      expect.objectContaining({ name: "NameOnlyProtectedRoute", completeness: "partial" })
+    ]));
+    expect(guards.filter((entity) => entity.completeness === "complete")).toEqual([]);
+  });
+
+  test("only marks exported CSF story-shaped values complete", async () => {
+    const content = [
+      "import { DashboardCard } from './dashboard-card';",
+      "const meta = { component: DashboardCard };",
+      "export default meta;",
+      "const Draft = { args: { title: 'draft' } };",
+      "export const helper = { cache: true };",
+      "export const Default = { args: { title: 'ready' } };"
+    ].join("\n");
+    const output = await analyzeEcosystem("src/dashboard-card.stories.tsx", content, [
+      { specifier: "./dashboard-card", resolvedPath: "src/dashboard-card.tsx" }
+    ]);
+    const stories = output.entities.filter((entity) => entity.kind === "test_fixture");
+
+    expect(stories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "Default", completeness: "complete" }),
+      expect.objectContaining({ name: "helper", completeness: "partial" })
+    ]));
+    expect(stories.some((entity) => entity.name === "Draft")).toBe(false);
+    expect(output.edges.filter((edge) => edge.kind === "documents")).toHaveLength(1);
+  });
+
   test("keeps deferred ecosystem packages at parser-backed basic recognition", async () => {
     const content = [
       "import i18next from 'i18next';",

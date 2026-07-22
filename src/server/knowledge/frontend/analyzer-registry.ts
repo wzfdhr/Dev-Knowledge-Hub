@@ -100,10 +100,25 @@ function canonicalEdge(value: FrontendEdge): string {
 }
 
 const reactCanonicalAnalyzerIds = new Set(["react-core", "react-ecosystem-core"]);
+const reactCanonicalContributorIds = new Set([
+  "react-core",
+  "react-ecosystem-core",
+  "state-data-core",
+  "typescript-core"
+]);
+
+function conflictingFacetNamespace(left: FrontendEntity, right: FrontendEntity): string | null {
+  for (const [namespace, facet] of Object.entries(right.facets)) {
+    const previous = left.facets[namespace];
+    if (previous !== undefined && stableJson(previous) !== stableJson(facet)) return namespace;
+  }
+  return null;
+}
 
 function mergeReactCanonicalEntity(left: FrontendEntity, right: FrontendEntity): FrontendEntity | null {
   const analyzerIds = new Set([...left.provenance, ...right.provenance].map((item) => item.analyzerId));
   if ([...reactCanonicalAnalyzerIds].some((id) => !analyzerIds.has(id))) return null;
+  if ([...analyzerIds].some((id) => !reactCanonicalContributorIds.has(id))) return null;
   if (stableJson({
     kind: left.kind,
     name: left.name,
@@ -280,17 +295,14 @@ export class AnalyzerRegistry {
         });
         const previous = entities.get(entity.id);
         if (!previous) entities.set(entity.id, entity);
+        else if (conflictingFacetNamespace(previous, entity)) {
+          issues.push({ rule: "FRONTEND_FACET_CONFLICT", severity: "error", targetId: entity.id, message: "Core analyzer returned conflicting facet values" });
+        }
         else if (canonicalEntity(previous) !== canonicalEntity(entity)) {
           const merged = mergeReactCanonicalEntity(previous, entity);
           if (merged) entities.set(entity.id, merged);
           else issues.push({ rule: "FRONTEND_CANONICAL_CONFLICT", severity: "error", targetId: entity.id, message: "Core analyzers disagree on canonical entity fields" });
         } else {
-          for (const [namespace, facet] of Object.entries(entity.facets)) {
-            const existingFacet = previous.facets[namespace];
-            if (existingFacet !== undefined && stableJson(existingFacet) !== stableJson(facet)) {
-              issues.push({ rule: "FRONTEND_FACET_CONFLICT", severity: "error", targetId: entity.id, message: "Core analyzer returned conflicting facet values" });
-            }
-          }
           entities.set(entity.id, {
             ...previous,
             facets: canonicalValue({ ...previous.facets, ...entity.facets }) as FrontendEntity["facets"],

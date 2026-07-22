@@ -12,6 +12,7 @@ import { AnalyzerRegistry } from "./analyzer-registry.js";
 
 const digest = "a".repeat(64);
 const secondDigest = "b".repeat(64);
+const thirdDigest = "c".repeat(64);
 const ref = (startLine: number, blobHash = digest) => ({
   snapshotId: "snapshot-1", path: "src/app.tsx", startLine, endLine: startLine, blobHash
 });
@@ -191,5 +192,62 @@ describe("frontend analyzer registry", () => {
     });
     expect(merged.ir.entities[0]?.sourceRefs.map((item) => item.startLine)).toEqual([3, 5]);
     expect(value.mergeOutputs([ecosystem, react])).toEqual(merged);
+  });
+
+  test("limits React canonical refinement to its stated core contributors", () => {
+    const value = registry();
+    for (const id of ["react-core", "react-ecosystem-core"]) {
+      value.register({ id, version: "1.0.0", role: "core", facetSchema: z.record(z.string(), z.unknown()) });
+    }
+    const unrelated = {
+      ...component("core-html", 1),
+      completeness: "partial" as const,
+      attributes: { componentType: { state: "unknown" as const, reason: "unresolved" as const } }
+    };
+    const react = {
+      ...component("react-core", 3),
+      completeness: "partial" as const,
+      attributes: { componentType: { state: "unknown" as const, reason: "unresolved" as const } }
+    };
+    const ecosystem = { ...component("react-ecosystem-core", 5) };
+
+    expect(value.mergeOutputs([
+      output("core-html", { entities: [unrelated] }),
+      output("react-core", { entities: [react] }),
+      output("react-ecosystem-core", { entities: [ecosystem] })
+    ])).toMatchObject({ valid: false, lintIssues: [{ rule: "FRONTEND_CANONICAL_CONFLICT" }] });
+  });
+
+  test("detects overlapping same-analyzer facets during refinement regardless of source order", () => {
+    const value = registry();
+    for (const id of ["react-core", "react-ecosystem-core", "state-data-core"]) {
+      value.register({ id, version: "1.0.0", role: "core", facetSchema: z.record(z.string(), z.unknown()) });
+    }
+    const react = output("react-core", { entities: [{
+      ...component("react-core", 2), completeness: "partial" as const,
+      attributes: { componentType: { state: "unknown" as const, reason: "unresolved" as const } }
+    }] });
+    const ecosystem = output("react-ecosystem-core", { entities: [component("react-ecosystem-core", 3)] });
+    const stateOutput = (blobHash: string, dataConsumer: boolean): FrontendAnalyzerOutput => {
+      const entity = {
+        ...component("state-data-core", 4),
+        completeness: "partial" as const,
+        attributes: { componentType: { state: "unknown" as const, reason: "unresolved" as const } },
+        facets: { "state-data-core": { dataConsumer } },
+        sourceRefs: [ref(4, blobHash)],
+        provenance: [{
+          analyzerId: "state-data-core", analyzerVersion: "1.0.0", parserConfigDigest: digest,
+          sourceBlobHashes: [blobHash]
+        }]
+      };
+      return output("state-data-core", { sourceBlobHashes: [blobHash], entities: [entity] });
+    };
+    const first = stateOutput(secondDigest, true);
+    const second = stateOutput(thirdDigest, false);
+    const forward = value.mergeOutputs([react, ecosystem, first, second]);
+    const reversed = value.mergeOutputs([second, first, ecosystem, react]);
+
+    expect(forward).toMatchObject({ valid: false, ir: null, lintIssues: [{ rule: "FRONTEND_FACET_CONFLICT" }] });
+    expect(reversed).toEqual(forward);
   });
 });

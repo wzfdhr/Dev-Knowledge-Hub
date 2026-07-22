@@ -189,6 +189,12 @@ function functionName(node: ExecutableFunction): string | null {
   return null;
 }
 
+type ImportBinding = {
+  importedName: string;
+  specifier: string;
+  resolvedPath: string | null;
+};
+
 export function analyzeStateDataSource(inputValue: TypeScriptAnalyzerInput): FrontendAnalyzerOutput {
   const input = { ...inputValue, path: normalizeFrontendCanonicalPath(inputValue.path) };
   const source = ts.createSourceFile(input.path, input.content, ts.ScriptTarget.Latest, true, scriptKind(input.path));
@@ -202,18 +208,34 @@ export function analyzeStateDataSource(inputValue: TypeScriptAnalyzerInput): Fro
   const functions = new Map<string, { node: ts.FunctionLikeDeclaration; entity: FrontendEntity }>();
   const browserChannels: Array<Record<string, unknown>> = [];
   const importedSymbols = new Map<string, string>();
+  const imports = new Map<string, ImportBinding>();
 
   source.forEachChild((node) => {
     if (!ts.isImportDeclaration(node) || !ts.isStringLiteralLike(node.moduleSpecifier)) return;
     const specifier = node.moduleSpecifier.text;
-    const resolved = input.resolutions.find((item) => item.specifier === specifier)?.resolvedPath;
-    if (!resolved || !node.importClause) return;
-    const canonicalPath = normalizeFrontendCanonicalPath(resolved);
-    if (node.importClause.name) importedSymbols.set(node.importClause.name.text, canonicalPath);
+    const resolved = input.resolutions.find((item) => item.specifier === specifier)?.resolvedPath ?? null;
+    if (!node.importClause) return;
+    const canonicalPath = resolved ? normalizeFrontendCanonicalPath(resolved) : null;
+    if (node.importClause.name) {
+      imports.set(node.importClause.name.text, { importedName: "default", specifier, resolvedPath: canonicalPath });
+      if (canonicalPath) importedSymbols.set(node.importClause.name.text, canonicalPath);
+    }
     if (node.importClause.namedBindings && ts.isNamedImports(node.importClause.namedBindings)) {
-      for (const item of node.importClause.namedBindings.elements) importedSymbols.set(item.name.text, canonicalPath);
+      for (const item of node.importClause.namedBindings.elements) {
+        imports.set(item.name.text, {
+          importedName: item.propertyName?.text ?? item.name.text,
+          specifier,
+          resolvedPath: canonicalPath
+        });
+        if (canonicalPath) importedSymbols.set(item.name.text, canonicalPath);
+      }
     }
   });
+
+  const importedBinding = (localName: string, specifier: string, importedName: string): boolean => {
+    const binding = imports.get(localName);
+    return binding?.specifier === specifier && binding.importedName === importedName;
+  };
 
   const module = makeEntity(
     input,
@@ -382,8 +404,12 @@ export function analyzeStateDataSource(inputValue: TypeScriptAnalyzerInput): Fro
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && ts.isCallExpression(node.initializer)) {
       const callee = node.initializer.expression.getText(source);
       if (callee === "create") addStore(node.name.text, "zustand", node, objectFromFactory(node.initializer));
-      if (callee === "createSlice") addReduxSlice(node.name.text, node, node.initializer);
-      if (callee === "configureStore") {
+      if (ts.isIdentifier(node.initializer.expression)
+        && importedBinding(callee, "@reduxjs/toolkit", "createSlice")) {
+        addReduxSlice(node.name.text, node, node.initializer);
+      }
+      if (ts.isIdentifier(node.initializer.expression)
+        && importedBinding(callee, "@reduxjs/toolkit", "configureStore")) {
         const options = objectLiteral(node.initializer.arguments[0]);
         const store = makeEntity(
           input,
@@ -420,7 +446,7 @@ export function analyzeStateDataSource(inputValue: TypeScriptAnalyzerInput): Fro
   collectStores(source);
 
   const collectReduxSelectors = (node: ts.Node): void => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && /^select[A-Z\d_]/u.test(node.name.text)
+    if (reduxSlices.size > 0 && ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && /^select[A-Z\d_]/u.test(node.name.text)
       && node.initializer && (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
       const body = ts.isBlock(node.initializer.body)
         ? node.initializer.body.statements.find((statement): statement is ts.ReturnStatement => ts.isReturnStatement(statement))?.expression
@@ -447,7 +473,13 @@ export function analyzeStateDataSource(inputValue: TypeScriptAnalyzerInput): Fro
   const collectDataQueries = (node: ts.Node): void => {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && ts.isCallExpression(node.initializer)) {
       const callee = node.initializer.expression.getText(source);
-      const queryKind = callee === "useQuery" ? "query" as const : callee === "useMutation" ? "mutation" as const : null;
+      const queryKind = ts.isIdentifier(node.initializer.expression)
+        && importedBinding(callee, "@tanstack/react-query", "useQuery")
+        ? "query" as const
+        : ts.isIdentifier(node.initializer.expression)
+          && importedBinding(callee, "@tanstack/react-query", "useMutation")
+          ? "mutation" as const
+          : null;
       if (queryKind) {
         const options = objectLiteral(node.initializer.arguments[0]);
         const key = staticKey(objectProperty(options, queryKind === "query" ? "queryKey" : "mutationKey"));
@@ -481,9 +513,24 @@ export function analyzeStateDataSource(inputValue: TypeScriptAnalyzerInput): Fro
   };
   collectDataQueries(source);
 
+  const queryClients = new Set<string>();
+  const reduxDispatchers = new Set<string>();
+  const collectBoundConsumers = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+      && ts.isCallExpression(node.initializer) && ts.isIdentifier(node.initializer.expression)) {
+      const callee = node.initializer.expression.text;
+      if (importedBinding(callee, "@tanstack/react-query", "useQueryClient")) queryClients.add(node.name.text);
+      if (importedBinding(callee, "react-redux", "useDispatch")) reduxDispatchers.add(node.name.text);
+    }
+    ts.forEachChild(node, collectBoundConsumers);
+  };
+  collectBoundConsumers(source);
+
   const collectInvalidations = (node: ts.Node): void => {
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)
-      && node.expression.name.text === "invalidateQueries") {
+      && node.expression.name.text === "invalidateQueries"
+      && ts.isIdentifier(node.expression.expression)
+      && queryClients.has(node.expression.expression.text)) {
       const options = objectLiteral(node.arguments[0]);
       const invalidatedKey = staticKey(objectProperty(options, "queryKey"));
       const mutation = [...dataQueries.values()].find((item) => item.queryKind === "mutation"
@@ -570,14 +617,16 @@ export function analyzeStateDataSource(inputValue: TypeScriptAnalyzerInput): Fro
         const relation = makeEdge(input, "reads_state", owner.id, store.id, node, node.expression.text);
         edges.set(relation.id, relation);
       }
-      if (owner && node.expression.text === "useSelector" && node.arguments[0] && ts.isIdentifier(node.arguments[0])) {
+      if (owner && importedBinding(node.expression.text, "react-redux", "useSelector")
+        && node.arguments[0] && ts.isIdentifier(node.arguments[0])) {
         const selector = reduxSelectors.get(node.arguments[0].text);
         if (selector) {
           const relation = makeEdge(input, "selects", owner.id, selector.id, node, selector.name);
           edges.set(relation.id, relation);
         }
       }
-      if (owner && node.arguments[0] && ts.isCallExpression(node.arguments[0]) && ts.isIdentifier(node.arguments[0].expression)) {
+      if (owner && reduxDispatchers.has(node.expression.text)
+        && node.arguments[0] && ts.isCallExpression(node.arguments[0]) && ts.isIdentifier(node.arguments[0].expression)) {
         const action = reduxActions.get(node.arguments[0].expression.text);
         if (action) {
           const relation = makeEdge(input, "dispatches", owner.id, action.id, node, action.name);

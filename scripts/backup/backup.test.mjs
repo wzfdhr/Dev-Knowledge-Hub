@@ -585,6 +585,12 @@ test("restore drill prints restored application logs when its health check fails
   assert.doesNotMatch(restore, /docker logs --no-color/);
 });
 
+test("restore drill aligns restored volume ownership with the application user", () => {
+  const restore = readFileSync(restoreDrillScript, "utf8");
+
+  assert.match(restore, /docker run --rm --user root[\s\S]*chown -R node:node \/restore-volume/);
+});
+
 test("restore drill selects the globally newest remote snapshot", () => {
   const olderSnapshotId = "c".repeat(64);
   const fixture = createFixture({

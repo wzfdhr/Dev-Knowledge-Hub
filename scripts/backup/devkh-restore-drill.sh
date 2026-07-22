@@ -277,6 +277,13 @@ fi
   exit 69
 }
 
+for volume in snapshots repositories sources artifacts; do
+  docker run --rm --user root \
+    --mount "type=bind,src=$volume_root/$volume,dst=/restore-volume" \
+    "$application_image" \
+    chown -R node:node /restore-volume
+done
+
 docker run -d \
   --name "$application_container" \
   --network "$network_name" \

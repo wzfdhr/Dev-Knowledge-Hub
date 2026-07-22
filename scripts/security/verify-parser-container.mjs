@@ -32,9 +32,19 @@ export function verifyParserContainer(inspect) {
     "writable parser socket volume only"
   );
   const environment = inspect.Config?.Env ?? [];
-  const environmentNames = environment.map((entry) => entry.split("=", 1)[0]).sort();
+  const allowedEnvironment = new Set([
+    "DEVKH_PARSER_SOCKET_PATH", "NODE_ENV", "NODE_VERSION", "PATH", "YARN_VERSION"
+  ]);
+  const clearedProxyEnvironment = new Set([
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"
+  ]);
+  const environmentAllowed = environment.every((entry) => {
+    const [name, value = ""] = entry.split("=", 2);
+    return allowedEnvironment.has(name) || (clearedProxyEnvironment.has(name) && value === "");
+  });
   requireValue(
-    environmentNames.join(",") === "DEVKH_PARSER_SOCKET_PATH,NODE_ENV,NODE_VERSION,PATH,YARN_VERSION",
+    environmentAllowed
+      && [...allowedEnvironment].every((name) => environment.some((entry) => entry.startsWith(`${name}=`))),
     "parser environment allowlist"
   );
   if (failures.length) throw new Error(`Parser container isolation failed: ${failures.join(", ")}`);

@@ -33,13 +33,14 @@ export function ImportHistory({ reports, loading, error, onRetry }: ImportHistor
       <button type="button" onClick={onRetry}>重试</button>
     </div> : reports.length === 0 ? <p>暂无导入记录</p> : <div className="import-history-overflow">
       <table aria-label="最近导入">
-        <thead><tr><th>来源</th><th>时间</th><th>采集内容</th><th>自动忽略</th><th>状态</th></tr></thead>
+        <thead><tr><th>来源</th><th>时间</th><th>采集内容</th><th>自动忽略</th><th>状态</th><th>知识版本</th></tr></thead>
         <tbody>{reports.map((report) => <tr key={report.id}>
           <td>{sourceLabels[report.sourceKind]}</td>
           <td>{formatTime(report.startedAt)}</td>
           <td>{report.collectedFileCount.toLocaleString("en-US")} 个文件 · {formatBytes(report.collectedTextBytes)}</td>
           <td>{report.ignored.total.toLocaleString("en-US")} 项</td>
           <td>{statusLabels[report.status]}{report.status === "failed" && report.failureCode ? <><br /><small>{report.failureCode}</small></> : null}</td>
+          <td>{report.snapshotId ? <a href={`/projects/${report.projectId}/versions`}>查看版本</a> : "—"}</td>
         </tr>)}</tbody>
       </table>
     </div>}

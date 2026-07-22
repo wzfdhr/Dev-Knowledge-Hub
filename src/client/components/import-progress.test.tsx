@@ -11,7 +11,7 @@ describe("ImportProgress", () => {
   test("uses a compact idle hint instead of the full stage panel", () => {
     const { container } = render(<ImportProgress progress={{ phase: "reading", status: "idle", percent: 0 }} />);
     expect(screen.getByText("选择资料来源后开始导入")).toBeVisible();
-    expect(container.querySelector(".import-stage-list")).not.toBeInTheDocument();
+    expect(container.querySelector(".import-stage-track")).not.toBeInTheDocument();
   });
 
   test("uses a compact idle hint when progress is null", () => {

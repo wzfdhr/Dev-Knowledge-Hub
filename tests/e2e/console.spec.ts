@@ -87,14 +87,19 @@ test("folder import, project release, Codex, and collaboration workflow", async 
     }));
     expect(layout.overflow, JSON.stringify(layout.offenders)).toBeLessThanOrEqual(0);
     await expect(page.getByRole("button", { name: "选择项目文件夹" })).toBeVisible();
-    const historyLayout = await page.locator(".import-history-overflow").evaluate((element) => ({
-      clientWidth: element.clientWidth,
-      scrollLeft: element.scrollLeft,
-      scrollWidth: element.scrollWidth
-    }));
     if (viewport.width <= 390) {
+      const historyLayout = await page.locator(".import-history-overflow").evaluate((element) => {
+        element.scrollLeft = Math.min(48, element.scrollWidth - element.clientWidth);
+        return {
+          clientWidth: element.clientWidth,
+          overflowX: getComputedStyle(element).overflowX,
+          scrollLeft: element.scrollLeft,
+          scrollWidth: element.scrollWidth
+        };
+      });
       expect(historyLayout.scrollWidth).toBeGreaterThan(historyLayout.clientWidth);
-      expect(historyLayout.scrollLeft).toBe(0);
+      expect(historyLayout.scrollLeft).toBeGreaterThan(0);
+      expect(historyLayout.overflowX).toBe("auto");
     }
     await page.screenshot({ path: `test-results/imports-${viewport.width}x${viewport.height}.png`, fullPage: true });
   }

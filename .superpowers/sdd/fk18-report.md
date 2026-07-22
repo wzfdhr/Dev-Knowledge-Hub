@@ -297,3 +297,61 @@ The first full test attempt had one unrelated 5-second timeout in `src/client/ap
 - Per-capability evidence is intentionally small, with one positive case per split for most trial capabilities. The gate now prevents aggregate masking, but future evidence growth would improve statistical confidence.
 - Passing local gates does not promote or release these capabilities; `implemented-gated` remains the required status.
 - No unresolved functional defect remains within the approved local FK18 expansion.
+
+---
+
+# FK18 Final Review Defects Follow-up (2026-07-22)
+
+## Status and Boundaries
+
+The two final FK18 review defects are resolved locally on `codex/frontend-experience-kernel-design`. No push, merge, deployment, production access, credential operation, active worktree switch, or `DEVKH_FRONTEND_KNOWLEDGE_MODE=active` change was performed.
+
+The seven V1 Trial capabilities remain `implemented-gated`. The six deferred V1.1 technologies remain `basic-recognition`.
+
+## Defects Resolved
+
+### Schema-valid keyless TanStack mutations
+
+- Root cause: state-data extraction marked every object-form `useQuery`/`useMutation` call complete, even when no static key existed and the required `api_operation.attributes.path` remained unknown. The frontend IR schema rejects complete entities with unknown attributes.
+- Static query/mutation keys are now normalized to a non-empty key or `null`.
+- A TanStack operation is complete only when both its options object and non-empty static key are present. Missing, empty, or dynamic keys retain the import-proven deep recognition facet but emit a partial entity with an unknown dynamic path.
+- Added a direct analyzer regression for `useMutation({ mutationFn })` without `mutationKey`.
+- Extended the registered B02 shadow/active pipeline fixture with the same keyless mutation. The end-to-end test proves extraction succeeds, source-analysis caching occurs, and the persisted frontend IR contains a schema-valid partial mutation instead of aborting registry validation.
+
+### Separate named and aliased CSF exports
+
+- Root cause: story export discovery only inspected `export` modifiers on variable statements. TypeScript represents `const Primary = {...}; export { Primary }` as a separate `ExportDeclaration`, so the story remained unexported in analyzer state.
+- Story variable records now retain a set of public exported names.
+- Local named export declarations resolve each export specifier back to its local object variable. Aliases use the public export name as the story name and stable semantic identity.
+- Re-exports with a module specifier remain excluded.
+- Static CSF shape checks are unchanged: exported objects with recognized CSF properties become complete and emit `documents`; exported non-CSF objects remain partial/unknown; unexported lookalikes emit no story fact.
+- Added coverage for a valid separate named export, an aliased export, an exported non-CSF helper, and an unexported CSF-shaped lookalike.
+
+## TDD Record
+
+1. Added direct analyzer and registered B02 regressions before production changes.
+2. RED: 3 files ran 25 tests; 4 failed. The keyless mutation was incorrectly complete, both B02 storage modes aborted before source-analysis caching, and separate CSF exports produced no stories.
+3. Changed mutation completeness to follow non-empty static-key evidence and changed CSF discovery to resolve public names from local `ExportDeclaration` specifiers.
+4. GREEN: the same 3 files passed all 25 tests.
+5. Broadened FK18 verification passed 8 files and 69 tests.
+
+## Final Verification
+
+All final commands ran from `/Users/start/Desktop/知识库系统/dev-knowledge-hub/.worktrees/frontend-experience-kernel-design` after the last implementation change.
+
+| Command | Result |
+|---|---|
+| `npm test -- src/server/knowledge/frontend/runtime/analyzer-worker.test.ts src/server/knowledge/frontend/analyzer-registry.test.ts src/server/knowledge/frontend/react-ecosystem-analyzer.test.ts src/server/knowledge/frontend/state-data-analyzer.test.ts src/server/knowledge/frontend/tooling-test-analyzer.test.ts src/server/knowledge/frontend/style-analyzer.test.ts src/server/knowledge/frontend/evaluation.test.ts src/server/knowledge/pipeline/b02-shadow-pipeline.test.ts` | PASS: 8 files, 69 tests |
+| `npm test` | PASS: 154 files passed, 1 skipped; 989 tests passed, 34 skipped |
+| `npm run typecheck` | PASS: client and node TypeScript projects |
+| `npm run lint` | PASS: ESLint exit 0 |
+| `npm run evaluate:frontend` | PASS: 336 cases; quality gate passed |
+| `git diff --check` | PASS: no whitespace errors before report append |
+
+The full test run emitted the repository's existing non-failing jsdom `getComputedStyle()` pseudo-element warnings.
+
+## Residual Concerns
+
+- Per-capability evaluation evidence remains intentionally small, as noted in the prior review report.
+- Passing local gates does not promote or release any capability; `implemented-gated` remains required.
+- No unresolved functional defect remains in this final approved FK18 review scope.

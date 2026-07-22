@@ -414,18 +414,34 @@ export function analyzeReactEcosystemSource(inputValue: TypeScriptAnalyzerInput)
   });
 
   if (/\.stories\.[jt]sx?$/u.test(input.path)) {
-    const variables = new Map<string, { node: ts.VariableDeclaration; value: ts.ObjectLiteralExpression; exported: boolean }>();
+    const variables = new Map<string, {
+      node: ts.VariableDeclaration;
+      value: ts.ObjectLiteralExpression;
+      exportedNames: Set<string>;
+    }>();
     let meta: ts.ObjectLiteralExpression | null = null;
     for (const statement of source.statements) {
       if (ts.isVariableStatement(statement)) {
         const exported = statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ?? false;
         for (const declaration of statement.declarationList.declarations) {
           if (ts.isIdentifier(declaration.name) && declaration.initializer && ts.isObjectLiteralExpression(declaration.initializer)) {
-            variables.set(declaration.name.text, { node: declaration, value: declaration.initializer, exported });
+            variables.set(declaration.name.text, {
+              node: declaration,
+              value: declaration.initializer,
+              exportedNames: new Set(exported ? [declaration.name.text] : [])
+            });
           }
         }
       }
       if (ts.isExportAssignment(statement) && ts.isIdentifier(statement.expression)) meta = variables.get(statement.expression.text)?.value ?? null;
+    }
+    for (const statement of source.statements) {
+      if (!ts.isExportDeclaration(statement) || statement.moduleSpecifier
+        || !statement.exportClause || !ts.isNamedExports(statement.exportClause)) continue;
+      for (const element of statement.exportClause.elements) {
+        const localName = element.propertyName?.text ?? element.name.text;
+        variables.get(localName)?.exportedNames.add(element.name.text);
+      }
     }
     const componentValue = objectProperty(meta, "component");
     const componentName = componentValue && ts.isIdentifier(componentValue) ? componentValue.text : null;
@@ -447,25 +463,27 @@ export function analyzeReactEcosystemSource(inputValue: TypeScriptAnalyzerInput)
     }
     const metaDecorators = arrayLength(objectProperty(meta, "decorators"));
     if (component) {
-      for (const [name, record] of variables) {
-        if (record.value === meta || !record.exported) continue;
+      for (const record of variables.values()) {
+        if (record.value === meta) continue;
         const storyKeys = new Set(["args", "decorators", "loaders", "parameters", "play", "render", "tags"]);
         const storyShaped = record.value.properties.some((property) => property.name && storyKeys.has(propertyName(property.name)));
-        const story = makeEntity(input, "test_fixture", input.path, name, `component-story:${name}`, record.node,
-          storyShaped ? "complete" : "partial", {
-          role: "component-story", storyShape: storyShaped ? "csf-object" : "unknown",
-          args: objectKeys(objectProperty(record.value, "args")),
-          decorators: arrayLength(objectProperty(record.value, "decorators")) + metaDecorators,
-          component: component.name
-        }, {
-          fixtureKind: storyShaped
-            ? { state: "known", value: "storybook-csf" }
-            : { state: "unknown", reason: "unresolved" }
-        });
-        entities.set(story.id, story);
-        if (storyShaped) {
-          const relation = makeEdge(input, "documents", story.id, component.id, record.node, `${name}:${component.name}`);
-          edges.set(relation.id, relation);
+        for (const exportedName of [...record.exportedNames].sort()) {
+          const story = makeEntity(input, "test_fixture", input.path, exportedName, `component-story:${exportedName}`, record.node,
+            storyShaped ? "complete" : "partial", {
+            role: "component-story", storyShape: storyShaped ? "csf-object" : "unknown",
+            args: objectKeys(objectProperty(record.value, "args")),
+            decorators: arrayLength(objectProperty(record.value, "decorators")) + metaDecorators,
+            component: component.name
+          }, {
+            fixtureKind: storyShaped
+              ? { state: "known", value: "storybook-csf" }
+              : { state: "unknown", reason: "unresolved" }
+          });
+          entities.set(story.id, story);
+          if (storyShaped) {
+            const relation = makeEdge(input, "documents", story.id, component.id, record.node, `${exportedName}:${component.name}`);
+            edges.set(relation.id, relation);
+          }
         }
       }
     }

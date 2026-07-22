@@ -336,6 +336,31 @@ describe("FK18 React trial analyzer coverage", () => {
     expect(output.edges.filter((edge) => edge.kind === "documents")).toHaveLength(1);
   });
 
+  test("resolves separate named and aliased CSF exports without promoting lookalikes", async () => {
+    const content = [
+      "import { DashboardCard } from './dashboard-card';",
+      "const meta = { component: DashboardCard };",
+      "export default meta;",
+      "const Primary = { args: { title: 'primary' } };",
+      "const Secondary = { render: () => <DashboardCard title='secondary' /> };",
+      "const Helper = { cache: true };",
+      "const Draft = { args: { title: 'draft' } };",
+      "export { Primary, Secondary as Featured, Helper };"
+    ].join("\n");
+    const output = await analyzeEcosystem("src/separate.stories.tsx", content, [
+      { specifier: "./dashboard-card", resolvedPath: "src/dashboard-card.tsx" }
+    ]);
+    const stories = output.entities.filter((entity) => entity.kind === "test_fixture");
+
+    expect(stories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "Primary", completeness: "complete" }),
+      expect.objectContaining({ name: "Featured", completeness: "complete" }),
+      expect.objectContaining({ name: "Helper", completeness: "partial" })
+    ]));
+    expect(stories.some((entity) => ["Secondary", "Draft"].includes(entity.name))).toBe(false);
+    expect(output.edges.filter((edge) => edge.kind === "documents")).toHaveLength(2);
+  });
+
   test("keeps deferred ecosystem packages at parser-backed basic recognition", async () => {
     const content = [
       "import i18next from 'i18next';",

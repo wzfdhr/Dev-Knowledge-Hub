@@ -482,7 +482,8 @@ export function analyzeStateDataSource(inputValue: TypeScriptAnalyzerInput): Fro
           : null;
       if (queryKind) {
         const options = objectLiteral(node.initializer.arguments[0]);
-        const key = staticKey(objectProperty(options, queryKind === "query" ? "queryKey" : "mutationKey"));
+        const parsedKey = staticKey(objectProperty(options, queryKind === "query" ? "queryKey" : "mutationKey"));
+        const key = parsedKey?.length ? parsedKey : null;
         const fetcher = calledFunctionName(objectProperty(options, queryKind === "query" ? "queryFn" : "mutationFn"));
         const query = makeEntity(
           input,
@@ -491,7 +492,7 @@ export function analyzeStateDataSource(inputValue: TypeScriptAnalyzerInput): Fro
           node.name.text,
           `data-query:${queryKind}:${node.name.text}`,
           node,
-          options ? "complete" : "partial",
+          options && key ? "complete" : "partial",
           { queryKind, queryKey: key, fetcher },
           {
             method: { state: "known", value: queryKind.toUpperCase() },

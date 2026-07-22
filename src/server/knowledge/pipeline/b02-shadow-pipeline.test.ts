@@ -85,8 +85,11 @@ describe("B02 shadow pipeline", () => {
     directories.push(snapshotRoot, artifactRoot, blobRoot);
     const sourcePath = "src/app.ts";
     const source = [
+      "import { useMutation } from '@tanstack/react-query';",
       "import gql from 'graphql-tag';",
       "export const DashboardOverview = gql`query DashboardOverview { dashboard { title } }`;",
+      "const saveDashboard = async () => undefined;",
+      "export function useSaveDashboard() { const mutation = useMutation({ mutationFn: saveDashboard }); return mutation; }",
       "export const answer = 42;",
       ""
     ].join("\n");
@@ -227,6 +230,16 @@ describe("B02 shadow pipeline", () => {
           kind: "api_operation",
           name: "DashboardOverview",
           facets: { "react-ecosystem-core": expect.objectContaining({ protocol: "graphql" }) }
+        }),
+        expect.objectContaining({
+          kind: "api_operation",
+          name: "mutation",
+          completeness: "partial",
+          attributes: {
+            method: { state: "known", value: "MUTATION" },
+            path: { state: "unknown", reason: "dynamic" }
+          },
+          facets: { "state-data-core": expect.objectContaining({ queryKind: "mutation", queryKey: null }) }
         })
       ]),
       analyzerManifest: expect.arrayContaining([

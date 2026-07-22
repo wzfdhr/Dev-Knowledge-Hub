@@ -119,6 +119,26 @@ describe("analyzeStateDataSource", () => {
     expect(output.edges).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "invalidates" })]));
   });
 
+  test("keeps a mutation without a static key schema-valid and partial", () => {
+    const content = [
+      "import { useMutation } from '@tanstack/react-query';",
+      "export function useSaveProject() { const save = useMutation({ mutationFn: saveProject }); return save; }"
+    ].join("\n");
+    const output = analyzeStateDataSource(input(content));
+
+    expect(output.entities).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: "api_operation",
+        name: "save",
+        completeness: "partial",
+        attributes: {
+          method: { state: "known", value: "MUTATION" },
+          path: { state: "unknown", reason: "dynamic" }
+        }
+      })
+    ]));
+  });
+
   test("does not emit complete Redux or TanStack facts for spoofed local bindings", () => {
     const content = [
       "const createSlice = (options) => options;",

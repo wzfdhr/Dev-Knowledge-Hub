@@ -575,6 +575,15 @@ test("restore drill never writes production Docker volumes", () => {
   }
 });
 
+test("restore drill prints restored application logs when its health check fails", () => {
+  const restore = readFileSync(restoreDrillScript, "utf8");
+
+  assert.match(
+    restore,
+    /docker logs --no-color[\s\S]*application_container[\s\S]*restored application did not pass its health check/
+  );
+});
+
 test("restore drill selects the globally newest remote snapshot", () => {
   const olderSnapshotId = "c".repeat(64);
   const fixture = createFixture({

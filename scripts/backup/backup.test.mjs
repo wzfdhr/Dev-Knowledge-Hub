@@ -594,7 +594,7 @@ test("restore drill aligns restored volume ownership with the application user",
 test("restore drill removes root-owned recovery files inside an isolated helper", () => {
   const restore = readFileSync(restoreDrillScript, "utf8");
 
-  assert.match(restore, /docker run --rm --network none --user root[\s\S]*rm -rf \/restore-root/);
+  assert.match(restore, /docker run --rm --network none --user root[\s\S]*find \/restore-root -mindepth 1 -depth -delete/);
 });
 
 test("restore drill selects the globally newest remote snapshot", () => {

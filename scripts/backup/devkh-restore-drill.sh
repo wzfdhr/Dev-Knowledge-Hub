@@ -70,7 +70,7 @@ finish() {
     if (( ! cleanup_failed )) && [[ -n "$target" ]]; then
       if [[ -n "$application_image" ]] && ! docker run --rm --network none --user root \
         --mount "type=bind,src=$target,dst=/restore-root" \
-        "$application_image" rm -rf /restore-root; then
+        "$application_image" sh -c 'find /restore-root -mindepth 1 -depth -delete'; then
         printf 'recovery cleanup failed inside restored directory: %s\n' "$target" >&2
         cleanup_failed=1
       fi

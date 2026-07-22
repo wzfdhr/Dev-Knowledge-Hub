@@ -161,8 +161,14 @@ jobs:
           APPROVED_HEAD: ${{ inputs.approved_head }}
         run: |
           set -euo pipefail
-          base_contract="$(git rev-parse "$APPROVED_BASE:drizzle/0035_source_blobs_contract.sql" 2>/dev/null || true)"
-          head_contract="$(git rev-parse "$APPROVED_HEAD:drizzle/0035_source_blobs_contract.sql" 2>/dev/null || true)"
+          base_contract=""
+          head_contract=""
+          if git cat-file -e "$APPROVED_BASE:drizzle/0035_source_blobs_contract.sql" 2>/dev/null; then
+            base_contract="$(git rev-parse "$APPROVED_BASE:drizzle/0035_source_blobs_contract.sql")"
+          fi
+          if git cat-file -e "$APPROVED_HEAD:drizzle/0035_source_blobs_contract.sql" 2>/dev/null; then
+            head_contract="$(git rev-parse "$APPROVED_HEAD:drizzle/0035_source_blobs_contract.sql")"
+          fi
           if [[ -z "$base_contract" && -z "$head_contract" ]]; then
             # Non-contract PRs do not need the immutable source-blob gate.
             echo "required=false" >> "$GITHUB_OUTPUT"

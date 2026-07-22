@@ -76,6 +76,18 @@ Redux Toolkit、TanStack Query、OpenAPI/GraphQL、复杂表单校验、权限�
 
 Webpack/Rspack/Rollup、Nx/Turbo、i18n、可访问性、错误监控和 Web Vitals 在 V1.1 仍仅基础识别，不纳入 V1 Trial 交付承诺。
 
+## Experience Kernel V1 Trial 能力分组
+
+| 能力组 | 项目事实 | 可复用经验 | 默认推荐门禁 |
+|---|---|---|---|
+| 路由、页面与布局 | route/page/layout/guard/lazy 引用 | 已发布且当前用户可见的实现证据 | 框架、版本、rendering 与 router 硬条件通过 |
+| 状态、请求、缓存与 API | store/query/mutation/cache/operation 事实链 | 有 citation 的观察事实、审核决策和结果 | required/forbidden/unknown 门禁全部通过 |
+| 表单、权限与错误处理 | form/schema/guard/error boundary 事实 | 有效来源的历史实现与明确人工决策 | 无高严重度失败或回滚结果 |
+| ECharts 联动与下钻 | chart/event/route/state/API/test 影响链 | 可见且兼容的实现证据 | 当前项目不混入 prior references，关键条件未知时拒绝推荐 |
+| 变更影响、测试与工具约束 | impact/test/build/tooling 引用 | 经当前 ACL 计算的历史经验 | 影响和验证步骤必须有引用，不由文本相似度覆盖硬冲突 |
+
+来源资格固定为 Git 已发布、Upload `unverified`、Upload `admin_attested` 和 Upload `git_linked` 四种模式。只有未过期的 Git 已发布证据，或内容版本与 Git commit 经服务端验证一致的 `git_linked` 证据，可自动进入多项目验证。
+
 2026-07-19 产品决策：V1 Demo 的 FK06 只接入经客户端和服务端共同验证的前端文本与 SVG。图片、字体和媒体继续在读取内容前过滤；其 `client_unverified` 资产清单随 FK14 的分页 manifest 上传合同在 V1 Trial 交付，避免在缺少持久化信任字段时伪造 source file。
 
 ## 版本范围治理

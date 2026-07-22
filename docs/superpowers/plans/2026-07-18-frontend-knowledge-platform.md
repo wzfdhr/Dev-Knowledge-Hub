@@ -240,9 +240,20 @@ V1 可演示约在第 12–16 工程周，可试用约在第 22–30 周，可�
 
 **Commit:** `feat: deepen approved react ecosystem knowledge`.
 
+## Experience Kernel Addendum (EX01-EX12)
+
+EX01-EX12 在 FK17 和 FK18 之后、原 FK19 之前执行。该阶段交付来源身份、项目画像、经验证据、适用性、治理、workspace MCP 方案编排、管理体验、评测和 staging 门禁。原 FK19-FK22 必须消费 EX 合同，不得另行发明 pattern、Trust、来源资格或 MCP 响应结构。
+
+- EX01-EX03：产品状态、来源身份与 `frontend-project-profile@1`。
+- EX04-EX08：经验生命周期、候选提取、治理、ACL 投影与 workspace MCP。
+- EX09-EX10：经验库、审核、方案上下文、反馈和 Knowledge Lint。
+- EX11-EX12：专项评测、恢复、压力、回滚与 V1 Trial 交付门禁。
+
+迁移编号固定为 FK17 `0035`、EX 来源合同 `0036`、EX 经验合同 `0037`、EX workspace MCP Token `0038`。以下原 FK19/FK20 的迁移编号视为历史草案，实施时不得与 EX 迁移重号。
+
 ### FK19 建立可追溯 workspace patterns 与分区检索
 
-**Files:** Create `drizzle/0036_workspace_patterns_search.sql`, `src/server/knowledge/frontend/patterns.ts`, `src/server/knowledge/frontend/patterns.test.ts`, `src/server/knowledge/frontend/search-intent.ts`, `src/server/knowledge/frontend/search-intent.test.ts`; Modify `src/db/schema.ts`, `src/db/schema.test.ts`, `src/db/migrate.test.ts`, `src/server/persistence/store.ts`, `src/server/persistence/memory-store.ts`, `src/server/persistence/postgres-store.ts`, `src/server/persistence/postgres-knowledge.integration.test.ts`, `src/server/knowledge/pipeline/index-stage.ts`, `src/server/app.ts`, `src/client/api/types.ts`.
+**Files:** Consume EX04-EX07 contracts and `drizzle/0037_frontend_experience_contracts.sql`; extend the existing pattern/query implementation only where the FK19 product projection requires it. No new migration or parallel pattern model is created here.
 
 **Precondition:** V1 Demo 三层复审通过后，在与生产完全隔离的 staging 中为两个代表项目开启 v2 `active`，人工创建不可变 v2 release。pattern 和 workspace 检索只使用这些已发布 staging release，不读 shadow candidate。
 
@@ -254,7 +265,7 @@ V1 可演示约在第 12–16 工程周，可试用约在第 22–30 周，可�
 
 ### FK20 建立独立 workspace MCP 凭据全生命周期
 
-**Files:** Create `drizzle/0037_workspace_mcp_tokens.sql`, `src/server/mcp/workspace-auth.ts`, `src/server/mcp/workspace-auth.test.ts`, `docs/operations/workspace-mcp.md`; Modify `src/db/schema.ts`, `src/db/schema.test.ts`, `src/db/migrate.test.ts`, `src/server/app.ts`, `src/server/mcp/tools.ts`, `src/server/mcp-access.test.ts`, `src/server/persistence/store.ts`, `src/server/persistence/memory-store.ts`, `src/server/persistence/postgres-store.ts`, `src/server/persistence/postgres-knowledge.integration.test.ts`, `src/client/pages/system-settings-page.tsx`, `src/client/pages/project-codex-page.tsx`, `src/client/api/client.ts`, `src/client/api/types.ts`.
+**Files:** Consume EX08 and `drizzle/0038_workspace_mcp_tokens.sql`; extend the existing workspace MCP UI and operational documentation only where FK20 lifecycle presentation requires it. No second workspace-token table or endpoint is created.
 
 **Security:** 现有 project token 模型与 scope 不改。`workspace_mcp_tokens` 绑定 workspace/user/sessionVersion，最长 30 天，只允许当前用户为自己创建；plaintext 只展示一次，DB 只存 hash/prefix；实现过期、撤销、原子轮换、last-used、限流、审计和过期清理。
 

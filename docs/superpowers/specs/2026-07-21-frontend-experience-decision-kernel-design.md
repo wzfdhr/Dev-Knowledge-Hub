@@ -1,8 +1,8 @@
 # 前端工程经验决策内核设计
 
-> 状态：待用户书面复核。设计方向已于 2026-07-21 确认；本文将产品经理与技术经理审查结论固化为可实施合同，不代表已经开发或部署。
+> 状态：已于 2026-07-22 获得用户书面实施批准。本文是 EX01-EX12 的可实施合同；批准不代表已部署、已切换生产 `active` 或已授予任何生产凭据。
 
-**基线：** `origin/main@2b3bf51`。FK01-FK16 已合并；FK17 及其后的任务尚未开始。本设计属于“前端专业知识平台”的 V1 Trial 增强，不修改 Phase F 的生产状态，不授权 `active`，也不提前创建 FK17 的 contract migration。
+**实施基线：** `codex/frontend-experience-kernel-design@38449c5`。FK17 与 FK18 已在当前隔离工作树完成并通过本地门禁，`0035_source_blobs_contract.sql` 已作为 FK17 唯一 contract migration 存在。本设计属于“前端专业知识平台”的 V1 Trial 增强，不修改 Phase F 的生产状态，不授权生产 `active`。
 
 **上位设计：** `docs/superpowers/specs/2026-07-18-frontend-knowledge-platform-design.md`
 

@@ -42,7 +42,8 @@ export function ImportProgress({
     </section>;
   }
 
-  const activeIndex = stages.findIndex((stage) => stage.phase === progress.phase);
+  const visualPhase = progress.phase === "packaging" ? "uploading" : progress.phase;
+  const activeIndex = stages.findIndex((stage) => stage.phase === visualPhase);
   const rate = formatRate(progress?.bytesPerSecond);
   const eta = formatEta(progress?.estimatedSeconds);
   const transfer = progress.processedFiles !== undefined && progress.totalFiles !== undefined
@@ -61,9 +62,10 @@ export function ImportProgress({
     <Progress percent={progress.percent} showInfo={false} status={progress.status === "failed" ? "exception" : undefined} />
     <div className="import-stage-track" aria-label="导入阶段">
       {stages.map((stage, index) => {
-        const complete = activeIndex > index || (progress.status === "completed" && activeIndex === index);
-        const active = activeIndex === index && !complete;
-        return <span key={stage.phase} className={`import-stage${complete ? " complete" : active ? " active" : ""}`}>
+        const active = activeIndex === index;
+        const complete = activeIndex > index || (progress.status === "completed" && active);
+        const state = active ? `当前步骤，${complete ? "已完成" : "进行中"}` : complete ? "已完成" : "待处理";
+        return <span key={stage.phase} className={`import-stage${complete ? " complete" : ""}${active ? " active" : ""}`} aria-current={active ? "step" : undefined} aria-label={`${stage.label}，${state}`}>
           <span className="import-stage-icon" aria-hidden="true">{complete ? <Check /> : <Circle />}</span>
           <span className="import-stage-label">{stage.label}</span>
         </span>;

@@ -5,6 +5,24 @@ import { describe, expect, test } from "vitest";
 import { parse } from "yaml";
 
 describe("delivery database isolation", () => {
+  test("keeps the FK17 bootstrap free of the source-blob migration", async () => {
+    await expect(readFile("drizzle/0035_source_blobs_contract.sql", "utf8")).rejects.toThrow();
+  });
+
+  test("keeps the FK17 trust root bootstrap-compatible until its exact commit is configured", async () => {
+    const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
+    const phaseMerge = parse(await readFile(".github/workflows/phase-merge.yml", "utf8"));
+    const verifyCommands = ci.jobs.verify.steps.map((step) => step.run).filter(Boolean).join("\n");
+    const containerCommands = ci.jobs["container-smoke"].steps.map((step) => step.run).filter(Boolean).join("\n");
+
+    expect(ci.jobs.verify.env.DEVKH_FK17_BOOTSTRAP_COMMIT).toBe("${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}");
+    expect(ci.jobs["container-smoke"].env.DEVKH_FK17_BOOTSTRAP_COMMIT).toBe("${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}");
+    expect(verifyCommands).toContain('if [[ -z "$DEVKH_FK17_BOOTSTRAP_COMMIT" ]]');
+    expect(containerCommands).toContain('if [[ -z "$DEVKH_FK17_BOOTSTRAP_COMMIT" ]]');
+    expect(phaseMerge.on.workflow_dispatch.inputs).toHaveProperty("source_blob_contract_gate_manifest");
+    expect(phaseMerge.on.workflow_dispatch.inputs).toHaveProperty("source_blob_contract_gate_artifact_run_id");
+  });
+
   test("limits automatic CI fan-out to release-relevant events", async () => {
     const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
 
@@ -67,7 +85,16 @@ describe("delivery database isolation", () => {
     expect(parser.mem_limit).toBe("512m");
     expect(parser.cpus).toBe(1);
     expect(parser.healthcheck.test.join(" ")).toContain("isSocket");
-    expect(Object.keys(parser.environment).sort()).toEqual(["DEVKH_PARSER_SOCKET_PATH", "NODE_ENV"]);
+    expect(parser.environment).toEqual({
+      NODE_ENV: "production",
+      DEVKH_PARSER_SOCKET_PATH: "/run/devkh-parser/parser.sock",
+      HTTP_PROXY: "",
+      HTTPS_PROXY: "",
+      NO_PROXY: "",
+      http_proxy: "",
+      https_proxy: "",
+      no_proxy: ""
+    });
     expect(parser.volumes).toEqual(["parser_runtime:/run/devkh-parser"]);
     expect(JSON.stringify(parser)).not.toMatch(/DATABASE_URL|MASTER_KEY|SESSION_SECRET|snapshot_data|uploaded_sources|repository_mirrors|artifact_data/);
     expect(compose.services.app.volumes).toContain("parser_runtime:/run/devkh-parser:ro");
@@ -121,6 +148,9 @@ describe("delivery database isolation", () => {
     expect(ci.jobs["container-smoke"].env.DEVKH_CONTAINER_SMOKE).toBe("true");
     expect(ci.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DIR).toBe("/tmp/devkh-recovery-evidence");
     expect(ci.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DEFER_FINALIZATION).toBe("true");
+    expect(ci.jobs["container-smoke"].steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ run: "npm ci" })
+    ]));
     expect(phaseMerge.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DEFER_FINALIZATION).toBe("true");
     expect(verifySteps).toContain("npx playwright install --with-deps chromium");
     expect(verifySteps).toContain("npm run release:verify -- --scope verify");
@@ -143,13 +173,6 @@ describe("delivery database isolation", () => {
     const config = await readFile("vitest.config.ts", "utf8");
 
     expect(config).toContain('"**/.worktrees/**"');
-  });
-
-  test("installs verifier dependencies in the phase-merge container job", async () => {
-    const phaseMerge = parse(await readFile(".github/workflows/phase-merge.yml", "utf8"));
-    expect(phaseMerge.jobs["container-smoke"].steps).toEqual(expect.arrayContaining([
-      expect.objectContaining({ run: "npm ci" })
-    ]));
   });
 
   test("preserves the retrieval evaluation report outside Playwright's disposable result directory", async () => {

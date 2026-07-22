@@ -19,6 +19,26 @@ on:
         description: User explicitly approved this exact head
         required: true
         type: boolean
+      source_blob_contract_gate_manifest:
+        description: Manifest basename inside the immutable FK17 gate artifact
+        required: false
+        default: ""
+        type: string
+      source_blob_contract_gate_manifest_sha256:
+        description: Reviewed SHA-256 of the exact FK17 gate manifest
+        required: false
+        default: ""
+        type: string
+      source_blob_contract_gate_artifact_run_id:
+        description: Workflow run containing the immutable FK17 gate artifact bundle
+        required: false
+        default: ""
+        type: string
+      source_blob_contract_gate_artifact_name:
+        description: Immutable artifact name containing the FK17 gate manifest and references
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: phase-merge-pr-${{ inputs.pr_number }}
@@ -48,6 +68,7 @@ jobs:
           --health-retries 12
     env:
       TEST_DATABASE_URL: postgres://devkh:devkh-ci-password@127.0.0.1:5432/devkh_test
+      DEVKH_FK17_BOOTSTRAP_COMMIT: ${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,8 +85,29 @@ jobs:
           node-version: 22.13.0
           cache: npm
       - run: npm ci
+      - name: Extract reviewed FK17 bootstrap verifier
+        env:
+          CURRENT_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$DEVKH_FK17_BOOTSTRAP_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+          git cat-file -e "$DEVKH_FK17_BOOTSTRAP_COMMIT^{commit}"
+          git merge-base --is-ancestor "$DEVKH_FK17_BOOTSTRAP_COMMIT" HEAD
+          test "$(git rev-parse "$DEVKH_FK17_BOOTSTRAP_COMMIT:.github/workflows/phase-merge.yml")" = \
+            "$(git rev-parse "$CURRENT_WORKFLOW_SHA:.github/workflows/phase-merge.yml")"
+          rm -rf /tmp/devkh-fk17-trusted
+          install -d -m 0700 /tmp/devkh-fk17-trusted
+          git archive "$DEVKH_FK17_BOOTSTRAP_COMMIT" | tar -x -C /tmp/devkh-fk17-trusted
+      - name: Install reviewed FK17 verifier dependencies
+        run: npm ci --ignore-scripts --prefix /tmp/devkh-fk17-trusted
       - run: npx playwright install --with-deps chromium
-      - run: npm run release:verify -- --scope verify
+      - name: Run reviewed FK17 verifier
+        env:
+          DEVKH_RELEASE_CANDIDATE_ROOT: ${{ github.workspace }}
+          DEVKH_FK17_TRUSTED_BOOTSTRAP_COMMIT: ${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}
+          DEVKH_FK17_CURRENT_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          DEVKH_FK17_CURRENT_WORKFLOW_PATH: .github/workflows/phase-merge.yml
+        run: node /tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope verify
       - name: Upload Playwright artifacts
         if: failure()
         uses: actions/upload-artifact@v4
@@ -79,7 +121,9 @@ jobs:
   container-smoke:
     permissions:
       contents: read
+      actions: read
     runs-on: ubuntu-latest
+    if: ${{ inputs.user_approved && github.actor == github.repository_owner }}
     env:
       POSTGRES_PASSWORD: devkh-container-password
       DEVKH_MASTER_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
@@ -92,6 +136,13 @@ jobs:
       DEVKH_CONTAINER_SMOKE: "true"
       RECOVERY_EVIDENCE_DIR: /tmp/devkh-recovery-evidence
       RECOVERY_EVIDENCE_DEFER_FINALIZATION: "true"
+      DEVKH_SOURCE_STORAGE_MODE: shadow
+      DEVKH_RELEASE_APPROVED_BASE: ${{ inputs.approved_base }}
+      DEVKH_SOURCE_BLOB_CONTRACT_GATE_MANIFEST: /tmp/devkh-source-blob-contract-gate/${{ inputs.source_blob_contract_gate_manifest }}
+      DEVKH_SOURCE_BLOB_CONTRACT_GATE_MANIFEST_SHA256: ${{ inputs.source_blob_contract_gate_manifest_sha256 }}
+      DEVKH_SOURCE_BLOB_CONTRACT_CANDIDATE_COMMIT: ${{ inputs.approved_head }}
+      DEVKH_SOURCE_BLOB_CONTRACT_EXPECTED_APPROVER: ${{ github.actor }}
+      DEVKH_FK17_BOOTSTRAP_COMMIT: ${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -103,13 +154,66 @@ jobs:
           APPROVED_BASE: ${{ inputs.approved_base }}
           APPROVED_HEAD: ${{ inputs.approved_head }}
         run: git merge-base --is-ancestor "$APPROVED_BASE" "$APPROVED_HEAD"
+      - name: Detect source blob contract gate
+        id: source-blob-contract
+        env:
+          APPROVED_BASE: ${{ inputs.approved_base }}
+          APPROVED_HEAD: ${{ inputs.approved_head }}
+        run: |
+          set -euo pipefail
+          base_contract="$(git rev-parse "$APPROVED_BASE:drizzle/0035_source_blobs_contract.sql" 2>/dev/null || true)"
+          head_contract="$(git rev-parse "$APPROVED_HEAD:drizzle/0035_source_blobs_contract.sql" 2>/dev/null || true)"
+          if [[ -n "$base_contract" && "$base_contract" == "$head_contract" ]]; then
+            echo "required=false" >> "$GITHUB_OUTPUT"
+          else
+            test -f drizzle/0035_source_blobs_contract.sql
+            echo "required=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download immutable source blob contract gate
+        if: ${{ steps.source-blob-contract.outputs.required == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_BLOB_GATE_ARTIFACT_RUN_ID: ${{ inputs.source_blob_contract_gate_artifact_run_id }}
+          SOURCE_BLOB_GATE_ARTIFACT_NAME: ${{ inputs.source_blob_contract_gate_artifact_name }}
+          SOURCE_BLOB_GATE_MANIFEST: ${{ inputs.source_blob_contract_gate_manifest }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_BLOB_GATE_ARTIFACT_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$SOURCE_BLOB_GATE_ARTIFACT_NAME" =~ ^[A-Za-z0-9._-]+$ ]]
+          [[ "$SOURCE_BLOB_GATE_MANIFEST" =~ ^[A-Za-z0-9._-]+\.json$ ]]
+          install -d -m 0700 /tmp/devkh-source-blob-contract-gate
+          gh run download "$SOURCE_BLOB_GATE_ARTIFACT_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$SOURCE_BLOB_GATE_ARTIFACT_NAME" \
+            --dir /tmp/devkh-source-blob-contract-gate
+          test -f "/tmp/devkh-source-blob-contract-gate/$SOURCE_BLOB_GATE_MANIFEST"
       - uses: actions/setup-node@v4
         with:
           node-version: 22.13.0
-      - run: npm ci
+      - name: Extract reviewed FK17 bootstrap verifier
+        env:
+          CURRENT_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$DEVKH_FK17_BOOTSTRAP_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+          git cat-file -e "$DEVKH_FK17_BOOTSTRAP_COMMIT^{commit}"
+          git merge-base --is-ancestor "$DEVKH_FK17_BOOTSTRAP_COMMIT" HEAD
+          test "$(git rev-parse "$DEVKH_FK17_BOOTSTRAP_COMMIT:.github/workflows/phase-merge.yml")" = \
+            "$(git rev-parse "$CURRENT_WORKFLOW_SHA:.github/workflows/phase-merge.yml")"
+          rm -rf /tmp/devkh-fk17-trusted
+          install -d -m 0700 /tmp/devkh-fk17-trusted
+          git archive "$DEVKH_FK17_BOOTSTRAP_COMMIT" | tar -x -C /tmp/devkh-fk17-trusted
+      - name: Install reviewed FK17 verifier dependencies
+        run: npm ci --ignore-scripts --prefix /tmp/devkh-fk17-trusted
       - name: Install recovery tooling
         run: sudo apt-get update && sudo apt-get install -y restic
-      - run: npm run release:verify -- --scope container
+      - name: Run reviewed FK17 verifier
+        env:
+          DEVKH_RELEASE_CANDIDATE_ROOT: ${{ github.workspace }}
+          DEVKH_FK17_TRUSTED_BOOTSTRAP_COMMIT: ${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}
+          DEVKH_FK17_CURRENT_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          DEVKH_FK17_CURRENT_WORKFLOW_PATH: .github/workflows/phase-merge.yml
+        run: node /tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope container
       - name: Upload recovery evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -130,6 +234,8 @@ jobs:
       PR_NUMBER: ${{ inputs.pr_number }}
       APPROVED_HEAD: ${{ inputs.approved_head }}
       APPROVED_BASE: ${{ inputs.approved_base }}
+      TRUSTED_BOOTSTRAP: ${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}
+      CURRENT_WORKFLOW_SHA: ${{ github.workflow_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -138,6 +244,10 @@ jobs:
       - name: Validate approved pull request
         run: |
           set -euo pipefail
+          [[ "$TRUSTED_BOOTSTRAP" =~ ^[a-f0-9]{40}$ ]] || { echo "invalid trusted bootstrap" >&2; exit 64; }
+          git merge-base --is-ancestor "$TRUSTED_BOOTSTRAP" HEAD
+          test "$(git rev-parse "$TRUSTED_BOOTSTRAP:.github/workflows/phase-merge.yml")" = \
+            "$(git rev-parse "$CURRENT_WORKFLOW_SHA:.github/workflows/phase-merge.yml")"
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || { echo "invalid pull request number" >&2; exit 64; }
           [[ "$APPROVED_HEAD" =~ ^[a-fA-F0-9]{40}$ ]] || { echo "invalid approved head" >&2; exit 64; }
           [[ "$APPROVED_BASE" =~ ^[a-fA-F0-9]{40}$ ]] || { echo "invalid approved base" >&2; exit 64; }
@@ -149,9 +259,62 @@ jobs:
           git merge-base --is-ancestor "$APPROVED_BASE" "$APPROVED_HEAD"
           test "$(git rev-parse HEAD)" = "$APPROVED_BASE"
       - name: Create and atomically push approved merge commit
+        id: merge
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git merge --no-ff --no-edit "$APPROVED_HEAD" -m "Merge pull request #$PR_NUMBER"
           git push origin "HEAD:refs/heads/main" "--force-with-lease=refs/heads/main:$APPROVED_BASE"
+          merge_commit="$(git rev-parse HEAD)"
+          echo "commit=$merge_commit" >> "$GITHUB_OUTPUT"
+          if git cat-file -e "$merge_commit:drizzle/0035_source_blobs_contract.sql" \
+            && git cat-file -e "$merge_commit:docker/post-contract-ci-baseline.sql"; then
+            echo "post_contract=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "post_contract=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Issue exact-commit Phase Merge approval provenance
+        if: ${{ steps.merge.outputs.post_contract == 'true' }}
+        env:
+          MERGE_COMMIT: ${{ steps.merge.outputs.commit }}
+          WORKFLOW_RUN_ID: ${{ github.run_id }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          contract_blob="$(git rev-parse "$MERGE_COMMIT:drizzle/0035_source_blobs_contract.sql")"
+          baseline_blob="$(git rev-parse "$MERGE_COMMIT:docker/post-contract-ci-baseline.sql")"
+          workflow_blob="$(git rev-parse "$TRUSTED_BOOTSTRAP:.github/workflows/phase-merge.yml")"
+          trusted_verifier_blob="$(git rev-parse "$TRUSTED_BOOTSTRAP:scripts/release-verify.mjs")"
+          trusted_database_verifier_blob="$(git rev-parse "$TRUSTED_BOOTSTRAP:scripts/verify-post-contract-database.mjs")"
+          issued_at="$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')"
+          export contract_blob baseline_blob workflow_blob trusted_verifier_blob trusted_database_verifier_blob issued_at
+          node --input-type=module -e '
+            import { writeFileSync } from "node:fs";
+            const document = {
+              schemaVersion: 1,
+              kind: "devkh-phase-merge-approval",
+              repository: process.env.GITHUB_REPOSITORY,
+              approvedCommit: process.env.MERGE_COMMIT,
+              approvedHead: process.env.APPROVED_HEAD,
+              approvedBase: process.env.APPROVED_BASE,
+              contractBlob: process.env.contract_blob,
+              baselineBlob: process.env.baseline_blob,
+              workflowBlob: process.env.workflow_blob,
+              trustedBootstrapCommit: process.env.TRUSTED_BOOTSTRAP,
+              trustedVerifierBlob: process.env.trusted_verifier_blob,
+              trustedDatabaseVerifierBlob: process.env.trusted_database_verifier_blob,
+              workflowRunId: Number(process.env.WORKFLOW_RUN_ID),
+              workflowRunAttempt: Number(process.env.WORKFLOW_RUN_ATTEMPT),
+              issuedAt: process.env.issued_at
+            };
+            writeFileSync("phase-merge-approval.json", `${JSON.stringify(document)}\n`, { mode: 0o600, flag: "wx" });
+          '
+      - name: Upload exact-commit Phase Merge approval provenance
+        if: ${{ steps.merge.outputs.post_contract == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-merge-approval-${{ steps.merge.outputs.commit }}
+          path: phase-merge-approval.json
+          if-no-files-found: error
+          retention-days: 90

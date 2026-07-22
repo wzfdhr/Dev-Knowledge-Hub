@@ -62,6 +62,12 @@ services:
     environment:
       NODE_ENV: production
       DEVKH_PARSER_SOCKET_PATH: /run/devkh-parser/parser.sock
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      NO_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      no_proxy: ""
     volumes:
       - parser_runtime:/run/devkh-parser
     network_mode: none

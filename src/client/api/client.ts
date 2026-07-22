@@ -1,5 +1,5 @@
 import type {
-  ApiErrorShape, Build, PipelineStageRun, Feedback, McpConnection, McpToken, KnowledgePageRecord, KnowledgeKernelComparison,
+  ApiErrorShape, Build, PipelineStageRun, Feedback, McpConnection, McpToken, WorkspaceMcpToken, KnowledgePageRecord, KnowledgeKernelComparison,
   ArchivedRepository, KnowledgeMetadata, ProjectKnowledgeQuality, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotChangeSummary, SnapshotSummary, SourceExcerpt,
   UploadSnapshotSummary, ImportReport, TeamMember, ProjectMember, Project, ProjectSummary, ProjectActivity, CodexConnectionPack,
   Remediation, RemediationEvent, RemediationState,
@@ -166,6 +166,16 @@ export interface ApiClient {
   createMcpToken(name: string, projectId: string, scopes?: McpToken["scopes"]): Promise<McpToken & { token: string }>;
   revokeMcpToken(id: string): Promise<{ token: McpToken }>;
   rotateMcpToken(id: string): Promise<{ previous: McpToken; replacement: McpToken; token: string }>;
+  getWorkspaceMcpConnection(): Promise<McpConnection>;
+  listWorkspaceMcpTokens(pagination: PaginationParams): Promise<{ tokens: WorkspaceMcpToken[] } & PaginatedResponse>;
+  createWorkspaceMcpToken(
+    name: string,
+    scopes?: WorkspaceMcpToken["scopes"]
+  ): Promise<WorkspaceMcpToken & { token: string }>;
+  revokeWorkspaceMcpToken(id: string): Promise<{ token: WorkspaceMcpToken }>;
+  rotateWorkspaceMcpToken(id: string): Promise<{
+    previous: WorkspaceMcpToken; replacement: WorkspaceMcpToken; token: string;
+  }>;
   getModelConfig(): Promise<{ config: ModelConfig | null }>;
   updateModelConfig(input: { provider: ModelProvider; model: string; apiKey: string }): Promise<{ config: ModelConfig }>;
   getMfaStatus(): Promise<MfaStatus>;
@@ -478,6 +488,13 @@ export const api: ApiClient = {
   createMcpToken: (name, projectId, scopes) => request("/api/mcp/tokens", { method: "POST", body: json({ name, projectId, ...(scopes ? { scopes } : {}) }) }),
   revokeMcpToken: (id) => request(`/api/mcp/tokens/${id}/revoke`, { method: "POST" }),
   rotateMcpToken: (id) => request(`/api/mcp/tokens/${encodeURIComponent(id)}/rotate`, { method: "POST" }),
+  getWorkspaceMcpConnection: () => request("/api/workspace/mcp/connection"),
+  listWorkspaceMcpTokens: (pagination) => request(listPath("/api/workspace/mcp/tokens", pagination)),
+  createWorkspaceMcpToken: (name, scopes) => request("/api/workspace/mcp/tokens", {
+    method: "POST", body: json({ name, ...(scopes ? { scopes } : {}) })
+  }),
+  revokeWorkspaceMcpToken: (id) => request(`/api/workspace/mcp/tokens/${encodeURIComponent(id)}/revoke`, { method: "POST" }),
+  rotateWorkspaceMcpToken: (id) => request(`/api/workspace/mcp/tokens/${encodeURIComponent(id)}/rotate`, { method: "POST" }),
   getModelConfig: () => request("/api/settings/model"),
   updateModelConfig: (input) => request("/api/settings/model", { method: "PUT", body: json(input) }),
   getMfaStatus: () => request("/api/settings/mfa"),

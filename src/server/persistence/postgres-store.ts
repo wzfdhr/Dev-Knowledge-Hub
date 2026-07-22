@@ -73,6 +73,8 @@ import type {
   ModelProvider,
   McpTokenRecord,
   CreateMcpTokenInput,
+  WorkspaceMcpTokenRecord,
+  CreateWorkspaceMcpTokenInput,
   Pagination,
   PipelineArtifactStore,
   PipelineSearchDocumentInput,
@@ -417,6 +419,21 @@ interface McpTokenRow extends QueryResultRow {
   token_hash: string;
   token_prefix: string;
   scopes: string[];
+  expires_at: Date;
+  created_at: Date;
+  last_used_at: Date | null;
+  revoked_at: Date | null;
+}
+
+interface WorkspaceMcpTokenRow extends QueryResultRow {
+  id: string;
+  workspace_id: string;
+  user_id: string;
+  name: string;
+  token_hash: string;
+  token_prefix: string;
+  scopes: string[];
+  session_version: number;
   expires_at: Date;
   created_at: Date;
   last_used_at: Date | null;
@@ -770,6 +787,16 @@ function mcpTokenRecord(row: McpTokenRow): McpTokenRecord {
     createdAt: row.created_at,
     lastUsedAt: row.last_used_at,
     revokedAt: row.revoked_at
+  };
+}
+
+function workspaceMcpTokenRecord(row: WorkspaceMcpTokenRow): WorkspaceMcpTokenRecord {
+  return {
+    id: row.id, workspaceId: row.workspace_id, userId: row.user_id,
+    name: row.name, tokenHash: row.token_hash, tokenPrefix: row.token_prefix,
+    scopes: row.scopes as WorkspaceMcpTokenRecord["scopes"],
+    sessionVersion: row.session_version, expiresAt: row.expires_at,
+    createdAt: row.created_at, lastUsedAt: row.last_used_at, revokedAt: row.revoked_at
   };
 }
 
@@ -3954,6 +3981,150 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         metadata: { replacementTokenId: replacementToken.id }
       });
       return { previous: revokedToken, replacement: replacementToken };
+    });
+  }
+
+  async createWorkspaceMcpTokenWithAudit(
+    input: CreateWorkspaceMcpTokenInput,
+    actorId: string
+  ): Promise<WorkspaceMcpTokenRecord> {
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<WorkspaceMcpTokenRow>(
+        `INSERT INTO workspace_mcp_tokens
+          (workspace_id, user_id, name, token_hash, token_prefix, scopes, session_version, expires_at)
+         SELECT $1, $2, $3, $4, $5, $6, $7, COALESCE($8, now() + interval '30 days')
+         FROM admin_users owner
+         WHERE owner.workspace_id = $1 AND owner.id = $2 AND owner.id = $9
+           AND owner.session_version = $7 AND owner.disabled_at IS NULL
+         RETURNING id, workspace_id, user_id, name, token_hash, token_prefix, scopes,
+                   session_version, expires_at, created_at, last_used_at, revoked_at`,
+        [input.workspaceId, input.userId, input.name, input.tokenHash, input.tokenPrefix,
+          input.scopes, input.sessionVersion, input.expiresAt ?? null, actorId]
+      );
+      if (!rows[0]) throw new Error("Workspace MCP token owner or expiry is invalid");
+      const token = workspaceMcpTokenRecord(rows[0]);
+      await this.insertAudit(client, {
+        workspaceId: input.workspaceId, actorId, action: "workspace_mcp_token.created",
+        resourceType: "workspace_mcp_token", resourceId: token.id
+      });
+      return token;
+    });
+  }
+
+  async listWorkspaceMcpTokens(
+    workspaceId: string,
+    userId: string,
+    pagination?: Pagination
+  ): Promise<WorkspaceMcpTokenRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    const { rows } = await this.pool.query<WorkspaceMcpTokenRow>(
+      `SELECT id, workspace_id, user_id, name, token_hash, token_prefix, scopes,
+              session_version, expires_at, created_at, last_used_at, revoked_at
+       FROM workspace_mcp_tokens
+       WHERE workspace_id = $1 AND user_id = $2
+       ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`,
+      [workspaceId, userId, limit, offset]
+    );
+    return rows.map(workspaceMcpTokenRecord);
+  }
+
+  async countWorkspaceMcpTokens(workspaceId: string, userId: string): Promise<number> {
+    const { rows } = await this.pool.query<{ total: string }>(
+      "SELECT count(*)::text AS total FROM workspace_mcp_tokens WHERE workspace_id = $1 AND user_id = $2",
+      [workspaceId, userId]
+    );
+    return Number(rows[0]?.total ?? 0);
+  }
+
+  async findWorkspaceMcpTokenByHash(tokenHash: string): Promise<WorkspaceMcpTokenRecord | null> {
+    const { rows } = await this.pool.query<WorkspaceMcpTokenRow>(
+      `SELECT id, workspace_id, user_id, name, token_hash, token_prefix, scopes,
+              session_version, expires_at, created_at, last_used_at, revoked_at
+       FROM workspace_mcp_tokens WHERE token_hash = $1 LIMIT 1`,
+      [tokenHash]
+    );
+    return rows[0] ? workspaceMcpTokenRecord(rows[0]) : null;
+  }
+
+  async touchWorkspaceMcpToken(tokenId: string): Promise<void> {
+    await this.pool.query(
+      "UPDATE workspace_mcp_tokens SET last_used_at = now(), updated_at = now() WHERE id = $1 AND revoked_at IS NULL",
+      [tokenId]
+    );
+  }
+
+  async revokeWorkspaceMcpTokenWithAudit(
+    workspaceId: string,
+    userId: string,
+    tokenId: string,
+    actorId: string
+  ): Promise<WorkspaceMcpTokenRecord | null> {
+    if (userId !== actorId) return null;
+    return this.transaction(async (client) => {
+      const { rows } = await client.query<WorkspaceMcpTokenRow>(
+        `UPDATE workspace_mcp_tokens SET revoked_at = COALESCE(revoked_at, now()), updated_at = now()
+         WHERE workspace_id = $1 AND user_id = $2 AND id = $3
+         RETURNING id, workspace_id, user_id, name, token_hash, token_prefix, scopes,
+                   session_version, expires_at, created_at, last_used_at, revoked_at`,
+        [workspaceId, userId, tokenId]
+      );
+      if (!rows[0]) return null;
+      const token = workspaceMcpTokenRecord(rows[0]);
+      await this.insertAudit(client, {
+        workspaceId, actorId, action: "workspace_mcp_token.revoked",
+        resourceType: "workspace_mcp_token", resourceId: token.id
+      });
+      return token;
+    });
+  }
+
+  async rotateWorkspaceMcpTokenWithAudit(
+    workspaceId: string,
+    userId: string,
+    tokenId: string,
+    replacement: Pick<WorkspaceMcpTokenRecord, "tokenHash" | "tokenPrefix">,
+    actorId: string
+  ): Promise<{ previous: WorkspaceMcpTokenRecord; replacement: WorkspaceMcpTokenRecord } | null> {
+    if (userId !== actorId) return null;
+    return this.transaction(async (client) => {
+      const previousResult = await client.query<WorkspaceMcpTokenRow>(
+        `SELECT token.id, token.workspace_id, token.user_id, token.name, token.token_hash,
+                token.token_prefix, token.scopes, token.session_version, token.expires_at,
+                token.created_at, token.last_used_at, token.revoked_at
+         FROM workspace_mcp_tokens token
+         JOIN admin_users owner ON owner.workspace_id = token.workspace_id AND owner.id = token.user_id
+         WHERE token.workspace_id = $1 AND token.user_id = $2 AND token.id = $3
+           AND token.revoked_at IS NULL AND owner.disabled_at IS NULL
+           AND owner.session_version = token.session_version
+         FOR UPDATE`,
+        [workspaceId, userId, tokenId]
+      );
+      if (!previousResult.rows[0]) return null;
+      const previous = workspaceMcpTokenRecord(previousResult.rows[0]);
+      const replacementResult = await client.query<WorkspaceMcpTokenRow>(
+        `INSERT INTO workspace_mcp_tokens
+          (workspace_id, user_id, name, token_hash, token_prefix, scopes, session_version, expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, now() + interval '30 days')
+         RETURNING id, workspace_id, user_id, name, token_hash, token_prefix, scopes,
+                   session_version, expires_at, created_at, last_used_at, revoked_at`,
+        [workspaceId, userId, previous.name, replacement.tokenHash,
+          replacement.tokenPrefix, previous.scopes, previous.sessionVersion]
+      );
+      const revokedResult = await client.query<WorkspaceMcpTokenRow>(
+        `UPDATE workspace_mcp_tokens SET revoked_at = now(), updated_at = now()
+         WHERE workspace_id = $1 AND user_id = $2 AND id = $3 AND revoked_at IS NULL
+         RETURNING id, workspace_id, user_id, name, token_hash, token_prefix, scopes,
+                   session_version, expires_at, created_at, last_used_at, revoked_at`,
+        [workspaceId, userId, tokenId]
+      );
+      if (!revokedResult.rows[0]) throw new Error("Workspace MCP token rotation lost its lock");
+      const next = workspaceMcpTokenRecord(replacementResult.rows[0]);
+      await this.insertAudit(client, {
+        workspaceId, actorId, action: "workspace_mcp_token.rotated",
+        resourceType: "workspace_mcp_token", resourceId: tokenId,
+        metadata: { replacementTokenId: next.id }
+      });
+      return { previous: workspaceMcpTokenRecord(revokedResult.rows[0]), replacement: next };
     });
   }
 

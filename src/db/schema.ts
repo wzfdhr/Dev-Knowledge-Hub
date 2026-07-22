@@ -1049,6 +1049,32 @@ export const mcpTokens = pgTable("mcp_tokens", {
   index("mcp_tokens_workspace_project_idx").on(table.workspaceId, table.projectId)
 ]);
 
+export const workspaceMcpTokens = pgTable("workspace_mcp_tokens", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  userId: uuid("user_id").notNull(),
+  name: text("name").notNull(),
+  tokenHash: text("token_hash").notNull(),
+  tokenPrefix: text("token_prefix").notNull(),
+  scopes: text("scopes").array().notNull(),
+  sessionVersion: integer("session_version").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  ...timestamps
+}, (table) => [
+  uniqueIndex("workspace_mcp_tokens_id_workspace_idx").on(table.id, table.workspaceId),
+  uniqueIndex("workspace_mcp_tokens_hash_idx").on(table.tokenHash),
+  index("workspace_mcp_tokens_owner_created_idx").on(table.workspaceId, table.userId, table.createdAt.desc(), table.id.desc()),
+  check("workspace_mcp_tokens_scopes_check", sql`cardinality(${table.scopes}) > 0 AND ${table.scopes} <@ ARRAY['workspace.patterns.read', 'workspace.solutions.read']::text[]`),
+  check("workspace_mcp_tokens_expiry_check", sql`${table.expiresAt} > ${table.createdAt} AND ${table.expiresAt} <= ${table.createdAt} + interval '30 days'`),
+  foreignKey({
+    columns: [table.userId, table.workspaceId],
+    foreignColumns: [adminUsers.id, adminUsers.workspaceId],
+    name: "workspace_mcp_tokens_owner_workspace_fk"
+  }).onDelete("cascade")
+]);
+
 export const agentFeedback = pgTable("agent_feedback", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),

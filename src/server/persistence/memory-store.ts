@@ -88,6 +88,8 @@ import type {
   RemediationRecord,
   RemediationListOptions,
   WorkspaceKnowledgeSearchRecord,
+  WorkspaceMcpTokenRecord,
+  CreateWorkspaceMcpTokenInput,
   WorkspaceProjectOverviewRecord,
   WorkspaceRecord
 } from "./store.js";
@@ -174,6 +176,7 @@ export class MemoryAppStore implements AppStore {
   }>();
   readonly auditEvents: AuditEventRecord[] = [];
   readonly mcpTokens: McpTokenRecord[] = [];
+  readonly workspaceMcpTokens: WorkspaceMcpTokenRecord[] = [];
   readonly feedback: AgentFeedbackRecord[] = [];
   readonly remediations: RemediationRecord[] = [];
   readonly remediationEvents: RemediationEventRecord[] = [];
@@ -1724,6 +1727,105 @@ export class MemoryAppStore implements AppStore {
       this.auditEvents.splice(auditLength);
       throw error;
     }
+  }
+
+  async createWorkspaceMcpTokenWithAudit(
+    input: CreateWorkspaceMcpTokenInput,
+    actorId: string
+  ): Promise<WorkspaceMcpTokenRecord> {
+    const actor = this.members.find((member) => member.id === actorId
+      && member.workspaceId === input.workspaceId && member.disabledAt === null);
+    const now = new Date();
+    const expiresAt = input.expiresAt ?? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1_000);
+    if (!actor || actor.id !== input.userId || actor.sessionVersion !== input.sessionVersion
+      || expiresAt <= now || expiresAt.getTime() - now.getTime() > 30 * 24 * 60 * 60 * 1_000
+      || input.scopes.length === 0
+      || input.scopes.some((scope) => !["workspace.patterns.read", "workspace.solutions.read"].includes(scope))) {
+      throw new Error("Workspace MCP token owner or expiry is invalid");
+    }
+    const record: WorkspaceMcpTokenRecord = {
+      ...input, id: randomUUID(), expiresAt, createdAt: now, lastUsedAt: null, revokedAt: null
+    };
+    this.workspaceMcpTokens.push(record);
+    await this.recordAudit({
+      workspaceId: input.workspaceId, actorId, action: "workspace_mcp_token.created",
+      resourceType: "workspace_mcp_token", resourceId: record.id
+    });
+    return structuredClone(record);
+  }
+
+  async listWorkspaceMcpTokens(
+    workspaceId: string,
+    userId: string,
+    pagination?: Pagination
+  ): Promise<WorkspaceMcpTokenRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    return this.workspaceMcpTokens.filter((token) =>
+      token.workspaceId === workspaceId && token.userId === userId
+    ).sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()
+      || right.id.localeCompare(left.id)).slice(offset, offset + limit)
+      .map((token) => structuredClone(token));
+  }
+
+  async countWorkspaceMcpTokens(workspaceId: string, userId: string): Promise<number> {
+    return this.workspaceMcpTokens.filter((token) =>
+      token.workspaceId === workspaceId && token.userId === userId
+    ).length;
+  }
+
+  async findWorkspaceMcpTokenByHash(tokenHash: string): Promise<WorkspaceMcpTokenRecord | null> {
+    const token = this.workspaceMcpTokens.find((candidate) => candidate.tokenHash === tokenHash);
+    return token ? structuredClone(token) : null;
+  }
+
+  async touchWorkspaceMcpToken(tokenId: string): Promise<void> {
+    const token = this.workspaceMcpTokens.find((candidate) => candidate.id === tokenId);
+    if (token && token.revokedAt === null) token.lastUsedAt = new Date();
+  }
+
+  async revokeWorkspaceMcpTokenWithAudit(
+    workspaceId: string,
+    userId: string,
+    tokenId: string,
+    actorId: string
+  ): Promise<WorkspaceMcpTokenRecord | null> {
+    if (actorId !== userId) return null;
+    const token = this.workspaceMcpTokens.find((candidate) => candidate.id === tokenId
+      && candidate.workspaceId === workspaceId && candidate.userId === userId);
+    if (!token) return null;
+    token.revokedAt ??= new Date();
+    await this.recordAudit({
+      workspaceId, actorId, action: "workspace_mcp_token.revoked",
+      resourceType: "workspace_mcp_token", resourceId: token.id
+    });
+    return structuredClone(token);
+  }
+
+  async rotateWorkspaceMcpTokenWithAudit(
+    workspaceId: string,
+    userId: string,
+    tokenId: string,
+    replacement: Pick<WorkspaceMcpTokenRecord, "tokenHash" | "tokenPrefix">,
+    actorId: string
+  ): Promise<{ previous: WorkspaceMcpTokenRecord; replacement: WorkspaceMcpTokenRecord } | null> {
+    if (actorId !== userId) return null;
+    const previous = this.workspaceMcpTokens.find((candidate) => candidate.id === tokenId
+      && candidate.workspaceId === workspaceId && candidate.userId === userId && candidate.revokedAt === null);
+    const actor = this.members.find((member) => member.id === userId
+      && member.workspaceId === workspaceId && member.disabledAt === null);
+    if (!previous || !actor || actor.sessionVersion !== previous.sessionVersion) return null;
+    const next = await this.createWorkspaceMcpTokenWithAudit({
+      workspaceId, userId, name: previous.name, tokenHash: replacement.tokenHash,
+      tokenPrefix: replacement.tokenPrefix, scopes: [...previous.scopes],
+      sessionVersion: actor.sessionVersion
+    }, actorId);
+    previous.revokedAt = new Date();
+    await this.recordAudit({
+      workspaceId, actorId, action: "workspace_mcp_token.rotated",
+      resourceType: "workspace_mcp_token", resourceId: previous.id,
+      metadata: { replacementTokenId: next.id }
+    });
+    return { previous: structuredClone(previous), replacement: next };
   }
 
   async createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord> {

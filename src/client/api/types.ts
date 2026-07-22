@@ -418,6 +418,19 @@ export interface McpToken {
   lastUsedAt: string | null;
   revokedAt: string | null;
 }
+export interface WorkspaceMcpToken {
+  id: string;
+  userId: string;
+  name: string;
+  tokenPrefix: string;
+  scopes: Array<"workspace.patterns.read" | "workspace.solutions.read">;
+  sessionVersion: number;
+  expiresAt: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+export type { FrontendSolutionContext } from "../../shared/frontend-solution-context";
 export interface McpConnection {
   endpoint: string;
   transport: string;

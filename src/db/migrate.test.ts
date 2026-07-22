@@ -124,3 +124,14 @@ test("creates workspace-isolated frontend experience contracts", async () => {
   expect(sql).toMatch(/workspace_experience_review_items_append_only_trigger/);
   expect(sql).not.toMatch(/DROP COLUMN|DROP TABLE|TRUNCATE/);
 });
+
+test("creates user-bound workspace MCP tokens without widening project token scopes", async () => {
+  const sql = await readFile(path.join(resolveMigrationDirectory(), "0038_workspace_mcp_tokens.sql"), "utf8");
+
+  expect(sql).toContain("CREATE TABLE workspace_mcp_tokens");
+  expect(sql).toMatch(/workspace_mcp_tokens_owner_workspace_fk/);
+  expect(sql).toContain("workspace.patterns.read");
+  expect(sql).toContain("workspace.solutions.read");
+  expect(sql).toMatch(/interval '30 days'/);
+  expect(sql).not.toContain("ALTER TABLE mcp_tokens");
+});

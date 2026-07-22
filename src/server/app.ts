@@ -96,8 +96,19 @@ import {
   hashMcpToken,
   sanitizedMcpToken
 } from "./mcp/auth.js";
-import { MCP_TOKEN_SCOPES } from "./persistence/store.js";
+import {
+  authenticateWorkspaceMcpTokenDetailed,
+  createWorkspaceMcpAuthorizationGuard,
+  generateWorkspaceMcpToken,
+  hashWorkspaceMcpToken,
+  sanitizedWorkspaceMcpToken
+} from "./mcp/workspace-auth.js";
+import { MCP_TOKEN_SCOPES, WORKSPACE_MCP_TOKEN_SCOPES } from "./persistence/store.js";
 import { createRegisteredMcpServer, MCP_TOOL_NAMES } from "./mcp/tools.js";
+import {
+  createRegisteredWorkspaceMcpServer,
+  WORKSPACE_MCP_TOOL_NAMES
+} from "./mcp/workspace-tools.js";
 import {
   DEFAULT_RATE_LIMITS,
   MAX_REQUEST_BODY_BYTES,
@@ -2410,6 +2421,80 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     tools: MCP_TOOL_NAMES
   }));
 
+  server.post("/api/workspace/mcp/tokens", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object({
+      name: z.string().trim().min(1).max(100),
+      scopes: z.array(z.enum(WORKSPACE_MCP_TOKEN_SCOPES))
+        .min(1).max(WORKSPACE_MCP_TOKEN_SCOPES.length).optional(),
+      expiresInDays: z.number().int().min(1).max(30).optional().default(30)
+    }).strict().safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid workspace MCP token");
+    const owner = (request as AuthenticatedRequest).sessionAdmin;
+    const plaintext = generateWorkspaceMcpToken();
+    try {
+      const token = await options.store.createWorkspaceMcpTokenWithAudit({
+        workspaceId: owner.workspaceId, userId: owner.id, name: parsed.data.name,
+        tokenHash: hashWorkspaceMcpToken(plaintext), tokenPrefix: plaintext.slice(0, 12),
+        scopes: parsed.data.scopes ?? [...WORKSPACE_MCP_TOKEN_SCOPES],
+        sessionVersion: owner.sessionVersion,
+        expiresAt: new Date(Date.now() + parsed.data.expiresInDays * 24 * 60 * 60 * 1_000)
+      }, owner.id);
+      return reply.code(201).send({ ...sanitizedWorkspaceMcpToken(token), token: plaintext });
+    } catch {
+      return sendError(reply, 500, "TOKEN_OPERATION_FAILED", "Workspace MCP token creation failed");
+    }
+  });
+
+  server.get("/api/workspace/mcp/tokens", { preHandler: requireAdmin }, async (request, reply) => {
+    const parsed = z.object(paginationQuerySchema).safeParse(request.query);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid pagination");
+    const owner = (request as AuthenticatedRequest).sessionAdmin;
+    const [tokens, total] = await Promise.all([
+      options.store.listWorkspaceMcpTokens(owner.workspaceId, owner.id, parsed.data),
+      options.store.countWorkspaceMcpTokens(owner.workspaceId, owner.id)
+    ]);
+    return {
+      tokens: tokens.map(sanitizedWorkspaceMcpToken),
+      ...paginationMetadata(total, parsed.data.offset ?? 0, tokens.length)
+    };
+  });
+
+  server.post("/api/workspace/mcp/tokens/:id/revoke", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ id: z.uuid() }).safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid workspace MCP token");
+    const owner = (request as AuthenticatedRequest).sessionAdmin;
+    const token = await options.store.revokeWorkspaceMcpTokenWithAudit(
+      owner.workspaceId, owner.id, params.data.id, owner.id
+    );
+    if (!token) return sendError(reply, 404, "TOKEN_NOT_FOUND", "Workspace MCP token was not found");
+    return { token: sanitizedWorkspaceMcpToken(token) };
+  });
+
+  server.post("/api/workspace/mcp/tokens/:id/rotate", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ id: z.uuid() }).safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid workspace MCP token");
+    const owner = (request as AuthenticatedRequest).sessionAdmin;
+    const plaintext = generateWorkspaceMcpToken();
+    const rotation = await options.store.rotateWorkspaceMcpTokenWithAudit(
+      owner.workspaceId, owner.id, params.data.id,
+      { tokenHash: hashWorkspaceMcpToken(plaintext), tokenPrefix: plaintext.slice(0, 12) },
+      owner.id
+    );
+    if (!rotation) return sendError(reply, 409, "TOKEN_NOT_ACTIVE", "Workspace MCP token is unavailable");
+    return {
+      previous: sanitizedWorkspaceMcpToken(rotation.previous),
+      replacement: sanitizedWorkspaceMcpToken(rotation.replacement),
+      token: plaintext
+    };
+  });
+
+  server.get("/api/workspace/mcp/connection", { preHandler: requireAdmin }, async () => ({
+    endpoint: "/mcp/workspace",
+    transport: "streamable-http",
+    authorization: "bearer",
+    tools: WORKSPACE_MCP_TOOL_NAMES
+  }));
+
   server.post("/api/repositories", { preHandler: requireAdministrator }, async (request, reply) => {
     const admin = (request as AuthenticatedRequest).sessionAdmin;
     const parsed = repositorySchema.safeParse(request.body);
@@ -3170,9 +3255,50 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
 
   const activeMcpServers = new Set<ReturnType<typeof createRegisteredMcpServer>>();
+  const activeWorkspaceMcpServers = new Set<ReturnType<typeof createRegisteredWorkspaceMcpServer>>();
   server.addHook("onClose", async () => {
-    await Promise.all([...activeMcpServers].map((mcp) => mcp.close()));
+    await Promise.all([
+      ...[...activeMcpServers].map((mcp) => mcp.close()),
+      ...[...activeWorkspaceMcpServers].map((mcp) => mcp.close())
+    ]);
     activeMcpServers.clear();
+    activeWorkspaceMcpServers.clear();
+  });
+
+  server.all("/mcp/workspace", async (request, reply) => {
+    const authorization = request.headers.authorization;
+    const match = /^Bearer (\S+)$/i.exec(authorization ?? "");
+    const authentication = match
+      ? await authenticateWorkspaceMcpTokenDetailed(options.store, match[1])
+      : { token: null, failure: "UNAUTHORIZED" as const };
+    if (!authentication.token) {
+      const code = authentication.failure ?? "UNAUTHORIZED";
+      const message = code === "WORKSPACE_TOKEN_EXPIRED"
+        ? "Workspace MCP token has expired"
+        : code === "WORKSPACE_SESSION_CHANGED"
+          ? "Workspace MCP token session is no longer valid"
+          : "Invalid or revoked workspace MCP token";
+      return sendError(reply, 401, code, message);
+    }
+    const token = authentication.token;
+    const mcp = createRegisteredWorkspaceMcpServer({
+      store: options.store, workspaceId: token.workspaceId, userId: token.userId,
+      scopes: token.scopes, artifactReader: options.qualityArtifactReader,
+      authorize: createWorkspaceMcpAuthorizationGuard(options.store, match![1]),
+      onUnauthorized: () => { setImmediate(() => void mcp.close()); }
+    });
+    activeWorkspaceMcpServers.add(mcp);
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true
+    });
+    await mcp.connect(transport);
+    reply.hijack();
+    reply.raw.once("finish", () => {
+      activeWorkspaceMcpServers.delete(mcp);
+      void mcp.close();
+    });
+    await transport.handleRequest(request.raw, reply.raw, request.body);
   });
 
   server.all("/mcp", async (request, reply) => {

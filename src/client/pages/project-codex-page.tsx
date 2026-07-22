@@ -33,6 +33,12 @@ export function ProjectCodexPage({ api }: { api: ApiClient }) {
     enabled: Boolean(projectId),
     retry: false
   });
+  const workspaceConnection = useQuery({
+    queryKey: ["workspace-mcp-connection"],
+    queryFn: api.getWorkspaceMcpConnection,
+    enabled: typeof api.getWorkspaceMcpConnection === "function",
+    retry: false
+  });
   const tokens = useInfiniteQuery({
     queryKey: ["projects", projectId, "mcp-tokens"],
     initialPageParam: 0,
@@ -78,6 +84,11 @@ export function ProjectCodexPage({ api }: { api: ApiClient }) {
       <CodePanel title=".codex/config.toml" icon={<Code2 aria-hidden="true" />} value={connection.data.configToml} />
       <CodePanel title="AGENTS.md" icon={<FileText aria-hidden="true" />} value={connection.data.agentsMarkdown} />
     </div>
+    {workspaceConnection.data && <section className="codex-connection-band" aria-label="团队经验解决方案连接">
+      <div><Link2 aria-hidden="true" /><span><small>团队经验 MCP</small><strong className="mono">{workspaceConnection.data.endpoint}</strong></span></div>
+      <div><ShieldCheck aria-hidden="true" /><span><small>能力边界</small><strong>只读结构化上下文，不调用模型</strong></span></div>
+      <CopyButton value={workspaceConnection.data.endpoint} label="复制 Workspace 端点" />
+    </section>}
     <section className="codex-tokens" aria-labelledby="project-token-title">
       <div className="section-heading"><div><p className="eyebrow">访问控制</p><h2 id="project-token-title">项目 Token</h2><p>每个 Token 只能查询当前项目，固定 90 天到期，明文仅在创建时展示一次。</p></div></div>
       <form className="codex-token-form" onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>

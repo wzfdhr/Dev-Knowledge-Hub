@@ -366,6 +366,33 @@ export interface McpTokenRotation {
   replacement: McpTokenRecord;
 }
 
+export const WORKSPACE_MCP_TOKEN_SCOPES = [
+  "workspace.patterns.read", "workspace.solutions.read"
+] as const;
+export type WorkspaceMcpTokenScope = (typeof WORKSPACE_MCP_TOKEN_SCOPES)[number];
+
+export interface WorkspaceMcpTokenRecord {
+  id: string;
+  workspaceId: string;
+  userId: string;
+  name: string;
+  tokenHash: string;
+  tokenPrefix: string;
+  scopes: WorkspaceMcpTokenScope[];
+  sessionVersion: number;
+  expiresAt: Date;
+  createdAt: Date;
+  lastUsedAt: Date | null;
+  revokedAt: Date | null;
+}
+
+export interface CreateWorkspaceMcpTokenInput extends Omit<
+  WorkspaceMcpTokenRecord,
+  "id" | "createdAt" | "lastUsedAt" | "revokedAt" | "expiresAt"
+> {
+  expiresAt?: Date;
+}
+
 export type AgentFeedbackStatus = (typeof AGENT_FEEDBACK_STATUSES)[number];
 
 export interface AgentFeedbackRecord {
@@ -1240,6 +1267,31 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
     replacement: Pick<McpTokenRecord, "tokenHash" | "tokenPrefix"> & { scopes?: McpTokenScope[] },
     actorId: string
   ): Promise<McpTokenRotation | null>;
+  createWorkspaceMcpTokenWithAudit(
+    input: CreateWorkspaceMcpTokenInput,
+    actorId: string
+  ): Promise<WorkspaceMcpTokenRecord>;
+  listWorkspaceMcpTokens(
+    workspaceId: string,
+    userId: string,
+    pagination?: Pagination
+  ): Promise<WorkspaceMcpTokenRecord[]>;
+  countWorkspaceMcpTokens(workspaceId: string, userId: string): Promise<number>;
+  findWorkspaceMcpTokenByHash(tokenHash: string): Promise<WorkspaceMcpTokenRecord | null>;
+  touchWorkspaceMcpToken(tokenId: string): Promise<void>;
+  revokeWorkspaceMcpTokenWithAudit(
+    workspaceId: string,
+    userId: string,
+    tokenId: string,
+    actorId: string
+  ): Promise<WorkspaceMcpTokenRecord | null>;
+  rotateWorkspaceMcpTokenWithAudit(
+    workspaceId: string,
+    userId: string,
+    tokenId: string,
+    replacement: Pick<WorkspaceMcpTokenRecord, "tokenHash" | "tokenPrefix">,
+    actorId: string
+  ): Promise<{ previous: WorkspaceMcpTokenRecord; replacement: WorkspaceMcpTokenRecord } | null>;
   createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord>;
   reportFeedbackWithAudit(input: CreateFeedbackInput): Promise<AgentFeedbackRecord>;
   listFeedback(

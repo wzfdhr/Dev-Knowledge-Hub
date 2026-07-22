@@ -151,6 +151,18 @@ describe("schema exports", () => {
     ]));
   });
 
+  test("keeps workspace MCP tokens owner-bound, scoped, and short-lived", () => {
+    const tokens = getTableConfig(schema.workspaceMcpTokens);
+
+    expect(tokens.checks.map((item) => item.name)).toEqual(expect.arrayContaining([
+      "workspace_mcp_tokens_scopes_check",
+      "workspace_mcp_tokens_expiry_check"
+    ]));
+    expect(tokens.foreignKeys.map((key) => key.getName())).toContain(
+      "workspace_mcp_tokens_owner_workspace_fk"
+    );
+  });
+
   test("keeps source analysis cache workspace-scoped and content-addressed", () => {
     const config = getTableConfig(schema.sourceAnalysisArtifacts);
     expect(config.name).toBe("source_analysis_artifacts");

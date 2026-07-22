@@ -430,4 +430,18 @@ describe("project Codex API client", () => {
       method: "POST"
     }));
   });
+
+  test("uses isolated workspace MCP token endpoints and scopes", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      id: "workspace-token", token: "dkhw_secret", scopes: ["workspace.solutions.read"]
+    }), { status: 201, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.createWorkspaceMcpToken("Workspace Codex", ["workspace.solutions.read"]);
+
+    expect(fetch).toHaveBeenCalledWith("/api/workspace/mcp/tokens", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ name: "Workspace Codex", scopes: ["workspace.solutions.read"] })
+    }));
+  });
 });

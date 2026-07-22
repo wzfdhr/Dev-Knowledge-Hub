@@ -14,6 +14,7 @@ evidence_sidecar_path=""
 network_name=""
 database_container=""
 application_container=""
+application_image=""
 cleanup_failed=0
 
 validate_archive_members() {
@@ -66,9 +67,17 @@ finish() {
       cleanup_failed=1
     fi
 
-    if (( ! cleanup_failed )) && [[ -n "$target" ]] && ! rm -rf "$target"; then
-      printf 'recovery cleanup failed for restored directory: %s\n' "$target" >&2
-      cleanup_failed=1
+    if (( ! cleanup_failed )) && [[ -n "$target" ]]; then
+      if [[ -n "$application_image" ]] && ! docker run --rm --network none --user root \
+        --mount "type=bind,src=$target,dst=/restore-root" \
+        "$application_image" sh -c 'find /restore-root -mindepth 1 -depth -delete'; then
+        printf 'recovery cleanup failed inside restored directory: %s\n' "$target" >&2
+        cleanup_failed=1
+      fi
+      if (( ! cleanup_failed )) && ! rm -rf "$target"; then
+        printf 'recovery cleanup failed for restored directory: %s\n' "$target" >&2
+        cleanup_failed=1
+      fi
     fi
 
     if (( cleanup_failed )); then
@@ -277,6 +286,13 @@ fi
   exit 69
 }
 
+for volume in snapshots repositories sources artifacts; do
+  docker run --rm --user root \
+    --mount "type=bind,src=$volume_root/$volume,dst=/restore-volume" \
+    "$application_image" \
+    chown -R node:node /restore-volume
+done
+
 docker run -d \
   --name "$application_container" \
   --network "$network_name" \
@@ -305,6 +321,7 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 (( health_check_passed == 1 )) || {
+  docker logs "$application_container" >&2 || true
   printf 'restored application did not pass its health check\n' >&2
   exit 69
 }

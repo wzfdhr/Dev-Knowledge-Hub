@@ -2,14 +2,21 @@ name: ci
 
 on:
   push:
-    branches: [main, codex/mvp]
+    branches: [main]
   pull_request:
+    types: [opened, reopened, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   verify:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -88,6 +95,7 @@ jobs:
           if-no-files-found: error
 
   container-smoke:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     permissions:
       actions: read
       contents: read
@@ -114,6 +122,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.13.0
+      - run: npm ci
       - name: Extract reviewed FK17 bootstrap verifier
         env:
           CURRENT_WORKFLOW_SHA: ${{ github.workflow_sha }}

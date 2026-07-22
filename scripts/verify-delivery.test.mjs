@@ -5,6 +5,44 @@ import { describe, expect, test } from "vitest";
 import { parse } from "yaml";
 
 describe("delivery database isolation", () => {
+  test("keeps the merged FK17 contract behind its explicit database authorization", async () => {
+    const migration = await readFile("drizzle/0035_source_blobs_contract.sql", "utf8");
+
+    expect(migration).toContain("devkh.source_blob_contract_authorized");
+    expect(migration).toContain("source_files_source_blob_identity_fk");
+  });
+
+  test("requires the reviewed FK17 trust root after the contract is present", async () => {
+    const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
+    const phaseMerge = parse(await readFile(".github/workflows/phase-merge.yml", "utf8"));
+    const verifyCommands = ci.jobs.verify.steps.map((step) => step.run).filter(Boolean).join("\n");
+    const containerCommands = ci.jobs["container-smoke"].steps.map((step) => step.run).filter(Boolean).join("\n");
+
+    expect(ci.jobs.verify.env.DEVKH_FK17_BOOTSTRAP_COMMIT).toBe("${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}");
+    expect(ci.jobs["container-smoke"].env.DEVKH_FK17_BOOTSTRAP_COMMIT).toBe("${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}");
+    expect(verifyCommands).not.toContain('if [[ -z "$DEVKH_FK17_BOOTSTRAP_COMMIT" ]]');
+    expect(containerCommands).not.toContain('if [[ -z "$DEVKH_FK17_BOOTSTRAP_COMMIT" ]]');
+    expect(verifyCommands).toContain('[[ "$DEVKH_FK17_BOOTSTRAP_COMMIT" =~ ^[a-f0-9]{40}$ ]]');
+    expect(containerCommands).toContain('[[ "$DEVKH_FK17_BOOTSTRAP_COMMIT" =~ ^[a-f0-9]{40}$ ]]');
+    expect(phaseMerge.on.workflow_dispatch.inputs).toHaveProperty("source_blob_contract_gate_manifest");
+    expect(phaseMerge.on.workflow_dispatch.inputs).toHaveProperty("source_blob_contract_gate_artifact_run_id");
+  });
+
+  test("limits automatic CI fan-out to release-relevant events", async () => {
+    const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
+
+    expect(ci.on.push.branches).toEqual(["main"]);
+    expect(ci.on.pull_request.types).toEqual(["opened", "reopened", "ready_for_review"]);
+    expect(ci.on).toHaveProperty("workflow_dispatch");
+    expect(ci.concurrency).toEqual({
+      group: "ci-${{ github.event.pull_request.number || github.ref }}",
+      "cancel-in-progress": true
+    });
+    for (const job of [ci.jobs.verify, ci.jobs["container-smoke"]]) {
+      expect(job.if).toContain("github.event.pull_request.draft == false");
+    }
+  });
+
   test("keeps Compose and CI tests out of the persistent application database", async () => {
     const compose = parse(await readFile("docker-compose.yml", "utf8"));
     const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
@@ -121,7 +159,16 @@ describe("delivery database isolation", () => {
     expect(parser.mem_limit).toBe("512m");
     expect(parser.cpus).toBe(1);
     expect(parser.healthcheck.test.join(" ")).toContain("isSocket");
-    expect(Object.keys(parser.environment).sort()).toEqual(["DEVKH_PARSER_SOCKET_PATH", "NODE_ENV"]);
+    expect(parser.environment).toEqual({
+      NODE_ENV: "production",
+      DEVKH_PARSER_SOCKET_PATH: "/run/devkh-parser/parser.sock",
+      HTTP_PROXY: "",
+      HTTPS_PROXY: "",
+      NO_PROXY: "",
+      http_proxy: "",
+      https_proxy: "",
+      no_proxy: ""
+    });
     expect(parser.volumes).toEqual(["parser_runtime:/run/devkh-parser"]);
     expect(JSON.stringify(parser)).not.toMatch(/DATABASE_URL|MASTER_KEY|SESSION_SECRET|snapshot_data|uploaded_sources|repository_mirrors|artifact_data/);
     expect(compose.services.app.volumes).toContain("parser_runtime:/run/devkh-parser:ro");
@@ -165,7 +212,7 @@ describe("delivery database isolation", () => {
     expect(deliveryCheck).toContain("node:22\\.13-bookworm-slim");
     expect(String(ci.jobs.verify.steps.find((step) => step.uses === "actions/setup-node@v4")
       ?.with?.["node-version"])).toBe("22.13.0");
-    expect(ci.on.push.branches).toEqual(expect.arrayContaining(["main", "codex/mvp"]));
+    expect(ci.on.push.branches).toEqual(["main"]);
     expect(ci.jobs["container-smoke"].env.DEVKH_DOMAIN).toBe("hub.example.test");
     expect(ci.jobs["container-smoke"].env.ACME_EMAIL).toBe("ci@example.test");
     expect(ci.jobs["container-smoke"].env.PUBLIC_BASE_URL).toBe("https://hub.example.test");
@@ -175,6 +222,9 @@ describe("delivery database isolation", () => {
     expect(ci.jobs["container-smoke"].env.DEVKH_CONTAINER_SMOKE).toBe("true");
     expect(ci.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DIR).toBe("/tmp/devkh-recovery-evidence");
     expect(ci.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DEFER_FINALIZATION).toBe("true");
+    expect(ci.jobs["container-smoke"].steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ run: "npm ci" })
+    ]));
     expect(phaseMerge.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DEFER_FINALIZATION).toBe("true");
     expect(verifySteps).toContain("npx playwright install --with-deps chromium");
     expect(verifySteps).toContain("node /tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope verify");

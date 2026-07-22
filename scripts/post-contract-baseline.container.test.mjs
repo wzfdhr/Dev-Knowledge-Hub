@@ -10,6 +10,7 @@ import { stageTrustedBaseline } from "./release-verify.mjs";
 import { verifyPostContractDatabase } from "./verify-post-contract-database.mjs";
 
 const dockerAvailable = spawnSync("docker", ["info"], { stdio: "ignore" }).status === 0;
+const sourceBlobContractPresent = readdirSync("drizzle").includes("0035_source_blobs_contract.sql");
 const expectedMigrations = readdirSync("drizzle")
   .filter((name) => name.endsWith(".sql") && name <= "0035_source_blobs_contract.sql")
   .sort();
@@ -54,7 +55,7 @@ afterEach(() => {
   while (cleanup.length > 0) cleanup.pop()();
 });
 
-describe.runIf(dockerAvailable)("post-contract trusted baseline container", () => {
+describe.runIf(dockerAvailable && sourceBlobContractPresent)("post-contract trusted baseline container", () => {
   test("initializes under the actual Postgres UID and passes the database contract audit", async () => {
     const baseline = readFileSync("docker/post-contract-ci-baseline.sql", "utf8");
     const { container, staged } = await initialize(baseline);

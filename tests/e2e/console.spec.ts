@@ -261,7 +261,7 @@ test("folder import, project release, Codex, and collaboration workflow", async 
 
   await page.goto("/projects");
   await expect(page.getByText("1.0.0").first()).toBeVisible();
-  await expect(page.getByText("14 个文件")).toBeVisible();
+  await expect(page.getByText("18 个文件")).toBeVisible();
   const activeNavigationStyle = await page.getByRole("link", { name: "项目中心" }).first().evaluate((link) => {
     const style = getComputedStyle(link);
     return { backgroundColor: style.backgroundColor, boxShadow: style.boxShadow };

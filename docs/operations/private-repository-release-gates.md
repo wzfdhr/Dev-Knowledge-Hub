@@ -16,6 +16,36 @@ The destructive container scope refuses to start unless `DEVKH_CONTAINER_SMOKE=t
 
 The pull request must target `main`, must no longer be a draft, and must have explicit user approval recorded in the phase review.
 
+## CI trigger policy
+
+The regular `ci` workflow is intentionally not a per-commit PR runner. It runs
+for PR creation, reopening, and transition out of draft, plus pushes to
+`main` and an explicit manual dispatch. It does not listen to every PR
+`synchronize` event, and `codex/mvp` is not a release branch. Draft PR jobs are
+skipped and an in-progress run for the same PR or ref is cancelled when a newer
+run starts.
+
+## FK17 Trust Bootstrap
+
+The FK17 source-blob contract is deliberately installed in two pull requests. The
+first, Bootstrap, contains only the reviewed verifier, the phase-merge workflow,
+and the post-contract verification harness. It must not contain migration `0035`,
+application schema changes, source-blob storage changes, or production actions.
+
+Bootstrap runs the existing release verifier while the repository variable
+`DEVKH_FK17_BOOTSTRAP_COMMIT` is empty. Once its exact merge commit is on `main`,
+the release owner records that 40-character commit in the repository variable
+before merging any further phase PR. From then on CI and phase merge extract the
+verifier from that immutable commit and reject candidates that replace the
+verifier or either gate workflow. An empty, malformed, or non-ancestor value is
+a release-gate failure, not a fallback mode.
+
+This reduces GitHub Actions fan-out while preserving the release gate:
+`npm run phase:merge` dispatches `phase-merge.yml`, which checks out the exact
+reviewed head SHA and runs fresh `verify` and `container-smoke` before creating
+the merge commit. After the merge, the `main` push workflow provides a
+post-merge smoke signal.
+
 After that approval, merge with:
 
 ```bash

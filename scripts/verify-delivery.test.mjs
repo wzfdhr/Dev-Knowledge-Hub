@@ -145,6 +145,13 @@ describe("delivery database isolation", () => {
     expect(config).toContain('"**/.worktrees/**"');
   });
 
+  test("installs verifier dependencies in the phase-merge container job", async () => {
+    const phaseMerge = parse(await readFile(".github/workflows/phase-merge.yml", "utf8"));
+    expect(phaseMerge.jobs["container-smoke"].steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ run: "npm ci" })
+    ]));
+  });
+
   test("preserves the retrieval evaluation report outside Playwright's disposable result directory", async () => {
     const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
     const upload = ci.jobs.verify.steps.find((step) =>

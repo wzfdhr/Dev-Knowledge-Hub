@@ -106,6 +106,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22.13.0
+      - run: npm ci
       - name: Install recovery tooling
         run: sudo apt-get update && sudo apt-get install -y restic
       - run: npm run release:verify -- --scope container

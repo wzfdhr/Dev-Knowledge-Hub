@@ -54,4 +54,19 @@ describe("ImportProgress", () => {
     render(<ImportProgress progress={{ phase: "packaging", status: "running", percent: 50 }} />);
     expect(screen.getByText("文件夹直传").closest(".import-stage")).toHaveAttribute("aria-current", "step");
   });
+
+  test("announces a failed active stage as failed", () => {
+    render(<ImportProgress progress={{ phase: "validating", status: "failed", percent: 80 }} />);
+    expect(screen.getByText("服务端校验").closest(".import-stage")).toHaveAccessibleName("服务端校验，当前步骤，失败");
+  });
+
+  test("announces a paused active stage as paused", () => {
+    render(<ImportProgress progress={{ phase: "uploading", status: "paused", percent: 42 }} />);
+    expect(screen.getByText("文件夹直传").closest(".import-stage")).toHaveAccessibleName("文件夹直传，当前步骤，已暂停");
+  });
+
+  test("announces a cancelled active stage as cancelled", () => {
+    render(<ImportProgress progress={{ phase: "uploading", status: "cancelled", percent: 42 }} />);
+    expect(screen.getByText("文件夹直传").closest(".import-stage")).toHaveAccessibleName("文件夹直传，当前步骤，已取消");
+  });
 });

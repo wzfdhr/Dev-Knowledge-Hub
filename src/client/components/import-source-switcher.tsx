@@ -20,9 +20,9 @@ export interface ImportSourceSwitcherProps {
 }
 
 const options = [
-  { value: "upload", label: <span className="ant-segmented-item-label">项目文件夹</span>, icon: <HardDriveUpload aria-hidden="true" /> },
-  { value: "git", label: <span className="ant-segmented-item-label">Git HTTPS</span>, icon: <GitBranch aria-hidden="true" /> },
-  { value: "local", label: <span className="ant-segmented-item-label">服务器路径</span>, icon: <Server aria-hidden="true" /> }
+  { value: "upload", label: "项目文件夹", icon: <HardDriveUpload aria-hidden="true" /> },
+  { value: "git", label: "Git HTTPS", icon: <GitBranch aria-hidden="true" /> },
+  { value: "local", label: "服务器路径", icon: <Server aria-hidden="true" /> }
 ];
 
 export function ImportSourceSwitcher({

@@ -28,7 +28,7 @@ describe("ImportSourceSwitcher", () => {
   test("switches source views without submitting a source", async () => {
     const user = userEvent.setup();
     const { props } = renderSwitcher();
-    await user.click(screen.getByText("Git HTTPS", { selector: ".ant-segmented-item-label" }));
+    await user.click(screen.getByRole("radio", { name: "Git HTTPS" }).closest("label")!);
     expect(props.onChange).toHaveBeenCalledWith("git");
     expect(props.onSubmitAlternative).not.toHaveBeenCalled();
   });

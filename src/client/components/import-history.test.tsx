@@ -23,6 +23,18 @@ test("renders a semantic recent import table", () => {
   expect(screen.getByText("成功")).toBeVisible();
 });
 
+test("links reports with snapshots to their project versions and marks missing snapshots", () => {
+  render(<ImportHistory loading={false} onRetry={vi.fn()} reports={[
+    { id: "with-snapshot", projectId: "project-with-version", repositoryId: "r1", sourceKind: "upload", status: "succeeded", startedAt: "2026-07-22T05:48:00.000Z", finishedAt: null, collectedFileCount: 1, collectedTextBytes: 1, ignored: { total: 0, reasons: {} }, snapshotId: "snapshot-1", failureCode: null },
+    { id: "without-snapshot", projectId: "project-without-version", repositoryId: "r2", sourceKind: "git", status: "running", startedAt: "2026-07-22T05:48:00.000Z", finishedAt: null, collectedFileCount: 1, collectedTextBytes: 1, ignored: { total: 0, reasons: {} }, snapshotId: null, failureCode: null }
+  ]} />);
+
+  expect(screen.getByRole("columnheader", { name: "知识版本" })).toBeVisible();
+  expect(screen.getByRole("link", { name: "查看版本" })).toHaveAttribute("href", "/projects/project-with-version/versions");
+  expect(screen.getByText("—")).toBeVisible();
+  expect(screen.getAllByRole("link", { name: "查看版本" })).toHaveLength(1);
+});
+
 test("isolates a history query failure behind its own retry", async () => {
   const user = userEvent.setup();
   const retry = vi.fn();

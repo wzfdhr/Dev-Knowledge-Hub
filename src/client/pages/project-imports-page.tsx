@@ -24,7 +24,13 @@ function idleProgress(): ImportProgressValue {
 
 function isTerminalUploadSessionError(error: unknown) {
   return error instanceof ApiError
-    && ["UPLOAD_SESSION_EXPIRED", "UPLOAD_SESSION_INVALIDATED", "UPLOAD_SESSION_NOT_FOUND"].includes(error.code);
+    && [
+      "UPLOAD_SESSION_EXPIRED",
+      "UPLOAD_SESSION_INVALIDATED",
+      "UPLOAD_SESSION_NOT_FOUND",
+      "UPLOAD_SESSION_STATE",
+      "IDEMPOTENCY_KEY_REUSED"
+    ].includes(error.code);
 }
 
 function uploadFailure(error: unknown): { message: string; description: string } {
@@ -45,8 +51,7 @@ function uploadFailure(error: unknown): { message: string; description: string }
     FOLDER_SIZE_LIMIT: "可采集源码总大小超过 2 GiB",
     MANIFEST_INCOMPLETE: "文件清单不完整，请重新选择项目文件夹",
     MANIFEST_DIGEST_MISMATCH: "文件夹内容已变化，请重新选择后再试",
-    PROJECT_ACCESS_DENIED: "你已没有该项目的上传权限",
-    UPLOAD_SESSION_STATE: "当前上传状态无法继续，请重新选择项目文件夹"
+    PROJECT_ACCESS_DENIED: "你已没有该项目的上传权限"
   };
   return {
     message: knownMessages[error.code] ?? "上传未完成，请检查项目文件夹后重试",

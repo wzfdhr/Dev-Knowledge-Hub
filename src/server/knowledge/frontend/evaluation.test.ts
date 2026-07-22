@@ -15,10 +15,14 @@ import {
   evaluateFrontendKnowledgeBySplit,
   evaluateFrontendTrialCapabilities,
   observeFrontendEvaluationCase,
+  assertFrontendExperienceQualityGate,
+  evaluateFrontendExperienceBySplit,
+  parseFrontendExperienceEvaluationDatasets,
   parseFrontendEvaluationDatasets,
   type FrontendEvaluationObservation,
   type FrontendEvaluationInput,
   validateFrontendEvaluationSuite,
+  validateFrontendExperienceEvaluationSuite,
   validateFrontendCompatibilityFixtures,
   validateFrontendFixtureReferences,
   validateFrontendPerformanceBaseline,
@@ -58,6 +62,84 @@ function dataset(items: unknown[]): string {
 }
 
 describe("frontend knowledge evaluation protocol", () => {
+  test("validates and gates the frontend experience decision protocol", () => {
+    const positive = {
+      id: "experience-positive",
+      split: "train",
+      capability: "react-routing",
+      locale: "zh-CN",
+      query: "为路由页面规划懒加载",
+      currentProjectId: "project-current",
+      currentProjectProfile: { framework: "react", router: "react-router" },
+      visibleReleaseIds: ["release-prior"],
+      visibleEvidenceIds: ["evidence-prior"],
+      invisibleEvidenceIds: [],
+      candidates: [{
+        id: "experience-prior",
+        sourceProjectId: "project-prior",
+        releaseId: "release-prior",
+        evidenceId: "evidence-prior",
+        sourceEligibility: "git",
+        lifecycle: "recommended",
+        evidenceState: "active",
+        required: [{ key: "framework", value: "react" }]
+      }],
+      expectedDecision: "recommend",
+      expectedRecommendationIds: ["experience-prior"],
+      expectedRejectionReasons: [],
+      expectedUnknownKeys: [],
+      abstentionRequired: false
+    };
+    const unknown = {
+      ...positive,
+      id: "experience-unknown",
+      split: "held-out",
+      currentProjectProfile: { framework: "react" },
+      candidates: [{ ...positive.candidates[0], id: "experience-router", required: [{ key: "router", value: "react-router" }] }],
+      expectedDecision: "abstain",
+      expectedRecommendationIds: [],
+      expectedRejectionReasons: ["REQUIRED_CONDITION_UNKNOWN"],
+      expectedUnknownKeys: ["router"],
+      abstentionRequired: true
+    };
+    const cases = parseFrontendExperienceEvaluationDatasets([
+      { name: "train", split: "train", content: dataset([positive]) },
+      { name: "held-out", split: "held-out", content: dataset([unknown]) }
+    ]);
+    const reports = evaluateFrontendExperienceBySplit(cases);
+
+    expect(reports.train.metrics.recommendationApplicabilityPrecision).toBe(1);
+    expect(reports.heldOut.metrics.requiredUnknownAbstentionRecall).toBe(1);
+    expect(reports.all.metrics.responsePartitionValidity).toBe(1);
+    expect(() => assertFrontendExperienceQualityGate(reports.heldOut)).not.toThrow();
+    expect(() => parseFrontendExperienceEvaluationDatasets([
+      { name: "invalid", split: "train", content: dataset([{ ...positive, expectedDecision: undefined }]) }
+    ])).toThrow("expectedDecision");
+  });
+
+  test("ships five isolated frontend experience capability datasets", async () => {
+    const capabilities = ["react-routing", "state-api", "forms-auth", "charts", "impact-testing"];
+    const inputs = await Promise.all(capabilities.flatMap((capability) => (["train", "held-out"] as const).map(async (split) => {
+      const filename = `evaluation/frontend/${split}/experience-${capability}.jsonl`;
+      return { name: filename, split, content: await readFile(path.join(root, filename), "utf8") };
+    })));
+    const cases = parseFrontendExperienceEvaluationDatasets(inputs);
+    const suite = validateFrontendExperienceEvaluationSuite(cases);
+    const reports = evaluateFrontendExperienceBySplit(cases);
+
+    expect(suite.total).toBe(100);
+    expect(suite.capabilities).toHaveLength(5);
+    expect(suite.capabilities.every((item) => item.train >= 12 && item.heldOut >= 8)).toBe(true);
+    expect(suite.chineseRate).toBeGreaterThanOrEqual(0.4);
+    expect(suite.negativeRate).toBeGreaterThanOrEqual(0.25);
+    expect(suite.negativeKinds).toEqual(expect.arrayContaining([
+      "hard-conflict", "required-unknown", "no-result", "source-ineligible", "unauthorized", "revoked"
+    ]));
+    expect(() => assertFrontendExperienceQualityGate(reports.train)).not.toThrow();
+    expect(() => assertFrontendExperienceQualityGate(reports.heldOut)).not.toThrow();
+    expect(() => assertFrontendExperienceQualityGate(reports.all)).not.toThrow();
+  });
+
   test("rejects empty, duplicate, uncited, ambiguous, and unpublished positive cases", () => {
     expect(() => parseFrontendEvaluationDatasets([])).toThrow("must not be empty");
     expect(() => parseFrontendEvaluationDatasets([

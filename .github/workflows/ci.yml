@@ -70,6 +70,8 @@ jobs:
         run: node /tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope verify
       - name: Validate frontend evaluation protocol (baseline; no analyzer quality gate)
         run: npm run evaluate:frontend
+      - name: Enforce frontend experience decision quality gate
+        run: npm run evaluate:frontend-experience
       - name: Upload Playwright artifacts
         if: failure()
         uses: actions/upload-artifact@v4
@@ -92,6 +94,13 @@ jobs:
         with:
           name: frontend-knowledge-evaluation
           path: artifacts/frontend-knowledge-evaluation.json
+          if-no-files-found: error
+      - name: Upload frontend experience evaluation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-experience-evaluation
+          path: artifacts/frontend-experience-evaluation.json
           if-no-files-found: error
 
   container-smoke:

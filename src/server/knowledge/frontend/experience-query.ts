@@ -220,6 +220,7 @@ export async function queryExperienceProjection(input: ExperienceQueryInput): Pr
     const decision = decisions.find((item) => item.decision === requiredDecision);
     let evidence = candidate.evidence.filter((item) =>
       item.sourceEligibility === "git" || item.sourceEligibility === "git_linked"
+        || item.sourceEligibility === "admin_attested"
     );
     if (evidence.length === 0) reasons.push("SOURCE_INELIGIBLE");
     if (!["recommended", "standard"].includes(effectiveState) || !decision) {

@@ -34,15 +34,41 @@ jobs:
           --health-retries 12
     env:
       TEST_DATABASE_URL: postgres://devkh:devkh-ci-password@127.0.0.1:5432/devkh_test
+      DEVKH_FK17_BOOTSTRAP_COMMIT: ${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22.13.0
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: npm run release:verify -- --scope verify
+      - name: Run bootstrap-aware FK17 verifier
+        env:
+          CURRENT_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$DEVKH_FK17_BOOTSTRAP_COMMIT" ]]; then
+            npm run release:verify -- --scope verify
+            exit 0
+          fi
+          [[ "$DEVKH_FK17_BOOTSTRAP_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+          git cat-file -e "$DEVKH_FK17_BOOTSTRAP_COMMIT^{commit}"
+          git merge-base --is-ancestor "$DEVKH_FK17_BOOTSTRAP_COMMIT" HEAD
+          test "$(git rev-parse "$DEVKH_FK17_BOOTSTRAP_COMMIT:.github/workflows/ci.yml")" = \
+            "$(git rev-parse "$CURRENT_WORKFLOW_SHA:.github/workflows/ci.yml")"
+          rm -rf /tmp/devkh-fk17-trusted
+          install -d -m 0700 /tmp/devkh-fk17-trusted
+          git archive "$DEVKH_FK17_BOOTSTRAP_COMMIT" | tar -x -C /tmp/devkh-fk17-trusted
+          npm ci --ignore-scripts --prefix /tmp/devkh-fk17-trusted
+          DEVKH_RELEASE_CANDIDATE_ROOT="$GITHUB_WORKSPACE" \
+          DEVKH_FK17_TRUSTED_BOOTSTRAP_COMMIT="$DEVKH_FK17_BOOTSTRAP_COMMIT" \
+          DEVKH_FK17_CURRENT_WORKFLOW_SHA="$CURRENT_WORKFLOW_SHA" \
+          DEVKH_FK17_CURRENT_WORKFLOW_PATH=.github/workflows/ci.yml \
+          node /tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope verify
       - name: Validate frontend evaluation protocol (baseline; no analyzer quality gate)
         run: npm run evaluate:frontend
       - name: Upload Playwright artifacts
@@ -71,6 +97,9 @@ jobs:
 
   container-smoke:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    permissions:
+      actions: read
+      contents: read
     runs-on: ubuntu-latest
     env:
       POSTGRES_PASSWORD: devkh-container-password
@@ -84,14 +113,46 @@ jobs:
       DEVKH_CONTAINER_SMOKE: "true"
       RECOVERY_EVIDENCE_DIR: /tmp/devkh-recovery-evidence
       RECOVERY_EVIDENCE_DEFER_FINALIZATION: "true"
+      GITHUB_TOKEN: ${{ github.token }}
+      DEVKH_FK17_BOOTSTRAP_COMMIT: ${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22.13.0
       - name: Install recovery tooling
         run: sudo apt-get update && sudo apt-get install -y restic
-      - run: npm run release:verify -- --scope container
+      - name: Run bootstrap-aware FK17 container verifier
+        env:
+          CURRENT_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$DEVKH_FK17_BOOTSTRAP_COMMIT" ]]; then
+            npm run release:verify -- --scope container
+            exit 0
+          fi
+          [[ "$DEVKH_FK17_BOOTSTRAP_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+          git cat-file -e "$DEVKH_FK17_BOOTSTRAP_COMMIT^{commit}"
+          git merge-base --is-ancestor "$DEVKH_FK17_BOOTSTRAP_COMMIT" HEAD
+          test "$(git rev-parse "$DEVKH_FK17_BOOTSTRAP_COMMIT:.github/workflows/ci.yml")" = \
+            "$(git rev-parse "$CURRENT_WORKFLOW_SHA:.github/workflows/ci.yml")"
+          rm -rf /tmp/devkh-fk17-trusted
+          install -d -m 0700 /tmp/devkh-fk17-trusted
+          git archive "$DEVKH_FK17_BOOTSTRAP_COMMIT" | tar -x -C /tmp/devkh-fk17-trusted
+          npm ci --ignore-scripts --prefix /tmp/devkh-fk17-trusted
+          if git cat-file -e HEAD:drizzle/0035_source_blobs_contract.sql; then
+            release_scope=runtime-container
+          else
+            release_scope=container
+          fi
+          DEVKH_RELEASE_CANDIDATE_ROOT="$GITHUB_WORKSPACE" \
+          DEVKH_FK17_TRUSTED_BOOTSTRAP_COMMIT="$DEVKH_FK17_BOOTSTRAP_COMMIT" \
+          DEVKH_FK17_CURRENT_WORKFLOW_SHA="$CURRENT_WORKFLOW_SHA" \
+          DEVKH_FK17_CURRENT_WORKFLOW_PATH=.github/workflows/ci.yml \
+          node /tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope "$release_scope"
       - name: Upload recovery evidence
         if: always()
         uses: actions/upload-artifact@v4

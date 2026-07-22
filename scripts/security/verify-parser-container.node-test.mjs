@@ -28,6 +28,14 @@ test("accepts the isolated parser runtime", () => {
   assert.doesNotThrow(() => verifyParserContainer(validInspect()));
 });
 
+test("permits Docker Desktop proxy variables only when Compose clears their values", () => {
+  const inspect = validInspect();
+  inspect.Config.Env.push("HTTP_PROXY=", "HTTPS_PROXY=", "NO_PROXY=", "http_proxy=", "https_proxy=", "no_proxy=");
+  assert.doesNotThrow(() => verifyParserContainer(inspect));
+  inspect.Config.Env[inspect.Config.Env.length - 1] = "no_proxy=host.docker.internal";
+  assert.throws(() => verifyParserContainer(inspect), /parser environment allowlist/);
+});
+
 test("rejects network, credentials, and project mounts", () => {
   const inspect = validInspect();
   inspect.HostConfig.NetworkMode = "default";

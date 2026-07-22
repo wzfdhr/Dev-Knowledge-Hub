@@ -14,6 +14,7 @@ evidence_sidecar_path=""
 network_name=""
 database_container=""
 application_container=""
+application_image=""
 cleanup_failed=0
 
 validate_archive_members() {
@@ -66,9 +67,17 @@ finish() {
       cleanup_failed=1
     fi
 
-    if (( ! cleanup_failed )) && [[ -n "$target" ]] && ! rm -rf "$target"; then
-      printf 'recovery cleanup failed for restored directory: %s\n' "$target" >&2
-      cleanup_failed=1
+    if (( ! cleanup_failed )) && [[ -n "$target" ]]; then
+      if [[ -n "$application_image" ]] && ! docker run --rm --network none --user root \
+        --mount "type=bind,src=$target,dst=/restore-root" \
+        "$application_image" rm -rf /restore-root; then
+        printf 'recovery cleanup failed inside restored directory: %s\n' "$target" >&2
+        cleanup_failed=1
+      fi
+      if (( ! cleanup_failed )) && ! rm -rf "$target"; then
+        printf 'recovery cleanup failed for restored directory: %s\n' "$target" >&2
+        cleanup_failed=1
+      fi
     fi
 
     if (( cleanup_failed )); then

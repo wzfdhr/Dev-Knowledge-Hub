@@ -1235,7 +1235,7 @@ describe("repository replacement", () => {
 
     renderPage(<ProjectImportsPage api={api} projectId="project" />);
 
-    await user.click(await screen.findByText("Git HTTPS", { selector: ".ant-segmented-item-label" }));
+    await user.click((await screen.findByRole("radio", { name: "Git HTTPS" })).closest("label")!);
     expect(connectRepository).not.toHaveBeenCalled();
     await user.type(screen.getByLabelText("HTTPS URL"), "https://github.com/acme/web.git");
     await user.click(screen.getByRole("button", { name: "连接 Git 仓库" }));
@@ -1269,7 +1269,7 @@ describe("repository replacement", () => {
     renderPage(<ProjectImportsPage api={api} projectId="project" />);
 
     expect(await screen.findByLabelText("Git HTTPS")).toBeChecked();
-    await user.click(await screen.findByText("服务器路径", { selector: ".ant-segmented-item-label" }));
+    await user.click((await screen.findByRole("radio", { name: "服务器路径" })).closest("label")!);
     await user.type(screen.getByLabelText("服务器绝对路径"), "/srv/projects/current");
     await user.click(screen.getByRole("button", { name: "连接服务器目录" }));
     await waitFor(() => expect(replaceRepository).toHaveBeenCalledWith({

@@ -1,10 +1,12 @@
 import type {
-  ApiErrorShape, Build, PipelineStageRun, Feedback, McpConnection, McpToken, WorkspaceMcpToken, KnowledgePageRecord, KnowledgeKernelComparison,
-  ArchivedRepository, KnowledgeMetadata, ProjectKnowledgeQuality, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotChangeSummary, SnapshotSummary, SourceExcerpt,
-  UploadSnapshotSummary, ImportReport, TeamMember, ProjectMember, Project, ProjectSummary, ProjectActivity, CodexConnectionPack,
-  Remediation, RemediationEvent, RemediationState,
-  WorkspaceOverview, WorkspaceSearchResult, MfaStatus, ProjectGraphFormat, ProjectGraphResponse,
-  FrontendPreviewResponse, GraphSourceRef, ImportProgress
+  ApiErrorShape, ArchivedRepository, Build, CodexConnectionPack, ExperienceReviewItemDto,
+  Feedback, FrontendPreviewResponse, FrontendSolutionContext, GraphSourceRef, ImportProgress,
+  ImportReport, KnowledgeKernelComparison, KnowledgeMetadata, KnowledgePageRecord, McpConnection,
+  McpToken, MfaStatus, PipelineStageRun, Project, ProjectActivity, ProjectGraphFormat,
+  ProjectGraphResponse, ProjectKnowledgeQuality, ProjectMember, ProjectSummary, Release, Remediation,
+  RemediationEvent, RemediationState, Repository, RepositoryStatus, SearchResult, Session,
+  SnapshotChangeSummary, SnapshotSummary, SourceExcerpt, TeamMember, UploadSnapshotSummary,
+  WorkspaceExperienceLibraryResponse, WorkspaceMcpToken, WorkspaceOverview, WorkspaceSearchResult
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
@@ -176,6 +178,19 @@ export interface ApiClient {
   rotateWorkspaceMcpToken(id: string): Promise<{
     previous: WorkspaceMcpToken; replacement: WorkspaceMcpToken; token: string;
   }>;
+  listWorkspaceExperiences(input: {
+    currentProjectId?: string;
+    query?: string;
+  }): Promise<WorkspaceExperienceLibraryResponse>;
+  listExperienceReviewItems(): Promise<{ reviewItems: ExperienceReviewItemDto[] }>;
+  previewFrontendSolution(
+    projectId: string,
+    input: { task: string; changedPaths?: string[] }
+  ): Promise<{ context: FrontendSolutionContext }>;
+  reviewExperience(
+    experienceId: string,
+    input: { action: string; reason: string; basisEvidenceIds: string[] }
+  ): Promise<unknown>;
   getModelConfig(): Promise<{ config: ModelConfig | null }>;
   updateModelConfig(input: { provider: ModelProvider; model: string; apiKey: string }): Promise<{ config: ModelConfig }>;
   getMfaStatus(): Promise<MfaStatus>;
@@ -495,6 +510,21 @@ export const api: ApiClient = {
   }),
   revokeWorkspaceMcpToken: (id) => request(`/api/workspace/mcp/tokens/${encodeURIComponent(id)}/revoke`, { method: "POST" }),
   rotateWorkspaceMcpToken: (id) => request(`/api/workspace/mcp/tokens/${encodeURIComponent(id)}/rotate`, { method: "POST" }),
+  listWorkspaceExperiences: (input) => {
+    const params = new URLSearchParams();
+    if (input.currentProjectId) params.set("currentProjectId", input.currentProjectId);
+    if (input.query) params.set("query", input.query);
+    return request(`/api/knowledge/experiences${params.size ? `?${params}` : ""}`);
+  },
+  listExperienceReviewItems: () => request("/api/knowledge/experience-review-items"),
+  previewFrontendSolution: (projectId, input) => request(
+    `/api/projects/${encodeURIComponent(projectId)}/frontend-solution-context`,
+    { method: "POST", body: json(input) }
+  ),
+  reviewExperience: (experienceId, input) => request(
+    `/api/knowledge/experiences/${encodeURIComponent(experienceId)}/reviews`,
+    { method: "POST", body: json({ ...input, decisionId: null, supersededById: null }) }
+  ),
   getModelConfig: () => request("/api/settings/model"),
   updateModelConfig: (input) => request("/api/settings/model", { method: "PUT", body: json(input) }),
   getMfaStatus: () => request("/api/settings/mfa"),

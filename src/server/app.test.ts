@@ -318,6 +318,61 @@ describe("buildServer", () => {
     ]));
     await app.close();
   });
+
+  test("returns typed experience and solution contexts when the current project has no release", async () => {
+    const store = new MemoryAppStore();
+    const password = "correct horse battery staple";
+    const setup = await store.createInitialSetup("admin@example.com", await hashPassword(password));
+    const [project] = await store.listProjects(setup!.workspace.id);
+    const app = buildServer({
+      store,
+      masterKey: Buffer.alloc(32, 1).toString("base64"),
+      sessionSecret: "experience-ui-route-test-secret",
+      dataDir: "/tmp/devkh-experience-ui-route-test",
+      nodeEnv: "test"
+    });
+    const login = await app.inject({
+      method: "POST", url: "/api/session", payload: { email: "admin@example.com", password }
+    });
+    const cookie = authenticatedCookie(login);
+
+    const library = await app.inject({
+      method: "GET",
+      url: `/api/knowledge/experiences?currentProjectId=${project!.id}`,
+      headers: { cookie }
+    });
+    expect(library.statusCode).toBe(200);
+    expect(library.json()).toMatchObject({
+      state: "no_release", currentProject: { projectId: project!.id, status: "no_release" },
+      experiences: [], rejectedExperiences: []
+    });
+
+    const preview = await app.inject({
+      method: "POST",
+      url: `/api/projects/${project!.id}/frontend-solution-context`,
+      headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { task: "为图表增加下钻", changedPaths: ["src/chart.tsx"] }
+    });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json()).toMatchObject({
+      context: {
+        schemaVersion: 1,
+        currentProject: { projectId: project!.id, status: "no_release" },
+        applicableExperiences: [],
+        changeImpact: [{ path: "src/chart.tsx" }]
+      }
+    });
+
+    const invalidPath = await app.inject({
+      method: "POST",
+      url: `/api/projects/${project!.id}/frontend-solution-context`,
+      headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { task: "unsafe path", changedPaths: ["../outside.ts"] }
+    });
+    expect(invalidPath.statusCode).toBe(400);
+    expect(invalidPath.json()).toMatchObject({ error: { code: "INVALID_INPUT" } });
+    await app.close();
+  });
 });
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";

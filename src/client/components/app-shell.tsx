@@ -19,7 +19,9 @@ const roleLabels: Record<WorkspaceRole, string> = { admin: "管理员", member: 
 export function AppShell({ email, role, onLogout }: { email: string; role: WorkspaceRole; onLogout: () => void }) {
   const [open, setOpen] = useState(false);
   const location = useLocation();
-  const selectedKey = location.pathname.startsWith("/projects/") ? "/projects" : location.pathname;
+  const selectedKey = location.pathname.startsWith("/projects/")
+    ? "/projects"
+    : location.pathname.startsWith("/knowledge") ? "/knowledge" : location.pathname;
   const visibleNavigation = role === "admin"
     ? navigation
     : navigation.filter(({ to }) => !["/members", "/settings"].includes(to));

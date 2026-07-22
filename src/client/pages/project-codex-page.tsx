@@ -7,6 +7,7 @@ import { useParams } from "react-router-dom";
 import { errorMessage, LIST_PAGE_SIZE, type ApiClient } from "../api/client";
 import type { McpToken } from "../api/types";
 import { Empty, ErrorState, Loading } from "../components/ui";
+import { ExperienceSolutionContext } from "../components/experience-solution-context";
 
 function CopyButton({ value, label }: { value: string; label: string }) {
   const [copied, setCopied] = useState(false);
@@ -47,6 +48,8 @@ export function ProjectCodexPage({ api }: { api: ApiClient }) {
     enabled: Boolean(projectId)
   });
   const [tokenName, setTokenName] = useState("");
+  const [task, setTask] = useState("");
+  const [changedPaths, setChangedPaths] = useState("");
   const [disclosure, setDisclosure] = useState<{ token: string; title: string } | null>(null);
   const create = useMutation({
     mutationFn: () => api.createMcpToken(tokenName, projectId),
@@ -68,6 +71,12 @@ export function ProjectCodexPage({ api }: { api: ApiClient }) {
     }
   });
   const listedTokens: McpToken[] = tokens.data?.pages.flatMap((page) => page.tokens) ?? [];
+  const preview = useMutation({
+    mutationFn: () => api.previewFrontendSolution(projectId, {
+      task,
+      changedPaths: changedPaths.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean)
+    })
+  });
 
   if (connection.isLoading) return <div className="page"><Loading label="正在生成 Codex 接入配置" /></div>;
   if (connection.error) return <div className="page"><ErrorState message={errorMessage(connection.error)} retry={() => void connection.refetch()} /></div>;
@@ -89,6 +98,16 @@ export function ProjectCodexPage({ api }: { api: ApiClient }) {
       <div><ShieldCheck aria-hidden="true" /><span><small>能力边界</small><strong>只读结构化上下文，不调用模型</strong></span></div>
       <CopyButton value={workspaceConnection.data.endpoint} label="复制 Workspace 端点" />
     </section>}
+    <section className="codex-solution-preview" aria-labelledby="solution-preview-title">
+      <div className="section-heading"><div><p className="eyebrow">STRUCTURED CONTEXT</p><h2 id="solution-preview-title">任务上下文预览</h2><p>仅解析当前事实与适用经验，不调用模型、不修改代码。</p></div></div>
+      <form className="codex-solution-form" onSubmit={(event) => { event.preventDefault(); preview.mutate(); }}>
+        <label>任务<textarea aria-label="任务描述" required maxLength={2000} value={task} onChange={(event) => setTask(event.target.value)} placeholder="例如：为销售图表增加下钻路由" /></label>
+        <label>Changed paths（每行一个）<textarea aria-label="Changed paths" value={changedPaths} onChange={(event) => setChangedPaths(event.target.value)} placeholder="src/pages/analytics.tsx" /></label>
+        <Button type="primary" htmlType="submit" loading={preview.isPending} disabled={!task.trim()}>生成上下文预览</Button>
+      </form>
+      {preview.error && <ErrorState message={errorMessage(preview.error)} />}
+      {preview.data && <ExperienceSolutionContext context={preview.data.context} />}
+    </section>
     <section className="codex-tokens" aria-labelledby="project-token-title">
       <div className="section-heading"><div><p className="eyebrow">访问控制</p><h2 id="project-token-title">项目 Token</h2><p>每个 Token 只能查询当前项目，固定 90 天到期，明文仅在创建时展示一次。</p></div></div>
       <form className="codex-token-form" onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>

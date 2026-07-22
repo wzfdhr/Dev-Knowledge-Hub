@@ -20,6 +20,7 @@ import { ProjectVersionsPage } from "./pages/project-versions-page";
 import { ProjectGraphPage } from "./pages/project-graph-page";
 import { ProjectFrontendMapPage } from "./pages/project-frontend-map-page";
 import { SystemSettingsPage } from "./pages/system-settings-page";
+import { WorkspaceExperiencesPage } from "./pages/workspace-experiences-page";
 
 function LegacyProjectRedirect({ section }: { section: string }) {
   const projectId = localStorage.getItem("devkh:active-project-id");
@@ -68,6 +69,7 @@ export function App({ api = defaultApi }: { api?: ApiClient }) {
     </Route>
     <Route path="/overview" element={<LegacyProjectRedirect section="overview" />} />
     <Route path="/knowledge" element={<KnowledgePage api={api} />} />
+    <Route path="/knowledge/experiences" element={<WorkspaceExperiencesPage api={api} role={workspaceRole} />} />
     <Route path="/feedback" element={<FeedbackPage api={api} />} />
     <Route path="/members" element={workspaceRole === "admin" ? <MembersPage api={api} /> : <Navigate to="/projects" replace />} />
     <Route path="/settings" element={workspaceRole === "admin" ? <SystemSettingsPage api={api} /> : <Navigate to="/projects" replace />} />

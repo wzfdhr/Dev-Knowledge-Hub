@@ -106,6 +106,7 @@ import {
 import { MCP_TOKEN_SCOPES, WORKSPACE_MCP_TOKEN_SCOPES } from "./persistence/store.js";
 import { createRegisteredMcpServer, MCP_TOOL_NAMES } from "./mcp/tools.js";
 import {
+  buildSolutionContext,
   createRegisteredWorkspaceMcpServer,
   WORKSPACE_MCP_TOOL_NAMES
 } from "./mcp/workspace-tools.js";
@@ -902,6 +903,82 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return {
       reviewItems: await options.store.listExperienceReviewItems(actor.workspaceId, query.data.experienceId)
     };
+  });
+
+  server.get("/api/knowledge/experiences", { preHandler: requireAdmin }, async (request, reply) => {
+    const query = z.object({
+      currentProjectId: z.uuid().optional(),
+      query: z.string().trim().max(500).optional().default("")
+    }).safeParse(request.query);
+    if (!query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid experience query");
+    const actor = (request as AuthenticatedRequest).sessionAdmin;
+    if (!query.data.currentProjectId) {
+      return {
+        state: "no_current_project", currentProject: null,
+        experiences: [], rejectedExperiences: []
+      };
+    }
+    await requireProjectRole("reader", query.data.currentProjectId, request, reply);
+    if (reply.sent) return;
+    try {
+      const context = await buildSolutionContext({
+        context: {
+          store: options.store, workspaceId: actor.workspaceId, userId: actor.id,
+          scopes: [...WORKSPACE_MCP_TOKEN_SCOPES], artifactReader: options.qualityArtifactReader
+        },
+        currentProjectId: query.data.currentProjectId,
+        task: query.data.query || "frontend engineering experience",
+        changedPaths: []
+      });
+      const state = context.currentProject.status !== "ready"
+        ? context.currentProject.status
+        : context.applicableExperiences.length === 0 ? "no_applicable_experience" : "ready";
+      return {
+        state, currentProject: context.currentProject,
+        experiences: context.applicableExperiences,
+        rejectedExperiences: context.rejectedExperiences
+      };
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "PROJECT_ACCESS_DENIED") {
+        return sendError(reply, 403, "PROJECT_ACCESS_DENIED", "Current project is not accessible");
+      }
+      return sendError(reply, 500, "EXPERIENCE_QUERY_FAILED", "Experience query failed");
+    }
+  });
+
+  server.post("/api/projects/:projectId/frontend-solution-context", {
+    preHandler: requireAdmin
+  }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    const body = z.object({
+      task: z.string().trim().min(1).max(2_000),
+      changedPaths: z.array(z.string().trim().min(1).max(500).refine((value) =>
+        !value.startsWith("/") && !value.includes("\\")
+        && !value.split("/").some((segment) => ["", ".", ".."].includes(segment))
+      )).max(50).optional().default([])
+    }).strict().safeParse(request.body);
+    if (!params.success || !body.success) {
+      return sendError(reply, 400, "INVALID_INPUT", "Invalid frontend solution input");
+    }
+    await requireProjectRole("reader", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const actor = (request as AuthenticatedRequest).sessionAdmin;
+    try {
+      const context = await buildSolutionContext({
+        context: {
+          store: options.store, workspaceId: actor.workspaceId, userId: actor.id,
+          scopes: [...WORKSPACE_MCP_TOKEN_SCOPES], artifactReader: options.qualityArtifactReader
+        },
+        currentProjectId: params.data.projectId,
+        task: body.data.task,
+        changedPaths: body.data.changedPaths
+      });
+      return { context };
+    } catch (error) {
+      const code = error instanceof Error && "code" in error ? String(error.code) : "INTERNAL_ERROR";
+      const status = code === "PROJECT_ACCESS_DENIED" ? 403 : 500;
+      return sendError(reply, status, code, error instanceof Error ? error.message : "Solution context failed");
+    }
   });
 
   server.get("/api/setup/status", async () => ({

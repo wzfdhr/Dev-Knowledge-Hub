@@ -431,6 +431,32 @@ export interface WorkspaceMcpToken {
   revokedAt: string | null;
 }
 export type { FrontendSolutionContext } from "../../shared/frontend-solution-context";
+export interface WorkspaceExperience {
+  id: string;
+  title: string;
+  capability: string;
+  state: "recommended" | "standard";
+  observedFacts: string[];
+  evidenceCount: number;
+  trustScore: number;
+  citations: GraphSourceRef[];
+}
+export interface WorkspaceExperienceLibraryResponse {
+  state: "no_current_project" | "no_release" | "stale" | "unsupported" | "no_applicable_experience" | "evidence_revoked" | "ready";
+  currentProject: { projectId: string; status: string } | null;
+  experiences: WorkspaceExperience[];
+  rejectedExperiences: Array<{ experienceId: string; reasons: string[] }>;
+}
+export interface ExperienceReviewItemDto {
+  id: string;
+  patternGroupId: string;
+  evidenceId?: string | null;
+  priority: "high" | "normal";
+  kind: "trusted_negative_outcome" | "user_feedback";
+  taskSummary: string;
+  feedbackEvent: string | null;
+  createdAt: string;
+}
 export interface McpConnection {
   endpoint: string;
   transport: string;

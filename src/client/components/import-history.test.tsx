@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, test, vi } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 
 import { ImportHistory } from "./import-history";
+
+afterEach(cleanup);
 
 test("renders a semantic recent import table", () => {
   render(<ImportHistory loading={false} onRetry={vi.fn()} reports={[{
@@ -32,4 +34,23 @@ test("isolates a history query failure behind its own retry", async () => {
 test("renders a compact empty state", () => {
   render(<ImportHistory loading={false} reports={[]} onRetry={vi.fn()} />);
   expect(screen.getByText("暂无导入记录")).toBeVisible();
+});
+
+test("renders an isolated loading state", () => {
+  render(<ImportHistory loading onRetry={vi.fn()} reports={[]} />);
+  expect(screen.getByText("正在加载导入记录...")).toBeVisible();
+  expect(screen.queryByRole("table")).not.toBeInTheDocument();
+});
+
+test("maps every source and status and shows a failed failure code", () => {
+  render(<ImportHistory loading={false} onRetry={vi.fn()} reports={[
+    { id: "upload", projectId: "p1", repositoryId: "r1", sourceKind: "upload", status: "succeeded", startedAt: "2026-07-22T05:48:00.000Z", finishedAt: null, collectedFileCount: 1, collectedTextBytes: 1, ignored: { total: 0, reasons: {} }, snapshotId: "s1", failureCode: null },
+    { id: "git", projectId: "p1", repositoryId: "r2", sourceKind: "git", status: "running", startedAt: "2026-07-22T05:48:00.000Z", finishedAt: null, collectedFileCount: 2, collectedTextBytes: 2, ignored: { total: 0, reasons: {} }, snapshotId: null, failureCode: null },
+    { id: "local", projectId: "p1", repositoryId: "r3", sourceKind: "local", status: "failed", startedAt: "2026-07-22T05:48:00.000Z", finishedAt: null, collectedFileCount: 3, collectedTextBytes: 3, ignored: { total: 0, reasons: {} }, snapshotId: null, failureCode: "VALIDATION_FAILED" },
+    { id: "cancelled", projectId: "p1", repositoryId: "r4", sourceKind: "local", status: "cancelled", startedAt: "2026-07-22T05:48:00.000Z", finishedAt: null, collectedFileCount: 4, collectedTextBytes: 4, ignored: { total: 0, reasons: {} }, snapshotId: null, failureCode: null }
+  ]} />);
+  ["项目文件夹", "Git HTTPS", "成功", "进行中", "失败", "已取消", "VALIDATION_FAILED"].forEach((label) => {
+    expect(screen.getByText(label)).toBeVisible();
+  });
+  expect(screen.getAllByText("服务器路径")).toHaveLength(2);
 });

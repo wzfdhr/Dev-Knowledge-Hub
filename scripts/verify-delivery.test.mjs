@@ -5,6 +5,21 @@ import { describe, expect, test } from "vitest";
 import { parse } from "yaml";
 
 describe("delivery database isolation", () => {
+  test("limits automatic CI fan-out to release-relevant events", async () => {
+    const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
+
+    expect(ci.on.push.branches).toEqual(["main"]);
+    expect(ci.on.pull_request.types).toEqual(["opened", "reopened", "ready_for_review"]);
+    expect(ci.on).toHaveProperty("workflow_dispatch");
+    expect(ci.concurrency).toEqual({
+      group: "ci-${{ github.event.pull_request.number || github.ref }}",
+      "cancel-in-progress": true
+    });
+    for (const job of [ci.jobs.verify, ci.jobs["container-smoke"]]) {
+      expect(job.if).toContain("github.event.pull_request.draft == false");
+    }
+  });
+
   test("keeps Compose and CI tests out of the persistent application database", async () => {
     const compose = parse(await readFile("docker-compose.yml", "utf8"));
     const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
@@ -96,7 +111,7 @@ describe("delivery database isolation", () => {
     expect(deliveryCheck).toContain("node:22\\.13-bookworm-slim");
     expect(String(ci.jobs.verify.steps.find((step) => step.uses === "actions/setup-node@v4")
       ?.with?.["node-version"])).toBe("22.13.0");
-    expect(ci.on.push.branches).toEqual(expect.arrayContaining(["main", "codex/mvp"]));
+    expect(ci.on.push.branches).toEqual(["main"]);
     expect(ci.jobs["container-smoke"].env.DEVKH_DOMAIN).toBe("hub.example.test");
     expect(ci.jobs["container-smoke"].env.ACME_EMAIL).toBe("ci@example.test");
     expect(ci.jobs["container-smoke"].env.PUBLIC_BASE_URL).toBe("https://hub.example.test");

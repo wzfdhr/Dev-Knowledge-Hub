@@ -190,6 +190,12 @@ export const sourceSnapshots = pgTable("source_snapshots", {
   remoteUrl: text("remote_url"),
   commitTimestamp: timestamp("commit_timestamp", { withTimezone: true }).notNull(),
   storagePath: text("storage_path").notNull(),
+  sourceKind: text("source_kind").$type<"git" | "upload">().notNull(),
+  gitCommitSha: text("git_commit_sha"),
+  contentVersion: text("content_version").notNull(),
+  attestation: text("attestation").$type<"unverified" | "admin_attested" | "git_linked">(),
+  linkedGitCommitSha: text("linked_git_commit_sha"),
+  remoteIdentityDigest: text("remote_identity_digest"),
   pendingUploadSessionId: uuid("pending_upload_session_id"),
   pendingImportReportId: uuid("pending_import_report_id"),
   ...timestamps
@@ -205,6 +211,26 @@ export const sourceSnapshots = pgTable("source_snapshots", {
   uniqueIndex("source_snapshots_pending_import_report_unique_idx")
     .on(table.pendingImportReportId)
     .where(sql`${table.pendingImportReportId} IS NOT NULL`),
+  check("source_snapshots_provenance_shape_check", sql`
+    (${table.sourceKind} = 'git'
+      AND ${table.gitCommitSha} IS NOT NULL
+      AND ${table.attestation} IS NULL
+      AND ${table.linkedGitCommitSha} IS NULL
+      AND ${table.remoteIdentityDigest} IS NOT NULL)
+    OR
+    (${table.sourceKind} = 'upload'
+      AND ${table.gitCommitSha} IS NULL
+      AND ${table.attestation} IN ('unverified', 'admin_attested', 'git_linked')
+      AND (
+        (${table.attestation} = 'git_linked'
+          AND ${table.linkedGitCommitSha} IS NOT NULL
+          AND ${table.remoteIdentityDigest} IS NOT NULL)
+        OR
+        (${table.attestation} <> 'git_linked'
+          AND ${table.linkedGitCommitSha} IS NULL
+          AND ${table.remoteIdentityDigest} IS NULL)
+      ))
+  `),
   foreignKey({
     columns: [table.repositoryId, table.workspaceId],
     foreignColumns: [repositories.id, repositories.workspaceId],

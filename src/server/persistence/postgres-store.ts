@@ -15,6 +15,7 @@ import {
   normalizePagination
 } from "./store.js";
 import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledge/trust.js";
+import { normalizeSnapshotProvenance } from "../source-provenance.js";
 
 import type {
   AdminRecord,
@@ -141,6 +142,12 @@ interface SnapshotRow extends QueryResultRow {
   remote_url: string | null;
   commit_timestamp: Date;
   storage_path: string;
+  source_kind: "git" | "upload";
+  git_commit_sha: string | null;
+  content_version: string;
+  attestation: "unverified" | "admin_attested" | "git_linked" | null;
+  linked_git_commit_sha: string | null;
+  remote_identity_digest: string | null;
 }
 
 interface SourceBlobRow extends QueryResultRow {
@@ -523,7 +530,13 @@ function snapshotRecord(row: SnapshotRow): SourceSnapshotRecord {
     ref: row.ref,
     remoteUrl: row.remote_url,
     commitTimestamp: row.commit_timestamp,
-    storagePath: row.storage_path
+    storagePath: row.storage_path,
+    sourceKind: row.source_kind,
+    gitCommitSha: row.git_commit_sha,
+    contentVersion: row.content_version,
+    attestation: row.attestation,
+    linkedGitCommitSha: row.linked_git_commit_sha,
+    remoteIdentityDigest: row.remote_identity_digest
   };
 }
 
@@ -4812,7 +4825,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   ): Promise<SourceSnapshotRecord | null> {
     const { rows } = await this.pool.query<SnapshotRow>(
       `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
-              commit_timestamp, storage_path
+              commit_timestamp, storage_path, source_kind, git_commit_sha, content_version,
+              attestation, linked_git_commit_sha, remote_identity_digest
        FROM source_snapshots
        WHERE workspace_id = $1 AND repository_id = $2 AND commit_sha = $3
          AND (pending_upload_session_id IS NULL OR pending_upload_session_id = $4)
@@ -4872,7 +4886,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   async findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null> {
     const { rows } = await this.pool.query<SnapshotRow>(
       `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
-              commit_timestamp, storage_path
+              commit_timestamp, storage_path, source_kind, git_commit_sha, content_version,
+              attestation, linked_git_commit_sha, remote_identity_digest
        FROM source_snapshots WHERE workspace_id = $1 AND id = $2
          AND pending_upload_session_id IS NULL AND pending_import_report_id IS NULL`,
       [workspaceId, snapshotId]
@@ -4900,7 +4915,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   async latestSnapshot(workspaceId: string, repositoryId: string): Promise<SourceSnapshotRecord | null> {
     const { rows } = await this.pool.query<SnapshotRow>(
       `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
-              commit_timestamp, storage_path
+              commit_timestamp, storage_path, source_kind, git_commit_sha, content_version,
+              attestation, linked_git_commit_sha, remote_identity_digest
        FROM source_snapshots WHERE workspace_id = $1 AND repository_id = $2
          AND pending_upload_session_id IS NULL AND pending_import_report_id IS NULL
        ORDER BY commit_timestamp DESC, created_at DESC, id DESC LIMIT 1`,
@@ -5001,6 +5017,7 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     pendingUploadSessionId?: string,
     pendingImportReportId?: string
   ): Promise<{ snapshot: SourceSnapshotRecord; inserted: boolean } | null> {
+      const normalizedSnapshot = normalizeSnapshotProvenance(snapshot);
       const inserted = await client.query<SnapshotRow>(
         lease
           ? `WITH held_lease AS (
@@ -5012,44 +5029,60 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
              )
              INSERT INTO source_snapshots
              (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path,
-              pending_upload_session_id, pending_import_report_id)
-             SELECT $3, $4, $1, $5, $6, $7, $8, $9, NULL, NULL
+              source_kind, git_commit_sha, content_version, attestation, linked_git_commit_sha,
+              remote_identity_digest, pending_upload_session_id, pending_import_report_id)
+             SELECT $3, $4, $1, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NULL, NULL
              FROM held_lease
              ON CONFLICT (repository_id, commit_sha)
                WHERE pending_upload_session_id IS NULL AND pending_import_report_id IS NULL
              DO NOTHING
              RETURNING id, workspace_id, repository_id, commit_sha, ref, remote_url,
-                       commit_timestamp, storage_path`
+                       commit_timestamp, storage_path, source_kind, git_commit_sha, content_version,
+                       attestation, linked_git_commit_sha, remote_identity_digest`
           : `INSERT INTO source_snapshots
          (id, workspace_id, repository_id, commit_sha, ref, remote_url, commit_timestamp, storage_path,
-          pending_upload_session_id, pending_import_report_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          source_kind, git_commit_sha, content_version, attestation, linked_git_commit_sha,
+          remote_identity_digest, pending_upload_session_id, pending_import_report_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
          ON CONFLICT (repository_id, commit_sha)
            WHERE pending_upload_session_id IS NULL AND pending_import_report_id IS NULL
          DO NOTHING
          RETURNING id, workspace_id, repository_id, commit_sha, ref, remote_url,
-                   commit_timestamp, storage_path`,
+                   commit_timestamp, storage_path, source_kind, git_commit_sha, content_version,
+                   attestation, linked_git_commit_sha, remote_identity_digest`,
         lease
           ? [
               lease.repositoryId,
               lease.leaseToken,
-              snapshot.id,
-              snapshot.workspaceId,
-              snapshot.commitSha,
-              snapshot.ref,
-              snapshot.remoteUrl,
-              snapshot.commitTimestamp,
-              snapshot.storagePath
+              normalizedSnapshot.id,
+              normalizedSnapshot.workspaceId,
+              normalizedSnapshot.commitSha,
+              normalizedSnapshot.ref,
+              normalizedSnapshot.remoteUrl,
+              normalizedSnapshot.commitTimestamp,
+              normalizedSnapshot.storagePath,
+              normalizedSnapshot.sourceKind,
+              normalizedSnapshot.gitCommitSha,
+              normalizedSnapshot.contentVersion,
+              normalizedSnapshot.attestation,
+              normalizedSnapshot.linkedGitCommitSha,
+              normalizedSnapshot.remoteIdentityDigest
             ]
           : [
-              snapshot.id,
-              snapshot.workspaceId,
-              snapshot.repositoryId,
-              snapshot.commitSha,
-              snapshot.ref,
-              snapshot.remoteUrl,
-              snapshot.commitTimestamp,
-              snapshot.storagePath,
+              normalizedSnapshot.id,
+              normalizedSnapshot.workspaceId,
+              normalizedSnapshot.repositoryId,
+              normalizedSnapshot.commitSha,
+              normalizedSnapshot.ref,
+              normalizedSnapshot.remoteUrl,
+              normalizedSnapshot.commitTimestamp,
+              normalizedSnapshot.storagePath,
+              normalizedSnapshot.sourceKind,
+              normalizedSnapshot.gitCommitSha,
+              normalizedSnapshot.contentVersion,
+              normalizedSnapshot.attestation,
+              normalizedSnapshot.linkedGitCommitSha,
+              normalizedSnapshot.remoteIdentityDigest,
               pendingUploadSessionId ?? null,
               pendingImportReportId ?? null
             ]
@@ -5058,7 +5091,8 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       if (!insertedSnapshot) {
         const existing = await client.query<SnapshotRow>(
           `SELECT id, workspace_id, repository_id, commit_sha, ref, remote_url,
-                  commit_timestamp, storage_path
+                  commit_timestamp, storage_path, source_kind, git_commit_sha, content_version,
+                  attestation, linked_git_commit_sha, remote_identity_digest
            FROM source_snapshots
            WHERE workspace_id = $1 AND repository_id = $2 AND commit_sha = $3
              AND (pending_upload_session_id IS NULL OR pending_upload_session_id = $4)

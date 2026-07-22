@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledge/trust.js";
+import { normalizeSnapshotProvenance } from "../source-provenance.js";
 
 import {
   boundedKnowledgePage,
@@ -2416,9 +2417,10 @@ export class MemoryAppStore implements AppStore {
     );
     if (existing) return existing;
     this.assertActiveSourceBlobBindings(files);
-    this.sourceSnapshots.push(snapshot);
+    const normalizedSnapshot = normalizeSnapshotProvenance(snapshot);
+    this.sourceSnapshots.push(normalizedSnapshot);
     this.sourceFiles.push(...files);
-    return snapshot;
+    return normalizedSnapshot;
   }
 
   async createSnapshotWithGitSynchronizationLease(
@@ -2449,9 +2451,10 @@ export class MemoryAppStore implements AppStore {
       );
       if (!persisted) {
         this.assertActiveSourceBlobBindings(input.files);
-        this.sourceSnapshots.push(input.snapshot);
+        const normalizedSnapshot = normalizeSnapshotProvenance(input.snapshot);
+        this.sourceSnapshots.push(normalizedSnapshot);
         this.sourceFiles.push(...input.files);
-        persisted = input.snapshot;
+        persisted = normalizedSnapshot;
         if (pendingUploadSessionId) this.pendingSnapshotUploadSessions.set(persisted.id, pendingUploadSessionId);
         if (pendingImportReportId) this.pendingSnapshotImportReports.set(persisted.id, pendingImportReportId);
       }

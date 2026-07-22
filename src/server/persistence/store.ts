@@ -505,6 +505,12 @@ export interface SourceSnapshotRecord {
   remoteUrl: string | null;
   commitTimestamp: Date;
   storagePath: string;
+  sourceKind?: "git" | "upload";
+  gitCommitSha?: string | null;
+  contentVersion?: string | null;
+  attestation?: "unverified" | "admin_attested" | "git_linked" | null;
+  linkedGitCommitSha?: string | null;
+  remoteIdentityDigest?: string | null;
 }
 
 export interface SourceFileRecord {

@@ -108,6 +108,21 @@ describe("schema exports", () => {
     expect(getTableConfig(schema.knowledgeArtifacts).name).toBe("knowledge_artifacts");
   });
 
+  test("keeps source provenance explicit in the typed snapshot schema", () => {
+    const config = getTableConfig(schema.sourceSnapshots);
+    const names = config.columns.map((column) => column.name);
+
+    expect(names).toEqual(expect.arrayContaining([
+      "source_kind",
+      "git_commit_sha",
+      "content_version",
+      "attestation",
+      "linked_git_commit_sha",
+      "remote_identity_digest"
+    ]));
+    expect(config.checks.map((check) => check.name)).toContain("source_snapshots_provenance_shape_check");
+  });
+
   test("keeps source analysis cache workspace-scoped and content-addressed", () => {
     const config = getTableConfig(schema.sourceAnalysisArtifacts);
     expect(config.name).toBe("source_analysis_artifacts");

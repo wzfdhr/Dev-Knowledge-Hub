@@ -92,3 +92,16 @@ test("contracts source blob references only after an authorized locked revalidat
   expect(sql).toMatch(/ALTER COLUMN source_blob_id SET NOT NULL/);
   expect(sql).not.toMatch(/DROP COLUMN|DROP TABLE|DELETE FROM|TRUNCATE/);
 });
+
+test("separates Git commit identity from upload content versions", async () => {
+  const sql = await readFile(path.join(resolveMigrationDirectory(), "0036_frontend_experience_source_provenance.sql"), "utf8");
+
+  expect(sql).toMatch(/ADD COLUMN source_kind text/);
+  expect(sql).toMatch(/ADD COLUMN git_commit_sha text/);
+  expect(sql).toMatch(/ADD COLUMN content_version text/);
+  expect(sql).toMatch(/ADD COLUMN attestation text/);
+  expect(sql).toMatch(/source_snapshots_provenance_shape_check/);
+  expect(sql).toMatch(/kind = 'upload'/);
+  expect(sql).toMatch(/kind IN \('git', 'local'\)/);
+  expect(sql).not.toMatch(/DROP COLUMN|DROP TABLE|DELETE FROM|TRUNCATE/);
+});

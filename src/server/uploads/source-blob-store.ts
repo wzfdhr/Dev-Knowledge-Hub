@@ -49,6 +49,11 @@ export class SourceBlobIntegrityError extends Error {
 export type SourceBlobLstatFile = (candidate: string) => Promise<Stats>;
 export type SourceBlobOpenFile = (candidate: string, flags: number) => Promise<FileHandle>;
 
+interface VerifiedSourceBlobFile {
+  bytes: Buffer;
+  metadata: Stats;
+}
+
 export function classifySourceBlobAccessError(
   error: unknown,
   message: string,
@@ -238,12 +243,12 @@ export function sourceBlobTrashDirectorySegments(
   return [".trash", record.workspaceId, record.contentHash];
 }
 
-export async function assertSourceBlobFile(
+async function verifySourceBlobFile(
   candidate: string,
   record: Pick<SourceBlobRecord, "contentHash" | "byteSize">,
   openFile: SourceBlobOpenFile = open,
   lstatFile: SourceBlobLstatFile = lstat
-): Promise<Buffer> {
+): Promise<VerifiedSourceBlobFile> {
   let pathMetadata: Stats;
   try {
     pathMetadata = await lstatFile(candidate);
@@ -280,13 +285,22 @@ export async function assertSourceBlobFile(
     if (bytes.length !== record.byteSize || digest(bytes) !== record.contentHash) {
       throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob bytes do not match metadata");
     }
-    return bytes;
+    return { bytes, metadata };
   } catch (error) {
     if (error instanceof SourceBlobIntegrityError) throw error;
     throw classifySourceBlobAccessError(error, "Source blob final file is inaccessible", "file_access_inaccessible");
   } finally {
     await handle.close();
   }
+}
+
+export async function assertSourceBlobFile(
+  candidate: string,
+  record: Pick<SourceBlobRecord, "contentHash" | "byteSize">,
+  openFile: SourceBlobOpenFile = open,
+  lstatFile: SourceBlobLstatFile = lstat
+): Promise<Buffer> {
+  return (await verifySourceBlobFile(candidate, record, openFile, lstatFile)).bytes;
 }
 
 async function makeDirectoriesReadOnly(root: string): Promise<void> {
@@ -548,6 +562,83 @@ export class SourceBlobStore {
       }
       throw error;
     }
+  }
+
+  async verifySnapshotReference(input: {
+    workspaceId: string;
+    snapshotId: string;
+    snapshotStoragePath: string;
+    path: string;
+    blob: SourceBlobRecord;
+  }): Promise<{ contentHash: string; byteSize: number; device: number; inode: number }> {
+    safeIdentifier(input.workspaceId, "Workspace identifier");
+    safeIdentifier(input.snapshotId, "Snapshot identifier");
+    let sourcePath: string;
+    try {
+      sourcePath = safeFolderUploadPath(input.path);
+    } catch {
+      throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Snapshot source path is invalid");
+    }
+    if (input.blob.workspaceId !== input.workspaceId || input.blob.status !== "active"
+      || input.blob.fencingToken !== null || input.blob.tombstonedAt !== null
+      || input.blob.trashedAt !== null || input.blob.deletedAt !== null) {
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_INTEGRITY_FAILED",
+        "Snapshot source blob is not an active workspace generation"
+      );
+    }
+    const expectedStoragePath = path.join(this.options.dataDir, "snapshots", input.snapshotId, "files");
+    if (path.resolve(input.snapshotStoragePath) !== path.resolve(expectedStoragePath)) {
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_INTEGRITY_FAILED",
+        "Snapshot storage path is not canonical"
+      );
+    }
+    const parentSegments = path.dirname(sourcePath) === "." ? [] : path.dirname(sourcePath).split("/");
+    if (!await this.ensureDirectoryChain({
+      dataDir: this.options.dataDir,
+      segments: ["snapshots", input.snapshotId, "files", ...parentSegments]
+    })) {
+      throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Snapshot source directory is missing");
+    }
+
+    const blobKey = sourceBlobStorageKey(input.workspaceId, input.blob.contentHash, input.blob.generation);
+    if (blobKey !== input.blob.storageKey) {
+      throw new SourceBlobIntegrityError("SOURCE_BLOB_INTEGRITY_FAILED", "Source blob storage key is invalid");
+    }
+    if (!await this.ensureDirectoryChain({
+      dataDir: this.options.dataDir,
+      segments: sourceBlobDirectorySegments(input.blob)
+    })) {
+      throw new SourceBlobIntegrityError("SOURCE_BLOB_MISSING", "Source blob directory is missing");
+    }
+
+    const [blob, view] = await Promise.all([
+      verifySourceBlobFile(
+        path.join(this.options.dataDir, ...blobKey.split("/")),
+        input.blob,
+        this.options.openFile,
+        this.options.lstatFile
+      ),
+      verifySourceBlobFile(
+        path.join(expectedStoragePath, ...sourcePath.split("/")),
+        input.blob,
+        this.options.openFile,
+        this.options.lstatFile
+      )
+    ]);
+    if (blob.metadata.dev !== view.metadata.dev || blob.metadata.ino !== view.metadata.ino) {
+      throw new SourceBlobIntegrityError(
+        "SOURCE_BLOB_INTEGRITY_FAILED",
+        "Snapshot source is not the source blob hardlink"
+      );
+    }
+    return {
+      contentHash: input.blob.contentHash,
+      byteSize: input.blob.byteSize,
+      device: blob.metadata.dev,
+      inode: blob.metadata.ino
+    };
   }
 
   async materializeSnapshotView(input: {

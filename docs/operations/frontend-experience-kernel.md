@@ -18,6 +18,14 @@ EX01-EX11 只允许在本地或完全隔离的 staging 中执行。EX12 只产�
 
 `no_release` 必须在 UI 显示专用说明，不得使用通用空状态。页面必须明确显示仍可进行的导入、同步、构建和发布动作，同时隐藏所有默认推荐。
 
+## Knowledge Lint 与复审
+
+- 管理员可在工程经验审核视图运行 `POST /api/knowledge/experience-lint`；发布合格的 Frontend v2 release 后也会运行同一检查。
+- 规则覆盖缺失引用、失权或缺失 basis、required/forbidden 冲突、过期 evidence、结果 source version 错配、signed CI 失败/回滚、废弃或已替代推荐，以及 supersession 循环。
+- `error` 诊断以稳定 ID 追加为 `knowledge_lint` 高优先级复审项；重复运行保持幂等。`warning` 只报告，不自动改变生命周期。
+- Lint 不调用 `transitionExperienceWithAudit`，不改写经验正文，不发布 release，也不把普通用户反馈提升为推荐依据。
+- outcome、用户反馈复审项、治理 review event 都是 append-only；负面可信结果只暂停与其 source version 精确匹配的 evidence。
+
 ## 回滚
 
 回滚关闭 `/mcp/workspace` 方案编排和默认推荐，恢复“当前项目事实 + 历史实现参考”。回滚不删除不可变 release、审核历史、结果事件或恢复证据。

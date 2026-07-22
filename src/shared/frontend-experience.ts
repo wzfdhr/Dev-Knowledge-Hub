@@ -99,7 +99,7 @@ export const experienceReviewItemInputSchema = z.object({
   evidenceId: z.string().min(1).nullable(),
   outcomeId: z.string().min(1).nullable(),
   reportedBy: z.string().min(1),
-  kind: z.enum(["trusted_negative_outcome", "user_feedback"]),
+  kind: z.enum(["trusted_negative_outcome", "user_feedback", "knowledge_lint"]),
   priority: z.enum(["high", "normal"]),
   feedbackEvent: experienceFeedbackEventSchema.nullable(),
   currentProjectId: z.string().min(1).nullable(),
@@ -114,6 +114,11 @@ export const experienceReviewItemInputSchema = z.object({
     && (value.outcomeId !== null || value.feedbackEvent === null || value.currentProjectId === null
       || value.priority !== "normal")) {
     context.addIssue({ code: "custom", message: "User feedback review item is invalid" });
+  }
+  if (value.kind === "knowledge_lint"
+    && (value.outcomeId !== null || value.feedbackEvent !== null || value.currentProjectId !== null
+      || value.priority !== "high")) {
+    context.addIssue({ code: "custom", message: "Knowledge Lint review item is invalid" });
   }
 });
 

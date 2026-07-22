@@ -452,10 +452,22 @@ export interface ExperienceReviewItemDto {
   patternGroupId: string;
   evidenceId?: string | null;
   priority: "high" | "normal";
-  kind: "trusted_negative_outcome" | "user_feedback";
+  kind: "trusted_negative_outcome" | "user_feedback" | "knowledge_lint";
   taskSummary: string;
   feedbackEvent: string | null;
   createdAt: string;
+}
+export interface FrontendExperienceLintResponse {
+  schemaVersion: 1;
+  diagnostics: Array<{
+    id: string;
+    rule: string;
+    severity: "error" | "warning";
+    patternGroupId: string;
+    evidenceId: string | null;
+    message: string;
+  }>;
+  reviewItemIds: string[];
 }
 export interface McpConnection {
   endpoint: string;

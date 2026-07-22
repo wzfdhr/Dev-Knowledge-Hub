@@ -1,6 +1,6 @@
 import type {
   ApiErrorShape, ArchivedRepository, Build, CodexConnectionPack, ExperienceReviewItemDto,
-  Feedback, FrontendPreviewResponse, FrontendSolutionContext, GraphSourceRef, ImportProgress,
+  Feedback, FrontendExperienceLintResponse, FrontendPreviewResponse, FrontendSolutionContext, GraphSourceRef, ImportProgress,
   ImportReport, KnowledgeKernelComparison, KnowledgeMetadata, KnowledgePageRecord, McpConnection,
   McpToken, MfaStatus, PipelineStageRun, Project, ProjectActivity, ProjectGraphFormat,
   ProjectGraphResponse, ProjectKnowledgeQuality, ProjectMember, ProjectSummary, Release, Remediation,
@@ -183,6 +183,7 @@ export interface ApiClient {
     query?: string;
   }): Promise<WorkspaceExperienceLibraryResponse>;
   listExperienceReviewItems(): Promise<{ reviewItems: ExperienceReviewItemDto[] }>;
+  runExperienceLint(): Promise<FrontendExperienceLintResponse>;
   previewFrontendSolution(
     projectId: string,
     input: { task: string; changedPaths?: string[] }
@@ -517,6 +518,7 @@ export const api: ApiClient = {
     return request(`/api/knowledge/experiences${params.size ? `?${params}` : ""}`);
   },
   listExperienceReviewItems: () => request("/api/knowledge/experience-review-items"),
+  runExperienceLint: () => request("/api/knowledge/experience-lint", { method: "POST" }),
   previewFrontendSolution: (projectId, input) => request(
     `/api/projects/${encodeURIComponent(projectId)}/frontend-solution-context`,
     { method: "POST", body: json(input) }

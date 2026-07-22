@@ -42,6 +42,7 @@ import {
 } from "../../shared/frontend-experience.js";
 import { transitionExperience } from "../knowledge/frontend/experience-lifecycle.js";
 import type { VisibleExperienceCandidate } from "../knowledge/frontend/experience-query.js";
+import type { ExperienceLintRecord } from "../knowledge/frontend/experience-lint.js";
 
 import type {
   AdminRecord,
@@ -6664,6 +6665,72 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
       kind: row.kind, priority: row.priority, feedbackEvent: row.feedback_event,
       currentProjectId: row.current_project_id, sourceVersion: row.source_version,
       taskSummary: row.task_summary, createdAt: row.created_at
+    }));
+  }
+
+  async listExperienceLintRecords(workspaceId: string): Promise<ExperienceLintRecord[]> {
+    const [groups, evidence, decisions, outcomes] = await Promise.all([
+      this.pool.query<{
+        id: string; state: ExperienceState; superseded_by_id: string | null;
+      }>(
+        `SELECT id, state, superseded_by_id
+         FROM workspace_pattern_groups WHERE workspace_id = $1 ORDER BY id`,
+        [workspaceId]
+      ),
+      this.pool.query<{
+        pattern_group_id: string; id: string; content_version: string;
+        citations: ObservedPatternEvidence["citations"]; revoked_at: Date | null; fresh: boolean;
+      }>(
+        `SELECT evidence.pattern_group_id, evidence.id, evidence.content_version,
+                evidence.citations, evidence.revoked_at,
+                evidence.snapshot_id = (
+                  SELECT latest.id FROM source_snapshots latest
+                  WHERE latest.workspace_id = evidence.workspace_id
+                    AND latest.repository_id = release.repository_id
+                  ORDER BY latest.commit_timestamp DESC, latest.id DESC LIMIT 1
+                ) AS fresh
+         FROM workspace_pattern_evidence evidence
+         JOIN releases release ON release.id = evidence.release_id
+           AND release.workspace_id = evidence.workspace_id
+         WHERE evidence.workspace_id = $1
+         ORDER BY evidence.pattern_group_id, evidence.id`,
+        [workspaceId]
+      ),
+      this.pool.query<{
+        pattern_group_id: string; id: string; decision: DeclaredDecisionEvidence["decision"];
+        basis_evidence_ids: string[]; applicability: DeclaredDecisionEvidence["applicability"];
+      }>(
+        `SELECT pattern_group_id, id, decision, basis_evidence_ids, applicability
+         FROM workspace_decisions WHERE workspace_id = $1
+         ORDER BY pattern_group_id, created_at, id`,
+        [workspaceId]
+      ),
+      this.pool.query<{
+        pattern_group_id: string; id: string; evidence_id: string | null; source_version: string;
+        authority: VerifiedOutcomeEvidence["authority"]; outcome: VerifiedOutcomeEvidence["outcome"];
+      }>(
+        `SELECT pattern_group_id, id, evidence_id, source_version, authority, outcome
+         FROM workspace_outcomes WHERE workspace_id = $1
+         ORDER BY pattern_group_id, created_at, id`,
+        [workspaceId]
+      )
+    ]);
+    return groups.rows.map((group) => ({
+      id: group.id,
+      state: group.state,
+      supersededById: group.superseded_by_id,
+      evidence: evidence.rows.filter((item) => item.pattern_group_id === group.id).map((item) => ({
+        id: item.id, contentVersion: item.content_version, citations: item.citations,
+        revokedAt: item.revoked_at, fresh: item.fresh
+      })),
+      decisions: decisions.rows.filter((item) => item.pattern_group_id === group.id).map((item) => ({
+        id: item.id, decision: item.decision, basisEvidenceIds: item.basis_evidence_ids,
+        applicability: item.applicability
+      })),
+      outcomes: outcomes.rows.filter((item) => item.pattern_group_id === group.id).map((item) => ({
+        id: item.id, evidenceId: item.evidence_id, sourceVersion: item.source_version,
+        authority: item.authority, outcome: item.outcome
+      }))
     }));
   }
 

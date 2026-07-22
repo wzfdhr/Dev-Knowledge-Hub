@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
@@ -43,13 +43,18 @@ describe("WorkspaceExperiencesPage", () => {
         experiences: [{ id: "experience-1", title: "Cited pattern", capability: "forms", state: "recommended", observedFacts: ["fact"], evidenceCount: 2, trustScore: 0.9, citations: [] }],
         rejectedExperiences: []
       }),
-      listExperienceReviewItems: vi.fn().mockResolvedValue({ reviewItems: [] })
+      listExperienceReviewItems: vi.fn().mockResolvedValue({ reviewItems: [] }),
+      runExperienceLint: vi.fn().mockResolvedValue({
+        schemaVersion: 1, diagnostics: [], reviewItemIds: []
+      })
     } as unknown as ApiClient;
     localStorage.setItem("devkh:active-project-id", "project-1");
 
     renderPage(api, "admin");
 
     expect(await screen.findByRole("heading", { name: "工程经验库" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "审核队列" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "审核队列" }));
+    fireEvent.click(await screen.findByRole("button", { name: "运行检查" }));
+    await waitFor(() => expect(api.runExperienceLint).toHaveBeenCalledOnce());
   });
 });

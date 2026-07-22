@@ -133,6 +133,16 @@ CREATE TABLE workspace_experience_reviews (
     FOREIGN KEY (actor_id, workspace_id) REFERENCES admin_users(id, workspace_id) ON DELETE RESTRICT
 );
 
+CREATE FUNCTION reject_workspace_outcome_mutation() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'workspace outcomes are append-only';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER workspace_outcomes_append_only_trigger
+BEFORE UPDATE OR DELETE ON workspace_outcomes
+FOR EACH ROW EXECUTE FUNCTION reject_workspace_outcome_mutation();
+
 CREATE INDEX workspace_experience_reviews_group_created_idx
   ON workspace_experience_reviews (workspace_id, pattern_group_id, created_at, id);
 
@@ -174,7 +184,7 @@ CREATE TABLE workspace_experience_review_items (
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (id, workspace_id),
   CONSTRAINT workspace_experience_review_items_kind_check
-    CHECK (kind IN ('trusted_negative_outcome', 'user_feedback')),
+    CHECK (kind IN ('trusted_negative_outcome', 'user_feedback', 'knowledge_lint')),
   CONSTRAINT workspace_experience_review_items_priority_check
     CHECK (priority IN ('high', 'normal')),
   CONSTRAINT workspace_experience_review_items_feedback_check
@@ -186,6 +196,9 @@ CREATE TABLE workspace_experience_review_items (
     OR
     (kind = 'user_feedback' AND outcome_id IS NULL
       AND feedback_event IS NOT NULL AND current_project_id IS NOT NULL AND priority = 'normal')
+    OR
+    (kind = 'knowledge_lint' AND outcome_id IS NULL
+      AND feedback_event IS NULL AND current_project_id IS NULL AND priority = 'high')
   ),
   CONSTRAINT workspace_experience_review_items_group_workspace_fk
     FOREIGN KEY (pattern_group_id, workspace_id)

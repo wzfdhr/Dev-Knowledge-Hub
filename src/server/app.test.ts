@@ -316,6 +316,21 @@ describe("buildServer", () => {
     expect(store.experienceReviewItems).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "user_feedback", priority: "normal", feedbackEvent: "failed" })
     ]));
+
+    store.experienceEvidence.find((item) => item.id === evidence.id)!.citations = [];
+    const lintResponse = await app.inject({
+      method: "POST", url: "/api/knowledge/experience-lint", headers
+    });
+    expect(lintResponse.statusCode).toBe(200);
+    expect(lintResponse.json()).toMatchObject({
+      schemaVersion: 1,
+      diagnostics: [expect.objectContaining({
+        rule: "EXPERIENCE_CITATION_MISSING", severity: "error", patternGroupId: experienceId
+      })]
+    });
+    expect(store.experienceReviewItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "knowledge_lint", priority: "high" })
+    ]));
     await app.close();
   });
 

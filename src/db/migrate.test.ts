@@ -122,6 +122,8 @@ test("creates workspace-isolated frontend experience contracts", async () => {
   expect(sql).toMatch(/workspace_decisions_validate_basis_trigger/);
   expect(sql).toMatch(/workspace_experience_reviews_append_only_trigger/);
   expect(sql).toMatch(/workspace_experience_review_items_append_only_trigger/);
+  expect(sql).toMatch(/workspace_outcomes_append_only_trigger/);
+  expect(sql).toMatch(/kind = 'knowledge_lint'/);
   expect(sql).not.toMatch(/DROP COLUMN|DROP TABLE|TRUNCATE/);
 });
 

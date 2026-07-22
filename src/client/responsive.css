@@ -568,10 +568,16 @@
   }
 
   .experience-review-actions .button,
+  .experience-lint-bar .button,
   .codex-solution-form .ant-btn,
   .page-header-actions label,
   .page-header-actions select,
   .page-header-actions .button {
     width: 100%;
+  }
+
+  .experience-lint-bar {
+    align-items: stretch;
+    flex-direction: column;
   }
 }

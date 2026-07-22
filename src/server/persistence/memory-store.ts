@@ -155,6 +155,7 @@ import {
 } from "../../shared/frontend-experience.js";
 import { transitionExperience } from "../knowledge/frontend/experience-lifecycle.js";
 import type { VisibleExperienceCandidate } from "../knowledge/frontend/experience-query.js";
+import type { ExperienceLintRecord } from "../knowledge/frontend/experience-lint.js";
 
 export class MemoryAppStore implements AppStore {
   private workspace: WorkspaceRecord | null = null;
@@ -3805,6 +3806,45 @@ export class MemoryAppStore implements AppStore {
       item.workspaceId === workspaceId && (!patternGroupId || item.patternGroupId === patternGroupId)
     ).sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime()
       || left.id.localeCompare(right.id)).map((item) => structuredClone(item));
+  }
+
+  async listExperienceLintRecords(workspaceId: string): Promise<ExperienceLintRecord[]> {
+    return this.experienceGroups.filter((group) => group.workspaceId === workspaceId).map((group) => ({
+      id: group.id,
+      state: group.state,
+      supersededById: group.supersededById,
+      evidence: this.experienceEvidence.filter((item) =>
+        item.workspaceId === workspaceId && item.patternGroupId === group.id
+      ).map((item) => {
+        const release = this.releases.find((candidate) =>
+          candidate.workspaceId === workspaceId && candidate.id === item.releaseId
+        );
+        const repositoryId = release?.repositoryId;
+        const latest = repositoryId ? this.sourceSnapshots.filter((snapshot) =>
+          snapshot.workspaceId === workspaceId && snapshot.repositoryId === repositoryId
+          && !this.pendingSnapshotUploadSessions.has(snapshot.id)
+          && !this.pendingSnapshotImportReports.has(snapshot.id)
+        ).sort((left, right) => right.commitTimestamp.getTime() - left.commitTimestamp.getTime()
+          || right.id.localeCompare(left.id))[0] : undefined;
+        return {
+          id: item.id, contentVersion: item.contentVersion,
+          citations: structuredClone(item.citations), revokedAt: item.revokedAt,
+          fresh: !latest || latest.id === item.snapshotId
+        };
+      }),
+      decisions: this.experienceDecisions.filter((item) =>
+        item.workspaceId === workspaceId && item.patternGroupId === group.id
+      ).map((item) => ({
+        id: item.id, decision: item.decision, basisEvidenceIds: [...item.basisEvidenceIds],
+        applicability: structuredClone(item.applicability)
+      })),
+      outcomes: this.experienceOutcomes.filter((item) =>
+        item.workspaceId === workspaceId && item.patternGroupId === group.id
+      ).map((item) => ({
+        id: item.id, evidenceId: item.evidenceId, sourceVersion: item.sourceVersion,
+        authority: item.authority, outcome: item.outcome
+      }))
+    })).sort((left, right) => left.id.localeCompare(right.id));
   }
 
   async listVisibleExperienceCandidates(input: {

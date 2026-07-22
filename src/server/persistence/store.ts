@@ -26,6 +26,7 @@ import type {
 import type { RemediationState } from "../knowledge/remediation.js";
 import type { FrontendKnowledgeMode } from "../knowledge/frontend/rollout-mode.js";
 import type { VisibleExperienceCandidate } from "../knowledge/frontend/experience-query.js";
+import type { ExperienceLintRecord } from "../knowledge/frontend/experience-lint.js";
 import type {
   DeclaredDecisionEvidence,
   DeclaredDecisionInput,
@@ -1046,6 +1047,7 @@ export interface ExperienceStore {
   recordExperienceOutcome(input: VerifiedOutcomeInput): Promise<VerifiedOutcomeEvidence>;
   createExperienceReviewItem(input: ExperienceReviewItemInput): Promise<ExperienceReviewItem>;
   listExperienceReviewItems(workspaceId: string, patternGroupId?: string): Promise<ExperienceReviewItem[]>;
+  listExperienceLintRecords(workspaceId: string): Promise<ExperienceLintRecord[]>;
   listVisibleExperienceCandidates(input: {
     workspaceId: string;
     userId: string;

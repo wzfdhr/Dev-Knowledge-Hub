@@ -82,6 +82,7 @@ import { frontendCandidateRunStatus } from "./knowledge/frontend/preview-status.
 import { searchFrontendKnowledge } from "./knowledge/frontend/search.js";
 import { indexPublishedFrontendPatternEvidence } from "./knowledge/frontend/patterns.js";
 import { FrontendExperienceGovernance } from "./knowledge/frontend/experience-governance.js";
+import { runFrontendExperienceLint } from "./knowledge/frontend/experience-lint.js";
 import { exportKnowledgeGraph } from "./knowledge/pipeline/viz.js";
 import { legacyBuildStatus } from "./knowledge/pipeline/contracts.js";
 import {
@@ -903,6 +904,16 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     return {
       reviewItems: await options.store.listExperienceReviewItems(actor.workspaceId, query.data.experienceId)
     };
+  });
+
+  server.post("/api/knowledge/experience-lint", {
+    preHandler: requireAdministrator
+  }, async (request) => {
+    const actor = (request as AuthenticatedRequest).sessionAdmin;
+    return runFrontendExperienceLint(options.store, {
+      workspaceId: actor.workspaceId,
+      actorId: actor.id
+    });
   });
 
   server.get("/api/knowledge/experiences", { preHandler: requireAdmin }, async (request, reply) => {
@@ -3148,6 +3159,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     try {
       const release = await options.store.publishRelease(admin.workspaceId, parsed.data.id);
       let experienceIndex: Awaited<ReturnType<typeof indexPublishedFrontendPatternEvidence>> | null = null;
+      let experienceLint: Awaited<ReturnType<typeof runFrontendExperienceLint>> | null = null;
       if (options.qualityArtifactReader && release.releaseArtifactFamily === "frontend-v2") {
         try {
           experienceIndex = await indexPublishedFrontendPatternEvidence({
@@ -3156,11 +3168,15 @@ export function buildServer(options: ServerOptions): FastifyInstance {
             workspaceId: admin.workspaceId,
             releaseId: release.id
           });
+          experienceLint = await runFrontendExperienceLint(options.store, {
+            workspaceId: admin.workspaceId,
+            actorId: admin.id
+          });
         } catch (error) {
           request.log.error({ err: error, releaseId: release.id }, "Published frontend experience indexing failed");
         }
       }
-      return { release, experienceIndex };
+      return { release, experienceIndex, experienceLint };
     } catch (error) {
       return sendError(reply, 409, "PUBLISH_FAILED", error instanceof Error ? error.message : "Publish failed");
     }

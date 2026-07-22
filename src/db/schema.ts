@@ -952,7 +952,7 @@ export const workspaceExperienceReviewItems = pgTable("workspace_experience_revi
 }, (table) => [
   uniqueIndex("workspace_experience_review_items_id_workspace_idx").on(table.id, table.workspaceId),
   index("workspace_experience_review_items_queue_idx").on(table.workspaceId, table.priority, table.createdAt, table.id),
-  check("workspace_experience_review_items_kind_check", sql`${table.kind} IN ('trusted_negative_outcome', 'user_feedback')`),
+  check("workspace_experience_review_items_kind_check", sql`${table.kind} IN ('trusted_negative_outcome', 'user_feedback', 'knowledge_lint')`),
   check("workspace_experience_review_items_priority_check", sql`${table.priority} IN ('high', 'normal')`),
   check("workspace_experience_review_items_feedback_check", sql`${table.feedbackEvent} IS NULL OR ${table.feedbackEvent} IN ('considered', 'adopted', 'partially_adopted', 'rejected', 'failed', 'rolled_back')`),
   check("workspace_experience_review_items_shape_check", sql`
@@ -961,6 +961,9 @@ export const workspaceExperienceReviewItems = pgTable("workspace_experience_revi
     OR
     (${table.kind} = 'user_feedback' AND ${table.outcomeId} IS NULL
       AND ${table.feedbackEvent} IS NOT NULL AND ${table.currentProjectId} IS NOT NULL AND ${table.priority} = 'normal')
+    OR
+    (${table.kind} = 'knowledge_lint' AND ${table.outcomeId} IS NULL
+      AND ${table.feedbackEvent} IS NULL AND ${table.currentProjectId} IS NULL AND ${table.priority} = 'high')
   `),
   foreignKey({ columns: [table.patternGroupId, table.workspaceId], foreignColumns: [workspacePatternGroups.id, workspacePatternGroups.workspaceId], name: "workspace_experience_review_items_group_workspace_fk" }).onDelete("cascade"),
   foreignKey({ columns: [table.evidenceId, table.workspaceId], foreignColumns: [workspacePatternEvidence.id, workspacePatternEvidence.workspaceId], name: "workspace_experience_review_items_evidence_workspace_fk" }).onDelete("restrict"),

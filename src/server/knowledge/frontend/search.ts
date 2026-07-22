@@ -80,7 +80,13 @@ const chineseQueryStopPhrases = [
 const termPatterns = new Map<string, RegExp>();
 
 function normalized(value: string): string {
-  return value.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLocaleLowerCase("en-US").replace(/[^\p{L}\p{N}_:/.@-]+/gu, " ").trim();
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([\p{Script=Han}])([A-Za-z0-9_$@])/gu, "$1 $2")
+    .replace(/([A-Za-z0-9_$@])([\p{Script=Han}])/gu, "$1 $2")
+    .toLocaleLowerCase("en-US")
+    .replace(/[^\p{L}\p{N}_:/.@-]+/gu, " ")
+    .trim();
 }
 
 function normalizedPathSubject(value: string): string {
@@ -168,7 +174,10 @@ function entityScore(query: string, entity: FrontendEntity): { score: number; re
   const haystack = normalized(`${entity.qualifiedName} ${entity.canonicalPath} ${semanticKey} ${JSON.stringify(entity.facets)} ${JSON.stringify(entity.attributes)}`);
   let score = 0;
   const reasons: string[] = [];
-  if (name.length >= 3 && containsTerm(query, name)) { score += 20; reasons.push("exact-name"); }
+  if (name.length >= 3 && containsTerm(query, name)) {
+    score += 20 + name.split(" ").length;
+    reasons.push("exact-name");
+  }
   if (path.length >= 3 && containsTerm(query, path)) { score += 16; reasons.push("exact-path"); }
   for (const term of kindTerms[entity.kind]) {
     if (containsTerm(query, normalized(term))) { score += term.length > 5 ? 10 : 6; reasons.push(`kind:${term}`); }
@@ -266,8 +275,17 @@ function factKey(edge: FrontendEdge, entities: ReadonlyMap<string, FrontendEntit
 }
 
 function bestFact(entity: FrontendEntity, connectedEdges: readonly FrontendEdge[], entities: ReadonlyMap<string, FrontendEntity>): string[] {
-  const priorities = relationPriority[entity.kind] ?? [];
-  const candidates = connectedEdges.filter((edge) => edge.evidenceClass === "fact");
+  const ecosystemFacet = entity.facets["react-ecosystem-core"];
+  const stateDataFacet = entity.facets["state-data-core"];
+  const priorities = ecosystemFacet?.role === "permission-guard"
+    ? ["guards", ...(relationPriority[entity.kind] ?? [])]
+    : ecosystemFacet?.encapsulation === "component-library-wrapper"
+      ? ["wraps", ...(relationPriority[entity.kind] ?? [])]
+      : stateDataFacet?.queryKind === "mutation"
+        ? ["invalidates", ...(relationPriority[entity.kind] ?? [])]
+        : relationPriority[entity.kind] ?? [];
+  const facts = connectedEdges.filter((edge) => edge.evidenceClass === "fact");
+  const candidates = priorities.length ? facts.filter((edge) => priorities.includes(edge.kind)) : facts;
   candidates.sort((left, right) => {
     const leftRank = priorities.indexOf(left.kind);
     const rightRank = priorities.indexOf(right.kind);
@@ -280,6 +298,9 @@ function bestFact(entity: FrontendEntity, connectedEdges: readonly FrontendEdge[
             if (other?.kind === "component" && /Page$/u.test(other.name)) return 0;
             if (other?.kind === "component") return 1;
             return 2;
+          }
+          if (entity.kind === "workspace_package" && other?.kind === "tooling_config") {
+            return other.name === "storybook" ? 1 : 0;
           }
           if (entity.kind === "component" && edge.kind === "renders") {
             return other?.kind === "component" && /Chart$/u.test(other.name) ? 0 : 1;

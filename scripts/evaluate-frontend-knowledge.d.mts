@@ -4,6 +4,8 @@ export interface FrontendEvaluationInput {
   content: string;
 }
 
+export const FRONTEND_TRIAL_CAPABILITIES: readonly string[];
+
 export interface FrontendCitation {
   path: string;
   startLine: number;
@@ -19,6 +21,7 @@ export interface FrontendEvaluationCase {
   scenarioKey: string;
   split: "train" | "held-out";
   capability: string;
+  trialCapability?: string;
   locale: "en" | "zh-CN";
   access: "authorized-published" | "unauthorized" | "unpublished";
   expected: {
@@ -70,6 +73,7 @@ export function validateFrontendEvaluationSuite(cases: FrontendEvaluationCase[],
   chineseRate: number;
   negativeRate: number;
   capabilities: Array<{ capability: string; train: number; heldOut: number }>;
+  trialCapabilities: Array<{ capability: string; train: number; heldOut: number }>;
   versionManifest: FrontendVersionManifest;
 };
 export function validateFrontendVersionManifestAgainstPackage(
@@ -87,10 +91,15 @@ export function evaluateFrontendKnowledgeBySplit(
   cases: FrontendEvaluationCase[],
   observations: FrontendEvaluationObservation[]
 ): { train: FrontendEvaluationReport; heldOut: FrontendEvaluationReport; all: FrontendEvaluationReport };
+export function evaluateFrontendTrialCapabilities(
+  cases: FrontendEvaluationCase[],
+  observations: FrontendEvaluationObservation[]
+): Record<string, { train: FrontendEvaluationReport; heldOut: FrontendEvaluationReport; all: FrontendEvaluationReport }>;
 export function assertFrontendEvaluationReport(report: FrontendEvaluationReport, cases: FrontendEvaluationCase[]): void;
 export function assertFrontendQualityGate(report: Pick<FrontendEvaluationReport, "denominators" | "metrics">): void;
 export function collectFrontendQualityGateFailures(
-  reports: Record<string, Pick<FrontendEvaluationReport, "denominators" | "metrics">>
+  reports: Record<string, Pick<FrontendEvaluationReport, "denominators" | "metrics">>,
+  trialCapabilityReports?: Record<string, Record<string, Pick<FrontendEvaluationReport, "denominators" | "metrics">>>
 ): Error[];
 export function observeFrontendEvaluationCase(
   item: FrontendEvaluationCase,

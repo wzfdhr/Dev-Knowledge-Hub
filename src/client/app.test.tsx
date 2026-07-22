@@ -1304,6 +1304,8 @@ describe("repository replacement", () => {
     renderPage(<ProjectImportsPage api={api} projectId="project" />);
     const uploadInput = await screen.findByLabelText("项目文件夹", { selector: 'input[type="file"]' }) as HTMLInputElement;
     await user.upload(uploadInput, new File(["export {};"], "main.ts", { type: "text/typescript" }));
+    expect(replaceRepository).not.toHaveBeenCalled();
+    expect(uploadReplacementFolder).not.toHaveBeenCalled();
     await user.click(await screen.findByRole("button", { name: "确认并开始上传" }));
 
     await waitFor(() => expect(replaceRepository).toHaveBeenCalledWith({ kind: "upload", name: "Current repository" }));
@@ -1315,6 +1317,9 @@ describe("repository replacement", () => {
 
   test("records an uploaded snapshot so Overview can start a build", async () => {
     const user = userEvent.setup();
+    const startBuild = vi.fn();
+    const createRelease = vi.fn();
+    const publishRelease = vi.fn();
     const api = {
       getRepository: vi.fn().mockRejectedValue(new ApiError(404, "REPOSITORY_NOT_FOUND", "missing")),
       connectRepository: vi.fn().mockResolvedValue({ repository: {
@@ -1326,7 +1331,10 @@ describe("repository replacement", () => {
       }),
       getModelConfig: vi.fn().mockResolvedValue({ config: null }),
       getMcpConnection: vi.fn().mockResolvedValue({ endpoint: "/mcp", transport: "streamable-http", authorization: "bearer", tools: [] }),
-      listMcpTokens: vi.fn().mockResolvedValue({ tokens: [] })
+      listMcpTokens: vi.fn().mockResolvedValue({ tokens: [] }),
+      startBuild,
+      createRelease,
+      publishRelease
     } as unknown as ApiClient;
 
     renderPage(<ProjectImportsPage api={api} projectId="project" />);
@@ -1343,6 +1351,9 @@ describe("repository replacement", () => {
     await waitFor(() => expect(sessionStorage.getItem("devkh:last-snapshot")).toContain("snapshot"));
     expect(await screen.findByText("本地预过滤 1 个文件")).toBeVisible();
     expect(screen.getByText("服务端二次过滤 0 个文件")).toBeVisible();
+    expect(startBuild).not.toHaveBeenCalled();
+    expect(createRelease).not.toHaveBeenCalled();
+    expect(publishRelease).not.toHaveBeenCalled();
   });
 
   test("reuses a newly connected upload repository when the first transfer is interrupted", async () => {
@@ -1380,7 +1391,13 @@ describe("repository replacement", () => {
     expect(await screen.findByText("上传会话已失效，请重新选择项目文件夹")).toBeVisible();
     expect(screen.getByText(/当前已发布知识不会自动变化/)).toBeVisible();
     expect(screen.queryByText(/没有创建内容版本/)).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "重试" }));
+    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认并开始上传" })).not.toBeInTheDocument();
+
+    await user.upload(uploadInput, new File(["export {};"], "main.ts", { type: "text/typescript" }));
+    expect(await screen.findByRole("button", { name: "确认并开始上传" })).toBeVisible();
+    expect(uploadFolder).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByRole("button", { name: "确认并开始上传" }));
     await waitFor(() => expect(uploadFolder).toHaveBeenCalledTimes(3));
 
     expect(connectRepository).toHaveBeenCalledTimes(1);

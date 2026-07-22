@@ -22,8 +22,13 @@ function idleProgress(): ImportProgressValue {
   return { phase: "reading", status: "idle", percent: 0 };
 }
 
+function isTerminalUploadSessionError(error: unknown) {
+  return error instanceof ApiError
+    && ["UPLOAD_SESSION_EXPIRED", "UPLOAD_SESSION_INVALIDATED", "UPLOAD_SESSION_NOT_FOUND"].includes(error.code);
+}
+
 function uploadFailure(error: unknown): { message: string; description: string } {
-  if (error instanceof ApiError && ["UPLOAD_SESSION_EXPIRED", "UPLOAD_SESSION_INVALIDATED", "UPLOAD_SESSION_NOT_FOUND"].includes(error.code)) {
+  if (isTerminalUploadSessionError(error)) {
     return {
       message: "上传会话已失效，请重新选择项目文件夹",
       description: "当前已发布知识不会自动变化。请先刷新导入历史确认处理结果；重新选择后会开始新的安全上传。"
@@ -122,7 +127,10 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
       setProgress((current) => ({ ...current, phase: "snapshot", status: "completed", percent: 100, detail: value.unchanged ? "内容没有变化" : "已创建新的内容版本" }));
       void rememberSnapshot(value, report);
     },
-    onError: () => { setProgress((value) => ({ ...value, status: "failed" })); }
+    onError: (error) => {
+      setProgress((value) => ({ ...value, status: "failed" }));
+      if (isTerminalUploadSessionError(error)) setReport(null);
+    }
   });
 
   const inspect = async (action: () => Promise<FolderImportReport>) => {
@@ -193,7 +201,7 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
       <ImportProgress progress={progress} />
       {report && <div className="import-report-row"><FolderFilterReport report={report} /><div className="import-confirm-panel"><h2>确认上传这些资料</h2><p>{currentRepository && currentRepository.kind !== "upload" ? "当前资料来源会保留为只读归档，完成上传后切换到新内容版本。" : "上传完成后仍需人工构建并发布，当前线上知识不会自动变化。"}</p><Button type="primary" loading={upload.isPending} disabled={!report.acceptedFiles.length} onClick={uploadFolder}>确认并开始上传</Button></div></div>}
       {result && <ImportResultReport upload={result} localIgnored={completedFilter} />}
-      {upload.error && <ErrorState {...uploadFailure(upload.error)} retry={uploadFolder} />}
+      {upload.error && <ErrorState {...uploadFailure(upload.error)} {...(isTerminalUploadSessionError(upload.error) ? {} : { retry: uploadFolder })} />}
       <ImportHistory
         reports={importHistory.data?.reports ?? []}
         loading={importHistory.isLoading}

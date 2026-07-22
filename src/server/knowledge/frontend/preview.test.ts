@@ -62,8 +62,8 @@ function fixture() {
     ["search", { schemaVersion: 2, snapshotId, analyzerManifestDigest: hash, documents: [{ documentKey: "frontend-routes:0", kind: "page", title: "Routes and Pages", content: "route: /", citations: [ref], metadata: { pageSlug: "frontend-routes", position: 0 } }] }],
     ["quality", { schemaVersion: 2, snapshotId, analyzerManifestDigest: hash, summary: { entities: 1, factEdges: 0, candidateEdges: 0, citedEntities: 1, components: 0, testedComponents: 0, routes: 1, visualizations: 0 }, issues: [] }],
     ["viz", { schemaVersion: 2, snapshotId, analyzerManifestDigest: hash, routeIds: [], componentIds: [], visualizationIds: [], factEdgeIds: [] }],
-    ["validation", { schemaVersion: 2, family: "frontend-v2", stage: "validate", snapshotId, analyzerManifestDigest: hash, upstreamManifestIds: [], sourceArtifactId: "legacy-validation", valid: true, pageCount: 1, issueCount: 0, graphReferenceCount: 2, checkedReferenceCount: 5, invalidReferenceCount: 0, projectProfileArtifactId: "profile", projectProfileDigest: profile.profileDigest }],
-    ["package", { schemaVersion: 2, family: "frontend-v2", stage: "package", snapshotId, analyzerManifestDigest: hash, upstreamManifestIds: ["legacy-validation", "validation"], sourceArtifactId: "legacy-package", irSchemaVersion: 2, graphSchemaVersion: 2, projectProfileArtifactId: "profile", projectProfileDigest: profile.profileDigest, artifacts: { convert: ["legacy-convert"], extract: ["legacy-extract", "frontend-extract"], tables: ["legacy-tables", "frontend-tables"], graph: ["legacy-graph", "graph"], synthesize: ["legacy-pages", "pages", "profile"], index: ["legacy-index", "search"], lint: ["legacy-quality", "quality"], viz: ["legacy-viz", "viz"], validate: ["legacy-validation", "validation"], package: ["legacy-package"] } }]
+    ["validation", { schemaVersion: 2, family: "frontend-v2", stage: "validate", snapshotId, analyzerManifestDigest: hash, upstreamManifestIds: [], sourceArtifactId: "legacy-validation", valid: true, pageCount: 1, issueCount: 0, graphReferenceCount: 2, checkedReferenceCount: 5, invalidReferenceCount: 0, projectProfileArtifactId: "profile", projectProfileDigest: profile.profileDigest, patternCandidatesArtifactId: "patterns" }],
+    ["package", { schemaVersion: 2, family: "frontend-v2", stage: "package", snapshotId, analyzerManifestDigest: hash, upstreamManifestIds: ["legacy-validation", "validation"], sourceArtifactId: "legacy-package", irSchemaVersion: 2, graphSchemaVersion: 2, projectProfileArtifactId: "profile", projectProfileDigest: profile.profileDigest, patternCandidatesArtifactId: "patterns", artifacts: { convert: ["legacy-convert"], extract: ["legacy-extract", "frontend-extract"], tables: ["legacy-tables", "frontend-tables"], graph: ["legacy-graph", "graph"], synthesize: ["legacy-pages", "pages", "profile"], index: ["legacy-index", "search", "patterns"], lint: ["legacy-quality", "quality"], viz: ["legacy-viz", "viz"], validate: ["legacy-validation", "validation"], package: ["legacy-package"] } }]
   ]);
   const store = {
     getBuild: vi.fn(async () => ({ id: buildId, workspaceId, repositoryId: "repository", snapshotId, commitSha: "a".repeat(40), status: "ready" })),
@@ -71,7 +71,8 @@ function fixture() {
     listPipelineStageRuns: vi.fn(async () => [
       ...[["graph", "graph"], ["synthesize", "pages"], ["index", "search"], ["lint", "quality"], ["viz", "viz"], ["validate", "validation"]].map(([stage, output]) => ({
         id: `${stage}-run`, workspaceId, projectId, snapshotId, buildId, stage, attempt: 1, status: "succeeded",
-        inputDigest: hash, outputManifestIds: [`legacy-${output}`, output, ...(stage === "synthesize" ? ["profile"] : [])], startedAt: null, finishedAt: null,
+        inputDigest: hash, outputManifestIds: [`legacy-${output}`, output,
+          ...(stage === "synthesize" ? ["profile"] : []), ...(stage === "index" ? ["patterns"] : [])], startedAt: null, finishedAt: null,
         errorCode: null, errorDetail: null
       })),
       { id: "package-run", workspaceId, projectId, snapshotId, buildId, stage: "package", attempt: 1, status: "succeeded", inputDigest: hash, outputManifestIds: ["legacy-package", "package"], startedAt: null, finishedAt: null, errorCode: null, errorDetail: null }
@@ -109,6 +110,7 @@ describe("loadFrontendCandidatePreview", () => {
       upstreamManifestIds: [], sourceArtifactId: "legacy-validation",
       graphReferenceCount: 2, checkedReferenceCount: 5, invalidReferenceCount: 1,
       projectProfileArtifactId: "profile", projectProfileDigest: projectProfile().profileDigest
+      , patternCandidatesArtifactId: "patterns"
     });
 
     await expect(loadFrontendCandidatePreview({ store: store as never, reader, workspaceId, projectId, buildId }))

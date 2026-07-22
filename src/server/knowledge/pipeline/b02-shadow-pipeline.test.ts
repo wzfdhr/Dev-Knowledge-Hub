@@ -201,7 +201,7 @@ describe("B02 shadow pipeline", () => {
       expect(manifests).not.toContain(null);
       const expectedCount = run.stage === "convert" && sourceStorageMode === "active"
         ? 1
-        : run.stage === "synthesize" ? 3 : 2;
+        : run.stage === "synthesize" || run.stage === "index" ? 3 : 2;
       expect(manifests).toHaveLength(expectedCount);
       expect(() => assertFrontendArtifactFamily(
         run.stage,
@@ -273,6 +273,12 @@ describe("B02 shadow pipeline", () => {
         citations: expect.arrayContaining([expect.objectContaining({ path: sourcePath })]),
         metadata: expect.objectContaining({ entityId: expect.any(String) })
       })])
+    });
+    await expect(frontendValue("index", "frontend-pattern-candidates")).resolves.toMatchObject({
+      schemaVersion: 1,
+      snapshotId: snapshot.id,
+      profileDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      candidates: expect.any(Array)
     });
     await expect(frontendValue("lint", "frontend-knowledge-quality-v2")).resolves.toMatchObject({
       summary: expect.objectContaining({ entities: expect.any(Number), citedEntities: expect.any(Number) })

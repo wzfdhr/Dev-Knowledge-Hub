@@ -94,6 +94,16 @@ function releaseFixture() {
   });
   artifacts.synthesize.push(profileArtifactId);
   runs.find((run) => run.stage === "synthesize")!.outputManifestIds.push(profileArtifactId);
+  const patternArtifactId = "frontend-pattern-candidates-1";
+  manifests.set(patternArtifactId, {
+    id: patternArtifactId, workspaceId, projectId, snapshotId, buildId, stage: "index",
+    kind: "frontend-pattern-candidates", schemaVersion: 1,
+    inputDigest: "a".repeat(64), contentDigest: "b".repeat(64),
+    storageKey: `index/${patternArtifactId}.json`, sourceRefs: [], producer: "deterministic",
+    createdAt: "2026-07-18T00:00:00.000Z"
+  });
+  artifacts.index.push(patternArtifactId);
+  runs.find((run) => run.stage === "index")!.outputManifestIds.push(patternArtifactId);
   const packageArtifactId = "frontend-package";
   manifests.set(packageArtifactId, {
     id: packageArtifactId, workspaceId, projectId, snapshotId, buildId, stage: "package",
@@ -110,6 +120,7 @@ function releaseFixture() {
     irSchemaVersion: 2 as const, graphSchemaVersion: 2 as const,
     projectProfileArtifactId: profileArtifactId,
     projectProfileDigest: profileValue.profileDigest,
+    patternCandidatesArtifactId: patternArtifactId,
     artifacts
   };
   const createReleaseDraft = vi.fn(async () => ({ id: "release-1" }) as never);
@@ -132,7 +143,8 @@ function releaseFixture() {
           valid: true, pageCount: 1, issueCount: 0,
           graphReferenceCount: 2, checkedReferenceCount: 5, invalidReferenceCount: 0,
           projectProfileArtifactId: profileArtifactId,
-          projectProfileDigest: profileValue.profileDigest
+          projectProfileDigest: profileValue.profileDigest,
+          patternCandidatesArtifactId: patternArtifactId
         };
       }
       return { ok: true };
@@ -181,10 +193,12 @@ describe("frontend v2 compatibility contracts", () => {
       irSchemaVersion: 2, graphSchemaVersion: 2,
       projectProfileArtifactId: "frontend-project-profile-v1",
       projectProfileDigest: "a".repeat(64),
+      patternCandidatesArtifactId: "frontend-pattern-candidates-v1",
       artifacts: {
         convert: ["convert-v1"], extract: ["extract-v1", "extract-v2"],
         tables: ["tables-v1", "tables-v2"], graph: ["graph-v1", "graph-v2"],
-        synthesize: ["synthesize-v1", "synthesize-v2", "frontend-project-profile-v1"], index: ["index-v1", "index-v2"],
+        synthesize: ["synthesize-v1", "synthesize-v2", "frontend-project-profile-v1"],
+        index: ["index-v1", "index-v2", "frontend-pattern-candidates-v1"],
         lint: ["lint-v1", "lint-v2"], viz: ["viz-v1", "viz-v2"],
         validate: ["validate-v1", "validate-v2"], package: ["package-v1"]
       }

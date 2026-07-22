@@ -79,6 +79,7 @@ import {
 } from "./knowledge/frontend/reference-validation.js";
 import { frontendCandidateRunStatus } from "./knowledge/frontend/preview-status.js";
 import { searchFrontendKnowledge } from "./knowledge/frontend/search.js";
+import { indexPublishedFrontendPatternEvidence } from "./knowledge/frontend/patterns.js";
 import { exportKnowledgeGraph } from "./knowledge/pipeline/viz.js";
 import { legacyBuildStatus } from "./knowledge/pipeline/contracts.js";
 import {
@@ -2811,7 +2812,21 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!repository) return;
     if (repository.id !== existing.repositoryId) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
     try {
-      return { release: await options.store.publishRelease(admin.workspaceId, parsed.data.id) };
+      const release = await options.store.publishRelease(admin.workspaceId, parsed.data.id);
+      let experienceIndex: Awaited<ReturnType<typeof indexPublishedFrontendPatternEvidence>> | null = null;
+      if (options.qualityArtifactReader && release.releaseArtifactFamily === "frontend-v2") {
+        try {
+          experienceIndex = await indexPublishedFrontendPatternEvidence({
+            store: options.store,
+            reader: options.qualityArtifactReader,
+            workspaceId: admin.workspaceId,
+            releaseId: release.id
+          });
+        } catch (error) {
+          request.log.error({ err: error, releaseId: release.id }, "Published frontend experience indexing failed");
+        }
+      }
+      return { release, experienceIndex };
     } catch (error) {
       return sendError(reply, 409, "PUBLISH_FAILED", error instanceof Error ? error.message : "Publish failed");
     }

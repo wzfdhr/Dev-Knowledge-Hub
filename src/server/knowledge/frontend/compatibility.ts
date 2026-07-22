@@ -18,6 +18,8 @@ export const FRONTEND_V2_IR_SCHEMA_VERSION = 2;
 export const FRONTEND_V2_GRAPH_SCHEMA_VERSION = 2;
 export const FRONTEND_PROJECT_PROFILE_SCHEMA_VERSION = 1;
 export const FRONTEND_PROJECT_PROFILE_ARTIFACT_KIND = "frontend-project-profile";
+export const FRONTEND_PATTERN_CANDIDATES_SCHEMA_VERSION = 1;
+export const FRONTEND_PATTERN_CANDIDATES_ARTIFACT_KIND = "frontend-pattern-candidates";
 export const EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST = frontendAnalyzerManifestDigest([]);
 
 export const ARTIFACT_KINDS: Record<BuildStage, Record<ReleaseArtifactFamily, { kind: string; schemaVersion: number }>> = {
@@ -102,7 +104,8 @@ export const frontendValidationV2Schema = frontendPipelineEnvelopeSchema.extend(
   checkedReferenceCount: z.number().int().nonnegative(),
   invalidReferenceCount: z.number().int().nonnegative(),
   projectProfileArtifactId: z.string({ error: "frontend project profile artifact is required" }).min(1),
-  projectProfileDigest: z.string({ error: "frontend project profile digest is required" }).regex(/^[a-f0-9]{64}$/u)
+  projectProfileDigest: z.string({ error: "frontend project profile digest is required" }).regex(/^[a-f0-9]{64}$/u),
+  patternCandidatesArtifactId: z.string({ error: "frontend pattern candidates artifact is required" }).min(1)
 }).strict();
 
 export function assertFrontendCandidateValid(value: unknown): asserts value is {
@@ -132,13 +135,14 @@ export const frontendPipelinePackageSchema = frontendPipelineEnvelopeSchema.exte
   graphSchemaVersion: z.literal(FRONTEND_V2_GRAPH_SCHEMA_VERSION),
   projectProfileArtifactId: z.string({ error: "frontend project profile artifact is required" }).min(1),
   projectProfileDigest: z.string({ error: "frontend project profile digest is required" }).regex(/^[a-f0-9]{64}$/u),
+  patternCandidatesArtifactId: z.string({ error: "frontend pattern candidates artifact is required" }).min(1),
   artifacts: z.object({
     convert: z.array(z.string().min(1)).min(1).max(2),
     extract: z.array(z.string().min(1)).length(2),
     tables: z.array(z.string().min(1)).length(2),
     graph: z.array(z.string().min(1)).length(2),
     synthesize: z.array(z.string().min(1)).length(3),
-    index: z.array(z.string().min(1)).length(2),
+    index: z.array(z.string().min(1)).length(3),
     lint: z.array(z.string().min(1)).length(2),
     viz: z.array(z.string().min(1)).length(2),
     validate: z.array(z.string().min(1)).length(2),
@@ -147,6 +151,9 @@ export const frontendPipelinePackageSchema = frontendPipelineEnvelopeSchema.exte
 }).strict().superRefine((value, context) => {
   if (!value.artifacts.synthesize.includes(value.projectProfileArtifactId)) {
     context.addIssue({ code: "custom", message: "frontend project profile artifact is not packaged" });
+  }
+  if (!value.artifacts.index.includes(value.patternCandidatesArtifactId)) {
+    context.addIssue({ code: "custom", message: "frontend pattern candidates artifact is not packaged" });
   }
 });
 
@@ -302,12 +309,16 @@ function artifactContracts(
   } else {
     primary = ARTIFACT_KINDS.convert["knowledge-v1"];
   }
-  return stage === "synthesize" && family === "frontend-v2"
-    ? [primary, {
-        kind: FRONTEND_PROJECT_PROFILE_ARTIFACT_KIND,
-        schemaVersion: FRONTEND_PROJECT_PROFILE_SCHEMA_VERSION
-      }]
-    : [primary];
+  if (family !== "frontend-v2") return [primary];
+  if (stage === "synthesize") return [primary, {
+    kind: FRONTEND_PROJECT_PROFILE_ARTIFACT_KIND,
+    schemaVersion: FRONTEND_PROJECT_PROFILE_SCHEMA_VERSION
+  }];
+  if (stage === "index") return [primary, {
+    kind: FRONTEND_PATTERN_CANDIDATES_ARTIFACT_KIND,
+    schemaVersion: FRONTEND_PATTERN_CANDIDATES_SCHEMA_VERSION
+  }];
+  return [primary];
 }
 
 export function frontendStageArtifactKinds(

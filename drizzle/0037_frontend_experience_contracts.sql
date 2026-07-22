@@ -158,6 +158,63 @@ CREATE TABLE workspace_standards (
     REFERENCES workspace_standards(id, workspace_id) ON DELETE RESTRICT
 );
 
+CREATE TABLE workspace_experience_review_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  pattern_group_id uuid NOT NULL,
+  evidence_id uuid,
+  outcome_id uuid UNIQUE,
+  reported_by uuid NOT NULL,
+  kind text NOT NULL,
+  priority text NOT NULL,
+  feedback_event text,
+  current_project_id uuid,
+  source_version text NOT NULL,
+  task_summary text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (id, workspace_id),
+  CONSTRAINT workspace_experience_review_items_kind_check
+    CHECK (kind IN ('trusted_negative_outcome', 'user_feedback')),
+  CONSTRAINT workspace_experience_review_items_priority_check
+    CHECK (priority IN ('high', 'normal')),
+  CONSTRAINT workspace_experience_review_items_feedback_check
+    CHECK (feedback_event IS NULL OR feedback_event IN
+      ('considered', 'adopted', 'partially_adopted', 'rejected', 'failed', 'rolled_back')),
+  CONSTRAINT workspace_experience_review_items_shape_check CHECK (
+    (kind = 'trusted_negative_outcome' AND outcome_id IS NOT NULL
+      AND feedback_event IS NULL AND current_project_id IS NULL AND priority = 'high')
+    OR
+    (kind = 'user_feedback' AND outcome_id IS NULL
+      AND feedback_event IS NOT NULL AND current_project_id IS NOT NULL AND priority = 'normal')
+  ),
+  CONSTRAINT workspace_experience_review_items_group_workspace_fk
+    FOREIGN KEY (pattern_group_id, workspace_id)
+    REFERENCES workspace_pattern_groups(id, workspace_id) ON DELETE CASCADE,
+  CONSTRAINT workspace_experience_review_items_evidence_workspace_fk
+    FOREIGN KEY (evidence_id, workspace_id)
+    REFERENCES workspace_pattern_evidence(id, workspace_id) ON DELETE RESTRICT,
+  CONSTRAINT workspace_experience_review_items_outcome_workspace_fk
+    FOREIGN KEY (outcome_id, workspace_id)
+    REFERENCES workspace_outcomes(id, workspace_id) ON DELETE RESTRICT,
+  CONSTRAINT workspace_experience_review_items_actor_workspace_fk
+    FOREIGN KEY (reported_by, workspace_id) REFERENCES admin_users(id, workspace_id) ON DELETE RESTRICT,
+  CONSTRAINT workspace_experience_review_items_project_workspace_fk
+    FOREIGN KEY (current_project_id, workspace_id) REFERENCES projects(id, workspace_id) ON DELETE RESTRICT
+);
+
+CREATE INDEX workspace_experience_review_items_queue_idx
+  ON workspace_experience_review_items (workspace_id, priority, created_at, id);
+
+CREATE FUNCTION reject_workspace_experience_review_item_mutation() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'workspace experience review items are append-only';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER workspace_experience_review_items_append_only_trigger
+BEFORE UPDATE OR DELETE ON workspace_experience_review_items
+FOR EACH ROW EXECUTE FUNCTION reject_workspace_experience_review_item_mutation();
+
 CREATE FUNCTION validate_workspace_decision_basis() RETURNS trigger AS $$
 BEGIN
   IF (

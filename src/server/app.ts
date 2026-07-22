@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -80,6 +80,7 @@ import {
 import { frontendCandidateRunStatus } from "./knowledge/frontend/preview-status.js";
 import { searchFrontendKnowledge } from "./knowledge/frontend/search.js";
 import { indexPublishedFrontendPatternEvidence } from "./knowledge/frontend/patterns.js";
+import { FrontendExperienceGovernance } from "./knowledge/frontend/experience-governance.js";
 import { exportKnowledgeGraph } from "./knowledge/pipeline/viz.js";
 import { legacyBuildStatus } from "./knowledge/pipeline/contracts.js";
 import {
@@ -176,6 +177,52 @@ const remediationTransitionSchema = z.object({
     context.addIssue({ code: "custom", path: ["reason"], message: "Dismissal reason is required" });
   }
 });
+const experienceIdParamsSchema = z.object({ experienceId: z.uuid() }).strict();
+const applicabilityInputSchema = z.object({
+  required: z.array(z.record(z.string(), z.unknown())).max(100),
+  forbidden: z.array(z.record(z.string(), z.unknown())).max(100),
+  preferred: z.array(z.record(z.string(), z.unknown())).max(100),
+  unsupportedWhenUnknown: z.array(z.string().trim().min(1).max(120)).max(100)
+}).strict();
+const experienceDecisionBodySchema = z.object({
+  id: z.uuid().optional(),
+  decision: z.enum(["approve", "reject", "deprecate", "standardize"]),
+  reason: z.string().trim().min(1).max(2_000),
+  basisEvidenceIds: z.array(z.uuid()).min(1).max(100),
+  applicability: applicabilityInputSchema
+}).strict();
+const experienceReviewBodySchema = z.object({
+  action: z.enum(["verify", "recommend", "standardize", "reject", "deprecate", "supersede"]),
+  reason: z.string().trim().min(1).max(2_000),
+  basisEvidenceIds: z.array(z.uuid()).min(1).max(100),
+  decisionId: z.uuid().nullable().default(null),
+  supersededById: z.uuid().nullable().default(null)
+}).strict();
+const experienceStandardBodySchema = z.object({
+  id: z.uuid().optional(),
+  title: z.string().trim().min(1).max(240),
+  body: z.string().trim().min(1).max(20_000),
+  supersededById: z.uuid().nullable().default(null)
+}).strict();
+const experienceOutcomeBodySchema = z.object({
+  id: z.uuid().optional(),
+  evidenceId: z.uuid().nullable(),
+  outcome: z.enum(["passed", "failed", "rolled_back", "partial"]),
+  sourceVersion: z.string().trim().min(1).max(240),
+  checks: z.array(z.object({
+    name: z.string().trim().min(1).max(240),
+    status: z.enum(["passed", "failed", "skipped"])
+  }).strict()).max(500),
+  reportDigest: z.string().regex(/^[a-f0-9]{64}$/u).nullable().default(null)
+}).strict();
+const experienceFeedbackBodySchema = z.object({
+  id: z.uuid().optional(),
+  evidenceId: z.uuid().nullable(),
+  event: z.enum(["considered", "adopted", "partially_adopted", "rejected", "failed", "rolled_back"]),
+  currentProjectId: z.uuid(),
+  sourceVersion: z.string().trim().min(1).max(240),
+  taskSummary: z.string().trim().min(1).max(2_000)
+}).strict();
 const qualityQuerySchema = z.object({
   issueLimit: z.coerce.number().int().min(1).max(100).default(50)
 });
@@ -464,6 +511,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
   const sessionStore = options.sessionStore ?? new MemorySessionStore();
+  const experienceGovernance = new FrontendExperienceGovernance(options.store);
   const knowledgeKernelMode = options.knowledgeKernelMode ?? "legacy";
   const frontendKnowledgeMode = options.frontendKnowledgeMode ?? "legacy";
   const stageSseConnections = new Map<string, number>();
@@ -720,6 +768,129 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   }
 
   server.get("/api/health", async () => ({ status: "ok", service: SERVICE_NAME }));
+
+  server.post("/api/knowledge/experiences/:experienceId/decisions", {
+    preHandler: requireAdministrator
+  }, async (request, reply) => {
+    const params = experienceIdParamsSchema.safeParse(request.params);
+    const body = experienceDecisionBodySchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return sendError(reply, 400, "INVALID_EXPERIENCE_DECISION", "Invalid experience decision");
+    }
+    const actor = (request as AuthenticatedRequest).sessionAdmin;
+    try {
+      const decision = await experienceGovernance.createDecision({
+        id: body.data.id ?? randomUUID(), workspaceId: actor.workspaceId,
+        patternGroupId: params.data.experienceId, actorId: actor.id,
+        decision: body.data.decision, reason: body.data.reason,
+        basisEvidenceIds: body.data.basisEvidenceIds, applicability: body.data.applicability
+      });
+      return reply.code(201).send({ decision });
+    } catch {
+      return sendError(reply, 409, "EXPERIENCE_BASIS_INVALID", "Decision basis is incomplete or not visible");
+    }
+  });
+
+  server.post("/api/knowledge/experiences/:experienceId/reviews", {
+    preHandler: requireAdministrator
+  }, async (request, reply) => {
+    const params = experienceIdParamsSchema.safeParse(request.params);
+    const body = experienceReviewBodySchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return sendError(reply, 400, "INVALID_EXPERIENCE_REVIEW", "Invalid experience review");
+    }
+    const actor = (request as AuthenticatedRequest).sessionAdmin;
+    try {
+      const review = await experienceGovernance.review({
+        ...body.data, workspaceId: actor.workspaceId,
+        experienceId: params.data.experienceId, actorId: actor.id
+      });
+      return reply.code(201).send({ review });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Experience review failed";
+      return sendError(reply, 409, "INVALID_EXPERIENCE_TRANSITION", message);
+    }
+  });
+
+  server.post("/api/knowledge/experiences/:experienceId/standards", {
+    preHandler: requireAdministrator
+  }, async (request, reply) => {
+    const params = experienceIdParamsSchema.safeParse(request.params);
+    const body = experienceStandardBodySchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return sendError(reply, 400, "INVALID_WORKSPACE_STANDARD", "Invalid workspace standard");
+    }
+    const actor = (request as AuthenticatedRequest).sessionAdmin;
+    try {
+      const standard = await experienceGovernance.createStandard({
+        id: body.data.id ?? randomUUID(), workspaceId: actor.workspaceId,
+        patternGroupId: params.data.experienceId, title: body.data.title,
+        body: body.data.body, authoredBy: actor.id, supersededById: body.data.supersededById
+      });
+      return reply.code(201).send({ standard });
+    } catch {
+      return sendError(reply, 409, "WORKSPACE_STANDARD_INVALID", "Workspace standard could not be created");
+    }
+  });
+
+  server.post("/api/knowledge/experiences/:experienceId/outcomes/manual", {
+    preHandler: requireAdministrator
+  }, async (request, reply) => {
+    const params = experienceIdParamsSchema.safeParse(request.params);
+    const body = experienceOutcomeBodySchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return sendError(reply, 400, "INVALID_EXPERIENCE_OUTCOME", "Invalid experience outcome");
+    }
+    const actor = (request as AuthenticatedRequest).sessionAdmin;
+    try {
+      const outcome = await experienceGovernance.recordOutcome({
+        id: body.data.id ?? randomUUID(), workspaceId: actor.workspaceId,
+        patternGroupId: params.data.experienceId, evidenceId: body.data.evidenceId,
+        authority: "admin_confirmed", outcome: body.data.outcome,
+        sourceVersion: body.data.sourceVersion, checks: body.data.checks,
+        reportDigest: body.data.reportDigest, recordedBy: actor.id
+      });
+      return reply.code(201).send({ outcome });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Experience outcome failed";
+      return sendError(reply, 409, "EXPERIENCE_OUTCOME_REJECTED", message);
+    }
+  });
+
+  server.post("/api/knowledge/experiences/:experienceId/feedback", {
+    preHandler: requireContributor
+  }, async (request, reply) => {
+    const params = experienceIdParamsSchema.safeParse(request.params);
+    const body = experienceFeedbackBodySchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return sendError(reply, 400, "INVALID_EXPERIENCE_FEEDBACK", "Invalid experience feedback");
+    }
+    await requireProjectRole("reader", body.data.currentProjectId, request, reply);
+    if (reply.sent) return;
+    const actor = (request as AuthenticatedRequest).sessionAdmin;
+    try {
+      const reviewItem = await experienceGovernance.submitFeedback({
+        id: body.data.id ?? randomUUID(), workspaceId: actor.workspaceId,
+        patternGroupId: params.data.experienceId, evidenceId: body.data.evidenceId,
+        actorId: actor.id, event: body.data.event, currentProjectId: body.data.currentProjectId,
+        sourceVersion: body.data.sourceVersion, taskSummary: body.data.taskSummary
+      });
+      return reply.code(202).send({ reviewItem });
+    } catch {
+      return sendError(reply, 409, "EXPERIENCE_FEEDBACK_REJECTED", "Experience feedback could not be queued");
+    }
+  });
+
+  server.get("/api/knowledge/experience-review-items", {
+    preHandler: requireAdministrator
+  }, async (request, reply) => {
+    const query = z.object({ experienceId: z.uuid().optional() }).safeParse(request.query);
+    if (!query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid review queue query");
+    const actor = (request as AuthenticatedRequest).sessionAdmin;
+    return {
+      reviewItems: await options.store.listExperienceReviewItems(actor.workspaceId, query.data.experienceId)
+    };
+  });
 
   server.get("/api/setup/status", async () => ({
     setupRequired: !(await options.store.isSetupComplete())

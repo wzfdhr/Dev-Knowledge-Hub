@@ -28,6 +28,7 @@ import type { FeedbackGenerationContext, RemediationGenerationContext } from "..
 import type { LintIssue, SourceRef } from "../shared/api-contracts.js";
 import type {
   DeclaredDecisionEvidence,
+  ExperienceReviewItem,
   ExperienceState,
   ExperienceSourceEligibility,
   VerifiedOutcomeEvidence
@@ -932,6 +933,40 @@ export const workspaceExperienceReviews = pgTable("workspace_experience_reviews"
   foreignKey({ columns: [table.patternGroupId, table.workspaceId], foreignColumns: [workspacePatternGroups.id, workspacePatternGroups.workspaceId], name: "workspace_experience_reviews_group_workspace_fk" }).onDelete("cascade"),
   foreignKey({ columns: [table.decisionId, table.workspaceId], foreignColumns: [workspaceDecisions.id, workspaceDecisions.workspaceId], name: "workspace_experience_reviews_decision_workspace_fk" }).onDelete("restrict"),
   foreignKey({ columns: [table.actorId, table.workspaceId], foreignColumns: [adminUsers.id, adminUsers.workspaceId], name: "workspace_experience_reviews_actor_workspace_fk" }).onDelete("restrict")
+]);
+
+export const workspaceExperienceReviewItems = pgTable("workspace_experience_review_items", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  patternGroupId: uuid("pattern_group_id").notNull(),
+  evidenceId: uuid("evidence_id"),
+  outcomeId: uuid("outcome_id").unique(),
+  reportedBy: uuid("reported_by").notNull(),
+  kind: text("kind").$type<ExperienceReviewItem["kind"]>().notNull(),
+  priority: text("priority").$type<ExperienceReviewItem["priority"]>().notNull(),
+  feedbackEvent: text("feedback_event").$type<ExperienceReviewItem["feedbackEvent"]>(),
+  currentProjectId: uuid("current_project_id"),
+  sourceVersion: text("source_version").notNull(),
+  taskSummary: text("task_summary").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+}, (table) => [
+  uniqueIndex("workspace_experience_review_items_id_workspace_idx").on(table.id, table.workspaceId),
+  index("workspace_experience_review_items_queue_idx").on(table.workspaceId, table.priority, table.createdAt, table.id),
+  check("workspace_experience_review_items_kind_check", sql`${table.kind} IN ('trusted_negative_outcome', 'user_feedback')`),
+  check("workspace_experience_review_items_priority_check", sql`${table.priority} IN ('high', 'normal')`),
+  check("workspace_experience_review_items_feedback_check", sql`${table.feedbackEvent} IS NULL OR ${table.feedbackEvent} IN ('considered', 'adopted', 'partially_adopted', 'rejected', 'failed', 'rolled_back')`),
+  check("workspace_experience_review_items_shape_check", sql`
+    (${table.kind} = 'trusted_negative_outcome' AND ${table.outcomeId} IS NOT NULL
+      AND ${table.feedbackEvent} IS NULL AND ${table.currentProjectId} IS NULL AND ${table.priority} = 'high')
+    OR
+    (${table.kind} = 'user_feedback' AND ${table.outcomeId} IS NULL
+      AND ${table.feedbackEvent} IS NOT NULL AND ${table.currentProjectId} IS NOT NULL AND ${table.priority} = 'normal')
+  `),
+  foreignKey({ columns: [table.patternGroupId, table.workspaceId], foreignColumns: [workspacePatternGroups.id, workspacePatternGroups.workspaceId], name: "workspace_experience_review_items_group_workspace_fk" }).onDelete("cascade"),
+  foreignKey({ columns: [table.evidenceId, table.workspaceId], foreignColumns: [workspacePatternEvidence.id, workspacePatternEvidence.workspaceId], name: "workspace_experience_review_items_evidence_workspace_fk" }).onDelete("restrict"),
+  foreignKey({ columns: [table.outcomeId, table.workspaceId], foreignColumns: [workspaceOutcomes.id, workspaceOutcomes.workspaceId], name: "workspace_experience_review_items_outcome_workspace_fk" }).onDelete("restrict"),
+  foreignKey({ columns: [table.reportedBy, table.workspaceId], foreignColumns: [adminUsers.id, adminUsers.workspaceId], name: "workspace_experience_review_items_actor_workspace_fk" }).onDelete("restrict"),
+  foreignKey({ columns: [table.currentProjectId, table.workspaceId], foreignColumns: [projects.id, projects.workspaceId], name: "workspace_experience_review_items_project_workspace_fk" }).onDelete("restrict")
 ]);
 
 export const workspaceStandards = pgTable("workspace_standards", {

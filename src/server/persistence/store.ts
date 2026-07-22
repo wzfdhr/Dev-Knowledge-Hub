@@ -30,6 +30,8 @@ import type {
   DeclaredDecisionInput,
   ExperienceProjection,
   ExperienceProjectionInput,
+  ExperienceReviewItem,
+  ExperienceReviewItemInput,
   ExperienceReviewEvent,
   ExperienceTransitionInput,
   ObservedPatternEvidence,
@@ -1014,6 +1016,8 @@ export interface ExperienceStore {
   saveObservedPatternEvidence(input: ObservedPatternEvidenceInput): Promise<ObservedPatternEvidence>;
   createExperienceDecisionWithAudit(input: DeclaredDecisionInput): Promise<DeclaredDecisionEvidence>;
   recordExperienceOutcome(input: VerifiedOutcomeInput): Promise<VerifiedOutcomeEvidence>;
+  createExperienceReviewItem(input: ExperienceReviewItemInput): Promise<ExperienceReviewItem>;
+  listExperienceReviewItems(workspaceId: string, patternGroupId?: string): Promise<ExperienceReviewItem[]>;
   transitionExperienceWithAudit(input: ExperienceTransitionInput): Promise<ExperienceReviewEvent>;
   listExperienceReviewEvents(workspaceId: string, patternGroupId: string): Promise<ExperienceReviewEvent[]>;
   createWorkspaceStandardWithAudit(input: WorkspaceStandardInput): Promise<WorkspaceStandard>;

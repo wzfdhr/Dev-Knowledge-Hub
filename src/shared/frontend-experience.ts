@@ -8,6 +8,9 @@ export const EXPERIENCE_STATES = [
 export const EXPERIENCE_SOURCE_ELIGIBILITY = [
   "git", "git_linked", "admin_attested", "unverified_upload"
 ] as const;
+export const EXPERIENCE_FEEDBACK_EVENTS = [
+  "considered", "adopted", "partially_adopted", "rejected", "failed", "rolled_back"
+] as const;
 
 export const experienceStateSchema = z.enum(EXPERIENCE_STATES);
 export const experienceSourceEligibilitySchema = z.enum(EXPERIENCE_SOURCE_ELIGIBILITY);
@@ -76,6 +79,37 @@ export const verifiedOutcomeInputSchema = z.object({
 
 export const verifiedOutcomeSchema = verifiedOutcomeInputSchema.extend({ createdAt: z.date() }).strict();
 
+export const experienceFeedbackEventSchema = z.enum(EXPERIENCE_FEEDBACK_EVENTS);
+
+export const experienceReviewItemInputSchema = z.object({
+  id: z.string().min(1),
+  workspaceId: z.string().min(1),
+  patternGroupId: z.string().min(1),
+  evidenceId: z.string().min(1).nullable(),
+  outcomeId: z.string().min(1).nullable(),
+  reportedBy: z.string().min(1),
+  kind: z.enum(["trusted_negative_outcome", "user_feedback"]),
+  priority: z.enum(["high", "normal"]),
+  feedbackEvent: experienceFeedbackEventSchema.nullable(),
+  currentProjectId: z.string().min(1).nullable(),
+  sourceVersion: z.string().min(1),
+  taskSummary: z.string().trim().min(1).max(2_000)
+}).strict().superRefine((value, context) => {
+  if (value.kind === "trusted_negative_outcome"
+    && (value.outcomeId === null || value.feedbackEvent !== null || value.priority !== "high")) {
+    context.addIssue({ code: "custom", message: "Trusted negative outcome review item is invalid" });
+  }
+  if (value.kind === "user_feedback"
+    && (value.outcomeId !== null || value.feedbackEvent === null || value.currentProjectId === null
+      || value.priority !== "normal")) {
+    context.addIssue({ code: "custom", message: "User feedback review item is invalid" });
+  }
+});
+
+export const experienceReviewItemSchema = experienceReviewItemInputSchema.extend({
+  createdAt: z.date()
+}).strict();
+
 export const experienceReviewEventSchema = z.object({
   id: z.string().min(1),
   workspaceId: z.string().min(1),
@@ -117,6 +151,9 @@ export type DeclaredDecisionInput = z.input<typeof declaredDecisionInputSchema>;
 export type DeclaredDecisionEvidence = z.infer<typeof declaredDecisionSchema>;
 export type VerifiedOutcomeInput = z.input<typeof verifiedOutcomeInputSchema>;
 export type VerifiedOutcomeEvidence = z.infer<typeof verifiedOutcomeSchema>;
+export type ExperienceFeedbackEvent = z.infer<typeof experienceFeedbackEventSchema>;
+export type ExperienceReviewItemInput = z.input<typeof experienceReviewItemInputSchema>;
+export type ExperienceReviewItem = z.infer<typeof experienceReviewItemSchema>;
 export type ExperienceReviewEvent = z.infer<typeof experienceReviewEventSchema>;
 export type WorkspaceStandardInput = z.input<typeof workspaceStandardInputSchema>;
 export type WorkspaceStandard = z.infer<typeof workspaceStandardSchema>;

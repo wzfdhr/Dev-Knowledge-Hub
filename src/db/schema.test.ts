@@ -133,6 +133,7 @@ describe("schema exports", () => {
     const groups = getTableConfig(schema.workspacePatternGroups);
     const evidence = getTableConfig(schema.workspacePatternEvidence);
     const reviews = getTableConfig(schema.workspaceExperienceReviews);
+    const reviewItems = getTableConfig(schema.workspaceExperienceReviewItems);
 
     expect(groups.checks.map((item) => item.name)).toEqual(expect.arrayContaining([
       "workspace_pattern_groups_state_check",
@@ -144,6 +145,10 @@ describe("schema exports", () => {
       "workspace_pattern_evidence_release_workspace_fk"
     ]));
     expect(reviews.checks.map((item) => item.name)).toContain("workspace_experience_reviews_basis_check");
+    expect(reviewItems.checks.map((item) => item.name)).toEqual(expect.arrayContaining([
+      "workspace_experience_review_items_shape_check",
+      "workspace_experience_review_items_priority_check"
+    ]));
   });
 
   test("keeps source analysis cache workspace-scoped and content-addressed", () => {

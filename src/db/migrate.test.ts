@@ -111,7 +111,8 @@ test("creates workspace-isolated frontend experience contracts", async () => {
 
   for (const table of [
     "workspace_pattern_groups", "workspace_pattern_evidence", "workspace_decisions",
-    "workspace_outcomes", "workspace_experience_reviews", "workspace_standards"
+    "workspace_outcomes", "workspace_experience_reviews", "workspace_experience_review_items",
+    "workspace_standards"
   ]) expect(sql).toContain(`CREATE TABLE ${table}`);
   expect(sql).toMatch(/workspace_pattern_groups_state_check/);
   expect(sql).toMatch(/workspace_pattern_evidence_source_eligibility_check/);
@@ -120,5 +121,6 @@ test("creates workspace-isolated frontend experience contracts", async () => {
   expect(sql).toMatch(/workspace_pattern_groups_no_self_supersession_check/);
   expect(sql).toMatch(/workspace_decisions_validate_basis_trigger/);
   expect(sql).toMatch(/workspace_experience_reviews_append_only_trigger/);
+  expect(sql).toMatch(/workspace_experience_review_items_append_only_trigger/);
   expect(sql).not.toMatch(/DROP COLUMN|DROP TABLE|TRUNCATE/);
 });

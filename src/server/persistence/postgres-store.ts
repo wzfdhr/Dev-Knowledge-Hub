@@ -18,6 +18,8 @@ import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledg
 import { normalizeSnapshotProvenance } from "../source-provenance.js";
 import {
   declaredDecisionInputSchema,
+  experienceReviewItemInputSchema,
+  experienceReviewItemSchema,
   experienceReviewEventSchema,
   observedPatternEvidenceInputSchema,
   verifiedOutcomeInputSchema,
@@ -27,6 +29,8 @@ import {
   type ExperienceProjection,
   type ExperienceProjectionInput,
   type ExperienceReviewEvent,
+  type ExperienceReviewItem,
+  type ExperienceReviewItemInput,
   type ExperienceState,
   type ExperienceTransitionInput,
   type ObservedPatternEvidence,
@@ -6389,28 +6393,106 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
 
   async recordExperienceOutcome(input: VerifiedOutcomeInput): Promise<VerifiedOutcomeEvidence> {
     const parsed = verifiedOutcomeInputSchema.parse(input);
+    return this.transaction(async (client) => {
+      if (parsed.evidenceId !== null) {
+        const evidence = await client.query<{ content_version: string }>(
+          `SELECT content_version FROM workspace_pattern_evidence
+           WHERE workspace_id = $1 AND pattern_group_id = $2 AND id = $3`,
+          [parsed.workspaceId, parsed.patternGroupId, parsed.evidenceId]
+        );
+        if (!evidence.rows[0]) throw new Error("Experience outcome references an inaccessible group or evidence");
+        if (evidence.rows[0].content_version !== parsed.sourceVersion) {
+          throw new Error("Experience outcome source version does not match evidence");
+        }
+      }
+      const { rows } = await client.query<{
+        id: string; workspace_id: string; pattern_group_id: string; evidence_id: string | null;
+        authority: VerifiedOutcomeEvidence["authority"]; outcome: VerifiedOutcomeEvidence["outcome"];
+        source_version: string; checks: VerifiedOutcomeEvidence["checks"]; report_digest: string | null;
+        recorded_by: string; created_at: Date;
+      }>(
+        `INSERT INTO workspace_outcomes
+          (id, workspace_id, pattern_group_id, evidence_id, authority, outcome,
+           source_version, checks, report_digest, recorded_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
+         RETURNING id, workspace_id, pattern_group_id, evidence_id, authority, outcome,
+                   source_version, checks, report_digest, recorded_by, created_at`,
+        [parsed.id, parsed.workspaceId, parsed.patternGroupId, parsed.evidenceId, parsed.authority,
+          parsed.outcome, parsed.sourceVersion, JSON.stringify(parsed.checks), parsed.reportDigest, parsed.recordedBy]
+      );
+      const row = rows[0]!;
+      return {
+        id: row.id, workspaceId: row.workspace_id, patternGroupId: row.pattern_group_id,
+        evidenceId: row.evidence_id, authority: row.authority, outcome: row.outcome,
+        sourceVersion: row.source_version, checks: row.checks, reportDigest: row.report_digest,
+        recordedBy: row.recorded_by, createdAt: row.created_at
+      };
+    });
+  }
+
+  async createExperienceReviewItem(input: ExperienceReviewItemInput): Promise<ExperienceReviewItem> {
+    const parsed = experienceReviewItemInputSchema.parse(input);
     const { rows } = await this.pool.query<{
       id: string; workspace_id: string; pattern_group_id: string; evidence_id: string | null;
-      authority: VerifiedOutcomeEvidence["authority"]; outcome: VerifiedOutcomeEvidence["outcome"];
-      source_version: string; checks: VerifiedOutcomeEvidence["checks"]; report_digest: string | null;
-      recorded_by: string; created_at: Date;
+      outcome_id: string | null; reported_by: string; kind: ExperienceReviewItem["kind"];
+      priority: ExperienceReviewItem["priority"]; feedback_event: ExperienceReviewItem["feedbackEvent"];
+      current_project_id: string | null; source_version: string; task_summary: string; created_at: Date;
     }>(
-      `INSERT INTO workspace_outcomes
-        (id, workspace_id, pattern_group_id, evidence_id, authority, outcome,
-         source_version, checks, report_digest, recorded_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10)
-       RETURNING id, workspace_id, pattern_group_id, evidence_id, authority, outcome,
-                 source_version, checks, report_digest, recorded_by, created_at`,
-      [parsed.id, parsed.workspaceId, parsed.patternGroupId, parsed.evidenceId, parsed.authority,
-        parsed.outcome, parsed.sourceVersion, JSON.stringify(parsed.checks), parsed.reportDigest, parsed.recordedBy]
+      `INSERT INTO workspace_experience_review_items
+        (id, workspace_id, pattern_group_id, evidence_id, outcome_id, reported_by,
+         kind, priority, feedback_event, current_project_id, source_version, task_summary)
+       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+       WHERE EXISTS (
+         SELECT 1 FROM workspace_members member
+         WHERE member.workspace_id = $2 AND member.user_id = $6
+       )
+       ON CONFLICT (id) DO NOTHING
+       RETURNING id, workspace_id, pattern_group_id, evidence_id, outcome_id, reported_by,
+                 kind, priority, feedback_event, current_project_id, source_version, task_summary, created_at`,
+      [parsed.id, parsed.workspaceId, parsed.patternGroupId, parsed.evidenceId, parsed.outcomeId,
+        parsed.reportedBy, parsed.kind, parsed.priority, parsed.feedbackEvent,
+        parsed.currentProjectId, parsed.sourceVersion, parsed.taskSummary]
     );
-    const row = rows[0]!;
-    return {
+    const row = rows[0] ?? (await this.pool.query<typeof rows[number]>(
+      `SELECT id, workspace_id, pattern_group_id, evidence_id, outcome_id, reported_by,
+              kind, priority, feedback_event, current_project_id, source_version, task_summary, created_at
+       FROM workspace_experience_review_items WHERE workspace_id = $1 AND id = $2`,
+      [parsed.workspaceId, parsed.id]
+    )).rows[0];
+    if (!row) throw new Error("Experience review item references inaccessible context");
+    return experienceReviewItemSchema.parse({
       id: row.id, workspaceId: row.workspace_id, patternGroupId: row.pattern_group_id,
-      evidenceId: row.evidence_id, authority: row.authority, outcome: row.outcome,
-      sourceVersion: row.source_version, checks: row.checks, reportDigest: row.report_digest,
-      recordedBy: row.recorded_by, createdAt: row.created_at
-    };
+      evidenceId: row.evidence_id, outcomeId: row.outcome_id, reportedBy: row.reported_by,
+      kind: row.kind, priority: row.priority, feedbackEvent: row.feedback_event,
+      currentProjectId: row.current_project_id, sourceVersion: row.source_version,
+      taskSummary: row.task_summary, createdAt: row.created_at
+    });
+  }
+
+  async listExperienceReviewItems(
+    workspaceId: string,
+    patternGroupId?: string
+  ): Promise<ExperienceReviewItem[]> {
+    const { rows } = await this.pool.query<{
+      id: string; workspace_id: string; pattern_group_id: string; evidence_id: string | null;
+      outcome_id: string | null; reported_by: string; kind: ExperienceReviewItem["kind"];
+      priority: ExperienceReviewItem["priority"]; feedback_event: ExperienceReviewItem["feedbackEvent"];
+      current_project_id: string | null; source_version: string; task_summary: string; created_at: Date;
+    }>(
+      `SELECT id, workspace_id, pattern_group_id, evidence_id, outcome_id, reported_by,
+              kind, priority, feedback_event, current_project_id, source_version, task_summary, created_at
+       FROM workspace_experience_review_items
+       WHERE workspace_id = $1 AND ($2::uuid IS NULL OR pattern_group_id = $2)
+       ORDER BY created_at, id`,
+      [workspaceId, patternGroupId ?? null]
+    );
+    return rows.map((row) => experienceReviewItemSchema.parse({
+      id: row.id, workspaceId: row.workspace_id, patternGroupId: row.pattern_group_id,
+      evidenceId: row.evidence_id, outcomeId: row.outcome_id, reportedBy: row.reported_by,
+      kind: row.kind, priority: row.priority, feedbackEvent: row.feedback_event,
+      currentProjectId: row.current_project_id, sourceVersion: row.source_version,
+      taskSummary: row.task_summary, createdAt: row.created_at
+    }));
   }
 
   async transitionExperienceWithAudit(input: ExperienceTransitionInput): Promise<ExperienceReviewEvent> {
@@ -6571,6 +6653,14 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
        WHERE pattern.workspace_id = $1 AND evidence.project_id <> $3
          AND evidence.revoked_at IS NULL AND project.archived_at IS NULL
          AND release.published_at IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM workspace_outcomes outcome
+           WHERE outcome.workspace_id = evidence.workspace_id
+             AND outcome.evidence_id = evidence.id
+             AND outcome.source_version = evidence.content_version
+             AND ((outcome.authority = 'signed_ci' AND outcome.outcome IN ('failed', 'rolled_back'))
+               OR (outcome.authority = 'admin_confirmed' AND outcome.outcome = 'rolled_back'))
+         )
          AND (member.role = 'admin' OR project_member.user_id IS NOT NULL)
          AND ($4 = '' OR lower(evidence.title || E'\n' || evidence.observed_fact) LIKE '%' || lower($4) || '%')
        GROUP BY pattern.id, pattern.capability, pattern.state

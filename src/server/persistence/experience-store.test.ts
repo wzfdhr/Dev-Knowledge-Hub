@@ -121,6 +121,57 @@ describe("MemoryAppStore frontend experience", () => {
 
     expect(JSON.stringify(projection)).not.toContain("secret-symbol");
   });
+
+  test("pauses only evidence with a matching trusted negative outcome", async () => {
+    const store = new MemoryAppStore();
+    const setup = await store.createInitialSetup("admin@example.com", "hash");
+    const [sourceProject] = await store.listProjects(setup!.workspace.id);
+    const currentProject = await store.createProject(
+      setup!.workspace.id, { name: "Current", slug: "current" }, setup!.admin.id
+    );
+    const repository = await store.createRepository(
+      setup!.workspace.id, { kind: "git", name: "Source", url: "https://example.test/source.git" },
+      sourceProject!.id
+    );
+    const sourceRelease = release({
+      workspaceId: setup!.workspace.id, repositoryId: repository!.id, snapshotId: randomUUID()
+    });
+    store.releases.push(sourceRelease);
+    const patternGroupId = randomUUID();
+    const evidence = await store.saveObservedPatternEvidence({
+      id: randomUUID(), workspaceId: setup!.workspace.id, patternGroupId,
+      projectId: sourceProject!.id, releaseId: sourceRelease.id, snapshotId: sourceRelease.snapshotId,
+      capability: "forms", sourceEligibility: "git", title: "Cited validation",
+      observedFact: "Validates before submit", profileDigest: "b".repeat(64),
+      contentVersion: "content-v1", citations: [{
+        snapshotId: sourceRelease.snapshotId, path: "src/form.tsx", startLine: 1, endLine: 2,
+        blobHash: "c".repeat(64)
+      }]
+    });
+    const projection = () => store.listExperienceProjection({
+      workspaceId: setup!.workspace.id, userId: setup!.admin.id,
+      currentProjectId: currentProject!.id, query: "validation"
+    });
+
+    expect(await projection()).toHaveLength(1);
+    await expect(store.recordExperienceOutcome({
+      id: randomUUID(), workspaceId: setup!.workspace.id, patternGroupId,
+      evidenceId: evidence.id, authority: "signed_ci", outcome: "failed",
+      sourceVersion: "other-version", checks: [], reportDigest: null, recordedBy: setup!.admin.id
+    })).rejects.toThrow("source version does not match");
+    await store.recordExperienceOutcome({
+      id: randomUUID(), workspaceId: setup!.workspace.id, patternGroupId,
+      evidenceId: evidence.id, authority: "user_reported", outcome: "rolled_back",
+      sourceVersion: "content-v1", checks: [], reportDigest: null, recordedBy: setup!.admin.id
+    });
+    expect(await projection()).toHaveLength(1);
+    await store.recordExperienceOutcome({
+      id: randomUUID(), workspaceId: setup!.workspace.id, patternGroupId,
+      evidenceId: evidence.id, authority: "signed_ci", outcome: "failed",
+      sourceVersion: "content-v1", checks: [], reportDigest: null, recordedBy: setup!.admin.id
+    });
+    expect(await projection()).toHaveLength(0);
+  });
 });
 
 describe("PostgresAppStore frontend experience", () => {
@@ -146,5 +197,7 @@ describe("PostgresAppStore frontend experience", () => {
     expect(sql).toContain("LEFT JOIN project_members");
     expect(sql).toContain("evidence.project_id <> $3");
     expect(sql).toContain("evidence.revoked_at IS NULL");
+    expect(sql).toContain("NOT EXISTS");
+    expect(sql).toContain("workspace_outcomes");
   });
 });

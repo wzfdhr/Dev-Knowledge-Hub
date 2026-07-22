@@ -130,6 +130,7 @@ import type { CodeIndex } from "../knowledge/intelligence.js";
 import { validateKnowledgeGraph } from "../knowledge/pipeline/graph.js";
 import {
   declaredDecisionInputSchema,
+  experienceReviewItemInputSchema,
   experienceReviewEventSchema,
   observedPatternEvidenceInputSchema,
   verifiedOutcomeInputSchema,
@@ -139,6 +140,8 @@ import {
   type ExperienceProjection,
   type ExperienceProjectionInput,
   type ExperienceReviewEvent,
+  type ExperienceReviewItem,
+  type ExperienceReviewItemInput,
   type ExperienceState,
   type ExperienceTransitionInput,
   type ObservedPatternEvidence,
@@ -180,6 +183,7 @@ export class MemoryAppStore implements AppStore {
   readonly experienceEvidence: ObservedPatternEvidence[] = [];
   readonly experienceDecisions: DeclaredDecisionEvidence[] = [];
   readonly experienceOutcomes: VerifiedOutcomeEvidence[] = [];
+  readonly experienceReviewItems: ExperienceReviewItem[] = [];
   readonly experienceReviews: ExperienceReviewEvent[] = [];
   readonly workspaceStandards: WorkspaceStandard[] = [];
   readonly encryptedCredentials: EncryptedCredentialRecord[] = [];
@@ -3648,11 +3652,56 @@ export class MemoryAppStore implements AppStore {
     if (!group || !actor || (parsed.evidenceId !== null && !evidence)) {
       throw new Error("Experience outcome references an inaccessible group or evidence");
     }
+    if (evidence && parsed.sourceVersion !== evidence.contentVersion) {
+      throw new Error("Experience outcome source version does not match evidence");
+    }
     const existing = this.experienceOutcomes.find((item) => item.id === parsed.id);
     if (existing) return structuredClone(existing);
     const record = { ...parsed, createdAt: new Date() };
     this.experienceOutcomes.push(record);
     return structuredClone(record);
+  }
+
+  async createExperienceReviewItem(input: ExperienceReviewItemInput): Promise<ExperienceReviewItem> {
+    const parsed = experienceReviewItemInputSchema.parse(input);
+    const actor = this.members.find((item) =>
+      item.id === parsed.reportedBy && item.workspaceId === parsed.workspaceId && item.disabledAt === null
+    );
+    const group = this.experienceGroups.find((item) =>
+      item.id === parsed.patternGroupId && item.workspaceId === parsed.workspaceId
+    );
+    const evidence = parsed.evidenceId === null ? null : this.experienceEvidence.find((item) =>
+      item.id === parsed.evidenceId && item.workspaceId === parsed.workspaceId
+      && item.patternGroupId === parsed.patternGroupId
+    );
+    const outcome = parsed.outcomeId === null ? null : this.experienceOutcomes.find((item) =>
+      item.id === parsed.outcomeId && item.workspaceId === parsed.workspaceId
+      && item.patternGroupId === parsed.patternGroupId
+    );
+    const currentProject = parsed.currentProjectId === null ? null : this.projects.find((item) =>
+      item.id === parsed.currentProjectId && item.workspaceId === parsed.workspaceId
+    );
+    if (!actor || !group || (parsed.evidenceId !== null && !evidence)
+      || (parsed.outcomeId !== null && !outcome) || (parsed.currentProjectId !== null && !currentProject)) {
+      throw new Error("Experience review item references inaccessible context");
+    }
+    const existing = this.experienceReviewItems.find((item) =>
+      item.id === parsed.id && item.workspaceId === parsed.workspaceId
+    );
+    if (existing) return structuredClone(existing);
+    const record = { ...parsed, createdAt: new Date() };
+    this.experienceReviewItems.push(record);
+    return structuredClone(record);
+  }
+
+  async listExperienceReviewItems(
+    workspaceId: string,
+    patternGroupId?: string
+  ): Promise<ExperienceReviewItem[]> {
+    return this.experienceReviewItems.filter((item) =>
+      item.workspaceId === workspaceId && (!patternGroupId || item.patternGroupId === patternGroupId)
+    ).sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime()
+      || left.id.localeCompare(right.id)).map((item) => structuredClone(item));
   }
 
   async transitionExperienceWithAudit(input: ExperienceTransitionInput): Promise<ExperienceReviewEvent> {
@@ -3741,6 +3790,12 @@ export class MemoryAppStore implements AppStore {
         && this.releases.some((release) =>
           release.id === item.releaseId && release.workspaceId === input.workspaceId
           && release.publishedAt !== null
+        )
+        && !this.experienceOutcomes.some((outcome) =>
+          outcome.workspaceId === input.workspaceId && outcome.evidenceId === item.id
+          && outcome.sourceVersion === item.contentVersion
+          && (outcome.authority === "signed_ci" && ["failed", "rolled_back"].includes(outcome.outcome)
+            || outcome.authority === "admin_confirmed" && outcome.outcome === "rolled_back")
         )
       ).sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime()
         || left.id.localeCompare(right.id));

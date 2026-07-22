@@ -148,4 +148,48 @@ describe("frontend analyzer registry", () => {
       valid: false, ir: null, lintIssues: [{ rule: "FRONTEND_FACET_CONFLICT" }]
     });
   });
+
+  test("deterministically refines canonical React entities with ecosystem evidence", () => {
+    const value = registry();
+    value.register({
+      id: "react-core",
+      version: "1.0.0",
+      role: "core",
+      facetSchema: z.record(z.string(), z.unknown())
+    });
+    value.register({
+      id: "react-ecosystem-core",
+      version: "1.0.0",
+      role: "core",
+      facetSchema: z.record(z.string(), z.unknown())
+    });
+    const reactEntity = {
+      ...component("react-core", 3),
+      completeness: "partial" as const,
+      attributes: { componentType: { state: "unknown" as const, reason: "unresolved" as const } },
+      facets: { "react-core": { refMode: "forwardRef" } }
+    };
+    const ecosystemEntity = {
+      ...component("react-ecosystem-core", 5),
+      completeness: "complete" as const,
+      attributes: { componentType: { state: "known" as const, value: "function" as const } },
+      facets: { "react-ecosystem-core": { encapsulation: "component-library-wrapper" } }
+    };
+    const react = output("react-core", { entities: [reactEntity] });
+    const ecosystem = output("react-ecosystem-core", { entities: [ecosystemEntity] });
+
+    const merged = value.mergeOutputs([react, ecosystem]);
+    expect(merged.valid).toBe(true);
+    if (!merged.valid) throw new Error("Expected valid React ecosystem merge");
+    expect(merged.ir.entities[0]).toMatchObject({
+      completeness: "complete",
+      attributes: { componentType: { state: "known", value: "function" } },
+      facets: {
+        "react-core": { refMode: "forwardRef" },
+        "react-ecosystem-core": { encapsulation: "component-library-wrapper" }
+      }
+    });
+    expect(merged.ir.entities[0]?.sourceRefs.map((item) => item.startLine)).toEqual([3, 5]);
+    expect(value.mergeOutputs([ecosystem, react])).toEqual(merged);
+  });
 });

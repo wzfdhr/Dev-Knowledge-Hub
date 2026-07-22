@@ -107,6 +107,12 @@ function arrayLength(value: ts.Expression | null): number {
 }
 
 type NamedFunction = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction;
+type ImportBinding = {
+  importedName: string;
+  specifier: string;
+  resolvedPath: string | null;
+  node: ts.ImportDeclaration;
+};
 
 function functionName(node: NamedFunction): string | null {
   if (node.name && ts.isIdentifier(node.name)) return node.name.text;
@@ -150,7 +156,7 @@ export function analyzeReactEcosystemSource(inputValue: TypeScriptAnalyzerInput)
   const source = ts.createSourceFile(input.path, input.content, ts.ScriptTarget.Latest, true, scriptKind(input.path));
   const entities = new Map<string, FrontendEntity>();
   const edges = new Map<string, FrontendEdge>();
-  const imports = new Map<string, { specifier: string; resolvedPath: string | null; node: ts.ImportDeclaration }>();
+  const imports = new Map<string, ImportBinding>();
   const functions = new Map<string, NamedFunction>();
   const components = new Map<string, FrontendEntity>();
   const validators = new Map<string, FrontendEntity>();
@@ -161,17 +167,51 @@ export function analyzeReactEcosystemSource(inputValue: TypeScriptAnalyzerInput)
     if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier) && node.importClause) {
       const specifier = node.moduleSpecifier.text;
       const resolved = input.resolutions.find((item) => item.specifier === specifier)?.resolvedPath ?? null;
-      if (node.importClause.name) imports.set(node.importClause.name.text, { specifier, resolvedPath: resolved, node });
+      if (node.importClause.name) {
+        imports.set(node.importClause.name.text, { importedName: "default", specifier, resolvedPath: resolved, node });
+      }
       if (node.importClause.namedBindings && ts.isNamedImports(node.importClause.namedBindings)) {
         for (const item of node.importClause.namedBindings.elements) {
-          imports.set(item.name.text, { specifier, resolvedPath: resolved, node });
+          imports.set(item.name.text, {
+            importedName: item.propertyName?.text ?? item.name.text,
+            specifier,
+            resolvedPath: resolved,
+            node
+          });
         }
       }
       if (node.importClause.namedBindings && ts.isNamespaceImport(node.importClause.namedBindings)) {
-        imports.set(node.importClause.namedBindings.name.text, { specifier, resolvedPath: resolved, node });
+        imports.set(node.importClause.namedBindings.name.text, {
+          importedName: "*",
+          specifier,
+          resolvedPath: resolved,
+          node
+        });
       }
     }
   });
+
+  const importedBinding = (
+    localName: string,
+    specifier: (value: string) => boolean,
+    importedNames: readonly string[]
+  ): ImportBinding | null => {
+    const binding = imports.get(localName);
+    return binding && specifier(binding.specifier) && importedNames.includes(binding.importedName) ? binding : null;
+  };
+  const openApiClients = new Map<string, ImportBinding>();
+  for (const [localName, binding] of imports) {
+    if (/openapi/iu.test(binding.specifier)) openApiClients.set(localName, binding);
+  }
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name) || !declaration.initializer || !ts.isCallExpression(declaration.initializer)
+        || !ts.isIdentifier(declaration.initializer.expression)) continue;
+      const factory = importedBinding(declaration.initializer.expression.text, (value) => /openapi/iu.test(value), ["default", "createClient"]);
+      if (factory) openApiClients.set(declaration.name.text, factory);
+    }
+  }
 
   walk(source, (node) => {
     if (ts.isFunctionDeclaration(node) && node.name) functions.set(node.name.text, node);
@@ -203,7 +243,10 @@ export function analyzeReactEcosystemSource(inputValue: TypeScriptAnalyzerInput)
     if (!ts.isVariableStatement(node)) continue;
     for (const declaration of node.declarationList.declarations) {
       if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
-      if (ts.isCallExpression(declaration.initializer) && declaration.initializer.expression.getText(source) === "z.object") {
+      if (ts.isCallExpression(declaration.initializer) && ts.isPropertyAccessExpression(declaration.initializer.expression)
+        && declaration.initializer.expression.name.text === "object"
+        && ts.isIdentifier(declaration.initializer.expression.expression)
+        && importedBinding(declaration.initializer.expression.expression.text, (value) => value === "zod", ["z", "*"])) {
         const shape = objectLiteral(declaration.initializer.arguments[0]);
         const validator = makeEntity(
           input,
@@ -220,7 +263,12 @@ export function analyzeReactEcosystemSource(inputValue: TypeScriptAnalyzerInput)
         validators.set(declaration.name.text, validator);
       }
       if (ts.isTaggedTemplateExpression(declaration.initializer)
-        && declaration.initializer.tag.getText(source) === "gql") {
+        && ts.isIdentifier(declaration.initializer.tag)
+        && importedBinding(
+          declaration.initializer.tag.text,
+          (value) => value === "graphql-tag" || value === "@apollo/client" || value === "graphql-request",
+          ["default", "gql"]
+        )) {
         const document = templateText(declaration.initializer);
         const operation = document ? /\b(query|mutation|subscription)\s+([A-Za-z_]\w*)/u.exec(document) : null;
         if (operation) {
@@ -259,14 +307,18 @@ export function analyzeReactEcosystemSource(inputValue: TypeScriptAnalyzerInput)
 
   for (const [name, node] of functions) {
     let hasForm = false;
+    let hasReactHookForm = false;
     let resolverName: string | null = null;
     const fields = new Map<string, ts.CallExpression>();
     walk(node, (candidate) => {
       if ((ts.isJsxOpeningElement(candidate) || ts.isJsxSelfClosingElement(candidate)) && jsxTag(candidate) === "form") hasForm = true;
-      if (ts.isCallExpression(candidate) && candidate.expression.getText(source) === "useForm") {
+      if (ts.isCallExpression(candidate) && ts.isIdentifier(candidate.expression)
+        && importedBinding(candidate.expression.text, (value) => value === "react-hook-form", ["useForm"])) {
+        hasReactHookForm = true;
         const options = objectLiteral(candidate.arguments[0]);
         const resolver = objectProperty(options, "resolver");
-        if (resolver && ts.isCallExpression(resolver) && resolver.expression.getText(source).endsWith("Resolver")
+        if (resolver && ts.isCallExpression(resolver) && ts.isIdentifier(resolver.expression)
+          && importedBinding(resolver.expression.text, (value) => value.startsWith("@hookform/resolvers/"), ["zodResolver"])
           && resolver.arguments[0] && ts.isIdentifier(resolver.arguments[0])) resolverName = resolver.arguments[0].text;
       }
       if (ts.isCallExpression(candidate) && candidate.expression.getText(source) === "register"
@@ -274,7 +326,7 @@ export function analyzeReactEcosystemSource(inputValue: TypeScriptAnalyzerInput)
         fields.set(candidate.arguments[0].text, candidate);
       }
     });
-    if (!hasForm) continue;
+    if (!hasForm || !hasReactHookForm) continue;
     const form = makeEntity(input, "form", input.path, name, `form:${name}`, node, "partial", {
       library: "react-hook-form",
       submitHandler: true
@@ -299,7 +351,7 @@ export function analyzeReactEcosystemSource(inputValue: TypeScriptAnalyzerInput)
 
   for (const [name, node] of functions) {
     if (!/(?:Guard|ProtectedRoute)$/u.test(name)) continue;
-    const guard = makeEntity(input, "component", input.path, name, `permission-guard:${name}`, node, "complete", {
+    const guard = makeEntity(input, "component", input.path, name, `component:${name}`, node, "complete", {
       role: "permission-guard", guardType: name.endsWith("Route") ? "route" : "component", permissionKeys: []
     }, { componentType: { state: "known", value: "function" } });
     entities.set(guard.id, guard);
@@ -332,7 +384,8 @@ export function analyzeReactEcosystemSource(inputValue: TypeScriptAnalyzerInput)
 
   walk(source, (node) => {
     if (!ts.isVariableDeclaration(node) || !ts.isIdentifier(node.name) || !node.initializer || !ts.isCallExpression(node.initializer)
-      || node.initializer.expression.getText(source) !== "forwardRef") return;
+      || !ts.isIdentifier(node.initializer.expression)
+      || !importedBinding(node.initializer.expression.text, (value) => value === "react", ["forwardRef"])) return;
     const primitiveNames = new Set<string>();
     walk(node.initializer, (candidate) => {
       if ((ts.isJsxOpeningElement(candidate) || ts.isJsxSelfClosingElement(candidate))) {
@@ -374,7 +427,22 @@ export function analyzeReactEcosystemSource(inputValue: TypeScriptAnalyzerInput)
     }
     const componentValue = objectProperty(meta, "component");
     const componentName = componentValue && ts.isIdentifier(componentValue) ? componentValue.text : null;
-    const component = componentName ? components.get(componentName) : null;
+    let component = componentName ? components.get(componentName) : null;
+    const importedComponent = componentName ? imports.get(componentName) : null;
+    if (!component && componentName && importedComponent?.resolvedPath) {
+      component = makeEntity(
+        input,
+        "component",
+        normalizeFrontendCanonicalPath(importedComponent.resolvedPath),
+        componentName,
+        `component:${componentName}`,
+        importedComponent.node,
+        "partial",
+        { package: importedComponent.specifier },
+        { componentType: { state: "unknown", reason: "unresolved" } }
+      );
+      entities.set(component.id, component);
+    }
     const metaDecorators = arrayLength(objectProperty(meta, "decorators"));
     if (component) {
       for (const [name, record] of variables) {
@@ -397,8 +465,8 @@ export function analyzeReactEcosystemSource(inputValue: TypeScriptAnalyzerInput)
     if (!new Set(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]).has(method)) return;
     const receiver = node.expression.expression;
     if (!ts.isIdentifier(receiver)) return;
-    const imported = imports.get(receiver.text);
-    if (!imported || !/openapi/iu.test(imported.specifier)) return;
+    const imported = openApiClients.get(receiver.text);
+    if (!imported) return;
     const endpoint = node.arguments[0];
     const endpointValue = endpoint && ts.isStringLiteralLike(endpoint) ? endpoint.text : null;
     const operation = makeEntity(input, "api_operation", input.path, `${method} ${endpointValue ?? "dynamic"}`,

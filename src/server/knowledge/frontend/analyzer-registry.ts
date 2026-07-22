@@ -99,6 +99,51 @@ function canonicalEdge(value: FrontendEdge): string {
   });
 }
 
+const reactCanonicalAnalyzerIds = new Set(["react-core", "react-ecosystem-core"]);
+
+function mergeReactCanonicalEntity(left: FrontendEntity, right: FrontendEntity): FrontendEntity | null {
+  const analyzerIds = new Set([...left.provenance, ...right.provenance].map((item) => item.analyzerId));
+  if ([...reactCanonicalAnalyzerIds].some((id) => !analyzerIds.has(id))) return null;
+  if (stableJson({
+    kind: left.kind,
+    name: left.name,
+    qualifiedName: left.qualifiedName,
+    packageKey: left.packageKey,
+    canonicalPath: left.canonicalPath,
+    identity: left.identity
+  }) !== stableJson({
+    kind: right.kind,
+    name: right.name,
+    qualifiedName: right.qualifiedName,
+    packageKey: right.packageKey,
+    canonicalPath: right.canonicalPath,
+    identity: right.identity
+  })) return null;
+
+  const leftAttributes = left.attributes as Record<string, { state: string }>;
+  const rightAttributes = right.attributes as Record<string, { state: string }>;
+  if (stableJson(Object.keys(leftAttributes).sort()) !== stableJson(Object.keys(rightAttributes).sort())) return null;
+  const attributes: Record<string, unknown> = {};
+  for (const key of Object.keys(leftAttributes).sort()) {
+    const leftValue = leftAttributes[key]!;
+    const rightValue = rightAttributes[key]!;
+    if (stableJson(leftValue) === stableJson(rightValue)) attributes[key] = leftValue;
+    else if (leftValue.state === "unknown" && rightValue.state === "known") attributes[key] = rightValue;
+    else if (leftValue.state === "known" && rightValue.state === "unknown") attributes[key] = leftValue;
+    else return null;
+  }
+  const complete = (left.completeness === "complete" || right.completeness === "complete")
+    && Object.values(attributes).every((value) => (value as { state?: unknown }).state === "known");
+  return frontendEntitySchema.parse({
+    ...left,
+    completeness: complete ? "complete" : "partial",
+    attributes,
+    facets: canonicalValue({ ...left.facets, ...right.facets }),
+    sourceRefs: mergeReferences(left.sourceRefs, right.sourceRefs),
+    provenance: mergeProvenance(left.provenance, right.provenance)
+  });
+}
+
 function outputManifest(output: FrontendAnalyzerOutput): FrontendAnalyzerManifestEntry {
   return frontendAnalyzerManifestEntrySchema.parse({
     analyzerId: output.analyzerId,
@@ -236,7 +281,9 @@ export class AnalyzerRegistry {
         const previous = entities.get(entity.id);
         if (!previous) entities.set(entity.id, entity);
         else if (canonicalEntity(previous) !== canonicalEntity(entity)) {
-          issues.push({ rule: "FRONTEND_CANONICAL_CONFLICT", severity: "error", targetId: entity.id, message: "Core analyzers disagree on canonical entity fields" });
+          const merged = mergeReactCanonicalEntity(previous, entity);
+          if (merged) entities.set(entity.id, merged);
+          else issues.push({ rule: "FRONTEND_CANONICAL_CONFLICT", severity: "error", targetId: entity.id, message: "Core analyzers disagree on canonical entity fields" });
         } else {
           for (const [namespace, facet] of Object.entries(entity.facets)) {
             const existingFacet = previous.facets[namespace];

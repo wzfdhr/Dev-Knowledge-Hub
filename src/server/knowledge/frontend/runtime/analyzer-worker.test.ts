@@ -107,6 +107,7 @@ describe("analyzer worker structural limits", () => {
         "frontend-project",
         "typescript-core",
         "react-core",
+        "react-ecosystem-core",
         "react-router-core",
         "state-data-core"
       ],
@@ -116,9 +117,11 @@ describe("analyzer worker structural limits", () => {
         parserSource("src/store.ts", "import { create } from 'zustand'; export const useStore = create(() => ({ count: 0 }));"),
         parserSource("src/api.ts", "import axios from 'axios'; export function loadTeam(id: string) { return axios.get(`/api/teams/${id}`); }"),
         parserSource("src/app.tsx", [
-          "import { useEffect } from 'react';",
+          "import { forwardRef, useEffect } from 'react';",
+          "import { Card } from '@acme/ui';",
           "import { useStore } from './store';",
           "import { loadTeam } from './api';",
+          "export const DashboardCard = forwardRef((props, ref) => <Card ref={ref} {...props} />);",
           "export function App() {",
           "  const count = useStore((state) => state.count);",
           "  useEffect(() => { void loadTeam('one'); }, []);",
@@ -136,12 +139,22 @@ describe("analyzer worker structural limits", () => {
 
     expect([...new Set(ir?.analyzerManifest.map((entry) => entry.analyzerId))]).toEqual([
       "react-core",
+      "react-ecosystem-core",
       "react-router-core",
       "state-data-core",
       "typescript-core"
     ]);
     expect(ir?.entities).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "component", name: "App" }),
+      expect.objectContaining({
+        kind: "component",
+        name: "DashboardCard",
+        completeness: "complete",
+        facets: expect.objectContaining({
+          "react-core": expect.objectContaining({ refMode: "forwardRef" }),
+          "react-ecosystem-core": expect.objectContaining({ encapsulation: "component-library-wrapper" })
+        })
+      }),
       expect.objectContaining({ kind: "route", name: "/" }),
       expect.objectContaining({ kind: "state_store", name: "useStore" }),
       expect.objectContaining({ kind: "api_operation", name: "GET /api/teams/:id" })
@@ -149,20 +162,25 @@ describe("analyzer worker structural limits", () => {
     expect(ir?.edges).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "routes_to" }),
       expect.objectContaining({ kind: "reads_state" }),
-      expect.objectContaining({ kind: "requests" })
+      expect.objectContaining({ kind: "requests" }),
+      expect.objectContaining({ kind: "wraps" })
     ]));
   });
 
   test("analyzes the approved React 18 fixture as an application flow", () => {
     const fixtureRoot = "fixtures/frontend/react-vite";
     const paths = [
+      ".storybook/main.ts",
       "package.json",
       "tsconfig.json",
       "vite.config.ts",
       "src/api.ts",
       "src/app.tsx",
       "src/app.test.tsx",
+      "src/card-primitive.tsx",
       "src/chart.tsx",
+      "src/dashboard-card.stories.tsx",
+      "src/dashboard-ecosystem.tsx",
       "src/main.tsx",
       "src/router.tsx",
       "src/store.ts",
@@ -176,6 +194,7 @@ describe("analyzer worker structural limits", () => {
         "frontend-project",
         "typescript-core",
         "react-core",
+        "react-ecosystem-core",
         "react-router-core",
         "state-data-core",
         "visualization-core",
@@ -198,6 +217,20 @@ describe("analyzer worker structural limits", () => {
       expect.objectContaining({ kind: "state_store", name: "SessionContext" }),
       expect.objectContaining({ kind: "state_store", name: "useDashboardStore" }),
       expect.objectContaining({ kind: "api_operation", name: "GET /api/teams/:teamId/dashboard" }),
+      expect.objectContaining({
+        kind: "api_operation",
+        attributes: expect.objectContaining({ method: { state: "known", value: "GET" } }),
+        facets: { "react-ecosystem-core": expect.objectContaining({ protocol: "openapi" }) }
+      }),
+      expect.objectContaining({
+        kind: "test_fixture",
+        facets: { "react-ecosystem-core": expect.objectContaining({ role: "component-story" }) }
+      }),
+      expect.objectContaining({
+        kind: "tooling_config",
+        name: "storybook",
+        completeness: "complete"
+      }),
       expect.objectContaining({ kind: "visualization", name: "chart" }),
       expect.objectContaining({ kind: "test_case", name: "renders the dashboard heading" }),
       expect.objectContaining({ kind: "tooling_config", name: "vite" })

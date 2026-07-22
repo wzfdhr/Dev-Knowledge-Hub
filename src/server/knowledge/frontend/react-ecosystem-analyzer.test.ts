@@ -198,6 +198,7 @@ describe("FK18 React trial analyzer coverage", () => {
       expect.objectContaining({
         kind: "component",
         name: "PermissionGuard",
+        identity: { type: "named", semanticKey: "component:PermissionGuard" },
         facets: { "react-ecosystem-core": expect.objectContaining({ role: "permission-guard", permissionKeys: ["dashboard:write"] }) }
       })
     ]));
@@ -237,6 +238,64 @@ describe("FK18 React trial analyzer coverage", () => {
       expect.objectContaining({ kind: "wraps" }),
       expect.objectContaining({ kind: "documents" })
     ]));
+  });
+
+  test("follows import aliases for complete Zod, RHF, gql, and forwardRef facts", async () => {
+    const content = [
+      "import { zodResolver as resolveZod } from '@hookform/resolvers/zod';",
+      "import graph from 'graphql-tag';",
+      "import { forwardRef as withRef } from 'react';",
+      "import { useForm as useValidatedForm } from 'react-hook-form';",
+      "import { z as schema } from 'zod';",
+      "import { CardPrimitive } from '@acme/ui';",
+      "const profileSchema = schema.object({ name: schema.string().min(1) });",
+      "export const ProfileCard = withRef((props, ref) => <CardPrimitive ref={ref} {...props} />);",
+      "export const Profile = graph`query Profile { profile { name } }`;",
+      "export function ProfileForm() { const { register } = useValidatedForm({ resolver: resolveZod(profileSchema) }); return <form><input {...register('name')} /></form>; }"
+    ].join("\n");
+    const output = await analyzeEcosystem("src/profile.tsx", content, [
+      { specifier: "@acme/ui", resolvedPath: "packages/ui/src/card.tsx" }
+    ]);
+
+    expect(output.entities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "data_schema", name: "profileSchema", completeness: "complete" }),
+      expect.objectContaining({ kind: "api_operation", name: "Profile", completeness: "complete" }),
+      expect.objectContaining({ kind: "form", name: "ProfileForm" }),
+      expect.objectContaining({
+        kind: "component",
+        name: "ProfileCard",
+        completeness: "complete",
+        facets: { "react-ecosystem-core": expect.objectContaining({ encapsulation: "component-library-wrapper" }) }
+      })
+    ]));
+    expect(output.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "validates" }),
+      expect.objectContaining({ kind: "wraps" })
+    ]));
+  });
+
+  test("does not emit complete deep-support facts from spoofed local bindings", async () => {
+    const content = [
+      "const z = { object: (value) => value, string: () => ({ min: () => ({}) }) };",
+      "const useForm = () => ({ register: () => ({}) });",
+      "const zodResolver = (value) => value;",
+      "const gql = (value) => value;",
+      "const forwardRef = (value) => value;",
+      "const schema = z.object({ name: z.string().min(1) });",
+      "export const Card = forwardRef((props, ref) => <Primitive ref={ref} {...props} />);",
+      "export const Profile = gql`query Profile { profile { name } }`;",
+      "export function ProfileForm() { const { register } = useForm({ resolver: zodResolver(schema) }); return <form><input {...register('name')} /></form>; }"
+    ].join("\n");
+    const output = await analyzeEcosystem("src/spoofed.tsx", content);
+    const deepFacts = output.entities.filter((entity) => entity.completeness === "complete" && (
+      entity.facets["react-ecosystem-core"]?.library === "zod"
+      || entity.facets["react-ecosystem-core"]?.library === "react-hook-form"
+      || entity.facets["react-ecosystem-core"]?.protocol === "graphql"
+      || entity.facets["react-ecosystem-core"]?.encapsulation === "component-library-wrapper"
+    ));
+
+    expect(deepFacts).toEqual([]);
+    expect(output.edges.filter((edge) => ["validates", "wraps"].includes(edge.kind))).toEqual([]);
   });
 
   test("keeps deferred ecosystem packages at parser-backed basic recognition", async () => {
@@ -293,7 +352,7 @@ describe("FK18 React trial analyzer coverage", () => {
       dependencies: Record<string, string>;
       devDependencies: Record<string, string>;
     };
-    const app = await readFile(path.join(root, "fixtures/frontend/react-vite/src/app.tsx"), "utf8");
+    const app = await readFile(path.join(root, "fixtures/frontend/react-vite/src/dashboard-ecosystem.tsx"), "utf8");
     const matrix = await readFile(path.join(root, "docs/product/frontend-capability-matrix.md"), "utf8");
 
     for (const capability of trialCapabilities) {

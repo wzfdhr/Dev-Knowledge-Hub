@@ -1,5 +1,7 @@
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { describe, expect, test } from "vitest";
 
@@ -21,6 +23,7 @@ import {
 } from "../../../../scripts/evaluate-frontend-knowledge.mjs";
 
 const root = process.cwd();
+const execFileAsync = promisify(execFile);
 
 function positiveCase(id = "react-component-1") {
   return {
@@ -145,9 +148,11 @@ describe("frontend knowledge evaluation protocol", () => {
   test("ships the approved per-capability distribution and locked version manifest", async () => {
     const datasetFiles: Array<[FrontendEvaluationInput["split"], string]> = [
       ["train", "evaluation/frontend/train/react-core.jsonl"],
+      ["train", "evaluation/frontend/train/react-trial.jsonl"],
       ["train", "evaluation/frontend/train/security-negative.jsonl"],
       ["train", "evaluation/frontend/train/no-result.jsonl"],
       ["held-out", "evaluation/frontend/held-out/react-core.jsonl"],
+      ["held-out", "evaluation/frontend/held-out/react-trial.jsonl"],
       ["held-out", "evaluation/frontend/held-out/security-negative.jsonl"],
       ["held-out", "evaluation/frontend/held-out/no-result.jsonl"]
     ];
@@ -160,9 +165,16 @@ describe("frontend knowledge evaluation protocol", () => {
     const versions = JSON.parse(await readFile(path.join(root, "evaluation/frontend/versions.json"), "utf8"));
     const summary = validateFrontendEvaluationSuite(cases, versions);
 
-    expect(summary.total).toBe(318);
+    expect(summary.total).toBe(336);
     expect(summary.capabilities).toHaveLength(15);
     expect(summary.capabilities.every((item) => item.train >= 12 && item.heldOut >= 8)).toBe(true);
+    expect(summary.trialCapabilities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ capability: "redux-toolkit" }),
+      expect.objectContaining({ capability: "storybook" }),
+      expect.objectContaining({ capability: "design-system" })
+    ]));
+    expect(summary.trialCapabilities).toHaveLength(7);
+    expect(summary.trialCapabilities.every((item) => item.train >= 1 && item.heldOut >= 1)).toBe(true);
     expect(summary.chineseRate).toBeGreaterThanOrEqual(0.4);
     expect(summary.negativeRate).toBeGreaterThanOrEqual(0.15);
     expect(summary.versionManifest.currentRepository.react).toBe("19.2.7");
@@ -191,6 +203,24 @@ describe("frontend knowledge evaluation protocol", () => {
     expect(() => validateFrontendPerformanceBaseline(versions, datasetDigest)).not.toThrow();
     expect(() => validateFrontendPerformanceBaseline(versions, "0".repeat(64))).toThrow("changed without approval");
   });
+
+  test("runs the actual CLI with FK18 train and held-out cases under every quality gate", async () => {
+    await execFileAsync(process.execPath, ["--import", "tsx", "scripts/evaluate-frontend-knowledge.mjs"], {
+      cwd: root,
+      maxBuffer: 10 * 1024 * 1024
+    });
+    const artifact = JSON.parse(await readFile(path.join(root, "artifacts/frontend-knowledge-evaluation.json"), "utf8")) as {
+      status: string;
+      qualityGateReports: string[];
+      observations: Array<{ caseId: string }>;
+      suite: { trialCapabilities?: Array<{ capability: string }> };
+    };
+
+    expect(artifact.status).toBe("quality-gate-passed");
+    expect(artifact.qualityGateReports).toEqual(["train", "heldOut", "all"]);
+    expect(artifact.observations.filter((item) => item.caseId.startsWith("react-trial-"))).toHaveLength(18);
+    expect(artifact.suite.trialCapabilities).toHaveLength(7);
+  }, 30_000);
 
   test("calculates entity, edge, retrieval, citation, and impact metrics", () => {
     const cases = parseFrontendEvaluationDatasets([

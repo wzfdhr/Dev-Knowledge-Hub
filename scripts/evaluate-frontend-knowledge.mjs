@@ -23,6 +23,23 @@ export const FRONTEND_CAPABILITIES = Object.freeze([
   "e2e-testing",
   "vite"
 ]);
+export const FRONTEND_TRIAL_CAPABILITIES = Object.freeze([
+  "redux-toolkit",
+  "tanstack-query",
+  "openapi-graphql",
+  "complex-form-validation",
+  "permission-guards",
+  "storybook",
+  "design-system"
+]);
+const FRONTEND_SECONDARY_CAPABILITIES = Object.freeze([
+  "webpack-rspack-rollup",
+  "nx-turbo",
+  "i18n",
+  "accessibility",
+  "error-monitoring",
+  "web-vitals"
+]);
 
 const SPLITS = new Set(["train", "held-out"]);
 const ACCESS = new Set(["authorized-published", "unauthorized", "unpublished"]);
@@ -76,9 +93,15 @@ function parseCase(value, declaredSplit, line, datasetName) {
   const id = nonEmptyString(item.id, "id", `line-${line}`);
   const split = nonEmptyString(item.split, "split", id);
   const capability = nonEmptyString(item.capability, "capability", id);
+  const trialCapability = item.trialCapability === undefined
+    ? null
+    : nonEmptyString(item.trialCapability, "trialCapability", id);
   const access = nonEmptyString(item.access, "access", id);
   if (!SPLITS.has(split) || split !== declaredSplit) throw new Error(`Frontend evaluation case ${id} has invalid split`);
   if (!FRONTEND_CAPABILITIES.includes(capability)) throw new Error(`Frontend evaluation case ${id} has invalid capability`);
+  if (trialCapability && !FRONTEND_TRIAL_CAPABILITIES.includes(trialCapability)) {
+    throw new Error(`Frontend evaluation case ${id} has invalid trialCapability`);
+  }
   if (!ACCESS.has(access)) throw new Error(`Frontend evaluation case ${id} has invalid access`);
   if (!LOCALES.has(item.locale)) throw new Error(`Frontend evaluation case ${id} has invalid locale`);
   if (item.source !== "fixture") throw new Error(`Frontend evaluation case ${id} has invalid source`);
@@ -123,6 +146,7 @@ function parseCase(value, declaredSplit, line, datasetName) {
     scenarioKey: nonEmptyString(item.scenarioKey, "scenarioKey", id),
     split,
     capability,
+    ...(trialCapability ? { trialCapability } : {}),
     locale: item.locale,
     source: item.source,
     access,
@@ -245,6 +269,20 @@ function validateVersions(value) {
     nonEmptyString(parser.package, `parsers.${capability}.package`, "versions");
     nonEmptyString(parser.version, `parsers.${capability}.version`, "versions");
   }
+  const trialCapabilities = object(manifest.trialCapabilities, "Frontend version manifest requires trialCapabilities");
+  for (const capability of FRONTEND_TRIAL_CAPABILITIES) {
+    const status = object(trialCapabilities[capability], `Frontend version manifest requires trialCapabilities.${capability}`);
+    if (status.status !== "implemented-gated" || status.target !== "V1 Trial") {
+      throw new Error(`Frontend trial capability ${capability} must remain implemented-gated for V1 Trial`);
+    }
+  }
+  const secondaryCapabilities = object(manifest.secondaryCapabilities, "Frontend version manifest requires secondaryCapabilities");
+  for (const capability of FRONTEND_SECONDARY_CAPABILITIES) {
+    const status = object(secondaryCapabilities[capability], `Frontend version manifest requires secondaryCapabilities.${capability}`);
+    if (status.status !== "basic-recognition" || status.target !== "V1.1") {
+      throw new Error(`Frontend secondary capability ${capability} must remain basic-recognition for V1.1`);
+    }
+  }
   const performance = object(manifest.performanceBaseline, "Frontend version manifest requires performanceBaseline");
   for (const field of ["runner", "cpu", "datasetDigestAlgorithm"]) nonEmptyString(performance[field], `performanceBaseline.${field}`, "versions");
   if (!Number.isInteger(performance.logicalCores) || performance.logicalCores < 1
@@ -331,6 +369,18 @@ export function validateFrontendEvaluationSuite(cases, versionManifest) {
   });
   const insufficient = capabilities.filter((item) => item.train < 12 || item.heldOut < 8);
   if (insufficient.length) throw new Error(`Frontend evaluation capability coverage is insufficient: ${insufficient.map((item) => item.capability).join(", ")}`);
+  const trialCapabilities = FRONTEND_TRIAL_CAPABILITIES.map((capability) => {
+    const scoped = cases.filter((item) => item.trialCapability === capability);
+    return {
+      capability,
+      train: scoped.filter((item) => item.split === "train").length,
+      heldOut: scoped.filter((item) => item.split === "held-out").length
+    };
+  });
+  const missingTrialEvidence = trialCapabilities.filter((item) => item.train < 1 || item.heldOut < 1);
+  if (missingTrialEvidence.length) {
+    throw new Error(`Frontend trial capability coverage is insufficient: ${missingTrialEvidence.map((item) => item.capability).join(", ")}`);
+  }
   const chinese = cases.filter((item) => item.locale === "zh-CN").length;
   const negative = cases.filter((item) => item.access !== "authorized-published").length;
   const chineseRate = chinese / cases.length;
@@ -348,6 +398,7 @@ export function validateFrontendEvaluationSuite(cases, versionManifest) {
     chineseRate,
     negativeRate,
     capabilities,
+    trialCapabilities,
     versionManifest: validateVersions(versionManifest)
   };
 }
@@ -675,9 +726,11 @@ export async function main() {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const inputs = await Promise.all([
     loadDataset(root, "evaluation/frontend/train/react-core.jsonl", "train"),
+    loadDataset(root, "evaluation/frontend/train/react-trial.jsonl", "train"),
     loadDataset(root, "evaluation/frontend/train/security-negative.jsonl", "train"),
     loadDataset(root, "evaluation/frontend/train/no-result.jsonl", "train"),
     loadDataset(root, "evaluation/frontend/held-out/react-core.jsonl", "held-out"),
+    loadDataset(root, "evaluation/frontend/held-out/react-trial.jsonl", "held-out"),
     loadDataset(root, "evaluation/frontend/held-out/security-negative.jsonl", "held-out"),
     loadDataset(root, "evaluation/frontend/held-out/no-result.jsonl", "held-out")
   ]);
@@ -706,7 +759,7 @@ export async function main() {
     const result = analyzeWorkerRequest({
       type: "analyze", requestId: createHash("sha256").update(fixture).digest("hex").slice(0, 8) + "-0000-4000-8000-000000000000",
       snapshotId: fixture,
-      analyzerIds: ["frontend-project", "frontend-project-core", "typescript-core", "html-core", "style-core", "react-core", "react-router-core", "state-data-core", "visualization-core", "tooling-test-core"],
+      analyzerIds: ["frontend-project", "frontend-project-core", "typescript-core", "html-core", "style-core", "react-core", "react-ecosystem-core", "react-router-core", "state-data-core", "visualization-core", "tooling-test-core"],
       cachedAnalyses: [], sources
     });
     const graph = buildFrontendGraph(result.outputs[0].frontendIr);

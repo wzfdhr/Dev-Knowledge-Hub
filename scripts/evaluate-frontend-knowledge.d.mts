@@ -19,6 +19,7 @@ export interface FrontendEvaluationCase {
   scenarioKey: string;
   split: "train" | "held-out";
   capability: string;
+  trialCapability?: string;
   locale: "en" | "zh-CN";
   access: "authorized-published" | "unauthorized" | "unpublished";
   expected: {
@@ -70,6 +71,7 @@ export function validateFrontendEvaluationSuite(cases: FrontendEvaluationCase[],
   chineseRate: number;
   negativeRate: number;
   capabilities: Array<{ capability: string; train: number; heldOut: number }>;
+  trialCapabilities: Array<{ capability: string; train: number; heldOut: number }>;
   versionManifest: FrontendVersionManifest;
 };
 export function validateFrontendVersionManifestAgainstPackage(

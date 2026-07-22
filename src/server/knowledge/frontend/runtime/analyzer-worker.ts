@@ -8,6 +8,7 @@ import { AnalyzerRegistry } from "../analyzer-registry.js";
 import { analyzeHtmlSource } from "../html-analyzer.js";
 import { analyzeFrontendProjectManifest, type FrontendProjectManifest } from "../project-manifest.js";
 import { analyzeProjectStructure } from "../project-structure-analyzer.js";
+import { analyzeReactEcosystemSource } from "../react-ecosystem-analyzer.js";
 import { analyzeReactSource } from "../react-analyzer.js";
 import { analyzeReactRouterSource } from "../react-router-analyzer.js";
 import { analyzeStateDataSource } from "../state-data-analyzer.js";
@@ -165,6 +166,9 @@ function analyzeFrontendIr(
     if (requestedAnalyzers.has("react-core") && [".tsx", ".jsx"].includes(extension)) {
       sourceOutputs.push(analyzeReactSource({ ...base, resolutions: sourceResolutions }));
     }
+    if (requestedAnalyzers.has("react-ecosystem-core") && typedSource) {
+      sourceOutputs.push(analyzeReactEcosystemSource({ ...base, resolutions: sourceResolutions }));
+    }
     if (requestedAnalyzers.has("react-router-core") && [".tsx", ".jsx", ".ts", ".js"].includes(extension)) {
       sourceOutputs.push(analyzeReactRouterSource({ ...base, resolutions: sourceResolutions }));
     }
@@ -191,6 +195,7 @@ function analyzeFrontendIr(
     "html-core",
     "style-core",
     "react-core",
+    "react-ecosystem-core",
     "react-router-core",
     "state-data-core",
     "visualization-core",

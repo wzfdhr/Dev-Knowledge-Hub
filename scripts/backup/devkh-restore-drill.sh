@@ -305,7 +305,7 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 (( health_check_passed == 1 )) || {
-  docker logs --no-color "$application_container" >&2 || true
+  docker logs "$application_container" >&2 || true
   printf 'restored application did not pass its health check\n' >&2
   exit 69
 }

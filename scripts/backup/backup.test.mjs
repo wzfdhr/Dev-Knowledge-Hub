@@ -580,8 +580,9 @@ test("restore drill prints restored application logs when its health check fails
 
   assert.match(
     restore,
-    /docker logs --no-color[\s\S]*application_container[\s\S]*restored application did not pass its health check/
+    /docker logs[\s\S]*application_container[\s\S]*restored application did not pass its health check/
   );
+  assert.doesNotMatch(restore, /docker logs --no-color/);
 });
 
 test("restore drill selects the globally newest remote snapshot", () => {

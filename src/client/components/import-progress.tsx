@@ -30,6 +30,14 @@ function formatBytes(value: number): string {
   return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
+function activeStageState(status: ImportProgressValue["status"], complete: boolean): string {
+  if (complete) return "已完成";
+  if (status === "failed") return "失败";
+  if (status === "paused") return "已暂停";
+  if (status === "cancelled") return "已取消";
+  return "进行中";
+}
+
 export function ImportProgress({
   progress,
 }: {
@@ -64,7 +72,7 @@ export function ImportProgress({
       {stages.map((stage, index) => {
         const active = activeIndex === index;
         const complete = activeIndex > index || (progress.status === "completed" && active);
-        const state = active ? `当前步骤，${complete ? "已完成" : "进行中"}` : complete ? "已完成" : "待处理";
+        const state = active ? `当前步骤，${activeStageState(progress.status, complete)}` : complete ? "已完成" : "待处理";
         return <span key={stage.phase} className={`import-stage${complete ? " complete" : ""}${active ? " active" : ""}`} aria-current={active ? "step" : undefined} aria-label={`${stage.label}，${state}`}>
           <span className="import-stage-icon" aria-hidden="true">{complete ? <Check /> : <Circle />}</span>
           <span className="import-stage-label">{stage.label}</span>

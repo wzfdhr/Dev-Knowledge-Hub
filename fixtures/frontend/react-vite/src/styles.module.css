@@ -1,3 +1,3 @@
-:global(:root) { --space-page: 24px; }
+:global(:root) { --color-brand: #1677ff; --space-page: 24px; }
 .dashboard { display: grid; gap: var(--space-page); container-type: inline-size; }
 @container (max-width: 640px) { .dashboard { grid-template-columns: 1fr; } }

@@ -416,6 +416,7 @@ export function createFrontendShadowStageExecutor(input: {
           "html-core",
           "style-core",
           "react-core",
+          "react-ecosystem-core",
           "react-router-core",
           "state-data-core",
           "visualization-core",

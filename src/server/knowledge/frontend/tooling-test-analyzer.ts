@@ -17,7 +17,7 @@ import type { TypeScriptAnalyzerInput } from "./typescript-analyzer.js";
 
 const ANALYZER_ID = "tooling-test-core";
 const ANALYZER_VERSION = "1.0.0";
-const PARSER_CONFIG_DIGEST = frontendAnalyzerConfigDigest(ANALYZER_ID, ANALYZER_VERSION, `typescript@${ts.version}:vite-tests-v1`);
+const PARSER_CONFIG_DIGEST = frontendAnalyzerConfigDigest(ANALYZER_ID, ANALYZER_VERSION, `typescript@${ts.version}:vite-tests-storybook-v2`);
 
 function scriptKind(sourcePath: string): ts.ScriptKind {
   const extension = path.posix.extname(sourcePath).toLowerCase();
@@ -82,6 +82,19 @@ function objectKeys(object: ts.ObjectLiteralExpression | null): string[] {
   return object?.properties.flatMap((item) => item.name ? [item.name.getText().replace(/^['"]|['"]$/gu, "")] : []).sort() ?? [];
 }
 
+function stringArray(value: ts.Expression | null): string[] {
+  if (!value || !ts.isArrayLiteralExpression(value)) return [];
+  return value.elements.flatMap((item) => ts.isStringLiteralLike(item) ? [item.text] : []).sort();
+}
+
+function stringOrNamedObject(value: ts.Expression | null): string | null {
+  if (!value) return null;
+  if (ts.isStringLiteralLike(value)) return value.text;
+  const object = objectValue(value);
+  const name = objectProperty(object, "name");
+  return name && ts.isStringLiteralLike(name) ? name.text : null;
+}
+
 function stringsFromCalls(node: ts.Node, source: ts.SourceFile, matcher: RegExp): string[] {
   const values = new Set<string>();
   const visit = (candidate: ts.Node): void => {
@@ -141,8 +154,29 @@ export function analyzeToolingTestSource(inputValue: TypeScriptAnalyzerInput): F
     entities.set(value.id, value);
   }
 
-  const basicTool = input.path.includes(".storybook/") ? "storybook"
-    : /(?:^|\/)(?:webpack|rspack)\.config\./u.test(input.path) ? "webpack-family"
+  if (input.path.includes(".storybook/")) {
+    let config: ts.ObjectLiteralExpression | null = null;
+    source.forEachChild((node) => {
+      if (!ts.isExportAssignment(node)) return;
+      const expression = ts.isSatisfiesExpression(node.expression) ? node.expression.expression : node.expression;
+      if (ts.isObjectLiteralExpression(expression)) config = expression;
+    });
+    const storybookConfig = config as ts.ObjectLiteralExpression | null;
+    const stories = stringArray(objectProperty(storybookConfig, "stories"));
+    const addons = stringArray(objectProperty(storybookConfig, "addons"));
+    const framework = stringOrNamedObject(objectProperty(storybookConfig, "framework"));
+    const deep = path.posix.basename(input.path).startsWith("main.") && stories.length > 0 && framework !== null;
+    const value = entity(input, "tooling_config", input.path, "storybook", "tooling:storybook", storybookConfig ?? source, deep ? {
+      supportLevel: "deep",
+      stories,
+      addons,
+      framework
+    } : { supportLevel: "basic-recognition", configurationFile: true }, { tool: { state: "known", value: "storybook" } });
+    if (!deep) value.completeness = "partial";
+    entities.set(value.id, value);
+  }
+
+  const basicTool = /(?:^|\/)(?:webpack|rspack)\.config\./u.test(input.path) ? "webpack-family"
       : /(?:^|\/)rollup\.config\./u.test(input.path) ? "rollup"
         : /(?:^|\/)turbo\.json$/u.test(input.path) ? "turborepo"
           : /(?:^|\/)(?:nx\.json|project\.json)$/u.test(input.path) ? "nx"

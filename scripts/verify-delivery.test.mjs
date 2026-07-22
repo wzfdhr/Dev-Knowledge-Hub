@@ -148,6 +148,9 @@ describe("delivery database isolation", () => {
     expect(ci.jobs["container-smoke"].env.DEVKH_CONTAINER_SMOKE).toBe("true");
     expect(ci.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DIR).toBe("/tmp/devkh-recovery-evidence");
     expect(ci.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DEFER_FINALIZATION).toBe("true");
+    expect(ci.jobs["container-smoke"].steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ run: "npm ci" })
+    ]));
     expect(phaseMerge.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DEFER_FINALIZATION).toBe("true");
     expect(verifySteps).toContain("npx playwright install --with-deps chromium");
     expect(verifySteps).toContain("npm run release:verify -- --scope verify");

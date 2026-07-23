@@ -1,12 +1,16 @@
 # Frontend Experience Kernel — Figma handoff
 
-## Formal artifact
+## Scope decision
+
+On 2026-07-23, the user explicitly deferred the formal Figma delivery from EX09. No further Figma login, subscription, permission, MCP, canvas, library, or screenshot work is required for this delivery. The implemented UI, local screenshots, and the specification in this document remain the design handoff source.
+
+## Deferred formal artifact
 
 - File: [Dev Knowledge Hub — Frontend Experience Kernel](https://www.figma.com/design/uf7puLJFuznpK9H5gwCCOM)
 - File key: `uf7puLJFuznpK9H5gwCCOM`
 - Source of truth: `src/client/styles.css`, `src/client/responsive.css`, and the experience components.
 
-The formal file was created on 2026-07-22. The connected Starter workspace rejected subsequent canvas operations after its MCP tool-call allowance was exhausted. No inaccessible or fabricated frame is claimed in this handoff. The frame specification below is implementation-complete in code and can be replayed into the formal file when the workspace allowance is restored.
+The formal file was created on 2026-07-22. The connected Starter workspace rejected subsequent canvas operations after its MCP tool-call allowance was exhausted. No inaccessible or fabricated frame is claimed in this handoff. The frame specification below is implementation-complete in code; it is retained only as an optional future replay reference and is not an acceptance requirement for this delivery.
 
 ## Code-derived system
 

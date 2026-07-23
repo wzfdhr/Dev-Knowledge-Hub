@@ -23,8 +23,8 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   const projectId = new URL(page.url()).pathname.split("/")[2];
   expect(projectId).toBeTruthy();
 
-  await page.getByRole("link", { name: "资料上传" }).click();
-  await expect(page.getByRole("heading", { name: "资料上传" })).toBeVisible();
+  await page.getByRole("link", { name: "资料接入" }).click();
+  await expect(page.getByRole("heading", { name: "资料接入" })).toBeVisible();
   await expect(page.getByText("当前来源：", { exact: false })).toBeVisible();
   await expect(page.getByRole("button", { name: "选择项目文件夹" })).toBeVisible();
   await expect(page.getByText("暂无导入记录")).toBeVisible();
@@ -105,7 +105,7 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   }
   await page.setViewportSize({ width: 1440, height: 1024 });
 
-  await page.getByRole("link", { name: "知识版本" }).click();
+  await page.getByRole("link", { name: "知识生产" }).click();
   await page.getByRole("button", { name: "开始构建知识" }).click();
   await expect(page.getByRole("button", { name: "审核就绪构建" })).toBeVisible({ timeout: 30_000 });
   await page.getByRole("button", { name: "审核就绪构建" }).click();

@@ -8,6 +8,7 @@ import { api as defaultApi, ApiError, errorMessage, type ApiClient } from "./api
 import { AppShell } from "./components/app-shell";
 import { ProjectLayout } from "./components/project-layout";
 import { ErrorState, Loading } from "./components/ui";
+import { projectLegacyRedirects } from "./features/project-routes";
 import { FeedbackPage } from "./pages/feedback-page";
 import { KnowledgePage } from "./pages/knowledge-page";
 import { MembersPage } from "./pages/members-page";
@@ -59,13 +60,17 @@ export function App({ api = defaultApi }: { api?: ApiClient }) {
     <Route path="/projects/:projectId" element={<ProjectLayout api={api} workspaceRole={session.data.admin.role} />}>
       <Route index element={<Navigate to="overview" replace />} />
       <Route path="overview" element={<ProjectOverviewPage api={api} />} />
-      <Route path="imports" element={<ProjectImportsPage api={api} />} />
-      <Route path="versions" element={<ProjectVersionsPage api={api} />} />
-      <Route path="knowledge" element={<KnowledgePage api={api} />} />
-      <Route path="graph" element={<ProjectGraphPage api={api} />} />
-      <Route path="frontend-map" element={<ProjectFrontendMapPage api={api} />} />
-      <Route path="collaboration" element={<ProjectCollaborationPage api={api} />} />
-      <Route path="codex" element={<ProjectCodexPage api={api} />} />
+      <Route path="sources" element={<ProjectImportsPage api={api} />} />
+      <Route path="production" element={<ProjectVersionsPage api={api} />} />
+      <Route path="knowledge/pages" element={<KnowledgePage api={api} />} />
+      <Route path="knowledge/quality" element={<Navigate to="../pages" replace />} />
+      <Route path="knowledge/graph" element={<ProjectGraphPage api={api} />} />
+      <Route path="knowledge/frontend" element={<ProjectFrontendMapPage api={api} />} />
+      <Route path="settings/team" element={<ProjectCollaborationPage api={api} />} />
+      <Route path="settings/codex" element={<ProjectCodexPage api={api} />} />
+      {Object.entries(projectLegacyRedirects).map(([path, target]) =>
+        <Route key={path} path={path} element={<Navigate to={target} replace />} />
+      )}
     </Route>
     <Route path="/overview" element={<LegacyProjectRedirect section="overview" />} />
     <Route path="/knowledge" element={<KnowledgePage api={api} />} />

@@ -182,7 +182,7 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
   if (repository.error && !missingRepository) return <div className="page"><ErrorState message={errorMessage(repository.error)} retry={() => void repository.refetch()} /></div>;
 
   return <div className="page project-imports-page">
-    <header className="page-header"><div><p className="eyebrow">项目资料</p><h1>资料上传</h1><p>管理项目资料来源并创建可追溯的内容版本。</p></div></header>
+    <header className="page-header"><div><p className="eyebrow">项目资料</p><h1>资料接入</h1><p>管理项目资料来源并创建可追溯的内容版本。</p></div></header>
     <div className="project-imports-workspace">
       <input ref={folderInput} className="visually-hidden" aria-label="项目文件夹" type="file" multiple onChange={(event) => {
         const files = Array.from(event.target.files ?? []);

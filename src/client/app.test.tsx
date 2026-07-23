@@ -142,15 +142,16 @@ describe("shared console copy", () => {
     renderAppAt(api, "/projects/project-1/collaboration");
 
     await waitFor(() => expect(api.listProjects).toHaveBeenCalledOnce(), { timeout: 5_000 });
-    expect(await screen.findByRole("heading", { name: "AHeart Admin" }, { timeout: 5_000 })).toBeVisible();
+    expect(await screen.findByText("AHeart Admin", { selector: ".project-name" }, { timeout: 5_000 })).toBeVisible();
     expect(screen.getByRole("navigation", { name: "项目导航" })).toBeVisible();
     expect(screen.getByRole("link", { name: "项目概览" })).toHaveAttribute("href", "/projects/project-1/overview");
-    expect(screen.getByRole("link", { name: "资料上传" })).toHaveAttribute("href", "/projects/project-1/imports");
-    expect(screen.getByRole("link", { name: "知识图谱" })).toHaveAttribute("href", "/projects/project-1/graph");
-    expect(screen.getByRole("link", { name: "知识版本" })).toHaveAttribute("href", "/projects/project-1/versions");
-    expect(screen.getByRole("link", { name: "团队协作" })).toHaveAttribute("href", "/projects/project-1/collaboration");
-    expect(screen.getByRole("link", { name: "Codex 接入" })).toHaveAttribute("href", "/projects/project-1/codex");
+    expect(screen.getByRole("link", { name: "资料接入" })).toHaveAttribute("href", "/projects/project-1/sources");
+    expect(screen.getByRole("link", { name: "知识生产" })).toHaveAttribute("href", "/projects/project-1/production");
+    expect(screen.getByRole("link", { name: "知识资料" })).toHaveAttribute("href", "/projects/project-1/knowledge/pages");
+    expect(screen.getByRole("link", { name: "项目设置" })).toHaveAttribute("href", "/projects/project-1/settings/team");
+    expect(within(screen.getByRole("navigation", { name: "项目导航" })).getAllByRole("link")).toHaveLength(5);
     expect(await screen.findByRole("heading", { name: "团队协作" })).toBeVisible();
+    expect(screen.getByRole("navigation", { name: "项目设置导航" })).toBeVisible();
   });
 
   test("renders folder import as a dedicated project workflow", async () => {
@@ -167,7 +168,7 @@ describe("shared console copy", () => {
 
     renderAppAt(api, "/projects/project-1/imports");
 
-    expect(await screen.findByRole("heading", { name: "资料上传" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "资料接入" })).toBeVisible();
     expect(screen.getByRole("button", { name: "选择项目文件夹" })).toBeVisible();
     expect(screen.getByText("选择资料来源后开始导入")).toBeVisible();
     expect(screen.queryByText("读取文件")).not.toBeInTheDocument();
@@ -204,13 +205,14 @@ describe("shared console copy", () => {
 
     renderAppAt(api, "/projects/project-1/overview");
     expect(await screen.findByRole("heading", { name: "项目概览" })).toBeVisible();
-    expect(screen.getByRole("link", { name: "上传新资料" })).toHaveAttribute("href", "/projects/project-1/imports");
-    expect(screen.getByRole("link", { name: "管理知识版本" })).toHaveAttribute("href", "/projects/project-1/versions");
+    expect(screen.getByRole("heading", { name: "下一步：开始构建" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "开始构建" })).toHaveAttribute("href", "/projects/project-1/production");
+    expect(screen.getAllByRole("link", { name: "开始构建" })).toHaveLength(1);
     expect(screen.queryByRole("heading", { name: "最近构建" })).not.toBeInTheDocument();
     cleanup();
 
     renderAppAt(api, "/projects/project-1/versions");
-    expect(await screen.findByRole("heading", { name: "知识版本" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "知识生产" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "最近构建" })).toBeVisible();
   });
 
@@ -353,7 +355,7 @@ describe("operations page copy", () => {
     } as unknown as ApiClient;
 
     renderPage(<OverviewPage api={overviewApi} />);
-    expect(await screen.findByRole("heading", { name: "知识版本" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "知识生产" })).toBeVisible();
     expect(screen.getByRole("button", { name: "同步仓库" })).toBeVisible();
     cleanup();
 
@@ -570,20 +572,20 @@ describe("overview primary command", () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
     });
-    render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={["/"]}>
+    render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={["/projects/project-1/production"]}>
       <Location />
       <Routes>
-        <Route path="/" element={<OverviewPage api={api} />} />
-        <Route path="/knowledge" element={<p>Knowledge route</p>} />
+        <Route path="/projects/:projectId/production" element={<OverviewPage api={api} />} />
+        <Route path="/projects/:projectId/knowledge/pages" element={<p>Knowledge route</p>} />
       </Routes>
     </MemoryRouter></QueryClientProvider>);
 
     await user.click(await screen.findByRole("button", { name: "审核就绪构建" }));
-    await user.click(screen.getByRole("button", { name: "查看知识" }));
+    await user.click(screen.getByRole("button", { name: "创建版本草稿" }));
 
     await waitFor(() => expect(createRelease).toHaveBeenCalledWith("build", "1.0.0"));
     expect(await screen.findByText("Knowledge route")).toBeVisible();
-    expect(screen.getByTestId("location")).toHaveTextContent("/knowledge?releaseId=release-1");
+    expect(screen.getByTestId("location")).toHaveTextContent("/projects/project-1/knowledge/pages?releaseId=release-1");
   });
 
   test("keeps EventSource alive for native reconnect and reports connection state", async () => {
@@ -654,7 +656,7 @@ describe("overview primary command", () => {
     renderPage(<KnowledgePage api={emptyKnowledgeApi} />);
     expect(await screen.findByText("尚未接入资料不会影响其他项目或已发布版本。"))
       .toBeVisible();
-    expect(screen.getByRole("link", { name: "前往资料上传" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "接入资料" })).toHaveAttribute("href", "/projects/project-1/sources");
     cleanup();
 
     const graphApi = {

@@ -312,17 +312,31 @@ describe("analyzer worker structural limits", () => {
 
   test("locks the production output limits and their exact structural boundaries", () => {
     expect(MAX_ANALYZER_OUTPUT_BYTES).toBe(16 * 1024 * 1024);
-    expect(MAX_ANALYZER_OUTPUT_NODES).toBe(100_000);
+    expect(MAX_ANALYZER_OUTPUT_NODES).toBe(250_000);
     expect(MAX_ANALYZER_OUTPUT_DEPTH).toBe(256);
 
+    const heapBefore = process.memoryUsage().heapUsed;
+    const startedAt = performance.now();
+    expect(() => assertAnalyzerOutputStructure(
+      Array.from({ length: 99_999 }, () => null),
+      { maxNodes: 100_000, maxDepth: MAX_ANALYZER_OUTPUT_DEPTH }
+    )).not.toThrow();
     expect(() => assertAnalyzerOutputStructure(
       Array.from({ length: MAX_ANALYZER_OUTPUT_NODES - 1 }, () => null),
       { maxNodes: MAX_ANALYZER_OUTPUT_NODES, maxDepth: MAX_ANALYZER_OUTPUT_DEPTH }
     )).not.toThrow();
+    const elapsedMs = performance.now() - startedAt;
+    const traversalHeapGrowth = process.memoryUsage().heapUsed - heapBefore;
+    expect(elapsedMs).toBeLessThan(1_500);
+    expect(traversalHeapGrowth).toBeLessThan(96 * 1024 * 1024);
+    const overLimitHeapBefore = process.memoryUsage().heapUsed;
+    const overLimitStartedAt = performance.now();
     expect(() => assertAnalyzerOutputStructure(
       Array.from({ length: MAX_ANALYZER_OUTPUT_NODES }, () => null),
       { maxNodes: MAX_ANALYZER_OUTPUT_NODES, maxDepth: MAX_ANALYZER_OUTPUT_DEPTH }
     )).toThrow("node limit");
+    expect(performance.now() - overLimitStartedAt).toBeLessThan(1_500);
+    expect(process.memoryUsage().heapUsed - overLimitHeapBefore).toBeLessThan(96 * 1024 * 1024);
 
     let withinDepth: Record<string, unknown> = {};
     for (let depth = 0; depth < MAX_ANALYZER_OUTPUT_DEPTH; depth += 1) withinDepth = { child: withinDepth };
@@ -332,5 +346,29 @@ describe("analyzer worker structural limits", () => {
     expect(() => assertAnalyzerOutputStructure({ child: withinDepth }, {
       maxNodes: MAX_ANALYZER_OUTPUT_NODES, maxDepth: MAX_ANALYZER_OUTPUT_DEPTH
     })).toThrow("depth limit");
+  });
+
+  test("admits a byte-bounded large project that the former structural limit rejected", () => {
+    const legitimateLargeProject = {
+      outputs: [{
+        frontendIr: {
+          entities: Array.from({ length: 40_000 }, (_, index) => ({
+            id: `symbol-${index}`,
+            kind: "symbol"
+          }))
+        }
+      }]
+    };
+
+    expect(Buffer.byteLength(JSON.stringify(legitimateLargeProject), "utf8"))
+      .toBeLessThan(MAX_ANALYZER_OUTPUT_BYTES);
+    expect(() => assertAnalyzerOutputStructure(legitimateLargeProject, {
+      maxNodes: 100_000,
+      maxDepth: MAX_ANALYZER_OUTPUT_DEPTH
+    })).toThrow("node limit");
+    expect(() => assertAnalyzerOutputStructure(legitimateLargeProject, {
+      maxNodes: MAX_ANALYZER_OUTPUT_NODES,
+      maxDepth: MAX_ANALYZER_OUTPUT_DEPTH
+    })).not.toThrow();
   });
 });

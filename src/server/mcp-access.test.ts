@@ -146,57 +146,6 @@ async function connectMcp(store: MemoryAppStore, workspaceId: string) {
 }
 
 describe("MCP bearer tokens", () => {
-  test("keeps user-bound workspace tools and scopes separate from project MCP", async () => {
-    const { app, store, cookie } = await adminContext();
-    const [project] = await store.listProjects((await store.defaultWorkspace())!.id);
-    const created = await app.inject({
-      method: "POST", url: "/api/workspace/mcp/tokens",
-      headers: { cookie, ...csrfHeaders(cookie) },
-      payload: { name: "Workspace Codex", scopes: ["workspace.solutions.read"] }
-    });
-    expect(created.statusCode).toBe(201);
-    expect(created.json()).toMatchObject({
-      token: expect.stringMatching(/^dkhw_/), scopes: ["workspace.solutions.read"],
-      expiresAt: expect.any(String)
-    });
-    expect(store.mcpTokens).toEqual([]);
-    const plaintext = created.json<{ token: string }>().token;
-    const address = await app.listen({ host: "127.0.0.1", port: 0 });
-    const transport = new StreamableHTTPClientTransport(new URL(`${address}/mcp/workspace`), {
-      requestInit: { headers: { authorization: `Bearer ${plaintext}` } }
-    });
-    const client = new Client({ name: "workspace-http-test", version: "0.0.0" });
-    await client.connect(transport);
-    expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual([
-      "dkh_plan_frontend_solution"
-    ]);
-    const result = await client.callTool({
-      name: "dkh_plan_frontend_solution",
-      arguments: { currentProjectId: project!.id, task: "实现下钻页面" }
-    });
-    expect(result.structuredContent).toMatchObject({
-      currentProject: { status: "no_release", projectId: project!.id },
-      applicableExperiences: []
-    });
-    await client.close();
-    const tokenId = created.json<{ id: string }>().id;
-    expect((await app.inject({
-      method: "POST", url: `/api/workspace/mcp/tokens/${tokenId}/revoke`,
-      headers: { cookie, ...csrfHeaders(cookie) }
-    })).statusCode).toBe(200);
-    const unauthorized = await fetch(`${address}/mcp/workspace`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${plaintext}`,
-        accept: "application/json, text/event-stream",
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })
-    });
-    expect(unauthorized.status).toBe(401);
-    await app.close();
-  });
-
   test("shows plaintext once, persists only its hash, lists sanitized metadata, and rejects revocation", async () => {
     const { app, store, cookie } = await adminContext();
     const created = await app.inject({

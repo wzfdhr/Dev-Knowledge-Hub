@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-import { frontendProjectProfileSchema } from "../../../shared/frontend-project-profile.js";
 import { frontendAnalyzerManifestDigest } from "../../../shared/frontend-ir.js";
 import { frontendEdgeSchema, frontendEntitySchema } from "../../../shared/frontend-ir.js";
 import type { ArtifactManifest, BuildStage } from "../pipeline/contracts.js";
@@ -16,10 +15,6 @@ export type SourceStorageMode = "legacy" | "shadow" | "active";
 
 export const FRONTEND_V2_IR_SCHEMA_VERSION = 2;
 export const FRONTEND_V2_GRAPH_SCHEMA_VERSION = 2;
-export const FRONTEND_PROJECT_PROFILE_SCHEMA_VERSION = 1;
-export const FRONTEND_PROJECT_PROFILE_ARTIFACT_KIND = "frontend-project-profile";
-export const FRONTEND_PATTERN_CANDIDATES_SCHEMA_VERSION = 1;
-export const FRONTEND_PATTERN_CANDIDATES_ARTIFACT_KIND = "frontend-pattern-candidates";
 export const EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST = frontendAnalyzerManifestDigest([]);
 
 export const ARTIFACT_KINDS: Record<BuildStage, Record<ReleaseArtifactFamily, { kind: string; schemaVersion: number }>> = {
@@ -102,10 +97,7 @@ export const frontendValidationV2Schema = frontendPipelineEnvelopeSchema.extend(
   issueCount: z.number().int().nonnegative(),
   graphReferenceCount: z.number().int().nonnegative(),
   checkedReferenceCount: z.number().int().nonnegative(),
-  invalidReferenceCount: z.number().int().nonnegative(),
-  projectProfileArtifactId: z.string({ error: "frontend project profile artifact is required" }).min(1),
-  projectProfileDigest: z.string({ error: "frontend project profile digest is required" }).regex(/^[a-f0-9]{64}$/u),
-  patternCandidatesArtifactId: z.string({ error: "frontend pattern candidates artifact is required" }).min(1)
+  invalidReferenceCount: z.number().int().nonnegative()
 }).strict();
 
 export function assertFrontendCandidateValid(value: unknown): asserts value is {
@@ -133,29 +125,19 @@ export const frontendPipelinePackageSchema = frontendPipelineEnvelopeSchema.exte
   stage: z.literal("package"),
   irSchemaVersion: z.literal(FRONTEND_V2_IR_SCHEMA_VERSION),
   graphSchemaVersion: z.literal(FRONTEND_V2_GRAPH_SCHEMA_VERSION),
-  projectProfileArtifactId: z.string({ error: "frontend project profile artifact is required" }).min(1),
-  projectProfileDigest: z.string({ error: "frontend project profile digest is required" }).regex(/^[a-f0-9]{64}$/u),
-  patternCandidatesArtifactId: z.string({ error: "frontend pattern candidates artifact is required" }).min(1),
   artifacts: z.object({
     convert: z.array(z.string().min(1)).min(1).max(2),
     extract: z.array(z.string().min(1)).length(2),
     tables: z.array(z.string().min(1)).length(2),
     graph: z.array(z.string().min(1)).length(2),
-    synthesize: z.array(z.string().min(1)).length(3),
-    index: z.array(z.string().min(1)).length(3),
+    synthesize: z.array(z.string().min(1)).length(2),
+    index: z.array(z.string().min(1)).length(2),
     lint: z.array(z.string().min(1)).length(2),
     viz: z.array(z.string().min(1)).length(2),
     validate: z.array(z.string().min(1)).length(2),
     package: z.array(z.string().min(1)).length(1)
   }).strict()
-}).strict().superRefine((value, context) => {
-  if (!value.artifacts.synthesize.includes(value.projectProfileArtifactId)) {
-    context.addIssue({ code: "custom", message: "frontend project profile artifact is not packaged" });
-  }
-  if (!value.artifacts.index.includes(value.patternCandidatesArtifactId)) {
-    context.addIssue({ code: "custom", message: "frontend pattern candidates artifact is not packaged" });
-  }
-});
+}).strict();
 
 type FrontendReleaseStore = {
   getBuild(workspaceId: string, buildId: string): Promise<{
@@ -262,21 +244,6 @@ export async function createVerifiedFrontendReleaseDraft(input: {
         throw new Error("Frontend v2 validation provenance does not match its release package", { cause: error });
       }
     }
-    if (stage === "synthesize") {
-      const profile = artifacts.find((artifact) =>
-        artifact.manifest.kind === FRONTEND_PROJECT_PROFILE_ARTIFACT_KIND
-        && artifact.manifest.schemaVersion === FRONTEND_PROJECT_PROFILE_SCHEMA_VERSION
-      );
-      if (!profile || profile.manifest.id !== value.projectProfileArtifactId) {
-        throw new Error("Frontend v2 release requires its frontend project profile artifact");
-      }
-      const parsed = frontendProjectProfileSchema.safeParse(profile.value);
-      if (!parsed.success || parsed.data.snapshotId !== build.snapshotId
-        || parsed.data.analyzerManifestDigest !== value.analyzerManifestDigest
-        || parsed.data.profileDigest !== value.projectProfileDigest) {
-        throw new Error("Frontend v2 release project profile provenance does not match its package");
-      }
-    }
   }
   return input.store.createReleaseDraft(input.workspaceId, repository.id, build.id, input.version, {
     releaseArtifactFamily: "frontend-v2",
@@ -297,28 +264,16 @@ export function releaseArtifactFamily(value: { releaseArtifactFamily?: unknown }
   return family;
 }
 
-function artifactContracts(
+function artifactContract(
   stage: BuildStage,
   family: ReleaseArtifactFamily,
   sourceStorageMode: SourceStorageMode
-): Array<{ kind: string; schemaVersion: number }> {
-  let primary: { kind: string; schemaVersion: number };
-  if (stage !== "convert" || sourceStorageMode === "legacy") primary = ARTIFACT_KINDS[stage][family];
-  else if (sourceStorageMode === "active" || family === "frontend-v2") {
-    primary = { kind: "normalized-source-refs", schemaVersion: 2 };
-  } else {
-    primary = ARTIFACT_KINDS.convert["knowledge-v1"];
+): { kind: string; schemaVersion: number } {
+  if (stage !== "convert" || sourceStorageMode === "legacy") return ARTIFACT_KINDS[stage][family];
+  if (sourceStorageMode === "active" || family === "frontend-v2") {
+    return { kind: "normalized-source-refs", schemaVersion: 2 };
   }
-  if (family !== "frontend-v2") return [primary];
-  if (stage === "synthesize") return [primary, {
-    kind: FRONTEND_PROJECT_PROFILE_ARTIFACT_KIND,
-    schemaVersion: FRONTEND_PROJECT_PROFILE_SCHEMA_VERSION
-  }];
-  if (stage === "index") return [primary, {
-    kind: FRONTEND_PATTERN_CANDIDATES_ARTIFACT_KIND,
-    schemaVersion: FRONTEND_PATTERN_CANDIDATES_SCHEMA_VERSION
-  }];
-  return [primary];
+  return ARTIFACT_KINDS.convert["knowledge-v1"];
 }
 
 export function frontendStageArtifactKinds(
@@ -326,9 +281,7 @@ export function frontendStageArtifactKinds(
   families: readonly ReleaseArtifactFamily[],
   sourceStorageMode: SourceStorageMode = "legacy"
 ): string[] {
-  return [...new Set(families.flatMap((family) =>
-    artifactContracts(stage, family, sourceStorageMode).map((contract) => contract.kind)
-  ))].sort();
+  return [...new Set(families.map((family) => artifactContract(stage, family, sourceStorageMode).kind))].sort();
 }
 
 export function assertFrontendArtifactFamily(
@@ -338,12 +291,11 @@ export function assertFrontendArtifactFamily(
   sourceStorageMode: SourceStorageMode = "legacy"
 ): void {
   for (const family of [...new Set(families)].sort()) {
-    for (const expected of artifactContracts(stage, family, sourceStorageMode)) {
-      const matches = artifacts.filter((artifact) =>
-        artifact.kind === expected.kind && artifact.schemaVersion === expected.schemaVersion
-      );
-      if (matches.length === 0) throw new Error(`Artifact family ${family} is missing ${expected.kind}@${expected.schemaVersion}`);
-      if (matches.length !== 1) throw new Error(`Artifact family ${family} requires exactly one ${expected.kind}@${expected.schemaVersion}`);
-    }
+    const expected = artifactContract(stage, family, sourceStorageMode);
+    const matches = artifacts.filter((artifact) =>
+      artifact.kind === expected.kind && artifact.schemaVersion === expected.schemaVersion
+    );
+    if (matches.length === 0) throw new Error(`Artifact family ${family} is missing ${expected.kind}@${expected.schemaVersion}`);
+    if (matches.length !== 1) throw new Error(`Artifact family ${family} requires exactly one ${expected.kind}@${expected.schemaVersion}`);
   }
 }

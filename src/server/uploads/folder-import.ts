@@ -14,7 +14,6 @@ import path from "node:path";
 import { filterImportFile, importLanguageForPath } from "../../shared/import-filter.js";
 
 import type { AppStore, SourceFileRecord, SourceSnapshotRecord } from "../persistence/store.js";
-import { updateContentVersion } from "../source-provenance.js";
 import type { SourceBlobStore } from "./source-blob-store.js";
 
 export const MAX_FOLDER_UPLOAD_FILES = 50_000;
@@ -272,7 +271,11 @@ export async function importFolderFiles({
     const versionHash = createHash("sha1");
     for (const file of accepted) {
       const content = await readFile(path.join(stagedFiles, ...file.filePath.split("/")));
-      updateContentVersion(versionHash, file.filePath, content);
+      const pathBytes = Buffer.from(file.filePath, "utf8");
+      versionHash.update(`${pathBytes.length}:`);
+      versionHash.update(pathBytes);
+      versionHash.update(`:${content.length}:`);
+      versionHash.update(content);
     }
     const sourceVersion = versionHash.digest("hex");
     const textBytes = accepted.reduce((total, file) => total + file.byteSize, 0);
@@ -349,13 +352,7 @@ export async function importFolderFiles({
       ref: `upload/${sourceVersion}`,
       remoteUrl: null,
       commitTimestamp: new Date(),
-      storagePath,
-      sourceKind: "upload",
-      gitCommitSha: null,
-      contentVersion: sourceVersion,
-      attestation: "unverified",
-      linkedGitCommitSha: null,
-      remoteIdentityDigest: null
+      storagePath
     };
     const persisted = await store.createSnapshotWithAudit(
       { snapshot, files: sourceFiles }, actorId, pendingUploadSessionId, pendingImportReportId

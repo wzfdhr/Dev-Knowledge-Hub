@@ -33,22 +33,6 @@ describe("loadEnv", () => {
     })).toThrow(/DEVKH_SOURCE_STORAGE_MODE/);
   });
 
-  test("loads the bounded frontend experience rollback switches", () => {
-    expect(loadEnv({
-      mode: "development",
-      env: {
-        DEVKH_WORKSPACE_SOLUTION_PLANNING: "disabled",
-        DEVKH_FRONTEND_EXPERIENCE_RECOMMENDATIONS: "disabled"
-      }
-    })).toMatchObject({
-      workspaceSolutionPlanningEnabled: false,
-      frontendExperienceRecommendationsEnabled: false
-    });
-    expect(() => loadEnv({
-      mode: "development", env: { DEVKH_WORKSPACE_SOLUTION_PLANNING: "unexpected" }
-    })).toThrow(/DEVKH_WORKSPACE_SOLUTION_PLANNING/);
-  });
-
   test("loads an explicit parser runtime socket path", () => {
     expect(loadEnv({
       mode: "development",

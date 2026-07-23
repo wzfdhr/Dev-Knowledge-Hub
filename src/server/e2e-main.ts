@@ -283,4 +283,4 @@ app.post("/__test__/frontend-shadow", async (_request, reply) => {
 });
 
 app.addHook("onClose", async () => buildService.stop());
-await app.listen({ host: "127.0.0.1", port: Number(process.env.E2E_API_PORT ?? 3000) });
+await app.listen({ host: "127.0.0.1", port: 3000 });

@@ -26,13 +26,6 @@ import {
 import type { Citation } from "../server/knowledge/intelligence.js";
 import type { FeedbackGenerationContext, RemediationGenerationContext } from "../server/knowledge/build-service.js";
 import type { LintIssue, SourceRef } from "../shared/api-contracts.js";
-import type {
-  DeclaredDecisionEvidence,
-  ExperienceReviewItem,
-  ExperienceState,
-  ExperienceSourceEligibility,
-  VerifiedOutcomeEvidence
-} from "../shared/frontend-experience.js";
 import type { RemediationState } from "../server/knowledge/remediation.js";
 
 export { AGENT_FEEDBACK_STATUSES, BUILD_JOB_STATUSES } from "../shared/contracts.js";
@@ -197,12 +190,6 @@ export const sourceSnapshots = pgTable("source_snapshots", {
   remoteUrl: text("remote_url"),
   commitTimestamp: timestamp("commit_timestamp", { withTimezone: true }).notNull(),
   storagePath: text("storage_path").notNull(),
-  sourceKind: text("source_kind").$type<"git" | "upload">().notNull(),
-  gitCommitSha: text("git_commit_sha"),
-  contentVersion: text("content_version").notNull(),
-  attestation: text("attestation").$type<"unverified" | "admin_attested" | "git_linked">(),
-  linkedGitCommitSha: text("linked_git_commit_sha"),
-  remoteIdentityDigest: text("remote_identity_digest"),
   pendingUploadSessionId: uuid("pending_upload_session_id"),
   pendingImportReportId: uuid("pending_import_report_id"),
   ...timestamps
@@ -218,26 +205,6 @@ export const sourceSnapshots = pgTable("source_snapshots", {
   uniqueIndex("source_snapshots_pending_import_report_unique_idx")
     .on(table.pendingImportReportId)
     .where(sql`${table.pendingImportReportId} IS NOT NULL`),
-  check("source_snapshots_provenance_shape_check", sql`
-    (${table.sourceKind} = 'git'
-      AND ${table.gitCommitSha} IS NOT NULL
-      AND ${table.attestation} IS NULL
-      AND ${table.linkedGitCommitSha} IS NULL
-      AND ${table.remoteIdentityDigest} IS NOT NULL)
-    OR
-    (${table.sourceKind} = 'upload'
-      AND ${table.gitCommitSha} IS NULL
-      AND ${table.attestation} IN ('unverified', 'admin_attested', 'git_linked')
-      AND (
-        (${table.attestation} = 'git_linked'
-          AND ${table.linkedGitCommitSha} IS NOT NULL
-          AND ${table.remoteIdentityDigest} IS NOT NULL)
-        OR
-        (${table.attestation} <> 'git_linked'
-          AND ${table.linkedGitCommitSha} IS NULL
-          AND ${table.remoteIdentityDigest} IS NULL)
-      ))
-  `),
   foreignKey({
     columns: [table.repositoryId, table.workspaceId],
     foreignColumns: [repositories.id, repositories.workspaceId],
@@ -272,8 +239,6 @@ export const sourceBlobs = pgTable("source_blobs", {
   unique("source_blobs_workspace_hash_generation_unique")
     .on(table.workspaceId, table.contentHash, table.generation),
   unique("source_blobs_id_workspace_unique").on(table.id, table.workspaceId),
-  unique("source_blobs_reference_identity_unique")
-    .on(table.id, table.workspaceId, table.contentHash, table.byteSize),
   uniqueIndex("source_blobs_live_workspace_hash_idx")
     .on(table.workspaceId, table.contentHash)
     .where(sql`${table.status} IN ('active', 'tombstoned')`),
@@ -292,7 +257,7 @@ export const sourceFiles = pgTable("source_files", {
   language: text("language"),
   contentHash: text("content_hash").notNull(),
   byteSize: integer("byte_size").notNull(),
-  sourceBlobId: uuid("source_blob_id").notNull(),
+  sourceBlobId: uuid("source_blob_id"),
   ...timestamps
 }, (table) => [
   uniqueIndex("source_files_id_workspace_idx").on(table.id, table.workspaceId),
@@ -303,9 +268,9 @@ export const sourceFiles = pgTable("source_files", {
     name: "source_files_snapshot_workspace_fk"
   }).onDelete("cascade"),
   foreignKey({
-    columns: [table.sourceBlobId, table.workspaceId, table.contentHash, table.byteSize],
-    foreignColumns: [sourceBlobs.id, sourceBlobs.workspaceId, sourceBlobs.contentHash, sourceBlobs.byteSize],
-    name: "source_files_source_blob_identity_fk"
+    columns: [table.sourceBlobId, table.workspaceId],
+    foreignColumns: [sourceBlobs.id, sourceBlobs.workspaceId],
+    name: "source_files_source_blob_workspace_fk"
   }).onDelete("restrict"),
   index("source_files_source_blob_idx").on(table.sourceBlobId)
 ]);
@@ -815,179 +780,6 @@ export const releases = pgTable("releases", {
   `)
 ]);
 
-export const workspacePatternGroups = pgTable("workspace_pattern_groups", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  capability: text("capability").notNull(),
-  state: text("state").$type<ExperienceState>().notNull().default("candidate"),
-  supersededById: uuid("superseded_by_id"),
-  ...timestamps
-}, (table) => [
-  uniqueIndex("workspace_pattern_groups_id_workspace_idx").on(table.id, table.workspaceId),
-  index("workspace_pattern_groups_workspace_state_idx").on(table.workspaceId, table.state, table.capability, table.id),
-  check("workspace_pattern_groups_state_check", sql`${table.state} IN ('candidate', 'verified', 'recommended', 'standard', 'rejected', 'deprecated')`),
-  check("workspace_pattern_groups_no_self_supersession_check", sql`${table.supersededById} IS NULL OR ${table.supersededById} <> ${table.id}`)
-]);
-
-export const workspacePatternEvidence = pgTable("workspace_pattern_evidence", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  patternGroupId: uuid("pattern_group_id").notNull(),
-  projectId: uuid("project_id").notNull(),
-  releaseId: uuid("release_id").notNull(),
-  snapshotId: uuid("snapshot_id").notNull(),
-  evidenceType: text("evidence_type").notNull().default("observed_pattern"),
-  sourceEligibility: text("source_eligibility").$type<ExperienceSourceEligibility>().notNull(),
-  title: text("title").notNull(),
-  observedFact: text("observed_fact").notNull(),
-  profileDigest: text("profile_digest").notNull(),
-  contentVersion: text("content_version").notNull(),
-  citations: jsonb("citations").$type<SourceRef[]>().notNull(),
-  revokedAt: timestamp("revoked_at", { withTimezone: true }),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
-}, (table) => [
-  uniqueIndex("workspace_pattern_evidence_id_workspace_idx").on(table.id, table.workspaceId),
-  index("workspace_pattern_evidence_projection_idx").on(table.workspaceId, table.patternGroupId, table.projectId, table.revokedAt),
-  check("workspace_pattern_evidence_type_check", sql`${table.evidenceType} = 'observed_pattern'`),
-  check("workspace_pattern_evidence_source_eligibility_check", sql`${table.sourceEligibility} IN ('git', 'git_linked', 'admin_attested', 'unverified_upload')`),
-  check("workspace_pattern_evidence_citations_check", sql`jsonb_typeof(${table.citations}) = 'array' AND jsonb_array_length(${table.citations}) > 0`),
-  check("workspace_pattern_evidence_profile_digest_check", sql`${table.profileDigest} ~ '^[0-9a-f]{64}$'`),
-  foreignKey({
-    columns: [table.patternGroupId, table.workspaceId],
-    foreignColumns: [workspacePatternGroups.id, workspacePatternGroups.workspaceId],
-    name: "workspace_pattern_evidence_group_workspace_fk"
-  }).onDelete("cascade"),
-  foreignKey({
-    columns: [table.projectId, table.workspaceId],
-    foreignColumns: [projects.id, projects.workspaceId],
-    name: "workspace_pattern_evidence_project_workspace_fk"
-  }).onDelete("cascade"),
-  foreignKey({
-    columns: [table.releaseId, table.workspaceId],
-    foreignColumns: [releases.id, releases.workspaceId],
-    name: "workspace_pattern_evidence_release_workspace_fk"
-  }).onDelete("restrict"),
-  foreignKey({
-    columns: [table.snapshotId, table.workspaceId],
-    foreignColumns: [sourceSnapshots.id, sourceSnapshots.workspaceId],
-    name: "workspace_pattern_evidence_snapshot_workspace_fk"
-  }).onDelete("restrict")
-]);
-
-export const workspaceDecisions = pgTable("workspace_decisions", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  patternGroupId: uuid("pattern_group_id").notNull(),
-  actorId: uuid("actor_id").notNull(),
-  decision: text("decision").$type<DeclaredDecisionEvidence["decision"]>().notNull(),
-  reason: text("reason").notNull(),
-  basisEvidenceIds: uuid("basis_evidence_ids").array().notNull(),
-  applicability: jsonb("applicability").$type<DeclaredDecisionEvidence["applicability"]>().notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
-}, (table) => [
-  uniqueIndex("workspace_decisions_id_workspace_idx").on(table.id, table.workspaceId),
-  check("workspace_decisions_decision_check", sql`${table.decision} IN ('approve', 'reject', 'deprecate', 'standardize')`),
-  check("workspace_decisions_basis_check", sql`cardinality(${table.basisEvidenceIds}) > 0`),
-  foreignKey({ columns: [table.patternGroupId, table.workspaceId], foreignColumns: [workspacePatternGroups.id, workspacePatternGroups.workspaceId], name: "workspace_decisions_group_workspace_fk" }).onDelete("cascade"),
-  foreignKey({ columns: [table.actorId, table.workspaceId], foreignColumns: [adminUsers.id, adminUsers.workspaceId], name: "workspace_decisions_actor_workspace_fk" }).onDelete("restrict")
-]);
-
-export const workspaceOutcomes = pgTable("workspace_outcomes", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  patternGroupId: uuid("pattern_group_id").notNull(),
-  evidenceId: uuid("evidence_id"),
-  authority: text("authority").$type<VerifiedOutcomeEvidence["authority"]>().notNull(),
-  outcome: text("outcome").$type<VerifiedOutcomeEvidence["outcome"]>().notNull(),
-  sourceVersion: text("source_version").notNull(),
-  checks: jsonb("checks").$type<VerifiedOutcomeEvidence["checks"]>().notNull(),
-  reportDigest: text("report_digest"),
-  recordedBy: uuid("recorded_by").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
-}, (table) => [
-  uniqueIndex("workspace_outcomes_id_workspace_idx").on(table.id, table.workspaceId),
-  check("workspace_outcomes_authority_check", sql`${table.authority} IN ('signed_ci', 'admin_confirmed', 'user_reported')`),
-  check("workspace_outcomes_outcome_check", sql`${table.outcome} IN ('passed', 'failed', 'rolled_back', 'partial')`),
-  check("workspace_outcomes_report_digest_check", sql`${table.reportDigest} IS NULL OR ${table.reportDigest} ~ '^[0-9a-f]{64}$'`),
-  foreignKey({ columns: [table.patternGroupId, table.workspaceId], foreignColumns: [workspacePatternGroups.id, workspacePatternGroups.workspaceId], name: "workspace_outcomes_group_workspace_fk" }).onDelete("cascade"),
-  foreignKey({ columns: [table.evidenceId, table.workspaceId], foreignColumns: [workspacePatternEvidence.id, workspacePatternEvidence.workspaceId], name: "workspace_outcomes_evidence_workspace_fk" }).onDelete("restrict"),
-  foreignKey({ columns: [table.recordedBy, table.workspaceId], foreignColumns: [adminUsers.id, adminUsers.workspaceId], name: "workspace_outcomes_actor_workspace_fk" }).onDelete("restrict")
-]);
-
-export const workspaceExperienceReviews = pgTable("workspace_experience_reviews", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  patternGroupId: uuid("pattern_group_id").notNull(),
-  actorId: uuid("actor_id").notNull(),
-  fromState: text("from_state").$type<ExperienceState>().notNull(),
-  toState: text("to_state").$type<ExperienceState>().notNull(),
-  reason: text("reason").notNull(),
-  basisEvidenceIds: uuid("basis_evidence_ids").array().notNull(),
-  decisionId: uuid("decision_id"),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
-}, (table) => [
-  uniqueIndex("workspace_experience_reviews_id_workspace_idx").on(table.id, table.workspaceId),
-  index("workspace_experience_reviews_group_created_idx").on(table.workspaceId, table.patternGroupId, table.createdAt, table.id),
-  check("workspace_experience_reviews_state_check", sql`${table.fromState} IN ('candidate', 'verified', 'recommended', 'standard', 'rejected', 'deprecated') AND ${table.toState} IN ('candidate', 'verified', 'recommended', 'standard', 'rejected', 'deprecated')`),
-  check("workspace_experience_reviews_basis_check", sql`cardinality(${table.basisEvidenceIds}) > 0 OR ${table.decisionId} IS NOT NULL`),
-  foreignKey({ columns: [table.patternGroupId, table.workspaceId], foreignColumns: [workspacePatternGroups.id, workspacePatternGroups.workspaceId], name: "workspace_experience_reviews_group_workspace_fk" }).onDelete("cascade"),
-  foreignKey({ columns: [table.decisionId, table.workspaceId], foreignColumns: [workspaceDecisions.id, workspaceDecisions.workspaceId], name: "workspace_experience_reviews_decision_workspace_fk" }).onDelete("restrict"),
-  foreignKey({ columns: [table.actorId, table.workspaceId], foreignColumns: [adminUsers.id, adminUsers.workspaceId], name: "workspace_experience_reviews_actor_workspace_fk" }).onDelete("restrict")
-]);
-
-export const workspaceExperienceReviewItems = pgTable("workspace_experience_review_items", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  patternGroupId: uuid("pattern_group_id").notNull(),
-  evidenceId: uuid("evidence_id"),
-  outcomeId: uuid("outcome_id").unique(),
-  reportedBy: uuid("reported_by").notNull(),
-  kind: text("kind").$type<ExperienceReviewItem["kind"]>().notNull(),
-  priority: text("priority").$type<ExperienceReviewItem["priority"]>().notNull(),
-  feedbackEvent: text("feedback_event").$type<ExperienceReviewItem["feedbackEvent"]>(),
-  currentProjectId: uuid("current_project_id"),
-  sourceVersion: text("source_version").notNull(),
-  taskSummary: text("task_summary").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
-}, (table) => [
-  uniqueIndex("workspace_experience_review_items_id_workspace_idx").on(table.id, table.workspaceId),
-  index("workspace_experience_review_items_queue_idx").on(table.workspaceId, table.priority, table.createdAt, table.id),
-  check("workspace_experience_review_items_kind_check", sql`${table.kind} IN ('trusted_negative_outcome', 'user_feedback', 'knowledge_lint')`),
-  check("workspace_experience_review_items_priority_check", sql`${table.priority} IN ('high', 'normal')`),
-  check("workspace_experience_review_items_feedback_check", sql`${table.feedbackEvent} IS NULL OR ${table.feedbackEvent} IN ('considered', 'adopted', 'partially_adopted', 'rejected', 'failed', 'rolled_back')`),
-  check("workspace_experience_review_items_shape_check", sql`
-    (${table.kind} = 'trusted_negative_outcome' AND ${table.outcomeId} IS NOT NULL
-      AND ${table.feedbackEvent} IS NULL AND ${table.currentProjectId} IS NULL AND ${table.priority} = 'high')
-    OR
-    (${table.kind} = 'user_feedback' AND ${table.outcomeId} IS NULL
-      AND ${table.feedbackEvent} IS NOT NULL AND ${table.currentProjectId} IS NOT NULL AND ${table.priority} = 'normal')
-    OR
-    (${table.kind} = 'knowledge_lint' AND ${table.outcomeId} IS NULL
-      AND ${table.feedbackEvent} IS NULL AND ${table.currentProjectId} IS NULL AND ${table.priority} = 'high')
-  `),
-  foreignKey({ columns: [table.patternGroupId, table.workspaceId], foreignColumns: [workspacePatternGroups.id, workspacePatternGroups.workspaceId], name: "workspace_experience_review_items_group_workspace_fk" }).onDelete("cascade"),
-  foreignKey({ columns: [table.evidenceId, table.workspaceId], foreignColumns: [workspacePatternEvidence.id, workspacePatternEvidence.workspaceId], name: "workspace_experience_review_items_evidence_workspace_fk" }).onDelete("restrict"),
-  foreignKey({ columns: [table.outcomeId, table.workspaceId], foreignColumns: [workspaceOutcomes.id, workspaceOutcomes.workspaceId], name: "workspace_experience_review_items_outcome_workspace_fk" }).onDelete("restrict"),
-  foreignKey({ columns: [table.reportedBy, table.workspaceId], foreignColumns: [adminUsers.id, adminUsers.workspaceId], name: "workspace_experience_review_items_actor_workspace_fk" }).onDelete("restrict"),
-  foreignKey({ columns: [table.currentProjectId, table.workspaceId], foreignColumns: [projects.id, projects.workspaceId], name: "workspace_experience_review_items_project_workspace_fk" }).onDelete("restrict")
-]);
-
-export const workspaceStandards = pgTable("workspace_standards", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  patternGroupId: uuid("pattern_group_id").notNull(),
-  title: text("title").notNull(),
-  body: text("body").notNull(),
-  authoredBy: uuid("authored_by").notNull(),
-  supersededById: uuid("superseded_by_id"),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
-}, (table) => [
-  uniqueIndex("workspace_standards_id_workspace_idx").on(table.id, table.workspaceId),
-  check("workspace_standards_no_self_supersession_check", sql`${table.supersededById} IS NULL OR ${table.supersededById} <> ${table.id}`),
-  foreignKey({ columns: [table.patternGroupId, table.workspaceId], foreignColumns: [workspacePatternGroups.id, workspacePatternGroups.workspaceId], name: "workspace_standards_group_workspace_fk" }).onDelete("cascade"),
-  foreignKey({ columns: [table.authoredBy, table.workspaceId], foreignColumns: [adminUsers.id, adminUsers.workspaceId], name: "workspace_standards_actor_workspace_fk" }).onDelete("restrict")
-]);
-
 export const releaseArtifacts = pgTable("release_artifacts", {
   releaseId: uuid("release_id").notNull().references(() => releases.id, { onDelete: "cascade" }),
   artifactId: uuid("artifact_id").notNull().references(() => knowledgeArtifacts.id, { onDelete: "restrict" })
@@ -1050,32 +842,6 @@ export const mcpTokens = pgTable("mcp_tokens", {
   uniqueIndex("mcp_tokens_hash_idx").on(table.tokenHash),
   index("mcp_tokens_workspace_idx").on(table.workspaceId),
   index("mcp_tokens_workspace_project_idx").on(table.workspaceId, table.projectId)
-]);
-
-export const workspaceMcpTokens = pgTable("workspace_mcp_tokens", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  userId: uuid("user_id").notNull(),
-  name: text("name").notNull(),
-  tokenHash: text("token_hash").notNull(),
-  tokenPrefix: text("token_prefix").notNull(),
-  scopes: text("scopes").array().notNull(),
-  sessionVersion: integer("session_version").notNull(),
-  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
-  revokedAt: timestamp("revoked_at", { withTimezone: true }),
-  ...timestamps
-}, (table) => [
-  uniqueIndex("workspace_mcp_tokens_id_workspace_idx").on(table.id, table.workspaceId),
-  uniqueIndex("workspace_mcp_tokens_hash_idx").on(table.tokenHash),
-  index("workspace_mcp_tokens_owner_created_idx").on(table.workspaceId, table.userId, table.createdAt.desc(), table.id.desc()),
-  check("workspace_mcp_tokens_scopes_check", sql`cardinality(${table.scopes}) > 0 AND ${table.scopes} <@ ARRAY['workspace.patterns.read', 'workspace.solutions.read']::text[]`),
-  check("workspace_mcp_tokens_expiry_check", sql`${table.expiresAt} > ${table.createdAt} AND ${table.expiresAt} <= ${table.createdAt} + interval '30 days'`),
-  foreignKey({
-    columns: [table.userId, table.workspaceId],
-    foreignColumns: [adminUsers.id, adminUsers.workspaceId],
-    name: "workspace_mcp_tokens_owner_workspace_fk"
-  }).onDelete("cascade")
 ]);
 
 export const agentFeedback = pgTable("agent_feedback", {

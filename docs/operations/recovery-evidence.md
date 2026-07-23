@@ -31,7 +31,6 @@
   "pgRestoreListValidated": true,
   "ephemeralDatabaseRestored": true,
   "healthCheckPassed": true,
-  "experienceRecoveryValidated": true,
   "artifactContentVerifiedCount": 8,
   "blobReferenceCount": 2,
   "blobContentVerifiedCount": 1,
@@ -56,15 +55,7 @@
     "sourceAnalysisArtifactCount": 12,
     "sourceBlobCount": 2,
     "sourceFileBlobReferenceCount": 2,
-    "referencedSourceBlobGenerationCount": 1,
-    "frontendProjectProfileArtifactCount": 1,
-    "patternGroupCount": 1,
-    "patternEvidenceCount": 1,
-    "decisionCount": 1,
-    "outcomeCount": 1,
-    "experienceReviewCount": 1,
-    "experienceReviewItemCount": 1,
-    "standardCount": 1
+    "referencedSourceBlobGenerationCount": 1
   },
   "integrity": {
     "orphanedReleases": 0,
@@ -74,19 +65,7 @@
     "orphanedArtifacts": 0,
     "orphanedSourceAnalysisArtifacts": 0,
     "unboundSourceFiles": 0,
-    "invalidSourceBlobReferences": 0,
-    "invalidSourceProvenance": 0,
-    "orphanedExperienceEvidence": 0,
-    "experienceReleaseSnapshotMismatch": 0,
-    "experienceCitationSnapshotMismatch": 0,
-    "experienceEvidenceWithoutProfileArtifact": 0,
-    "invalidDecisionBasis": 0,
-    "invalidOutcomeEvidence": 0,
-    "outcomeVersionMismatch": 0,
-    "invalidExperienceReviewBasis": 0,
-    "invalidExperienceReviewItems": 0,
-    "invalidWorkspaceStandards": 0,
-    "experienceSupersessionCycles": 0
+    "invalidSourceBlobReferences": 0
   }
 }
 ```
@@ -112,8 +91,7 @@ trash 或 deleted 时间；被引用的 `tombstoned` blob 必须有 UUID fence �
 metadata 有固定上限。提取后再次遍历并拒绝 symlink、特殊节点或 canonical 越界路径。Blob 与 snapshot view
 还必须通过 `O_NOFOLLOW` 先打开为普通文件，再由同一个 pinned descriptor 完成 `fstat`、内容哈希和读取；证据中的
 device、inode、mode、size 和 allocated blocks 也只能来自该 descriptor。任一 owner/group/other 写位都会使恢复演练失败。
-`experienceRecoveryValidated=true` 证明独立经验恢复图校验器已复核来源身份、项目画像、release、证据、
-决策、结果、审核、复审项、标准及 supersession；`integrity` 各项均为 `0`。`resticSnapshotId`
+`integrity` 各项均为 `0`。`resticSnapshotId`
 必须是 restic 返回的完整 64 位快照 ID，并与备份或恢复日志对应；
 `startedAt` 和 `finishedAt` 必须是严格 UTC ISO 时间，且结束时间不得早于开始时间。记录不得包含
 Restic 密码、OSS/RAM 凭据、数据库 URL、`DEVKH_MASTER_KEY`、源文件内容或数据库转储。

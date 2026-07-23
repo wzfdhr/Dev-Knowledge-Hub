@@ -13,7 +13,7 @@ or executable configuration.
 - CPU, memory, PID, worker heap, stack, request, output, and wall-clock limits are enforced.
 - A parser container accepts one socket and one active worker; incomplete request frames are
   closed after five seconds so the 64 MiB protocol frame limit stays within the 512 MiB container budget.
-- Analyzer output is rejected above 250,000 structural values, 256 levels of nesting, or 16 MiB
+- Analyzer output is rejected above 100,000 structural values, 256 levels of nesting, or 16 MiB
   of serialized JSON. Worker heap exhaustion, structural overflow, and byte overflow stay scoped
   to the current shadow stage.
 - Every source path is a relative POSIX virtual path and every byte payload must match its SHA-256 hash.

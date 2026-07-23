@@ -21,11 +21,6 @@ const legacyDatabaseStatNames = [
 const sourceBlobDatabaseStatNames = [
   "sourceBlobCount", "sourceFileBlobReferenceCount", "referencedSourceBlobGenerationCount"
 ];
-const experienceDatabaseStatNames = [
-  "frontendProjectProfileArtifactCount", "patternGroupCount", "patternEvidenceCount",
-  "decisionCount", "outcomeCount", "experienceReviewCount", "experienceReviewItemCount",
-  "standardCount"
-];
 const legacyIntegrityNames = [
   "orphanedReleases",
   "orphanedReleaseChannels",
@@ -35,13 +30,6 @@ const legacyIntegrityNames = [
   "orphanedSourceAnalysisArtifacts"
 ];
 const sourceBlobIntegrityNames = ["unboundSourceFiles", "invalidSourceBlobReferences"];
-const experienceIntegrityNames = [
-  "invalidSourceProvenance", "orphanedExperienceEvidence", "experienceReleaseSnapshotMismatch",
-  "experienceCitationSnapshotMismatch", "experienceEvidenceWithoutProfileArtifact",
-  "invalidDecisionBasis", "invalidOutcomeEvidence", "outcomeVersionMismatch",
-  "invalidExperienceReviewBasis", "invalidExperienceReviewItems", "invalidWorkspaceStandards",
-  "experienceSupersessionCycles"
-];
 const sha256 = /^[a-f0-9]{64}$/;
 const utcIsoTimestamp = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?Z$/;
 const evidenceFields = [
@@ -51,7 +39,7 @@ const evidenceFields = [
   "ephemeralDatabaseRestored", "healthCheckPassed", "artifactContentVerifiedCount", "databaseStats",
   "integrity", "blobReferenceCount", "blobContentVerifiedCount", "blobHardlinkVerifiedCount",
   "referencedSourceBlobGenerationCount", "sourceBlobLogicalBytes", "sourceBlobPhysicalBytes",
-  "sourceBlobRecordManifest", "experienceRecoveryValidated"
+  "sourceBlobRecordManifest"
 ];
 const sourceBlobRecordFields = [
   "workspaceId", "snapshotId", "sourcePath", "storageKey", "snapshotStoragePath", "contentHash",
@@ -202,7 +190,7 @@ export function validateRecoveryEvidence(evidence, options = {}) {
     sourceBlobEvidence ? evidenceFields : evidenceFields.filter((field) => ![
       "blobReferenceCount", "blobContentVerifiedCount", "blobHardlinkVerifiedCount",
       "referencedSourceBlobGenerationCount", "sourceBlobLogicalBytes", "sourceBlobPhysicalBytes",
-      "sourceBlobRecordManifest", "experienceRecoveryValidated"
+      "sourceBlobRecordManifest"
     ].includes(field)),
     "document"
   );
@@ -230,7 +218,7 @@ export function validateRecoveryEvidence(evidence, options = {}) {
     );
   }
   const databaseStatNames = sourceBlobEvidence
-    ? [...legacyDatabaseStatNames, ...sourceBlobDatabaseStatNames, ...experienceDatabaseStatNames]
+    ? [...legacyDatabaseStatNames, ...sourceBlobDatabaseStatNames]
     : legacyDatabaseStatNames;
   requireExactFields(evidence.databaseStats, databaseStatNames, "databaseStats");
   for (const name of databaseStatNames) {
@@ -240,7 +228,7 @@ export function validateRecoveryEvidence(evidence, options = {}) {
     );
   }
   const integrityNames = sourceBlobEvidence
-    ? [...legacyIntegrityNames, ...sourceBlobIntegrityNames, ...experienceIntegrityNames]
+    ? [...legacyIntegrityNames, ...sourceBlobIntegrityNames]
     : legacyIntegrityNames;
   requireExactFields(evidence.integrity, integrityNames, "integrity");
   for (const name of integrityNames) {
@@ -251,10 +239,6 @@ export function validateRecoveryEvidence(evidence, options = {}) {
   requireEvidence(evidence.pgRestoreListValidated === true, "pg_restore list must be validated");
   requireEvidence(evidence.ephemeralDatabaseRestored === true, "ephemeral database restore must pass");
   requireEvidence(evidence.healthCheckPassed === true, "application health check must pass");
-  if (sourceBlobEvidence) requireEvidence(
-    evidence.experienceRecoveryValidated === true,
-    "experience recovery graph validation must pass"
-  );
   requireEvidence(
     Number.isInteger(evidence.artifactContentVerifiedCount)
       && evidence.artifactContentVerifiedCount === evidence.databaseStats.artifactCount,

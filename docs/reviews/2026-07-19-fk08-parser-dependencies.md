@@ -28,7 +28,7 @@ The direct unpacked total is 805,624 bytes. `parse5` and PostCSS were already pr
 
 - Parsing runs only in the dedicated no-network parser service and a terminable worker thread. It does not run package scripts, imported modules, HTML scripts, CSS functions, or configuration code.
 - Virtual paths are normalized project-relative POSIX paths. Host filesystem paths, `node_modules`, duplicate paths, non-canonical base64, and hash mismatches are rejected before analysis.
-- The parser service enforces a 2 MiB per-file limit, 32 MiB total request-source limit, 64 MiB framed-protocol limit, 30-second worker deadline, 256 MiB old-generation heap limit, 32 MiB young-generation limit, 8 MiB stack, and 16 MiB/250,000-node/256-depth output limits.
+- The parser service enforces a 2 MiB per-file limit, 32 MiB total request-source limit, 64 MiB framed-protocol limit, 30-second worker deadline, 256 MiB old-generation heap limit, 32 MiB young-generation limit, 8 MiB stack, and 16 MiB/100,000-node/256-depth output limits.
 - Parse failures produce bounded partial facts or a stable parser error. They cannot alter the current release because FK08 remains shadow-only.
 - Source-analysis cache entries are immutable, workspace-scoped, content-addressed, parser-versioned JSON facts. Project paths, snapshot IDs, source refs, credentials, and storage paths are rejected from cached facts.
 

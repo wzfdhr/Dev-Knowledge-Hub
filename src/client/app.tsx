@@ -8,9 +8,7 @@ import { api as defaultApi, ApiError, errorMessage, type ApiClient } from "./api
 import { AppShell } from "./components/app-shell";
 import { ProjectLayout } from "./components/project-layout";
 import { ErrorState, Loading } from "./components/ui";
-import { projectLegacyRedirects } from "./features/project-routes";
 import { FeedbackPage } from "./pages/feedback-page";
-import { GlobalKnowledgeSearchPage } from "./pages/global-knowledge-search-page";
 import { KnowledgePage } from "./pages/knowledge-page";
 import { MembersPage } from "./pages/members-page";
 import { ProjectOverviewPage } from "./pages/overview-page";
@@ -21,9 +19,7 @@ import { ProjectCollaborationPage } from "./pages/project-collaboration-page";
 import { ProjectVersionsPage } from "./pages/project-versions-page";
 import { ProjectGraphPage } from "./pages/project-graph-page";
 import { ProjectFrontendMapPage } from "./pages/project-frontend-map-page";
-import { ProjectKnowledgeQualityPage } from "./pages/project-knowledge-quality-page";
 import { SystemSettingsPage } from "./pages/system-settings-page";
-import { WorkspaceExperiencesPage } from "./pages/workspace-experiences-page";
 
 function LegacyProjectRedirect({ section }: { section: string }) {
   const projectId = localStorage.getItem("devkh:active-project-id");
@@ -62,21 +58,16 @@ export function App({ api = defaultApi }: { api?: ApiClient }) {
     <Route path="/projects/:projectId" element={<ProjectLayout api={api} workspaceRole={session.data.admin.role} />}>
       <Route index element={<Navigate to="overview" replace />} />
       <Route path="overview" element={<ProjectOverviewPage api={api} />} />
-      <Route path="sources" element={<ProjectImportsPage api={api} />} />
-      <Route path="production" element={<ProjectVersionsPage api={api} />} />
-      <Route path="knowledge/pages" element={<KnowledgePage api={api} />} />
-      <Route path="knowledge/quality" element={<ProjectKnowledgeQualityPage api={api} />} />
-      <Route path="knowledge/graph" element={<ProjectGraphPage api={api} />} />
-      <Route path="knowledge/frontend" element={<ProjectFrontendMapPage api={api} />} />
-      <Route path="settings/team" element={<ProjectCollaborationPage api={api} />} />
-      <Route path="settings/codex" element={<ProjectCodexPage api={api} />} />
-      {Object.entries(projectLegacyRedirects).map(([path, target]) =>
-        <Route key={path} path={path} element={<Navigate to={target} replace />} />
-      )}
+      <Route path="imports" element={<ProjectImportsPage api={api} />} />
+      <Route path="versions" element={<ProjectVersionsPage api={api} />} />
+      <Route path="knowledge" element={<KnowledgePage api={api} />} />
+      <Route path="graph" element={<ProjectGraphPage api={api} />} />
+      <Route path="frontend-map" element={<ProjectFrontendMapPage api={api} />} />
+      <Route path="collaboration" element={<ProjectCollaborationPage api={api} />} />
+      <Route path="codex" element={<ProjectCodexPage api={api} />} />
     </Route>
     <Route path="/overview" element={<LegacyProjectRedirect section="overview" />} />
-    <Route path="/knowledge" element={<GlobalKnowledgeSearchPage api={api} />} />
-    <Route path="/knowledge/experiences" element={<WorkspaceExperiencesPage api={api} role={workspaceRole} />} />
+    <Route path="/knowledge" element={<KnowledgePage api={api} />} />
     <Route path="/feedback" element={<FeedbackPage api={api} />} />
     <Route path="/members" element={workspaceRole === "admin" ? <MembersPage api={api} /> : <Navigate to="/projects" replace />} />
     <Route path="/settings" element={workspaceRole === "admin" ? <SystemSettingsPage api={api} /> : <Navigate to="/projects" replace />} />

@@ -23,7 +23,6 @@ const legacySessionReadUntilSchema = z.string().datetime({ offset: true })
 const knowledgeKernelModeSchema = z.enum(["legacy", "shadow", "active"]);
 const frontendKnowledgeModeSchema = z.enum(FRONTEND_KNOWLEDGE_MODES);
 const sourceStorageModeSchema = z.enum(["legacy", "shadow", "active"]);
-const experienceSwitchSchema = z.enum(["enabled", "disabled"]);
 
 const sharedEnvSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
@@ -37,8 +36,6 @@ const sharedEnvSchema = z.object({
   DEVKH_KNOWLEDGE_KERNEL_MODE: knowledgeKernelModeSchema.default("legacy"),
   DEVKH_FRONTEND_KNOWLEDGE_MODE: frontendKnowledgeModeSchema.default("legacy"),
   DEVKH_SOURCE_STORAGE_MODE: sourceStorageModeSchema.default("legacy"),
-  DEVKH_WORKSPACE_SOLUTION_PLANNING: experienceSwitchSchema.default("enabled"),
-  DEVKH_FRONTEND_EXPERIENCE_RECOMMENDATIONS: experienceSwitchSchema.default("enabled"),
   DEVKH_PARSER_SOCKET_PATH: z.string().startsWith("/").default("/run/devkh-parser/parser.sock")
 });
 
@@ -63,8 +60,6 @@ export interface AppEnv {
   knowledgeKernelMode: z.infer<typeof knowledgeKernelModeSchema>;
   frontendKnowledgeMode: z.infer<typeof frontendKnowledgeModeSchema>;
   sourceStorageMode: z.infer<typeof sourceStorageModeSchema>;
-  workspaceSolutionPlanningEnabled: boolean;
-  frontendExperienceRecommendationsEnabled: boolean;
   parserSocketPath: string;
 }
 
@@ -94,8 +89,6 @@ export function loadEnv({
       knowledgeKernelMode: parsed.DEVKH_KNOWLEDGE_KERNEL_MODE,
       frontendKnowledgeMode: parsed.DEVKH_FRONTEND_KNOWLEDGE_MODE,
       sourceStorageMode: parsed.DEVKH_SOURCE_STORAGE_MODE,
-      workspaceSolutionPlanningEnabled: parsed.DEVKH_WORKSPACE_SOLUTION_PLANNING === "enabled",
-      frontendExperienceRecommendationsEnabled: parsed.DEVKH_FRONTEND_EXPERIENCE_RECOMMENDATIONS === "enabled",
       parserSocketPath: parsed.DEVKH_PARSER_SOCKET_PATH
     };
   }
@@ -118,8 +111,6 @@ export function loadEnv({
     knowledgeKernelMode: parsed.DEVKH_KNOWLEDGE_KERNEL_MODE,
     frontendKnowledgeMode: parsed.DEVKH_FRONTEND_KNOWLEDGE_MODE,
     sourceStorageMode: parsed.DEVKH_SOURCE_STORAGE_MODE,
-    workspaceSolutionPlanningEnabled: parsed.DEVKH_WORKSPACE_SOLUTION_PLANNING === "enabled",
-    frontendExperienceRecommendationsEnabled: parsed.DEVKH_FRONTEND_EXPERIENCE_RECOMMENDATIONS === "enabled",
     parserSocketPath: parsed.DEVKH_PARSER_SOCKET_PATH
   };
 }

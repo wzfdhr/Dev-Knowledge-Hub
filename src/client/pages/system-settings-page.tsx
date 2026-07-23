@@ -1,44 +1,10 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { DatabaseBackup, KeyRound, LockKeyhole, ShieldCheck, Trash2 } from "lucide-react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { DatabaseBackup, LockKeyhole, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { errorMessage, type ApiClient } from "../api/client";
 import type { ModelProvider } from "../api/types";
 import { ErrorState, Loading } from "../components/ui";
-
-function WorkspaceMcpForm({ api }: { api: ApiClient }) {
-  const supported = typeof api.listWorkspaceMcpTokens === "function";
-  const queryClient = useQueryClient();
-  const tokens = useQuery({
-    queryKey: ["workspace-mcp-tokens"],
-    queryFn: () => api.listWorkspaceMcpTokens({ limit: 100, offset: 0 }),
-    enabled: supported
-  });
-  const [name, setName] = useState("");
-  const [plaintext, setPlaintext] = useState<string | null>(null);
-  const create = useMutation({
-    mutationFn: () => api.createWorkspaceMcpToken(name),
-    onSuccess: async (value) => {
-      setPlaintext(value.token);
-      setName("");
-      await queryClient.invalidateQueries({ queryKey: ["workspace-mcp-tokens"] });
-    }
-  });
-  const revoke = useMutation({
-    mutationFn: api.revokeWorkspaceMcpToken,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["workspace-mcp-tokens"] })
-  });
-  if (!supported) return null;
-  return <section className="settings-section"><div className="settings-intro"><KeyRound aria-hidden="true" /><div><h2>Workspace Agent Token</h2><p>绑定当前用户会话，最长 30 天；用于团队经验查询与结构化方案上下文。</p></div></div>
-    <form className="form-stack" onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>
-      <label>Token 名称<input required value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：我的 Codex" /></label>
-      <button className="button primary" disabled={create.isPending}>创建 Workspace Token</button>
-    </form>
-    {create.error && <ErrorState message={errorMessage(create.error)} />}
-    {plaintext && <div className="secret-row"><code>{plaintext}</code><button className="button" type="button" onClick={() => setPlaintext(null)}>我已保存</button></div>}
-    {tokens.isLoading ? <Loading label="正在加载 Workspace Token" /> : tokens.error ? <ErrorState message={errorMessage(tokens.error)} /> : <div className="codex-token-list">{tokens.data?.tokens.map((token) => <div key={token.id}><KeyRound aria-hidden="true" /><span><strong>{token.name}</strong><small className="mono">{token.tokenPrefix}</small><small>到期：{new Date(token.expiresAt).toLocaleDateString("zh-CN")}</small></span>{!token.revokedAt && <button className="button" type="button" aria-label={`撤销 ${token.name}`} onClick={() => revoke.mutate(token.id)}><Trash2 aria-hidden="true" /></button>}</div>)}</div>}
-  </section>;
-}
 
 function ModelForm({ api }: { api: ApiClient }) {
   const config = useQuery({ queryKey: ["model-config"], queryFn: api.getModelConfig });
@@ -120,7 +86,6 @@ export function SystemSettingsPage({ api }: { api: ApiClient }) {
     <div className="settings-stack">
       <section className="settings-section"><div className="settings-intro"><LockKeyhole aria-hidden="true" /><div><h2>模型服务商</h2><p>用于可选的中文摘要和知识增强。</p></div></div><ModelForm api={api} /></section>
       <section className="settings-section"><div className="settings-intro"><ShieldCheck aria-hidden="true" /><div><h2>多因素认证</h2><p>仅管理员账户可配置。</p></div></div><MfaForm api={api} /></section>
-      <WorkspaceMcpForm api={api} />
       <section className="settings-section"><div className="settings-intro"><ShieldCheck aria-hidden="true" /><div><h2>安全策略</h2><p>工作区凭据与访问边界。</p></div></div><dl className="detail-list horizontal"><div><dt>凭据加密</dt><dd>AES-256-GCM</dd></div><div><dt>会话</dt><dd>安全 HttpOnly Cookie</dd></div><div><dt>项目访问</dt><dd>Token 按项目隔离</dd></div><div><dt>明文 Token</dt><dd>仅创建时展示</dd></div></dl></section>
       <section className="settings-section"><div className="settings-intro"><DatabaseBackup aria-hidden="true" /><div><h2>存储与备份</h2><p>线上资料的持久化边界。</p></div></div><dl className="detail-list horizontal"><div><dt>长期保存</dt><dd>过滤后的源码、配置和文档</dd></div><div><dt>原始压缩包</dt><dd>导入成功后删除</dd></div><div><dt>知识版本</dt><dd>不可变快照</dd></div><div><dt>发布切换</dt><dd>人工确认后原子切换</dd></div></dl></section>
     </div>

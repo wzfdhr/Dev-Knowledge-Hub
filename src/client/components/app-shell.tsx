@@ -7,7 +7,7 @@ import { APP_NAME } from "../../shared/contracts";
 
 const navigation = [
   { to: "/projects", label: "项目中心", icon: FolderKanban },
-  { to: "/knowledge", label: "知识搜索", icon: BookOpen },
+  { to: "/knowledge", label: "知识库", icon: BookOpen },
   { to: "/feedback", label: "反馈", icon: MessageSquareText },
   { to: "/members", label: "成员", icon: Users },
   { to: "/settings", label: "设置", icon: Settings }
@@ -19,9 +19,7 @@ const roleLabels: Record<WorkspaceRole, string> = { admin: "管理员", member: 
 export function AppShell({ email, role, onLogout }: { email: string; role: WorkspaceRole; onLogout: () => void }) {
   const [open, setOpen] = useState(false);
   const location = useLocation();
-  const selectedKey = location.pathname.startsWith("/projects/")
-    ? "/projects"
-    : location.pathname.startsWith("/knowledge") ? "/knowledge" : location.pathname;
+  const selectedKey = location.pathname.startsWith("/projects/") ? "/projects" : location.pathname;
   const visibleNavigation = role === "admin"
     ? navigation
     : navigation.filter(({ to }) => !["/members", "/settings"].includes(to));

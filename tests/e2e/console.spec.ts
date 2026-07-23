@@ -23,23 +23,8 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   const projectId = new URL(page.url()).pathname.split("/")[2];
   expect(projectId).toBeTruthy();
 
-  await page.getByRole("link", { name: "资料接入" }).click();
-  await expect(page.getByRole("heading", { name: "资料接入" })).toBeVisible();
-  await expect(page.getByText("当前来源：", { exact: false })).toBeVisible();
-  await expect(page.getByRole("button", { name: "选择项目文件夹" })).toBeVisible();
-  await expect(page.getByText("暂无导入记录")).toBeVisible();
-
-  const repositorySubmissions: string[] = [];
-  const trackRepositorySubmissions = (request: { method(): string; url(): string }) => {
-    if (request.method() === "POST" && request.url().includes("/repositories")) repositorySubmissions.push(request.url());
-  };
-  page.on("request", trackRepositorySubmissions);
-  await page.getByText("Git HTTPS", { exact: true }).click();
-  await expect(page.getByRole("textbox", { name: "HTTPS URL" })).toBeVisible();
-  expect(repositorySubmissions).toEqual([]);
-  page.off("request", trackRepositorySubmissions);
-  await page.getByText("项目文件夹", { exact: true }).click();
-
+  await page.getByRole("link", { name: "资料上传" }).click();
+  await expect(page.getByRole("heading", { name: "选择完整项目文件夹" })).toBeVisible();
   const folderInput = page.locator('input[type="file"][multiple]');
   await folderInput.evaluate((input) => {
     const selected = [
@@ -69,43 +54,8 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   await expect(report).toContainText("敏感文件1");
   await page.getByRole("button", { name: "确认并开始上传" }).click();
   await expect(page.getByRole("heading", { name: "内容版本已就绪" })).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByRole("table", { name: "最近导入" })).toBeVisible();
 
-  for (const viewport of [
-    { width: 1280, height: 900 },
-    { width: 768, height: 900 },
-    { width: 390, height: 844 },
-    { width: 320, height: 700 }
-  ]) {
-    await page.setViewportSize(viewport);
-    const layout = await page.evaluate(() => ({
-      overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-      offenders: [...document.querySelectorAll("body *")].map((element) => {
-        const rect = element.getBoundingClientRect();
-        return { tag: element.tagName, className: element.className, left: rect.left, right: rect.right, width: rect.width };
-      }).filter((rect) => rect.right > document.documentElement.clientWidth + 0.5 || rect.left < -0.5).slice(0, 10)
-    }));
-    expect(layout.overflow, JSON.stringify(layout.offenders)).toBeLessThanOrEqual(0);
-    await expect(page.getByRole("button", { name: "选择项目文件夹" })).toBeVisible();
-    if (viewport.width <= 390) {
-      const historyLayout = await page.locator(".import-history-overflow").evaluate((element) => {
-        element.scrollLeft = Math.min(48, element.scrollWidth - element.clientWidth);
-        return {
-          clientWidth: element.clientWidth,
-          overflowX: getComputedStyle(element).overflowX,
-          scrollLeft: element.scrollLeft,
-          scrollWidth: element.scrollWidth
-        };
-      });
-      expect(historyLayout.scrollWidth).toBeGreaterThan(historyLayout.clientWidth);
-      expect(historyLayout.scrollLeft).toBeGreaterThan(0);
-      expect(historyLayout.overflowX).toBe("auto");
-    }
-    await page.screenshot({ path: `test-results/imports-${viewport.width}x${viewport.height}.png`, fullPage: true });
-  }
-  await page.setViewportSize({ width: 1440, height: 1024 });
-
-  await page.getByRole("link", { name: "知识生产" }).click();
+  await page.getByRole("link", { name: "知识版本" }).click();
   await page.getByRole("button", { name: "开始构建知识" }).click();
   await expect(page.getByRole("button", { name: "审核就绪构建" })).toBeVisible({ timeout: 30_000 });
   await page.getByRole("button", { name: "审核就绪构建" }).click();
@@ -239,53 +189,6 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   const retainedKnowledgeTitle = await retainedKnowledgePage.innerText();
   await retainedKnowledgePage.click();
   await expect(page.locator(".knowledge-document")).toContainText(retainedKnowledgeTitle);
-
-  await page.goto("/knowledge");
-  await expect(page.getByRole("heading", { name: "知识搜索" })).toBeVisible();
-  await page.getByRole("searchbox", { name: "跨项目搜索" }).fill("add");
-  const workspaceResult = page.locator(".global-search-results a").first();
-  await expect(workspaceResult).toBeVisible();
-  await workspaceResult.click();
-  await expect(page.getByRole("heading", { name: "知识库", level: 1 })).toBeVisible();
-
-  await page.goto(`/projects/${projectId}/knowledge/quality`);
-  await expect(page.getByRole("heading", { name: "知识质量" })).toBeVisible();
-  await expect(page.getByLabel("质量分析版本")).toHaveValue(releaseBeforeShadow);
-  await expect(page.locator(".quality-metadata-panel")).toContainText("add");
-
-  for (const view of [
-    { path: "/knowledge", heading: "知识搜索", screenshot: "workspace-search" },
-    { path: `/projects/${projectId}/knowledge/quality`, heading: "知识质量", screenshot: "knowledge-quality" }
-  ]) {
-    for (const viewport of [
-      { width: 1440, height: 1024 },
-      { width: 768, height: 900 },
-      { width: 390, height: 844 },
-      { width: 320, height: 700 }
-    ]) {
-      await page.setViewportSize(viewport);
-      await page.goto(view.path);
-      await expect(page.getByRole("heading", { name: view.heading })).toBeVisible();
-      if (view.path === "/knowledge" && viewport.width <= 390) {
-        const navigationBox = await page.getByRole("button", { name: "打开导航" }).boundingBox();
-        const headerBox = await page.locator(".global-knowledge-search-page .page-header").boundingBox();
-        expect(navigationBox).not.toBeNull();
-        expect(headerBox).not.toBeNull();
-        expect(navigationBox!.y + navigationBox!.height).toBeLessThanOrEqual(headerBox!.y);
-      }
-      const viewOverflow = await page.evaluate(() =>
-        document.documentElement.scrollWidth - document.documentElement.clientWidth
-      );
-      expect(viewOverflow).toBeLessThanOrEqual(0);
-      if (viewport.width === 1440 || viewport.width === 390) {
-        await page.screenshot({
-          path: `test-results/${view.screenshot}-${viewport.width}x${viewport.height}.png`,
-          fullPage: true
-        });
-      }
-    }
-  }
-  await page.setViewportSize({ width: 1440, height: 1024 });
 
   await page.goto(`/projects/${projectId}/codex`);
   await expect(page.getByRole("heading", { name: "Codex 接入" })).toBeVisible();

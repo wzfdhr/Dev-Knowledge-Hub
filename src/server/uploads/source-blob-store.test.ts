@@ -623,55 +623,6 @@ describe("workspace source blob store", () => {
     await expect(readFile(viewPath, "utf8")).resolves.toBe("linked");
   });
 
-  test("verifies an active snapshot reference through pinned matching hardlink inodes", async () => {
-    const context = await fixture();
-    const workspaceId = randomUUID();
-    const snapshotId = randomUUID();
-    const bytes = Buffer.from("contract preflight");
-    const { record } = await context.store.put({ workspaceId, bytes });
-    const storagePath = await context.store.materializeSnapshotView({
-      workspaceId,
-      snapshotId,
-      files: [{ path: "src/index.ts", blob: record }]
-    });
-
-    await expect(context.store.verifySnapshotReference({
-      workspaceId,
-      snapshotId,
-      snapshotStoragePath: storagePath,
-      path: "src/index.ts",
-      blob: record
-    })).resolves.toMatchObject({ contentHash: sha256(bytes), byteSize: bytes.length });
-  });
-
-  test("blocks contract preflight when a snapshot view is no longer the blob hardlink", async () => {
-    const context = await fixture();
-    const workspaceId = randomUUID();
-    const snapshotId = randomUUID();
-    const bytes = Buffer.from("contract preflight inode");
-    const { record } = await context.store.put({ workspaceId, bytes });
-    const storagePath = await context.store.materializeSnapshotView({
-      workspaceId,
-      snapshotId,
-      files: [{ path: "src/index.ts", blob: record }]
-    });
-    const view = path.join(storagePath, "src/index.ts");
-    await chmod(path.dirname(view), 0o755);
-    await unlink(view);
-    await writeFile(view, bytes, { mode: 0o444 });
-
-    await expect(context.store.verifySnapshotReference({
-      workspaceId,
-      snapshotId,
-      snapshotStoragePath: storagePath,
-      path: "src/index.ts",
-      blob: record
-    })).rejects.toMatchObject({
-      code: "SOURCE_BLOB_INTEGRITY_FAILED",
-      message: expect.stringMatching(/hardlink/i)
-    });
-  });
-
   test("rejects unsafe snapshot paths and removes the incomplete view", async () => {
     const context = await fixture();
     const workspaceId = randomUUID();

@@ -142,16 +142,15 @@ describe("shared console copy", () => {
     renderAppAt(api, "/projects/project-1/collaboration");
 
     await waitFor(() => expect(api.listProjects).toHaveBeenCalledOnce(), { timeout: 5_000 });
-    expect(await screen.findByText("AHeart Admin", { selector: ".project-name" }, { timeout: 5_000 })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "AHeart Admin" }, { timeout: 5_000 })).toBeVisible();
     expect(screen.getByRole("navigation", { name: "项目导航" })).toBeVisible();
     expect(screen.getByRole("link", { name: "项目概览" })).toHaveAttribute("href", "/projects/project-1/overview");
-    expect(screen.getByRole("link", { name: "资料接入" })).toHaveAttribute("href", "/projects/project-1/sources");
-    expect(screen.getByRole("link", { name: "知识生产" })).toHaveAttribute("href", "/projects/project-1/production");
-    expect(screen.getByRole("link", { name: "知识资料" })).toHaveAttribute("href", "/projects/project-1/knowledge/pages");
-    expect(screen.getByRole("link", { name: "项目设置" })).toHaveAttribute("href", "/projects/project-1/settings/team");
-    expect(within(screen.getByRole("navigation", { name: "项目导航" })).getAllByRole("link")).toHaveLength(5);
+    expect(screen.getByRole("link", { name: "资料上传" })).toHaveAttribute("href", "/projects/project-1/imports");
+    expect(screen.getByRole("link", { name: "知识图谱" })).toHaveAttribute("href", "/projects/project-1/graph");
+    expect(screen.getByRole("link", { name: "知识版本" })).toHaveAttribute("href", "/projects/project-1/versions");
+    expect(screen.getByRole("link", { name: "团队协作" })).toHaveAttribute("href", "/projects/project-1/collaboration");
+    expect(screen.getByRole("link", { name: "Codex 接入" })).toHaveAttribute("href", "/projects/project-1/codex");
     expect(await screen.findByRole("heading", { name: "团队协作" })).toBeVisible();
-    expect(screen.getByRole("navigation", { name: "项目设置导航" })).toBeVisible();
   });
 
   test("renders folder import as a dedicated project workflow", async () => {
@@ -168,10 +167,11 @@ describe("shared console copy", () => {
 
     renderAppAt(api, "/projects/project-1/imports");
 
-    expect(await screen.findByRole("heading", { name: "资料接入" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "资料上传" })).toBeVisible();
     expect(screen.getByRole("button", { name: "选择项目文件夹" })).toBeVisible();
-    expect(screen.getByText("选择资料来源后开始导入")).toBeVisible();
-    expect(screen.queryByText("读取文件")).not.toBeInTheDocument();
+    expect(["读取文件", "安全过滤", "文件夹直传", "服务端校验", "创建内容版本"].map((label) => screen.getByText(label).textContent)).toEqual([
+      "读取文件", "安全过滤", "文件夹直传", "服务端校验", "创建内容版本"
+    ]);
   });
 
   test("separates project overview from knowledge version operations", async () => {
@@ -205,14 +205,13 @@ describe("shared console copy", () => {
 
     renderAppAt(api, "/projects/project-1/overview");
     expect(await screen.findByRole("heading", { name: "项目概览" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "下一步：开始构建" })).toBeVisible();
-    expect(screen.getByRole("link", { name: "开始构建" })).toHaveAttribute("href", "/projects/project-1/production");
-    expect(screen.getAllByRole("link", { name: "开始构建" })).toHaveLength(1);
+    expect(screen.getByRole("link", { name: "上传新资料" })).toHaveAttribute("href", "/projects/project-1/imports");
+    expect(screen.getByRole("link", { name: "管理知识版本" })).toHaveAttribute("href", "/projects/project-1/versions");
     expect(screen.queryByRole("heading", { name: "最近构建" })).not.toBeInTheDocument();
     cleanup();
 
     renderAppAt(api, "/projects/project-1/versions");
-    expect(await screen.findByRole("heading", { name: "知识生产" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "知识版本" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "最近构建" })).toBeVisible();
   });
 
@@ -324,7 +323,7 @@ describe("shared console copy", () => {
     expect(await screen.findByRole("link", { name: "项目中心" })).toBeVisible();
     expect(screen.getByRole("navigation", { name: "主导航" })).toBeVisible();
     expect(screen.getByRole("link", { name: "项目中心" })).toBeVisible();
-    expect(screen.getByRole("link", { name: "知识搜索" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "知识库" })).toBeVisible();
     expect(screen.getByRole("link", { name: "反馈" })).toBeVisible();
     expect(screen.getByRole("link", { name: "成员" })).toBeVisible();
     expect(screen.getByRole("link", { name: "设置" })).toBeVisible();
@@ -332,24 +331,6 @@ describe("shared console copy", () => {
 
     await user.click(screen.getByRole("link", { name: "成员" }));
     expect(await screen.findByRole("heading", { name: "成员" })).toBeVisible();
-  });
-
-  test("uses the workspace search as the global knowledge entry", async () => {
-    const api = {
-      setupStatus: vi.fn().mockResolvedValue({ setupRequired: false }),
-      session: vi.fn().mockResolvedValue({ admin: { email: "reader@example.com", role: "reader" } }),
-      logout: vi.fn().mockResolvedValue(undefined),
-      searchWorkspaceKnowledge: vi.fn(),
-      getRepositoryStatus: vi.fn(),
-      listReleases: vi.fn()
-    } as unknown as ApiClient;
-
-    renderAppAt(api, "/knowledge");
-
-    expect(await screen.findByRole("heading", { name: "知识搜索" })).toBeVisible();
-    expect(screen.getByRole("searchbox", { name: "跨项目搜索" })).toBeVisible();
-    expect(api.getRepositoryStatus).not.toHaveBeenCalled();
-    expect(api.listReleases).not.toHaveBeenCalled();
   });
 });
 
@@ -373,7 +354,7 @@ describe("operations page copy", () => {
     } as unknown as ApiClient;
 
     renderPage(<OverviewPage api={overviewApi} />);
-    expect(await screen.findByRole("heading", { name: "知识生产" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "知识版本" })).toBeVisible();
     expect(screen.getByRole("button", { name: "同步仓库" })).toBeVisible();
     cleanup();
 
@@ -590,20 +571,20 @@ describe("overview primary command", () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
     });
-    render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={["/projects/project-1/production"]}>
+    render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={["/"]}>
       <Location />
       <Routes>
-        <Route path="/projects/:projectId/production" element={<OverviewPage api={api} />} />
-        <Route path="/projects/:projectId/knowledge/pages" element={<p>Knowledge route</p>} />
+        <Route path="/" element={<OverviewPage api={api} />} />
+        <Route path="/knowledge" element={<p>Knowledge route</p>} />
       </Routes>
     </MemoryRouter></QueryClientProvider>);
 
     await user.click(await screen.findByRole("button", { name: "审核就绪构建" }));
-    await user.click(screen.getByRole("button", { name: "创建版本草稿" }));
+    await user.click(screen.getByRole("button", { name: "查看知识" }));
 
     await waitFor(() => expect(createRelease).toHaveBeenCalledWith("build", "1.0.0"));
     expect(await screen.findByText("Knowledge route")).toBeVisible();
-    expect(screen.getByTestId("location")).toHaveTextContent("/projects/project-1/knowledge/pages?releaseId=release-1");
+    expect(screen.getByTestId("location")).toHaveTextContent("/knowledge?releaseId=release-1");
   });
 
   test("keeps EventSource alive for native reconnect and reports connection state", async () => {
@@ -674,7 +655,7 @@ describe("overview primary command", () => {
     renderPage(<KnowledgePage api={emptyKnowledgeApi} />);
     expect(await screen.findByText("尚未接入资料不会影响其他项目或已发布版本。"))
       .toBeVisible();
-    expect(screen.getByRole("link", { name: "接入资料" })).toHaveAttribute("href", "/projects/project-1/sources");
+    expect(screen.getByRole("link", { name: "前往资料上传" })).toBeVisible();
     cleanup();
 
     const graphApi = {
@@ -1242,34 +1223,10 @@ describe("feedback workflow", () => {
 });
 
 describe("repository replacement", () => {
-  test("configures every source inline and only submits the selected source", async () => {
+  test("offers a connected administrator a deliberate repository replacement", async () => {
     const user = userEvent.setup();
-    const connectRepository = vi.fn().mockResolvedValue({ repository: {
-      id: "git", projectId: "project", kind: "git", name: "项目仓库", url: "https://github.com/acme/web.git", defaultBranch: "main"
-    } });
-    const api = {
-      getRepository: vi.fn().mockResolvedValue({ repository: null }),
-      listImportReports: vi.fn().mockResolvedValue({ reports: [], total: 0, limit: 20, offset: 0 }),
-      connectRepository
-    } as unknown as ApiClient;
-
-    renderPage(<ProjectImportsPage api={api} projectId="project" />);
-
-    await user.click((await screen.findByRole("radio", { name: "Git HTTPS" })).closest("label")!);
-    expect(connectRepository).not.toHaveBeenCalled();
-    await user.type(screen.getByLabelText("HTTPS URL"), "https://github.com/acme/web.git");
-    await user.click(screen.getByRole("button", { name: "连接 Git 仓库" }));
-    await waitFor(() => expect(connectRepository).toHaveBeenCalledWith({
-      kind: "git", name: "项目仓库", url: "https://github.com/acme/web.git"
-    }));
-    expect(screen.queryByRole("dialog", { name: "更换资料来源" })).not.toBeInTheDocument();
-  });
-
-  test("replaces a connected source inline and preserves the read-only history contract", async () => {
-    const user = userEvent.setup();
-    const invalidateQueries = vi.spyOn(QueryClient.prototype, "invalidateQueries");
     const replaceRepository = vi.fn().mockResolvedValue({ repository: {
-      id: "replacement", projectId: "project", kind: "local", name: "Current repository", path: "/srv/projects/current", defaultBranch: "local"
+      id: "replacement", projectId: "project", kind: "upload", name: "Uploaded project", defaultBranch: "upload"
     } });
     const api = {
       getRepository: vi.fn().mockResolvedValue({ repository: {
@@ -1282,64 +1239,18 @@ describe("repository replacement", () => {
       }),
       listMcpTokens: vi.fn().mockResolvedValue({ tokens: [] }),
       listArchivedRepositories: vi.fn().mockResolvedValue({ repositories: [] }),
-      listImportReports: vi.fn().mockResolvedValue({ reports: [], total: 0, limit: 20, offset: 0 }),
       replaceRepository
     } as unknown as ApiClient;
 
     renderPage(<ProjectImportsPage api={api} projectId="project" />);
 
-    expect(await screen.findByLabelText("Git HTTPS")).toBeChecked();
-    await user.click((await screen.findByRole("radio", { name: "服务器路径" })).closest("label")!);
-    await user.type(screen.getByLabelText("服务器绝对路径"), "/srv/projects/current");
-    await user.click(screen.getByRole("button", { name: "连接服务器目录" }));
-    await waitFor(() => expect(replaceRepository).toHaveBeenCalledWith({
-      kind: "local", name: "Current repository", path: "/srv/projects/current"
-    }));
-    expect(api.getRepository).toHaveBeenCalledTimes(1);
-    expect(invalidateQueries).toHaveBeenCalledWith({ queryKey: ["import-reports", "project"] });
-    expect(invalidateQueries).toHaveBeenCalledTimes(1);
-    expect(screen.getByText("旧来源和已发布知识会保留为只读历史，新来源不会自动发布。")).toBeVisible();
-    expect(screen.queryByRole("dialog", { name: "更换资料来源" })).not.toBeInTheDocument();
-  });
-
-  test("uses the replacement upload path after folder confirmation", async () => {
-    const user = userEvent.setup();
-    const replaceRepository = vi.fn().mockResolvedValue({ repository: {
-      id: "replacement-upload", projectId: "project", kind: "upload", name: "Current repository", defaultBranch: "upload"
-    }, pendingUpload: true });
-    const uploadReplacementFolder = vi.fn().mockResolvedValue({
-      snapshotId: "replacement-snapshot", sourceVersion: "c".repeat(40), fileCount: 1, textBytes: 10,
-      unchanged: false, ignored: { total: 0, reasons: {} }, assetCount: 0
-    });
-    const api = {
-      getRepository: vi.fn().mockResolvedValue({ repository: {
-        id: "repo", projectId: "project", kind: "git", name: "Current repository",
-        url: "https://github.com/example/current.git", hasCredential: false, defaultBranch: "main"
-      } }),
-      listImportReports: vi.fn().mockResolvedValue({ reports: [], total: 0, limit: 20, offset: 0 }),
-      replaceRepository,
-      uploadReplacementFolder
-    } as unknown as ApiClient;
-
-    renderPage(<ProjectImportsPage api={api} projectId="project" />);
-    const uploadInput = await screen.findByLabelText("项目文件夹", { selector: 'input[type="file"]' }) as HTMLInputElement;
-    await user.upload(uploadInput, new File(["export {};"], "main.ts", { type: "text/typescript" }));
-    expect(replaceRepository).not.toHaveBeenCalled();
-    expect(uploadReplacementFolder).not.toHaveBeenCalled();
-    await user.click(await screen.findByRole("button", { name: "确认并开始上传" }));
-
-    await waitFor(() => expect(replaceRepository).toHaveBeenCalledWith({ kind: "upload", name: "Current repository" }));
-    await waitFor(() => expect(uploadReplacementFolder).toHaveBeenCalledWith(
-      "project", "replacement-upload", [expect.objectContaining({ path: "main.ts", kind: "source" })],
-      { onProgress: expect.any(Function) }
-    ));
+    await user.click(await screen.findByRole("button", { name: "更换资料来源" }));
+    expect(screen.getByRole("dialog", { name: "更换资料来源" })).toHaveTextContent("旧来源和已发布知识会保留为只读历史");
+    expect(within(screen.getByRole("dialog", { name: "更换资料来源" })).getByRole("button", { name: "选择项目文件夹" })).toBeInTheDocument();
   });
 
   test("records an uploaded snapshot so Overview can start a build", async () => {
     const user = userEvent.setup();
-    const startBuild = vi.fn();
-    const createRelease = vi.fn();
-    const publishRelease = vi.fn();
     const api = {
       getRepository: vi.fn().mockRejectedValue(new ApiError(404, "REPOSITORY_NOT_FOUND", "missing")),
       connectRepository: vi.fn().mockResolvedValue({ repository: {
@@ -1351,16 +1262,13 @@ describe("repository replacement", () => {
       }),
       getModelConfig: vi.fn().mockResolvedValue({ config: null }),
       getMcpConnection: vi.fn().mockResolvedValue({ endpoint: "/mcp", transport: "streamable-http", authorization: "bearer", tools: [] }),
-      listMcpTokens: vi.fn().mockResolvedValue({ tokens: [] }),
-      startBuild,
-      createRelease,
-      publishRelease
+      listMcpTokens: vi.fn().mockResolvedValue({ tokens: [] })
     } as unknown as ApiClient;
 
     renderPage(<ProjectImportsPage api={api} projectId="project" />);
     const projectFile = new File(["export {};"], "main.ts", { type: "text/typescript" });
     const secretFile = new File(["TOKEN=secret"], ".env", { type: "text/plain" });
-    const uploadInput = await screen.findByLabelText("项目文件夹", { selector: 'input[type="file"]' }) as HTMLInputElement;
+    const uploadInput = await screen.findByLabelText("项目文件夹") as HTMLInputElement;
     await user.upload(uploadInput, [projectFile, secretFile]);
     await user.click(await screen.findByRole("button", { name: "确认并开始上传" }));
 
@@ -1371,9 +1279,6 @@ describe("repository replacement", () => {
     await waitFor(() => expect(sessionStorage.getItem("devkh:last-snapshot")).toContain("snapshot"));
     expect(await screen.findByText("本地预过滤 1 个文件")).toBeVisible();
     expect(screen.getByText("服务端二次过滤 0 个文件")).toBeVisible();
-    expect(startBuild).not.toHaveBeenCalled();
-    expect(createRelease).not.toHaveBeenCalled();
-    expect(publishRelease).not.toHaveBeenCalled();
   });
 
   test("reuses a newly connected upload repository when the first transfer is interrupted", async () => {
@@ -1396,7 +1301,7 @@ describe("repository replacement", () => {
     } as unknown as ApiClient;
 
     renderPage(<ProjectImportsPage api={api} projectId="project" />);
-    const uploadInput = await screen.findByLabelText("项目文件夹", { selector: 'input[type="file"]' }) as HTMLInputElement;
+    const uploadInput = await screen.findByLabelText("项目文件夹") as HTMLInputElement;
     await user.upload(uploadInput, new File(["export {};"], "main.ts", { type: "text/typescript" }));
     const confirm = await screen.findByRole("button", { name: "确认并开始上传" });
     await user.click(confirm);
@@ -1411,41 +1316,11 @@ describe("repository replacement", () => {
     expect(await screen.findByText("上传会话已失效，请重新选择项目文件夹")).toBeVisible();
     expect(screen.getByText(/当前已发布知识不会自动变化/)).toBeVisible();
     expect(screen.queryByText(/没有创建内容版本/)).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "确认并开始上传" })).not.toBeInTheDocument();
-
-    await user.upload(uploadInput, new File(["export {};"], "main.ts", { type: "text/typescript" }));
-    expect(await screen.findByRole("button", { name: "确认并开始上传" })).toBeVisible();
-    expect(uploadFolder).toHaveBeenCalledTimes(2);
-    await user.click(screen.getByRole("button", { name: "确认并开始上传" }));
+    await user.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() => expect(uploadFolder).toHaveBeenCalledTimes(3));
 
     expect(connectRepository).toHaveBeenCalledTimes(1);
     expect(await screen.findByText("内容版本已就绪")).toBeVisible();
-  });
-
-  test.each(["UPLOAD_SESSION_STATE", "IDEMPOTENCY_KEY_REUSED"])("requires a new folder selection for terminal %s upload errors", async (code) => {
-    const user = userEvent.setup();
-    const uploadFolder = vi.fn().mockRejectedValue(new ApiError(409, code, "terminal upload error"));
-    const api = {
-      getRepository: vi.fn().mockResolvedValue({ repository: {
-        id: "upload", projectId: "project", kind: "upload", name: "Uploaded project", defaultBranch: "upload"
-      } }),
-      listImportReports: vi.fn().mockResolvedValue({ reports: [], total: 0, limit: 20, offset: 0 }),
-      uploadFolder
-    } as unknown as ApiClient;
-
-    renderPage(<ProjectImportsPage api={api} projectId="project" />);
-    const uploadInput = await screen.findByLabelText("项目文件夹", { selector: 'input[type="file"]' }) as HTMLInputElement;
-    await user.upload(uploadInput, new File(["export {};"], "main.ts", { type: "text/typescript" }));
-    await user.click(await screen.findByRole("button", { name: "确认并开始上传" }));
-
-    expect(await screen.findByText("上传会话已失效，请重新选择项目文件夹")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "确认并开始上传" })).not.toBeInTheDocument();
-
-    await user.upload(uploadInput, new File(["export {};"], "main.ts", { type: "text/typescript" }));
-    expect(await screen.findByRole("button", { name: "确认并开始上传" })).toBeVisible();
   });
 });
 

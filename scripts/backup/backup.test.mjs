@@ -19,32 +19,6 @@ const validateTarArchiveScript = join(scriptDirectory, "validate-tar-archive.mjs
 const backupSnapshotId = "a".repeat(64);
 const latestSnapshotId = "b".repeat(64);
 const sourceBlobFence = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-const defaultDatabaseStatsResult = JSON.stringify({
-  workspaceCount: 1, userCount: 1, projectCount: 1, projectMemberCount: 1,
-  snapshotCount: 1, releaseCount: 1, releaseChannelCount: 1, artifactCount: 1,
-  sourceAnalysisArtifactCount: 1, sourceBlobCount: 2, sourceFileBlobReferenceCount: 2,
-  referencedSourceBlobGenerationCount: 1, frontendProjectProfileArtifactCount: 1,
-  patternGroupCount: 1, patternEvidenceCount: 1, decisionCount: 1, outcomeCount: 1,
-  experienceReviewCount: 1, experienceReviewItemCount: 1, standardCount: 1
-});
-const defaultIntegrityResult = JSON.stringify({
-  orphanedReleases: 0, orphanedReleaseChannels: 0, crossWorkspaceProjectMembers: 0,
-  projectMembersWithoutWorkspaceMembership: 0, orphanedArtifacts: 0,
-  orphanedSourceAnalysisArtifacts: 0, unboundSourceFiles: 0, invalidSourceBlobReferences: 0,
-  invalidSourceProvenance: 0, orphanedExperienceEvidence: 0,
-  experienceReleaseSnapshotMismatch: 0, experienceCitationSnapshotMismatch: 0,
-  experienceEvidenceWithoutProfileArtifact: 0, invalidDecisionBasis: 0,
-  invalidOutcomeEvidence: 0, outcomeVersionMismatch: 0, invalidExperienceReviewBasis: 0,
-  invalidExperienceReviewItems: 0, invalidWorkspaceStandards: 0,
-  experienceSupersessionCycles: 0
-});
-const emptyExperienceRecoveryManifest = JSON.stringify({
-  restoredDatabase: {
-    sourceSnapshots: [], releases: [], projectProfiles: [], patternGroups: [], evidence: [],
-    decisions: [], outcomes: [], reviews: [], reviewItems: [], standards: []
-  },
-  restoredArtifacts: []
-});
 
 function writeTarOctal(header, offset, length, value) {
   header.write(`${value.toString(8).padStart(length - 1, "0")}\0`, offset, length, "ascii");
@@ -113,9 +87,7 @@ function createFixture({
   writableSnapshotView = false,
   deriveSourceBlobIntegrity = true,
   resticSnapshots = [{ id: latestSnapshotId, time: "1970-01-02T03:45:00.000Z" }],
-  databaseStatsResult = defaultDatabaseStatsResult,
-  integrityResult = defaultIntegrityResult,
-  experienceRecoveryManifest = emptyExperienceRecoveryManifest,
+  integrityResult = '{"orphanedReleases":0,"orphanedReleaseChannels":0,"crossWorkspaceProjectMembers":0,"projectMembersWithoutWorkspaceMembership":0,"orphanedArtifacts":0,"orphanedSourceAnalysisArtifacts":0,"unboundSourceFiles":0,"invalidSourceBlobReferences":0}',
   artifactStorageKey = "33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json",
   artifactContent = '{"fixture":true}',
   sourceBlobManifest = '[{"workspaceId":"11111111-1111-4111-8111-111111111111","snapshotId":"55555555-5555-4555-8555-555555555555","snapshotStoragePath":"/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files","path":"src/one.ts","contentHash":"47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28","byteSize":34,"generation":1,"storageKey":"blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1","status":"active","fencingToken":null,"tombstonedAt":null,"trashedAt":null,"deletedAt":null},{"workspaceId":"11111111-1111-4111-8111-111111111111","snapshotId":"55555555-5555-4555-8555-555555555555","snapshotStoragePath":"/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files","path":"src/two.ts","contentHash":"47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28","byteSize":34,"generation":1,"storageKey":"blobs/11111111-1111-4111-8111-111111111111/47/47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28/1","status":"active","fencingToken":null,"tombstonedAt":null,"trashedAt":null,"deletedAt":null}]'
@@ -128,14 +100,12 @@ function createFixture({
   const backupBlockFile = join(root, "backup.block");
   const restoreBlockFile = join(root, "restore.block");
   const sourceBlobManifestFile = join(root, "source-blob-manifests.json");
-  const experienceRecoveryManifestFile = join(root, "experience-recovery.json");
   const snapshotArchiveFile = join(root, "snapshot-attack.tgz");
   const systemTar = execFileSync("which", ["tar"], { encoding: "utf8" }).trim();
   execFileSync("mkdir", ["-p", bin]);
   writeFileSync(log, "");
   writeFileSync(passwordFile, "test-only-password\n", { mode: 0o600 });
   writeFileSync(sourceBlobManifestFile, `${sourceBlobManifest}${" ".repeat(sourceBlobManifestPaddingBytes)}\n`, { mode: 0o600 });
-  writeFileSync(experienceRecoveryManifestFile, `${experienceRecoveryManifest}\n`, { mode: 0o600 });
   if (snapshotArchiveEntries) writeFileSync(snapshotArchiveFile, gzipTar(snapshotArchiveEntries), { mode: 0o600 });
   writeFileSync(join(bin, "docker"), String.raw`#!/usr/bin/env sh
 printf 'docker %s\n' "$*" >> "$CALL_LOG"
@@ -145,11 +115,10 @@ case " $* " in
   *" compose "*" exec "*) printf 'fake-pgdump\n' ;;
   *" compose "*" images -q app "*) printf 'devkh-recovery-image\n' ;;
   *" pg_restore "*) printf 'pg_restore %s\n' "$*" >> "$CALL_LOG" ;;
-  *" psql "*"workspaceCount"*) printf '%s\n' "$FAKE_DATABASE_STATS_RESULT" ;;
+  *" psql "*"workspaceCount"*) printf '{"workspaceCount":1,"userCount":1,"projectCount":1,"projectMemberCount":1,"snapshotCount":1,"releaseCount":1,"releaseChannelCount":1,"artifactCount":1,"sourceAnalysisArtifactCount":1,"sourceBlobCount":2,"sourceFileBlobReferenceCount":2,"referencedSourceBlobGenerationCount":1}\n' ;;
   *" psql "*"orphanedReleases"*)
     node -e 'const fs=require("node:fs"); const result=JSON.parse(process.env.FAKE_INTEGRITY_RESULT); if(process.env.FAKE_DERIVE_SOURCE_BLOB_INTEGRITY==="true"){const manifests=JSON.parse(fs.readFileSync(process.env.FAKE_SOURCE_BLOB_MANIFEST_PATH,"utf8")); const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i; const valid=(item)=>item.status==="active" ? item.fencingToken===null&&item.tombstonedAt===null&&item.trashedAt===null&&item.deletedAt===null : item.status==="tombstoned"&&uuid.test(item.fencingToken??"")&&typeof item.tombstonedAt==="string"&&item.trashedAt===null&&item.deletedAt===null; result.invalidSourceBlobReferences=manifests.filter((item)=>!valid(item)).length;} process.stdout.write(JSON.stringify(result)+"\n");' ;;
   *" psql "*"artifact_manifests"*) printf '[{"projectId":"33333333-3333-4333-8333-333333333333","snapshotId":"55555555-5555-4555-8555-555555555555","stage":"convert","storageKey":"%s","contentDigest":"218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9"}]\n' "$FAKE_ARTIFACT_STORAGE_KEY" ;;
-  *" psql "*"sourceSnapshots"*) cat "$FAKE_EXPERIENCE_RECOVERY_MANIFEST_PATH" ;;
   *" psql "*"source_blob_manifests"*)
     restored_snapshot_root=$(find "$BACKUP_STATE_DIR" -path '*/volumes/snapshots' -type d -print -quit)
     if [ "$FAKE_REPLACE_SOURCE_BLOB_WITH_SYMLINK" = "true" ]; then
@@ -267,8 +236,6 @@ fi
       RESTIC_BACKUP_SNAPSHOT_ID: backupSnapshotId,
       RESTIC_SNAPSHOTS_JSON: JSON.stringify(resticSnapshots),
       FAKE_INTEGRITY_RESULT: integrityResult,
-      FAKE_DATABASE_STATS_RESULT: databaseStatsResult,
-      FAKE_EXPERIENCE_RECOVERY_MANIFEST_PATH: experienceRecoveryManifestFile,
       FAKE_DERIVE_SOURCE_BLOB_INTEGRITY: String(deriveSourceBlobIntegrity),
       FAKE_ARTIFACT_STORAGE_KEY: artifactStorageKey,
       FAKE_ARTIFACT_CONTENT: artifactContent,
@@ -530,8 +497,7 @@ test("restore drill never writes production Docker volumes", () => {
     assert.match(calls, /docker exec .* createdb -U devkh dev_knowledge_hub/);
     assert.match(calls, /docker network create devkh-restore-drill-/);
     assert.match(calls, /docker exec -i devkh-restore-drill-.* pg_restore .*--exit-on-error/);
-    assert.match(calls, /docker exec [\s\S]* psql [\s\S]*workspaceCount/);
-    assert.match(calls, /sourceSnapshots/);
+    assert.match(calls, /docker exec .* psql .*workspaceCount/);
     assert.match(calls, /docker exec .* node -e .*api\/health/);
     assert.match(calls, /docker rm -f devkh-restore-drill-/);
     assert.doesNotMatch(calls, /docker compose .* stop/);
@@ -549,7 +515,6 @@ test("restore drill never writes production Docker volumes", () => {
         pgRestoreListValidated: evidence.pgRestoreListValidated,
         ephemeralDatabaseRestored: evidence.ephemeralDatabaseRestored,
         healthCheckPassed: evidence.healthCheckPassed,
-        experienceRecoveryValidated: evidence.experienceRecoveryValidated,
         volumeArchives: evidence.volumeArchives,
         databaseStats: evidence.databaseStats,
         volumeFileCounts: evidence.volumeFileCounts,
@@ -568,11 +533,10 @@ test("restore drill never writes production Docker volumes", () => {
         pgRestoreListValidated: true,
         ephemeralDatabaseRestored: true,
         healthCheckPassed: true,
-        experienceRecoveryValidated: true,
         volumeArchives: ["snapshots.tgz", "repositories.tgz", "sources.tgz", "artifacts.tgz"],
-        databaseStats: JSON.parse(defaultDatabaseStatsResult),
+        databaseStats: { workspaceCount: 1, userCount: 1, projectCount: 1, projectMemberCount: 1, snapshotCount: 1, releaseCount: 1, releaseChannelCount: 1, artifactCount: 1, sourceAnalysisArtifactCount: 1, sourceBlobCount: 2, sourceFileBlobReferenceCount: 2, referencedSourceBlobGenerationCount: 1 },
         volumeFileCounts: { snapshots: 3, repositories: 1, sources: 1, artifacts: 1 },
-        integrity: JSON.parse(defaultIntegrityResult),
+        integrity: { orphanedReleases: 0, orphanedReleaseChannels: 0, crossWorkspaceProjectMembers: 0, projectMembersWithoutWorkspaceMembership: 0, orphanedArtifacts: 0, orphanedSourceAnalysisArtifacts: 0, unboundSourceFiles: 0, invalidSourceBlobReferences: 0 },
         blobReferenceCount: 2,
         blobContentVerifiedCount: 1,
         blobHardlinkVerifiedCount: 2,

@@ -240,22 +240,9 @@ V1 可演示约在第 12–16 工程周，可试用约在第 22–30 周，可�
 
 **Commit:** `feat: deepen approved react ecosystem knowledge`.
 
-## Experience Kernel Addendum (EX01-EX12)
-
-EX01-EX12 在 FK17 和 FK18 之后、原 FK19 之前执行。该阶段交付来源身份、项目画像、经验证据、适用性、治理、workspace MCP 方案编排、管理体验、评测和 staging 门禁。原 FK19-FK22 必须消费 EX 合同，不得另行发明 pattern、Trust、来源资格或 MCP 响应结构。
-
-- EX01-EX03：产品状态、来源身份与 `frontend-project-profile@1`。
-- EX04-EX08：经验生命周期、候选提取、治理、ACL 投影与 workspace MCP。
-- EX09-EX10：经验库、审核、方案上下文、反馈和 Knowledge Lint。
-- EX11-EX12：专项评测、恢复、压力、回滚与 V1 Trial 交付门禁。
-
-迁移编号固定为 FK17 `0035`、EX 来源合同 `0036`、EX 经验合同 `0037`、EX workspace MCP Token `0038`。以下原 FK19/FK20 的迁移编号视为历史草案，实施时不得与 EX 迁移重号。
-
 ### FK19 建立可追溯 workspace patterns 与分区检索
 
-**EX12 handoff:** 直接消费 EX04–EX07 的经验表、opaque group、ACL-first 适用性查询和缓存合同；不得创建平行 pattern 主表或绕过可见 evidence 计算投影。
-
-**Files:** Consume EX04-EX07 contracts and `drizzle/0037_frontend_experience_contracts.sql`; extend the existing pattern/query implementation only where the FK19 product projection requires it. No new migration or parallel pattern model is created here.
+**Files:** Create `drizzle/0036_workspace_patterns_search.sql`, `src/server/knowledge/frontend/patterns.ts`, `src/server/knowledge/frontend/patterns.test.ts`, `src/server/knowledge/frontend/search-intent.ts`, `src/server/knowledge/frontend/search-intent.test.ts`; Modify `src/db/schema.ts`, `src/db/schema.test.ts`, `src/db/migrate.test.ts`, `src/server/persistence/store.ts`, `src/server/persistence/memory-store.ts`, `src/server/persistence/postgres-store.ts`, `src/server/persistence/postgres-knowledge.integration.test.ts`, `src/server/knowledge/pipeline/index-stage.ts`, `src/server/app.ts`, `src/client/api/types.ts`.
 
 **Precondition:** V1 Demo 三层复审通过后，在与生产完全隔离的 staging 中为两个代表项目开启 v2 `active`，人工创建不可变 v2 release。pattern 和 workspace 检索只使用这些已发布 staging release，不读 shadow candidate。
 
@@ -267,19 +254,17 @@ EX01-EX12 在 FK17 和 FK18 之后、原 FK19 之前执行。该阶段交付来�
 
 ### FK20 建立独立 workspace MCP 凭据全生命周期
 
-**Files:** Consume EX08 and `drizzle/0038_workspace_mcp_tokens.sql`; extend the existing workspace MCP UI and operational documentation only where FK20 lifecycle presentation requires it. No second workspace-token table or endpoint is created.
+**Files:** Create `drizzle/0037_workspace_mcp_tokens.sql`, `src/server/mcp/workspace-auth.ts`, `src/server/mcp/workspace-auth.test.ts`, `docs/operations/workspace-mcp.md`; Modify `src/db/schema.ts`, `src/db/schema.test.ts`, `src/db/migrate.test.ts`, `src/server/app.ts`, `src/server/mcp/tools.ts`, `src/server/mcp-access.test.ts`, `src/server/persistence/store.ts`, `src/server/persistence/memory-store.ts`, `src/server/persistence/postgres-store.ts`, `src/server/persistence/postgres-knowledge.integration.test.ts`, `src/client/pages/system-settings-page.tsx`, `src/client/pages/project-codex-page.tsx`, `src/client/api/client.ts`, `src/client/api/types.ts`.
 
 **Security:** 现有 project token 模型与 scope 不改。`workspace_mcp_tokens` 绑定 workspace/user/sessionVersion，最长 30 天，只允许当前用户为自己创建；plaintext 只展示一次，DB 只存 hash/prefix；实现过期、撤销、原子轮换、last-used、限流、审计和过期清理。
 
-**MCP:** 项目 `/mcp` 在所绑定 release 具有 v2 provenance 时新增 `dkh_get_frontend_map` 并扩展 `dkh_get_change_context`；否则保持 v1 结果。`/mcp/workspace` 复用 EX08 的 `dkh_find_prior_implementations(currentProjectId, query)` 与 `dkh_plan_frontend_solution(currentProjectId, task, changedPaths)`；后者只组装 `FrontendSolutionContext@1`，不调用模型、不修改代码。`currentProjectId` 必填，服务端实时验证权限，并从 evidence、结果、计数、Trust、排序和缓存中排除当前项目。scope 固定为 `workspace.patterns.read` 与 `workspace.solutions.read`；每次调用检查成员禁用、sessionVersion 和项目 ACL。Codex 配置明确列出“当前项目知识”与“历史项目参考”两个 server；普通团队搜索只走 REST。
+**MCP:** 项目 `/mcp` 在所绑定 release 具有 v2 provenance 时新增 `dkh_get_frontend_map` 并扩展 `dkh_get_change_context`；否则保持 v1 结果。`/mcp/workspace` 只提供 `dkh_find_prior_implementations(currentProjectId, query, ...)`，且只读已发布 v2 release；`currentProjectId` 必填，缺失返回 MCP invalid params，服务端实时验证调用者对当前项目的权限，并从 evidence、结果、计数、Trust、排序和缓存中排除当前项目。scope 固定 `workspace.patterns.read`；每次调用检查成员禁用、sessionVersion 和项目 ACL。Codex 配置明确列出“当前项目知识”与“历史项目参考”两个 server；普通团队搜索只走 REST。
 
 **UI:** workspace Token 管理位于“工作区设置 → 集成”，展示 scope、有效期、当前可访问项目数、最近使用、撤销和轮换；项目 Codex 页只保留项目 Token 和跳转入口。不缓存项目列表作为授权。
 
 **Commit:** `feat: add user bound workspace mcp access`.
 
 ### FK21 升级全局知识页、对比和专业 Graph
-
-**EX12 handoff:** 保留现有 `/knowledge` 项目知识入口、`/knowledge/experiences` 工程经验入口、同页管理员审核和 Codex 六分区上下文；FK21 只扩展对比与 Graph，不重建这些页面合同。
 
 **Files:** Create `src/client/components/frontend-search-results.tsx`, `src/client/components/frontend-search-results.test.tsx`, `src/client/components/pattern-comparison.tsx`, `src/client/components/pattern-comparison.test.tsx`, `src/client/components/frontend-map/impact-panel.tsx`; Modify `src/client/pages/knowledge-page.tsx`, `src/client/pages/project-graph-page.tsx`, `src/client/components/knowledge-graph-explorer.tsx`, `src/client/features/graph/graph-view-model.ts`, `src/client/api/client.ts`, `src/client/api/types.ts`, `src/client/styles.css`, `src/client/responsive.css`, `src/client/workbench.css`.
 
@@ -290,8 +275,6 @@ EX01-EX12 在 FK17 和 FK18 之后、原 FK19 之前执行。该阶段交付来�
 **Commit:** `feat: deliver workspace frontend knowledge experience`.
 
 ### FK22 完成 V1 Trial 黄金流程
-
-**EX12 handoff:** 复用 EX11 的五类 100 条专项数据、来源/撤权 acceptance 和五条 solution-context 黄金流程；新增代表项目流程时不得从 train、批准记录或 analyzer fixture 派生 held-out。
 
 **Files:** Create `acceptance/frontend-prior-implementation.acceptance.test.ts`, `acceptance/frontend-page-api.acceptance.test.ts`, `acceptance/frontend-change-impact.acceptance.test.ts`, `docs/operations/frontend-v1-trial.md`; Modify `src/client/app.test.tsx`, `playwright.config.ts`, `evaluation/frontend/train/react-trial.jsonl`, `evaluation/frontend/train/security-negative.jsonl`, `evaluation/frontend/held-out/react-trial.jsonl`, `evaluation/frontend/held-out/security-negative.jsonl`.
 
@@ -309,8 +292,6 @@ EX01-EX12 在 FK17 和 FK18 之后、原 FK19 之前执行。该阶段交付来�
 ## V1 Production：量化门禁与 React/Vite 灰度
 
 ### FK23 建立前端量化 CI 门禁
-
-**EX12 handoff:** 同时消费 `evaluate:frontend` 与 `evaluate:frontend-experience`。后者对来源准确率、硬冲突/撤权/当前项目/未授权泄漏、适用 precision、未知克制和响应分区执行独立 held-out 严格门禁，阈值不得下调。
 
 **Files:** Modify `scripts/evaluate-frontend-knowledge.mjs`, `scripts/release-verify.mjs`, `.github/workflows/ci.yml`, `package.json`, `evaluation/frontend/held-out/react-core.jsonl`, `evaluation/frontend/held-out/react-trial.jsonl`, `evaluation/frontend/held-out/security-negative.jsonl`; Create `docs/operations/frontend-quality-gates.md`.
 

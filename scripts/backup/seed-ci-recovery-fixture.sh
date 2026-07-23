@@ -27,17 +27,8 @@ INSERT INTO project_members (project_id, user_id, role)
 VALUES ('33333333-3333-4333-8333-333333333333', '22222222-2222-4222-8222-222222222222', 'admin');
 INSERT INTO repositories (id, workspace_id, project_id, name, clone_url, default_branch)
 VALUES ('44444444-4444-4444-8444-444444444444', '11111111-1111-4111-8111-111111111111', '33333333-3333-4333-8333-333333333333', 'Recovery source', 'https://example.invalid/recovery.git', 'main');
-INSERT INTO source_snapshots (
-  id, workspace_id, repository_id, commit_sha, ref, storage_path,
-  source_kind, git_commit_sha, content_version, attestation,
-  linked_git_commit_sha, remote_identity_digest
-)
-VALUES (
-  '55555555-5555-4555-8555-555555555555', '11111111-1111-4111-8111-111111111111',
-  '44444444-4444-4444-8444-444444444444', repeat('5', 40), 'refs/heads/main',
-  '/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files',
-  'git', repeat('5', 40), repeat('5', 40), NULL, NULL, repeat('e', 64)
-);
+INSERT INTO source_snapshots (id, workspace_id, repository_id, commit_sha, ref, storage_path)
+VALUES ('55555555-5555-4555-8555-555555555555', '11111111-1111-4111-8111-111111111111', '44444444-4444-4444-8444-444444444444', repeat('5', 40), 'refs/heads/main', '/var/lib/devkh/snapshots/snapshots/55555555-5555-4555-8555-555555555555/files');
 INSERT INTO source_blobs (id, workspace_id, content_hash, generation, byte_size, status, storage_key)
 VALUES (
   'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '11111111-1111-4111-8111-111111111111',
@@ -63,9 +54,9 @@ INSERT INTO knowledge_artifacts (
 VALUES (
   '77777777-7777-4777-8777-777777777777', '11111111-1111-4111-8111-111111111111',
   '33333333-3333-4333-8333-333333333333', '55555555-5555-4555-8555-555555555555',
-  '66666666-6666-4666-8666-666666666666', 'synthesize', 'frontend-project-profile', 1,
+  '66666666-6666-4666-8666-666666666666', 'convert', 'recovery-fixture', 1,
   repeat('d', 64), '218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9',
-  '33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/synthesize/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json',
+  '33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json',
   '[]'::jsonb, 'deterministic'
 );
 INSERT INTO source_analysis_artifacts (
@@ -77,70 +68,6 @@ VALUES (
 );
 INSERT INTO releases (id, workspace_id, repository_id, build_job_id, snapshot_id, version, published_at)
 VALUES ('88888888-8888-4888-8888-888888888888', '11111111-1111-4111-8111-111111111111', '44444444-4444-4444-8444-444444444444', '66666666-6666-4666-8666-666666666666', '55555555-5555-4555-8555-555555555555', 'recovery-v1', now());
-INSERT INTO workspace_pattern_groups (id, workspace_id, capability, state)
-VALUES ('a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1', '11111111-1111-4111-8111-111111111111', 'frontend_testing', 'recommended');
-INSERT INTO workspace_pattern_evidence (
-  id, workspace_id, pattern_group_id, project_id, release_id, snapshot_id,
-  source_eligibility, title, observed_fact, profile_digest, content_version, citations
-)
-VALUES (
-  'a2a2a2a2-a2a2-4a2a-8a2a-a2a2a2a2a2a2', '11111111-1111-4111-8111-111111111111',
-  'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1', '33333333-3333-4333-8333-333333333333',
-  '88888888-8888-4888-8888-888888888888', '55555555-5555-4555-8555-555555555555',
-  'git', 'Recovery frontend test pattern', 'Observed cited frontend test implementation',
-  repeat('d', 64), repeat('5', 40),
-  '[{"snapshotId":"55555555-5555-4555-8555-555555555555","path":"src/one.ts","startLine":1,"endLine":1,"blobHash":"47092ec41fd29a196ba9cc5101cb3ee100635028f95193116a37bd95961f8b28"}]'::jsonb
-);
-INSERT INTO workspace_decisions (
-  id, workspace_id, pattern_group_id, actor_id, decision, reason,
-  basis_evidence_ids, applicability
-)
-VALUES (
-  'a3a3a3a3-a3a3-4a3a-8a3a-a3a3a3a3a3a3', '11111111-1111-4111-8111-111111111111',
-  'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1', '22222222-2222-4222-8222-222222222222',
-  'approve', 'Recovery fixture approval',
-  ARRAY['a2a2a2a2-a2a2-4a2a-8a2a-a2a2a2a2a2a2']::uuid[],
-  '{"required":[],"forbidden":[],"preferred":[],"unsupportedWhenUnknown":[]}'::jsonb
-);
-INSERT INTO workspace_outcomes (
-  id, workspace_id, pattern_group_id, evidence_id, authority, outcome,
-  source_version, checks, report_digest, recorded_by
-)
-VALUES (
-  'a4a4a4a4-a4a4-4a4a-8a4a-a4a4a4a4a4a4', '11111111-1111-4111-8111-111111111111',
-  'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1', 'a2a2a2a2-a2a2-4a2a-8a2a-a2a2a2a2a2a2',
-  'signed_ci', 'failed', repeat('5', 40), '[{"name":"recovery","status":"failed"}]'::jsonb,
-  repeat('f', 64), '22222222-2222-4222-8222-222222222222'
-);
-INSERT INTO workspace_experience_reviews (
-  id, workspace_id, pattern_group_id, actor_id, from_state, to_state,
-  reason, basis_evidence_ids, decision_id
-)
-VALUES (
-  'a5a5a5a5-a5a5-4a5a-8a5a-a5a5a5a5a5a5', '11111111-1111-4111-8111-111111111111',
-  'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1', '22222222-2222-4222-8222-222222222222',
-  'candidate', 'recommended', 'Recovery fixture review',
-  ARRAY['a2a2a2a2-a2a2-4a2a-8a2a-a2a2a2a2a2a2']::uuid[],
-  'a3a3a3a3-a3a3-4a3a-8a3a-a3a3a3a3a3a3'
-);
-INSERT INTO workspace_standards (
-  id, workspace_id, pattern_group_id, title, body, authored_by, superseded_by_id
-)
-VALUES (
-  'a6a6a6a6-a6a6-4a6a-8a6a-a6a6a6a6a6a6', '11111111-1111-4111-8111-111111111111',
-  'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1', 'Recovery standard',
-  'Preserved recovery standard', '22222222-2222-4222-8222-222222222222', NULL
-);
-INSERT INTO workspace_experience_review_items (
-  id, workspace_id, pattern_group_id, evidence_id, outcome_id, reported_by,
-  kind, priority, feedback_event, current_project_id, source_version, task_summary
-)
-VALUES (
-  'a7a7a7a7-a7a7-4a7a-8a7a-a7a7a7a7a7a7', '11111111-1111-4111-8111-111111111111',
-  'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1', 'a2a2a2a2-a2a2-4a2a-8a2a-a2a2a2a2a2a2',
-  'a4a4a4a4-a4a4-4a4a-8a4a-a4a4a4a4a4a4', '22222222-2222-4222-8222-222222222222',
-  'trusted_negative_outcome', 'high', NULL, NULL, repeat('5', 40), 'Recovery fixture review item'
-);
 INSERT INTO release_channels (id, workspace_id, repository_id, release_id, name)
 VALUES ('99999999-9999-4999-8999-999999999999', '11111111-1111-4111-8111-111111111111', '44444444-4444-4444-8444-444444444444', '88888888-8888-4888-8888-888888888888', 'current');
 COMMIT;
@@ -170,5 +97,5 @@ docker run --rm \
 write_volume_file "${COMPOSE_PROJECT_NAME}_repository_mirrors" recovery/HEAD 'ref: refs/heads/main'
 write_volume_file "${COMPOSE_PROJECT_NAME}_uploaded_sources" recovery/source.ts 'export const recoveryFixture = true;'
 write_volume_file "${COMPOSE_PROJECT_NAME}_artifact_data" \
-  33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/synthesize/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json \
+  33333333-3333-4333-8333-333333333333/55555555-5555-4555-8555-555555555555/convert/218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9.json \
   '{"fixture":true}'

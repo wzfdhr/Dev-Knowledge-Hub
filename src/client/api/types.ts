@@ -364,14 +364,6 @@ export interface FrontendCandidatePreview {
   build: { id: string; snapshotId: string; commitSha: string; status: BuildStatus };
   graph: { schemaVersion: 2; snapshotId: string; analyzerManifestDigest: string; nodes: FrontendPreviewEntity[]; edges: FrontendPreviewEdge[] };
   pages: FrontendPreviewPage[];
-  projectProfile: {
-    schemaVersion: 1;
-    snapshotId: string;
-    analyzerManifestDigest: string;
-    profileDigest: string;
-    framework: { state: "known" | "unknown" | "unsupported"; value?: { name: string; version: string; supported: boolean }; reason?: string };
-    [key: string]: unknown;
-  };
   search: Array<{ documentKey: string; kind: string; title: string; content: string; citations: GraphSourceRef[]; metadata: Record<string, string | number | boolean> }>;
   quality: {
     summary: { entities: number; factEdges: number; candidateEdges: number; citedEntities: number; components: number; testedComponents: number; routes: number; visualizations: number };
@@ -417,57 +409,6 @@ export interface McpToken {
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
-}
-export interface WorkspaceMcpToken {
-  id: string;
-  userId: string;
-  name: string;
-  tokenPrefix: string;
-  scopes: Array<"workspace.patterns.read" | "workspace.solutions.read">;
-  sessionVersion: number;
-  expiresAt: string;
-  createdAt: string;
-  lastUsedAt: string | null;
-  revokedAt: string | null;
-}
-export type { FrontendSolutionContext } from "../../shared/frontend-solution-context";
-export interface WorkspaceExperience {
-  id: string;
-  title: string;
-  capability: string;
-  state: "recommended" | "standard";
-  observedFacts: string[];
-  evidenceCount: number;
-  trustScore: number;
-  citations: GraphSourceRef[];
-}
-export interface WorkspaceExperienceLibraryResponse {
-  state: "no_current_project" | "no_release" | "stale" | "unsupported" | "no_applicable_experience" | "evidence_revoked" | "ready";
-  currentProject: { projectId: string; status: string } | null;
-  experiences: WorkspaceExperience[];
-  rejectedExperiences: Array<{ experienceId: string; reasons: string[] }>;
-}
-export interface ExperienceReviewItemDto {
-  id: string;
-  patternGroupId: string;
-  evidenceId?: string | null;
-  priority: "high" | "normal";
-  kind: "trusted_negative_outcome" | "user_feedback" | "knowledge_lint";
-  taskSummary: string;
-  feedbackEvent: string | null;
-  createdAt: string;
-}
-export interface FrontendExperienceLintResponse {
-  schemaVersion: 1;
-  diagnostics: Array<{
-    id: string;
-    rule: string;
-    severity: "error" | "warning";
-    patternGroupId: string;
-    evidenceId: string | null;
-    message: string;
-  }>;
-  reviewItemIds: string[];
 }
 export interface McpConnection {
   endpoint: string;

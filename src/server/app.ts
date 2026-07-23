@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
@@ -16,7 +16,6 @@ import { z } from "zod";
 import { AGENT_FEEDBACK_STATUSES, SERVICE_NAME } from "../shared/contracts.js";
 import { lintIssueSchema, trustScoreSchema, type ArtifactManifest } from "../shared/api-contracts.js";
 import { MAX_IMPORT_TABLE_WORKBOOK_BYTES } from "../shared/import-filter.js";
-import { projectPredicateKeySchema, projectPredicateSchema } from "../shared/frontend-experience.js";
 import {
   FeedbackNotAcknowledgedError,
   InvalidLegacyReleaseRollbackError,
@@ -80,9 +79,6 @@ import {
 } from "./knowledge/frontend/reference-validation.js";
 import { frontendCandidateRunStatus } from "./knowledge/frontend/preview-status.js";
 import { searchFrontendKnowledge } from "./knowledge/frontend/search.js";
-import { indexPublishedFrontendPatternEvidence } from "./knowledge/frontend/patterns.js";
-import { FrontendExperienceGovernance } from "./knowledge/frontend/experience-governance.js";
-import { runFrontendExperienceLint } from "./knowledge/frontend/experience-lint.js";
 import { exportKnowledgeGraph } from "./knowledge/pipeline/viz.js";
 import { legacyBuildStatus } from "./knowledge/pipeline/contracts.js";
 import {
@@ -97,20 +93,8 @@ import {
   hashMcpToken,
   sanitizedMcpToken
 } from "./mcp/auth.js";
-import {
-  authenticateWorkspaceMcpTokenDetailed,
-  createWorkspaceMcpAuthorizationGuard,
-  generateWorkspaceMcpToken,
-  hashWorkspaceMcpToken,
-  sanitizedWorkspaceMcpToken
-} from "./mcp/workspace-auth.js";
-import { MCP_TOKEN_SCOPES, WORKSPACE_MCP_TOKEN_SCOPES } from "./persistence/store.js";
+import { MCP_TOKEN_SCOPES } from "./persistence/store.js";
 import { createRegisteredMcpServer, MCP_TOOL_NAMES } from "./mcp/tools.js";
-import {
-  buildSolutionContext,
-  createRegisteredWorkspaceMcpServer,
-  WORKSPACE_MCP_TOOL_NAMES
-} from "./mcp/workspace-tools.js";
 import {
   DEFAULT_RATE_LIMITS,
   MAX_REQUEST_BODY_BYTES,
@@ -191,52 +175,6 @@ const remediationTransitionSchema = z.object({
     context.addIssue({ code: "custom", path: ["reason"], message: "Dismissal reason is required" });
   }
 });
-const experienceIdParamsSchema = z.object({ experienceId: z.uuid() }).strict();
-const applicabilityInputSchema = z.object({
-  required: z.array(projectPredicateSchema).max(100),
-  forbidden: z.array(projectPredicateSchema).max(100),
-  preferred: z.array(projectPredicateSchema).max(100),
-  unsupportedWhenUnknown: z.array(projectPredicateKeySchema).max(100)
-}).strict();
-const experienceDecisionBodySchema = z.object({
-  id: z.uuid().optional(),
-  decision: z.enum(["approve", "reject", "deprecate", "standardize"]),
-  reason: z.string().trim().min(1).max(2_000),
-  basisEvidenceIds: z.array(z.uuid()).min(1).max(100),
-  applicability: applicabilityInputSchema
-}).strict();
-const experienceReviewBodySchema = z.object({
-  action: z.enum(["verify", "recommend", "standardize", "reject", "deprecate", "supersede"]),
-  reason: z.string().trim().min(1).max(2_000),
-  basisEvidenceIds: z.array(z.uuid()).min(1).max(100),
-  decisionId: z.uuid().nullable().default(null),
-  supersededById: z.uuid().nullable().default(null)
-}).strict();
-const experienceStandardBodySchema = z.object({
-  id: z.uuid().optional(),
-  title: z.string().trim().min(1).max(240),
-  body: z.string().trim().min(1).max(20_000),
-  supersededById: z.uuid().nullable().default(null)
-}).strict();
-const experienceOutcomeBodySchema = z.object({
-  id: z.uuid().optional(),
-  evidenceId: z.uuid().nullable(),
-  outcome: z.enum(["passed", "failed", "rolled_back", "partial"]),
-  sourceVersion: z.string().trim().min(1).max(240),
-  checks: z.array(z.object({
-    name: z.string().trim().min(1).max(240),
-    status: z.enum(["passed", "failed", "skipped"])
-  }).strict()).max(500),
-  reportDigest: z.string().regex(/^[a-f0-9]{64}$/u).nullable().default(null)
-}).strict();
-const experienceFeedbackBodySchema = z.object({
-  id: z.uuid().optional(),
-  evidenceId: z.uuid().nullable(),
-  event: z.enum(["considered", "adopted", "partially_adopted", "rejected", "failed", "rolled_back"]),
-  currentProjectId: z.uuid(),
-  sourceVersion: z.string().trim().min(1).max(240),
-  taskSummary: z.string().trim().min(1).max(2_000)
-}).strict();
 const qualityQuerySchema = z.object({
   issueLimit: z.coerce.number().int().min(1).max(100).default(50)
 });
@@ -345,8 +283,6 @@ export interface ServerOptions {
   frontendKnowledgeMode?: FrontendKnowledgeMode;
   sourceStorageMode?: "legacy" | "shadow" | "active";
   sourceBlobStore?: SourceBlobStore;
-  workspaceSolutionPlanningEnabled?: boolean;
-  frontendExperienceRecommendationsEnabled?: boolean;
 }
 
 async function loadQualityAssessment(input: {
@@ -527,11 +463,8 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     }
   });
   const sessionStore = options.sessionStore ?? new MemorySessionStore();
-  const experienceGovernance = new FrontendExperienceGovernance(options.store);
   const knowledgeKernelMode = options.knowledgeKernelMode ?? "legacy";
   const frontendKnowledgeMode = options.frontendKnowledgeMode ?? "legacy";
-  const workspaceSolutionPlanningEnabled = options.workspaceSolutionPlanningEnabled ?? true;
-  const frontendExperienceRecommendationsEnabled = options.frontendExperienceRecommendationsEnabled ?? true;
   const stageSseConnections = new Map<string, number>();
   const uploadSessions = new UploadSessionService({
     store: options.store,
@@ -786,221 +719,6 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   }
 
   server.get("/api/health", async () => ({ status: "ok", service: SERVICE_NAME }));
-
-  server.post("/api/knowledge/experiences/:experienceId/decisions", {
-    preHandler: requireAdministrator
-  }, async (request, reply) => {
-    const params = experienceIdParamsSchema.safeParse(request.params);
-    const body = experienceDecisionBodySchema.safeParse(request.body);
-    if (!params.success || !body.success) {
-      return sendError(reply, 400, "INVALID_EXPERIENCE_DECISION", "Invalid experience decision");
-    }
-    const actor = (request as AuthenticatedRequest).sessionAdmin;
-    try {
-      const decision = await experienceGovernance.createDecision({
-        id: body.data.id ?? randomUUID(), workspaceId: actor.workspaceId,
-        patternGroupId: params.data.experienceId, actorId: actor.id,
-        decision: body.data.decision, reason: body.data.reason,
-        basisEvidenceIds: body.data.basisEvidenceIds, applicability: body.data.applicability
-      });
-      return reply.code(201).send({ decision });
-    } catch {
-      return sendError(reply, 409, "EXPERIENCE_BASIS_INVALID", "Decision basis is incomplete or not visible");
-    }
-  });
-
-  server.post("/api/knowledge/experiences/:experienceId/reviews", {
-    preHandler: requireAdministrator
-  }, async (request, reply) => {
-    const params = experienceIdParamsSchema.safeParse(request.params);
-    const body = experienceReviewBodySchema.safeParse(request.body);
-    if (!params.success || !body.success) {
-      return sendError(reply, 400, "INVALID_EXPERIENCE_REVIEW", "Invalid experience review");
-    }
-    const actor = (request as AuthenticatedRequest).sessionAdmin;
-    try {
-      const review = await experienceGovernance.review({
-        ...body.data, workspaceId: actor.workspaceId,
-        experienceId: params.data.experienceId, actorId: actor.id
-      });
-      return reply.code(201).send({ review });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Experience review failed";
-      return sendError(reply, 409, "INVALID_EXPERIENCE_TRANSITION", message);
-    }
-  });
-
-  server.post("/api/knowledge/experiences/:experienceId/standards", {
-    preHandler: requireAdministrator
-  }, async (request, reply) => {
-    const params = experienceIdParamsSchema.safeParse(request.params);
-    const body = experienceStandardBodySchema.safeParse(request.body);
-    if (!params.success || !body.success) {
-      return sendError(reply, 400, "INVALID_WORKSPACE_STANDARD", "Invalid workspace standard");
-    }
-    const actor = (request as AuthenticatedRequest).sessionAdmin;
-    try {
-      const standard = await experienceGovernance.createStandard({
-        id: body.data.id ?? randomUUID(), workspaceId: actor.workspaceId,
-        patternGroupId: params.data.experienceId, title: body.data.title,
-        body: body.data.body, authoredBy: actor.id, supersededById: body.data.supersededById
-      });
-      return reply.code(201).send({ standard });
-    } catch {
-      return sendError(reply, 409, "WORKSPACE_STANDARD_INVALID", "Workspace standard could not be created");
-    }
-  });
-
-  server.post("/api/knowledge/experiences/:experienceId/outcomes/manual", {
-    preHandler: requireAdministrator
-  }, async (request, reply) => {
-    const params = experienceIdParamsSchema.safeParse(request.params);
-    const body = experienceOutcomeBodySchema.safeParse(request.body);
-    if (!params.success || !body.success) {
-      return sendError(reply, 400, "INVALID_EXPERIENCE_OUTCOME", "Invalid experience outcome");
-    }
-    const actor = (request as AuthenticatedRequest).sessionAdmin;
-    try {
-      const outcome = await experienceGovernance.recordOutcome({
-        id: body.data.id ?? randomUUID(), workspaceId: actor.workspaceId,
-        patternGroupId: params.data.experienceId, evidenceId: body.data.evidenceId,
-        authority: "admin_confirmed", outcome: body.data.outcome,
-        sourceVersion: body.data.sourceVersion, checks: body.data.checks,
-        reportDigest: body.data.reportDigest, recordedBy: actor.id
-      });
-      return reply.code(201).send({ outcome });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Experience outcome failed";
-      return sendError(reply, 409, "EXPERIENCE_OUTCOME_REJECTED", message);
-    }
-  });
-
-  server.post("/api/knowledge/experiences/:experienceId/feedback", {
-    preHandler: requireContributor
-  }, async (request, reply) => {
-    const params = experienceIdParamsSchema.safeParse(request.params);
-    const body = experienceFeedbackBodySchema.safeParse(request.body);
-    if (!params.success || !body.success) {
-      return sendError(reply, 400, "INVALID_EXPERIENCE_FEEDBACK", "Invalid experience feedback");
-    }
-    await requireProjectRole("reader", body.data.currentProjectId, request, reply);
-    if (reply.sent) return;
-    const actor = (request as AuthenticatedRequest).sessionAdmin;
-    try {
-      const reviewItem = await experienceGovernance.submitFeedback({
-        id: body.data.id ?? randomUUID(), workspaceId: actor.workspaceId,
-        patternGroupId: params.data.experienceId, evidenceId: body.data.evidenceId,
-        actorId: actor.id, event: body.data.event, currentProjectId: body.data.currentProjectId,
-        sourceVersion: body.data.sourceVersion, taskSummary: body.data.taskSummary
-      });
-      return reply.code(202).send({ reviewItem });
-    } catch {
-      return sendError(reply, 409, "EXPERIENCE_FEEDBACK_REJECTED", "Experience feedback could not be queued");
-    }
-  });
-
-  server.get("/api/knowledge/experience-review-items", {
-    preHandler: requireAdministrator
-  }, async (request, reply) => {
-    const query = z.object({ experienceId: z.uuid().optional() }).safeParse(request.query);
-    if (!query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid review queue query");
-    const actor = (request as AuthenticatedRequest).sessionAdmin;
-    return {
-      reviewItems: await options.store.listExperienceReviewItems(actor.workspaceId, query.data.experienceId)
-    };
-  });
-
-  server.post("/api/knowledge/experience-lint", {
-    preHandler: requireAdministrator
-  }, async (request) => {
-    const actor = (request as AuthenticatedRequest).sessionAdmin;
-    return runFrontendExperienceLint(options.store, {
-      workspaceId: actor.workspaceId,
-      actorId: actor.id
-    });
-  });
-
-  server.get("/api/knowledge/experiences", { preHandler: requireAdmin }, async (request, reply) => {
-    const query = z.object({
-      currentProjectId: z.uuid().optional(),
-      query: z.string().trim().max(500).optional().default("")
-    }).safeParse(request.query);
-    if (!query.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid experience query");
-    const actor = (request as AuthenticatedRequest).sessionAdmin;
-    if (!query.data.currentProjectId) {
-      return {
-        state: "no_current_project", currentProject: null,
-        experiences: [], rejectedExperiences: []
-      };
-    }
-    await requireProjectRole("reader", query.data.currentProjectId, request, reply);
-    if (reply.sent) return;
-    try {
-      const context = await buildSolutionContext({
-        context: {
-          store: options.store, workspaceId: actor.workspaceId, userId: actor.id,
-          scopes: [...WORKSPACE_MCP_TOKEN_SCOPES], artifactReader: options.qualityArtifactReader,
-          recommendationsEnabled: frontendExperienceRecommendationsEnabled
-        },
-        currentProjectId: query.data.currentProjectId,
-        task: query.data.query || "frontend engineering experience",
-        changedPaths: []
-      });
-      const state = context.currentProject.status !== "ready"
-        ? context.currentProject.status
-        : context.applicableExperiences.length === 0 ? "no_applicable_experience" : "ready";
-      return {
-        state, currentProject: context.currentProject,
-        experiences: context.applicableExperiences,
-        rejectedExperiences: context.rejectedExperiences
-      };
-    } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "PROJECT_ACCESS_DENIED") {
-        return sendError(reply, 403, "PROJECT_ACCESS_DENIED", "Current project is not accessible");
-      }
-      return sendError(reply, 500, "EXPERIENCE_QUERY_FAILED", "Experience query failed");
-    }
-  });
-
-  server.post("/api/projects/:projectId/frontend-solution-context", {
-    preHandler: requireAdmin
-  }, async (request, reply) => {
-    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
-    const body = z.object({
-      task: z.string().trim().min(1).max(2_000),
-      changedPaths: z.array(z.string().trim().min(1).max(500).refine((value) =>
-        !value.startsWith("/") && !value.includes("\\")
-        && !value.split("/").some((segment) => ["", ".", ".."].includes(segment))
-      )).max(50).optional().default([])
-    }).strict().safeParse(request.body);
-    if (!params.success || !body.success) {
-      return sendError(reply, 400, "INVALID_INPUT", "Invalid frontend solution input");
-    }
-    await requireProjectRole("reader", params.data.projectId, request, reply);
-    if (reply.sent) return;
-    if (!workspaceSolutionPlanningEnabled) {
-      return sendError(reply, 503, "SOLUTION_PLANNING_DISABLED", "Workspace solution planning is disabled by rollback policy");
-    }
-    const actor = (request as AuthenticatedRequest).sessionAdmin;
-    try {
-      const context = await buildSolutionContext({
-        context: {
-          store: options.store, workspaceId: actor.workspaceId, userId: actor.id,
-          scopes: [...WORKSPACE_MCP_TOKEN_SCOPES], artifactReader: options.qualityArtifactReader,
-          solutionPlanningEnabled: workspaceSolutionPlanningEnabled,
-          recommendationsEnabled: frontendExperienceRecommendationsEnabled
-        },
-        currentProjectId: params.data.projectId,
-        task: body.data.task,
-        changedPaths: body.data.changedPaths
-      });
-      return { context };
-    } catch (error) {
-      const code = error instanceof Error && "code" in error ? String(error.code) : "INTERNAL_ERROR";
-      const status = code === "PROJECT_ACCESS_DENIED" ? 403 : 500;
-      return sendError(reply, status, code, error instanceof Error ? error.message : "Solution context failed");
-    }
-  });
 
   server.get("/api/setup/status", async () => ({
     setupRequired: !(await options.store.isSetupComplete())
@@ -2102,32 +1820,6 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     };
   });
 
-  server.get("/api/projects/:projectId/releases", { preHandler: requireAdmin }, async (request, reply) => {
-    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
-    const query = z.object(paginationQuerySchema).safeParse(request.query);
-    if (!params.success || !query.success) {
-      return sendError(reply, 400, "INVALID_REQUEST", "Invalid project release query");
-    }
-    await requireProjectRole("reader", params.data.projectId, request, reply);
-    if (reply.sent) return;
-    const admin = (request as AuthenticatedRequest).sessionAdmin;
-    const repository = await options.store.currentRepository(admin.workspaceId, params.data.projectId);
-    if (!repository || repository.projectId !== params.data.projectId) {
-      return { releases: [], ...paginationMetadata(0, query.data.offset ?? 0, 0) };
-    }
-    const [releases, total] = await Promise.all([
-      options.store.listReleases(admin.workspaceId, repository.id, query.data),
-      options.store.countReleases(admin.workspaceId, repository.id)
-    ]);
-    return {
-      releases: await Promise.all(releases.map(async (release) => ({
-        ...release,
-        commitSha: (await options.store.findSnapshotById(admin.workspaceId, release.snapshotId))?.commitSha ?? null
-      }))),
-      ...paginationMetadata(total, query.data.offset ?? 0, releases.length)
-    };
-  });
-
   server.get("/api/projects/:projectId/remediations", { preHandler: requireAdmin }, async (request, reply) => {
     const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
     const query = remediationListQuerySchema.safeParse(request.query);
@@ -2543,80 +2235,6 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     authorization: "bearer",
     stdioCommand: "npm run mcp:stdio",
     tools: MCP_TOOL_NAMES
-  }));
-
-  server.post("/api/workspace/mcp/tokens", { preHandler: requireAdmin }, async (request, reply) => {
-    const parsed = z.object({
-      name: z.string().trim().min(1).max(100),
-      scopes: z.array(z.enum(WORKSPACE_MCP_TOKEN_SCOPES))
-        .min(1).max(WORKSPACE_MCP_TOKEN_SCOPES.length).optional(),
-      expiresInDays: z.number().int().min(1).max(30).optional().default(30)
-    }).strict().safeParse(request.body);
-    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid workspace MCP token");
-    const owner = (request as AuthenticatedRequest).sessionAdmin;
-    const plaintext = generateWorkspaceMcpToken();
-    try {
-      const token = await options.store.createWorkspaceMcpTokenWithAudit({
-        workspaceId: owner.workspaceId, userId: owner.id, name: parsed.data.name,
-        tokenHash: hashWorkspaceMcpToken(plaintext), tokenPrefix: plaintext.slice(0, 12),
-        scopes: parsed.data.scopes ?? [...WORKSPACE_MCP_TOKEN_SCOPES],
-        sessionVersion: owner.sessionVersion,
-        expiresAt: new Date(Date.now() + parsed.data.expiresInDays * 24 * 60 * 60 * 1_000)
-      }, owner.id);
-      return reply.code(201).send({ ...sanitizedWorkspaceMcpToken(token), token: plaintext });
-    } catch {
-      return sendError(reply, 500, "TOKEN_OPERATION_FAILED", "Workspace MCP token creation failed");
-    }
-  });
-
-  server.get("/api/workspace/mcp/tokens", { preHandler: requireAdmin }, async (request, reply) => {
-    const parsed = z.object(paginationQuerySchema).safeParse(request.query);
-    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid pagination");
-    const owner = (request as AuthenticatedRequest).sessionAdmin;
-    const [tokens, total] = await Promise.all([
-      options.store.listWorkspaceMcpTokens(owner.workspaceId, owner.id, parsed.data),
-      options.store.countWorkspaceMcpTokens(owner.workspaceId, owner.id)
-    ]);
-    return {
-      tokens: tokens.map(sanitizedWorkspaceMcpToken),
-      ...paginationMetadata(total, parsed.data.offset ?? 0, tokens.length)
-    };
-  });
-
-  server.post("/api/workspace/mcp/tokens/:id/revoke", { preHandler: requireAdmin }, async (request, reply) => {
-    const params = z.object({ id: z.uuid() }).safeParse(request.params);
-    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid workspace MCP token");
-    const owner = (request as AuthenticatedRequest).sessionAdmin;
-    const token = await options.store.revokeWorkspaceMcpTokenWithAudit(
-      owner.workspaceId, owner.id, params.data.id, owner.id
-    );
-    if (!token) return sendError(reply, 404, "TOKEN_NOT_FOUND", "Workspace MCP token was not found");
-    return { token: sanitizedWorkspaceMcpToken(token) };
-  });
-
-  server.post("/api/workspace/mcp/tokens/:id/rotate", { preHandler: requireAdmin }, async (request, reply) => {
-    const params = z.object({ id: z.uuid() }).safeParse(request.params);
-    if (!params.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid workspace MCP token");
-    const owner = (request as AuthenticatedRequest).sessionAdmin;
-    const plaintext = generateWorkspaceMcpToken();
-    const rotation = await options.store.rotateWorkspaceMcpTokenWithAudit(
-      owner.workspaceId, owner.id, params.data.id,
-      { tokenHash: hashWorkspaceMcpToken(plaintext), tokenPrefix: plaintext.slice(0, 12) },
-      owner.id
-    );
-    if (!rotation) return sendError(reply, 409, "TOKEN_NOT_ACTIVE", "Workspace MCP token is unavailable");
-    return {
-      previous: sanitizedWorkspaceMcpToken(rotation.previous),
-      replacement: sanitizedWorkspaceMcpToken(rotation.replacement),
-      token: plaintext
-    };
-  });
-
-  server.get("/api/workspace/mcp/connection", { preHandler: requireAdmin }, async () => ({
-    endpoint: "/mcp/workspace",
-    transport: "streamable-http",
-    authorization: "bearer",
-    tools: WORKSPACE_MCP_TOOL_NAMES
   }));
 
   server.post("/api/repositories", { preHandler: requireAdministrator }, async (request, reply) => {
@@ -3193,26 +2811,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     if (!repository) return;
     if (repository.id !== existing.repositoryId) return sendError(reply, 404, "RELEASE_NOT_FOUND", "Release was not found");
     try {
-      const release = await options.store.publishRelease(admin.workspaceId, parsed.data.id);
-      let experienceIndex: Awaited<ReturnType<typeof indexPublishedFrontendPatternEvidence>> | null = null;
-      let experienceLint: Awaited<ReturnType<typeof runFrontendExperienceLint>> | null = null;
-      if (options.qualityArtifactReader && release.releaseArtifactFamily === "frontend-v2") {
-        try {
-          experienceIndex = await indexPublishedFrontendPatternEvidence({
-            store: options.store,
-            reader: options.qualityArtifactReader,
-            workspaceId: admin.workspaceId,
-            releaseId: release.id
-          });
-          experienceLint = await runFrontendExperienceLint(options.store, {
-            workspaceId: admin.workspaceId,
-            actorId: admin.id
-          });
-        } catch (error) {
-          request.log.error({ err: error, releaseId: release.id }, "Published frontend experience indexing failed");
-        }
-      }
-      return { release, experienceIndex, experienceLint };
+      return { release: await options.store.publishRelease(admin.workspaceId, parsed.data.id) };
     } catch (error) {
       return sendError(reply, 409, "PUBLISH_FAILED", error instanceof Error ? error.message : "Publish failed");
     }
@@ -3384,52 +2983,9 @@ export function buildServer(options: ServerOptions): FastifyInstance {
   });
 
   const activeMcpServers = new Set<ReturnType<typeof createRegisteredMcpServer>>();
-  const activeWorkspaceMcpServers = new Set<ReturnType<typeof createRegisteredWorkspaceMcpServer>>();
   server.addHook("onClose", async () => {
-    await Promise.all([
-      ...[...activeMcpServers].map((mcp) => mcp.close()),
-      ...[...activeWorkspaceMcpServers].map((mcp) => mcp.close())
-    ]);
+    await Promise.all([...activeMcpServers].map((mcp) => mcp.close()));
     activeMcpServers.clear();
-    activeWorkspaceMcpServers.clear();
-  });
-
-  server.all("/mcp/workspace", async (request, reply) => {
-    const authorization = request.headers.authorization;
-    const match = /^Bearer (\S+)$/i.exec(authorization ?? "");
-    const authentication = match
-      ? await authenticateWorkspaceMcpTokenDetailed(options.store, match[1])
-      : { token: null, failure: "UNAUTHORIZED" as const };
-    if (!authentication.token) {
-      const code = authentication.failure ?? "UNAUTHORIZED";
-      const message = code === "WORKSPACE_TOKEN_EXPIRED"
-        ? "Workspace MCP token has expired"
-        : code === "WORKSPACE_SESSION_CHANGED"
-          ? "Workspace MCP token session is no longer valid"
-          : "Invalid or revoked workspace MCP token";
-      return sendError(reply, 401, code, message);
-    }
-    const token = authentication.token;
-    const mcp = createRegisteredWorkspaceMcpServer({
-      store: options.store, workspaceId: token.workspaceId, userId: token.userId,
-      scopes: token.scopes, artifactReader: options.qualityArtifactReader,
-      solutionPlanningEnabled: workspaceSolutionPlanningEnabled,
-      recommendationsEnabled: frontendExperienceRecommendationsEnabled,
-      authorize: createWorkspaceMcpAuthorizationGuard(options.store, match![1]),
-      onUnauthorized: () => { setImmediate(() => void mcp.close()); }
-    });
-    activeWorkspaceMcpServers.add(mcp);
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-      enableJsonResponse: true
-    });
-    await mcp.connect(transport);
-    reply.hijack();
-    reply.raw.once("finish", () => {
-      activeWorkspaceMcpServers.delete(mcp);
-      void mcp.close();
-    });
-    await transport.handleRequest(request.raw, reply.raw, request.body);
   });
 
   server.all("/mcp", async (request, reply) => {

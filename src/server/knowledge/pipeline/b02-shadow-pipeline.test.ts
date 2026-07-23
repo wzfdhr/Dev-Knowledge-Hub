@@ -199,9 +199,7 @@ describe("B02 shadow pipeline", () => {
     for (const run of runs) {
       const manifests = await Promise.all(run.outputManifestIds.map((id) => store.findArtifactById(id)));
       expect(manifests).not.toContain(null);
-      const expectedCount = run.stage === "convert" && sourceStorageMode === "active"
-        ? 1
-        : run.stage === "synthesize" || run.stage === "index" ? 3 : 2;
+      const expectedCount = run.stage === "convert" && sourceStorageMode === "active" ? 1 : 2;
       expect(manifests).toHaveLength(expectedCount);
       expect(() => assertFrontendArtifactFamily(
         run.stage,
@@ -261,11 +259,6 @@ describe("B02 shadow pipeline", () => {
     await expect(frontendValue("synthesize", "frontend-knowledge-pages-v2")).resolves.toMatchObject({
       pages: expect.arrayContaining([expect.objectContaining({ slug: "frontend-architecture" })])
     });
-    await expect(frontendValue("synthesize", "frontend-project-profile")).resolves.toMatchObject({
-      schemaVersion: 1,
-      snapshotId: snapshot.id,
-      profileDigest: expect.stringMatching(/^[a-f0-9]{64}$/)
-    });
     await expect(frontendValue("index", "frontend-search-index-v2")).resolves.toMatchObject({
       documents: expect.arrayContaining([expect.objectContaining({
         title: `Frontend Architecture: ${sourcePath}`,
@@ -273,12 +266,6 @@ describe("B02 shadow pipeline", () => {
         citations: expect.arrayContaining([expect.objectContaining({ path: sourcePath })]),
         metadata: expect.objectContaining({ entityId: expect.any(String) })
       })])
-    });
-    await expect(frontendValue("index", "frontend-pattern-candidates")).resolves.toMatchObject({
-      schemaVersion: 1,
-      snapshotId: snapshot.id,
-      profileDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
-      candidates: expect.any(Array)
     });
     await expect(frontendValue("lint", "frontend-knowledge-quality-v2")).resolves.toMatchObject({
       summary: expect.objectContaining({ entities: expect.any(Number), citedEntities: expect.any(Number) })

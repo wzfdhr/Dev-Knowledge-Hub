@@ -1099,11 +1099,8 @@ test("real PostgreSQL rescans a snapshot committed behind the cursor during the 
     await writeFile(path.join(legacyView, "src/index.ts"), bytes);
     await pool.query(
       `INSERT INTO source_snapshots
-         (id, workspace_id, repository_id, commit_sha, ref, commit_timestamp, storage_path,
-          source_kind, git_commit_sha, content_version, attestation,
-          linked_git_commit_sha, remote_identity_digest)
-       VALUES ($1, $2, $3, $4, 'upload', now(), $5,
-          'upload', NULL, $4, 'unverified', NULL, NULL)`,
+         (id, workspace_id, repository_id, commit_sha, ref, commit_timestamp, storage_path)
+       VALUES ($1, $2, $3, $4, 'main', now(), $5)`,
       [snapshotId, workspaceId, repositoryId, marker.padEnd(40, "0").slice(0, 40), legacyView]
     );
     await pool.query(
@@ -1206,11 +1203,8 @@ test("runs the snapshot backfill against PostgreSQL atomically", {
     );
     await pool.query(
       `INSERT INTO source_snapshots
-         (id, workspace_id, repository_id, commit_sha, ref, commit_timestamp, storage_path,
-          source_kind, git_commit_sha, content_version, attestation,
-          linked_git_commit_sha, remote_identity_digest)
-       VALUES ($1, $2, $3, $4, 'upload', now(), $5,
-          'upload', NULL, $4, 'unverified', NULL, NULL)`,
+         (id, workspace_id, repository_id, commit_sha, ref, commit_timestamp, storage_path)
+       VALUES ($1, $2, $3, $4, 'main', now(), $5)`,
       [snapshotId, workspaceId, repositoryId, "a".repeat(40), legacyView]
     );
     for (const source of sourceRows) {

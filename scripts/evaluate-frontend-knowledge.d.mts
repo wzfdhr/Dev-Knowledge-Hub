@@ -5,51 +5,6 @@ export interface FrontendEvaluationInput {
 }
 
 export const FRONTEND_TRIAL_CAPABILITIES: readonly string[];
-export const FRONTEND_EXPERIENCE_CAPABILITIES: readonly string[];
-
-export interface FrontendExperienceEvaluationCase {
-  id: string;
-  split: "train" | "held-out";
-  capability: string;
-  locale: "en" | "zh-CN";
-  query: string;
-  currentProjectId: string;
-  currentProjectProfile: Record<string, string>;
-  visibleReleaseIds: string[];
-  visibleEvidenceIds: string[];
-  invisibleEvidenceIds: string[];
-  candidates: Array<{
-    id: string;
-    sourceProjectId: string;
-    releaseId: string;
-    evidenceId: string;
-    sourceEligibility: "git" | "git_linked" | "admin_attested" | "unverified_upload";
-    lifecycle: "verified" | "recommended" | "standard" | "deprecated";
-    evidenceState: "active" | "revoked";
-    required: Array<{ key: string; value: string }>;
-    forbidden: Array<{ key: string; value: string }>;
-  }>;
-  expectedDecision: "recommend" | "reject" | "abstain" | "no_result";
-  expectedRecommendationIds: string[];
-  expectedRejectionReasons: string[];
-  expectedUnknownKeys: string[];
-  abstentionRequired: boolean;
-}
-
-export interface FrontendExperienceEvaluationReport {
-  protocolVersion: number;
-  caseIds: string[];
-  observations: Array<{
-    caseId: string;
-    decision: string;
-    recommendationIds: string[];
-    rejected: Array<{ candidateId: string; reason: string; unknownKey?: string }>;
-    unknownKeys: string[];
-  }>;
-  denominators: Record<string, number>;
-  metrics: Record<string, number>;
-  failures: Array<{ caseId: string; expectedDecision: string; observation: unknown }>;
-}
 
 export interface FrontendCitation {
   path: string;
@@ -112,26 +67,6 @@ export interface FrontendVersionManifest {
 
 export function digestFrontendEvaluationDatasets(inputs: FrontendEvaluationInput[]): string;
 export function parseFrontendEvaluationDatasets(inputs: FrontendEvaluationInput[]): FrontendEvaluationCase[];
-export function parseFrontendExperienceEvaluationDatasets(
-  inputs: FrontendEvaluationInput[]
-): FrontendExperienceEvaluationCase[];
-export function validateFrontendExperienceEvaluationSuite(cases: FrontendExperienceEvaluationCase[]): {
-  total: number;
-  chineseRate: number;
-  negativeRate: number;
-  capabilities: Array<{ capability: string; train: number; heldOut: number }>;
-  negativeKinds: string[];
-};
-export function evaluateFrontendExperience(cases: FrontendExperienceEvaluationCase[]): FrontendExperienceEvaluationReport;
-export function evaluateFrontendExperienceBySplit(cases: FrontendExperienceEvaluationCase[]): {
-  train: FrontendExperienceEvaluationReport;
-  heldOut: FrontendExperienceEvaluationReport;
-  all: FrontendExperienceEvaluationReport;
-};
-export function assertFrontendExperienceQualityGate(report: Pick<
-  FrontendExperienceEvaluationReport,
-  "denominators" | "metrics"
->): void;
 export function validateFrontendFixtureReferences(cases: FrontendEvaluationCase[], fixturesRoot: string): Promise<void>;
 export function validateFrontendEvaluationSuite(cases: FrontendEvaluationCase[], versionManifest: unknown): {
   total: number;

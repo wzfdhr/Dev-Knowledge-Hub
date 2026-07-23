@@ -5,23 +5,6 @@ import { api } from "./client";
 afterEach(() => vi.unstubAllGlobals());
 
 describe("release API client", () => {
-  test("requests releases through the exact project route", async () => {
-    const fetch = vi.fn(async () => new Response(JSON.stringify({
-      releases: [], total: 0, nextOffset: null
-    }), {
-      status: 200,
-      headers: { "content-type": "application/json" }
-    }));
-    vi.stubGlobal("fetch", fetch);
-
-    await api.listProjectReleases("project / quality", { limit: 20, offset: 40 });
-
-    expect(fetch).toHaveBeenCalledWith(
-      "/api/projects/project%20%2F%20quality/releases?limit=20&offset=40",
-      expect.objectContaining({ credentials: "same-origin" })
-    );
-  });
-
   test("requests one exact encoded release ID", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({
       release: { id: "release / old", version: "0.1.0" }
@@ -445,20 +428,6 @@ describe("project Codex API client", () => {
 
     expect(fetch).toHaveBeenCalledWith("/api/mcp/tokens/old%20token/rotate", expect.objectContaining({
       method: "POST"
-    }));
-  });
-
-  test("uses isolated workspace MCP token endpoints and scopes", async () => {
-    const fetch = vi.fn(async () => new Response(JSON.stringify({
-      id: "workspace-token", token: "dkhw_secret", scopes: ["workspace.solutions.read"]
-    }), { status: 201, headers: { "content-type": "application/json" } }));
-    vi.stubGlobal("fetch", fetch);
-
-    await api.createWorkspaceMcpToken("Workspace Codex", ["workspace.solutions.read"]);
-
-    expect(fetch).toHaveBeenCalledWith("/api/workspace/mcp/tokens", expect.objectContaining({
-      method: "POST",
-      body: JSON.stringify({ name: "Workspace Codex", scopes: ["workspace.solutions.read"] })
     }));
   });
 });

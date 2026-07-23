@@ -73,7 +73,6 @@ function validEvidence() {
     pgRestoreListValidated: true,
     ephemeralDatabaseRestored: true,
     healthCheckPassed: true,
-    experienceRecoveryValidated: true,
     artifactContentVerifiedCount: 1,
     blobReferenceCount: 2,
     blobContentVerifiedCount: 1,
@@ -98,15 +97,7 @@ function validEvidence() {
       sourceAnalysisArtifactCount: 1,
       sourceBlobCount: 2,
       sourceFileBlobReferenceCount: 2,
-      referencedSourceBlobGenerationCount: 1,
-      frontendProjectProfileArtifactCount: 1,
-      patternGroupCount: 1,
-      patternEvidenceCount: 1,
-      decisionCount: 1,
-      outcomeCount: 1,
-      experienceReviewCount: 1,
-      experienceReviewItemCount: 1,
-      standardCount: 1
+      referencedSourceBlobGenerationCount: 1
     },
     integrity: {
       orphanedReleases: 0,
@@ -116,19 +107,7 @@ function validEvidence() {
       orphanedArtifacts: 0,
       orphanedSourceAnalysisArtifacts: 0,
       unboundSourceFiles: 0,
-      invalidSourceBlobReferences: 0,
-      invalidSourceProvenance: 0,
-      orphanedExperienceEvidence: 0,
-      experienceReleaseSnapshotMismatch: 0,
-      experienceCitationSnapshotMismatch: 0,
-      experienceEvidenceWithoutProfileArtifact: 0,
-      invalidDecisionBasis: 0,
-      invalidOutcomeEvidence: 0,
-      outcomeVersionMismatch: 0,
-      invalidExperienceReviewBasis: 0,
-      invalidExperienceReviewItems: 0,
-      invalidWorkspaceStandards: 0,
-      experienceSupersessionCycles: 0
+      invalidSourceBlobReferences: 0
     }
   };
 }
@@ -139,33 +118,13 @@ function legacyV2Evidence() {
   for (const field of [
     "blobReferenceCount", "blobContentVerifiedCount", "blobHardlinkVerifiedCount",
     "referencedSourceBlobGenerationCount", "sourceBlobLogicalBytes", "sourceBlobPhysicalBytes",
-    "sourceBlobRecordManifest", "experienceRecoveryValidated"
+    "sourceBlobRecordManifest"
   ]) delete evidence[field];
   delete evidence.databaseStats.sourceBlobCount;
   delete evidence.databaseStats.sourceFileBlobReferenceCount;
   delete evidence.databaseStats.referencedSourceBlobGenerationCount;
-  delete evidence.databaseStats.frontendProjectProfileArtifactCount;
-  delete evidence.databaseStats.patternGroupCount;
-  delete evidence.databaseStats.patternEvidenceCount;
-  delete evidence.databaseStats.decisionCount;
-  delete evidence.databaseStats.outcomeCount;
-  delete evidence.databaseStats.experienceReviewCount;
-  delete evidence.databaseStats.experienceReviewItemCount;
-  delete evidence.databaseStats.standardCount;
   delete evidence.integrity.unboundSourceFiles;
   delete evidence.integrity.invalidSourceBlobReferences;
-  delete evidence.integrity.invalidSourceProvenance;
-  delete evidence.integrity.orphanedExperienceEvidence;
-  delete evidence.integrity.experienceReleaseSnapshotMismatch;
-  delete evidence.integrity.experienceCitationSnapshotMismatch;
-  delete evidence.integrity.experienceEvidenceWithoutProfileArtifact;
-  delete evidence.integrity.invalidDecisionBasis;
-  delete evidence.integrity.invalidOutcomeEvidence;
-  delete evidence.integrity.outcomeVersionMismatch;
-  delete evidence.integrity.invalidExperienceReviewBasis;
-  delete evidence.integrity.invalidExperienceReviewItems;
-  delete evidence.integrity.invalidWorkspaceStandards;
-  delete evidence.integrity.experienceSupersessionCycles;
   return evidence;
 }
 

@@ -13,7 +13,6 @@ import type {
 } from "../persistence/store.js";
 import type { SourceBlobStore } from "../uploads/source-blob-store.js";
 import { removeReadOnlyTree } from "../uploads/folder-import.js";
-import { remoteIdentityDigest, updateContentVersion } from "../source-provenance.js";
 import { prepareRemoteRepository, runGit } from "./remote.js";
 
 const repositorySyncs = new Map<string, Promise<void>>();
@@ -201,7 +200,6 @@ async function syncRepositoryUnlocked({
     blob: Awaited<ReturnType<SourceBlobStore["put"]>>["record"];
   }> = [];
   const ignoredReasons: Record<string, number> = {};
-  const contentVersionHash = createHash("sha1");
   for (const filePath of tracked) {
     const byteSize = Number((await runGit({
       cwd: repositoryPath,
@@ -228,7 +226,6 @@ async function syncRepositoryUnlocked({
       recordIgnored(ignoredReasons, contentDecision.reason);
       continue;
     }
-    updateContentVersion(contentVersionHash, filePath, content);
 
     let sourceBlobId: string | null = null;
     if (sourceStorageMode === "legacy") {
@@ -269,13 +266,7 @@ async function syncRepositoryUnlocked({
     ref,
     remoteUrl,
     commitTimestamp,
-    storagePath,
-    sourceKind: "git",
-    gitCommitSha: commitSha,
-    contentVersion: contentVersionHash.digest("hex"),
-    attestation: null,
-    linkedGitCommitSha: null,
-    remoteIdentityDigest: remoteIdentityDigest(remoteUrl ?? `repository:${repository.id}`)
+    storagePath
   };
   let persisted: SourceSnapshotRecord;
   try {

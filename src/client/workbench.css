@@ -1621,3 +1621,129 @@
   background: #f2f7fd;
   color: var(--blue);
 }
+
+.global-search-box {
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 28px;
+  padding: 0 16px;
+  border: 1px solid #b9c7d7;
+  border-radius: 9px;
+  background: #fff;
+  box-shadow: 0 6px 18px rgba(31, 57, 87, 0.06);
+}
+
+.global-search-box > svg {
+  width: 20px;
+  color: #65758b;
+}
+
+.global-search-box input {
+  height: 54px;
+  padding: 0;
+  border: 0;
+  outline: 0;
+}
+
+.global-search-box kbd {
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #f6f7f9;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.global-search-section {
+  min-width: 0;
+}
+
+.global-search-results {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.global-search-results > a {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 13px;
+  padding: 17px;
+  border-bottom: 1px solid #e8ecf1;
+}
+
+.global-search-results > a:last-child {
+  border-bottom: 0;
+}
+
+.global-search-results > a:hover {
+  background: #f7faff;
+}
+
+.global-search-results > a > svg {
+  width: 34px;
+  height: 34px;
+  padding: 8px;
+  border-radius: 6px;
+  background: #eaf2fd;
+  color: #2860a1;
+}
+
+.global-search-result-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.global-search-result-copy > span {
+  color: #4a586c;
+  font-size: 12px;
+}
+
+.global-search-result-copy small {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.recent-knowledge-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.recent-knowledge-grid a {
+  min-width: 0;
+  min-height: 108px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.recent-knowledge-grid svg {
+  width: 18px;
+  color: var(--blue);
+}
+
+.recent-knowledge-grid strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-knowledge-grid span {
+  color: var(--muted);
+  font-size: 11px;
+}

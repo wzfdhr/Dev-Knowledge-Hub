@@ -324,7 +324,7 @@ describe("shared console copy", () => {
     expect(await screen.findByRole("link", { name: "项目中心" })).toBeVisible();
     expect(screen.getByRole("navigation", { name: "主导航" })).toBeVisible();
     expect(screen.getByRole("link", { name: "项目中心" })).toBeVisible();
-    expect(screen.getByRole("link", { name: "知识库" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "知识搜索" })).toBeVisible();
     expect(screen.getByRole("link", { name: "反馈" })).toBeVisible();
     expect(screen.getByRole("link", { name: "成员" })).toBeVisible();
     expect(screen.getByRole("link", { name: "设置" })).toBeVisible();
@@ -332,6 +332,24 @@ describe("shared console copy", () => {
 
     await user.click(screen.getByRole("link", { name: "成员" }));
     expect(await screen.findByRole("heading", { name: "成员" })).toBeVisible();
+  });
+
+  test("uses the workspace search as the global knowledge entry", async () => {
+    const api = {
+      setupStatus: vi.fn().mockResolvedValue({ setupRequired: false }),
+      session: vi.fn().mockResolvedValue({ admin: { email: "reader@example.com", role: "reader" } }),
+      logout: vi.fn().mockResolvedValue(undefined),
+      searchWorkspaceKnowledge: vi.fn(),
+      getRepositoryStatus: vi.fn(),
+      listReleases: vi.fn()
+    } as unknown as ApiClient;
+
+    renderAppAt(api, "/knowledge");
+
+    expect(await screen.findByRole("heading", { name: "知识搜索" })).toBeVisible();
+    expect(screen.getByRole("searchbox", { name: "跨项目搜索" })).toBeVisible();
+    expect(api.getRepositoryStatus).not.toHaveBeenCalled();
+    expect(api.listReleases).not.toHaveBeenCalled();
   });
 });
 

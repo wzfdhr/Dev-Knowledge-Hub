@@ -10,6 +10,7 @@ import { ProjectLayout } from "./components/project-layout";
 import { ErrorState, Loading } from "./components/ui";
 import { projectLegacyRedirects } from "./features/project-routes";
 import { FeedbackPage } from "./pages/feedback-page";
+import { GlobalKnowledgeSearchPage } from "./pages/global-knowledge-search-page";
 import { KnowledgePage } from "./pages/knowledge-page";
 import { MembersPage } from "./pages/members-page";
 import { ProjectOverviewPage } from "./pages/overview-page";
@@ -73,7 +74,7 @@ export function App({ api = defaultApi }: { api?: ApiClient }) {
       )}
     </Route>
     <Route path="/overview" element={<LegacyProjectRedirect section="overview" />} />
-    <Route path="/knowledge" element={<KnowledgePage api={api} />} />
+    <Route path="/knowledge" element={<GlobalKnowledgeSearchPage api={api} />} />
     <Route path="/knowledge/experiences" element={<WorkspaceExperiencesPage api={api} role={workspaceRole} />} />
     <Route path="/feedback" element={<FeedbackPage api={api} />} />
     <Route path="/members" element={workspaceRole === "admin" ? <MembersPage api={api} /> : <Navigate to="/projects" replace />} />

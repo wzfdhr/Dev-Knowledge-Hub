@@ -28,6 +28,21 @@ describe("delivery database isolation", () => {
     expect(phaseMerge.on.workflow_dispatch.inputs).toHaveProperty("source_blob_contract_gate_artifact_run_id");
   });
 
+  test("classifies the first FK17 contract pull request from its base commit", async () => {
+    const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
+    const containerJob = ci.jobs["container-smoke"];
+    const containerCommands = containerJob.steps.map((step) => step.run).filter(Boolean).join("\n");
+
+    expect(containerJob.env.DEVKH_PULL_REQUEST_BASE_SHA)
+      .toBe("${{ github.event.pull_request.base.sha }}");
+    expect(containerCommands)
+      .toContain('contract_probe_commit="${DEVKH_PULL_REQUEST_BASE_SHA:-HEAD}"');
+    expect(containerCommands)
+      .toContain('git cat-file -e "$contract_probe_commit:drizzle/0035_source_blobs_contract.sql"');
+    expect(containerCommands)
+      .not.toContain("git cat-file -e HEAD:drizzle/0035_source_blobs_contract.sql");
+  });
+
   test("limits automatic CI fan-out to release-relevant events", async () => {
     const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
 
@@ -105,8 +120,10 @@ describe("delivery database isolation", () => {
     expect(baseline).toMatch(/source_blob_id uuid NOT NULL/);
     expect(baseline).toContain("source_files_source_blob_identity_fk");
     expect(baseline).toMatch(/INSERT INTO .*schema_migrations.*0035_source_blobs_contract\.sql/is);
-    expect(ordinaryCommands).toContain("/tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope runtime-container");
-    expect(ordinaryCommands).not.toContain("--scope container");
+    expect(ordinaryCommands).toContain('contract_probe_commit="${DEVKH_PULL_REQUEST_BASE_SHA:-HEAD}"');
+    expect(ordinaryCommands).toContain('/tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope "$release_scope"');
+    expect(ci.jobs["container-smoke"].env.DEVKH_PULL_REQUEST_BASE_SHA)
+      .toBe("${{ github.event.pull_request.base.sha }}");
     expect(introducingCommands).toContain("/tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope container");
     expect(phaseMerge.jobs.merge.steps.some((step) => step.uses === "actions/upload-artifact@v4")).toBe(true);
     expect(introducingCommands).not.toContain("phase-merge-approval");
@@ -131,7 +148,7 @@ describe("delivery database isolation", () => {
       expect(commands).toContain("git archive");
       expect(commands).toContain("/tmp/devkh-fk17-trusted");
       expect(commands).toContain("npm ci --ignore-scripts");
-      expect(commands).toMatch(/node \/tmp\/devkh-fk17-trusted\/scripts\/release-verify\.mjs --scope (?:verify|container|runtime-container)/);
+      expect(commands).toMatch(/node \/tmp\/devkh-fk17-trusted\/scripts\/release-verify\.mjs --scope (?:verify|container|runtime-container|"\$release_scope")/);
       expect(commands).not.toContain("npm run release:verify");
     }
     expect(JSON.stringify(ci)).toContain("${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}");
@@ -245,7 +262,7 @@ describe("delivery database isolation", () => {
     expect(verifySteps).toContain("npx playwright install --with-deps chromium");
     expect(verifySteps).toContain("node /tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope verify");
     expect(smokeSteps).toContain("apt-get install -y restic");
-    expect(smokeSteps).toContain("node /tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope runtime-container");
+    expect(smokeSteps).toContain("node /tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope \"$release_scope\"");
     expect(ci.jobs["container-smoke"].steps).toEqual(expect.arrayContaining([
       expect.objectContaining({ uses: "actions/upload-artifact@v4", if: "always()" })
     ]));

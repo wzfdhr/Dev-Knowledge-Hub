@@ -7,4 +7,5 @@ artifacts
 .env
 docker-compose.override.yml
 .worktrees/
+/data/
 *.log

@@ -55,3 +55,5 @@ COPY --from=build --chown=node:node /app/src ./src
 COPY --from=build --chown=node:node /app/drizzle ./drizzle
 COPY --from=build --chown=node:node /app/tsconfig.json /app/tsconfig.node.json /app/vite.config.ts ./
 COPY --chown=node:node scripts ./scripts
+COPY --chown=node:node evaluation ./evaluation
+COPY --chown=node:node Dockerfile vitest.config.ts ./

@@ -59,6 +59,22 @@ describe("delivery database isolation", () => {
     expect(ci.jobs.verify.env.TEST_DATABASE_URL).toContain("/devkh_test");
   });
 
+  test("packages retrieval evaluation fixtures into the integration image", async () => {
+    const dockerfile = await readFile("Dockerfile", "utf8");
+    const deliveryCheck = await readFile("scripts/verify-delivery.mjs", "utf8");
+    const integrationStage = dockerfile.slice(dockerfile.indexOf("FROM runtime AS integration"));
+
+    expect(integrationStage).toContain("COPY --chown=node:node evaluation ./evaluation");
+    expect(integrationStage).toContain("COPY --chown=node:node Dockerfile vitest.config.ts ./");
+    expect(deliveryCheck).toContain("integration image retrieval evaluation fixtures");
+  });
+
+  test("keeps local runtime data out of version control", async () => {
+    const gitignore = await readFile(".gitignore", "utf8");
+
+    expect(gitignore.split(/\r?\n/)).toContain("/data/");
+  });
+
   test("isolates source blob contract authorization to an explicit migration-only service", async () => {
     const compose = parse(await readFile("docker-compose.yml", "utf8"));
     const migration = compose.services["contract-migrate"];

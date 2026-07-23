@@ -115,6 +115,7 @@ jobs:
       RECOVERY_EVIDENCE_DEFER_FINALIZATION: "true"
       GITHUB_TOKEN: ${{ github.token }}
       DEVKH_FK17_BOOTSTRAP_COMMIT: ${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}
+      DEVKH_PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -144,7 +145,8 @@ jobs:
           install -d -m 0700 /tmp/devkh-fk17-trusted
           git archive "$DEVKH_FK17_BOOTSTRAP_COMMIT" | tar -x -C /tmp/devkh-fk17-trusted
           npm ci --ignore-scripts --prefix /tmp/devkh-fk17-trusted
-          if git cat-file -e HEAD:drizzle/0035_source_blobs_contract.sql; then
+          contract_probe_commit="${DEVKH_PULL_REQUEST_BASE_SHA:-HEAD}"
+          if git cat-file -e "$contract_probe_commit:drizzle/0035_source_blobs_contract.sql"; then
             release_scope=runtime-container
           else
             release_scope=container

@@ -23,6 +23,21 @@ describe("delivery database isolation", () => {
     expect(phaseMerge.on.workflow_dispatch.inputs).toHaveProperty("source_blob_contract_gate_artifact_run_id");
   });
 
+  test("classifies the first FK17 contract pull request from its base commit", async () => {
+    const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
+    const containerJob = ci.jobs["container-smoke"];
+    const containerCommands = containerJob.steps.map((step) => step.run).filter(Boolean).join("\n");
+
+    expect(containerJob.env.DEVKH_PULL_REQUEST_BASE_SHA)
+      .toBe("${{ github.event.pull_request.base.sha }}");
+    expect(containerCommands)
+      .toContain('contract_probe_commit="${DEVKH_PULL_REQUEST_BASE_SHA:-HEAD}"');
+    expect(containerCommands)
+      .toContain('git cat-file -e "$contract_probe_commit:drizzle/0035_source_blobs_contract.sql"');
+    expect(containerCommands)
+      .not.toContain("git cat-file -e HEAD:drizzle/0035_source_blobs_contract.sql");
+  });
+
   test("limits automatic CI fan-out to release-relevant events", async () => {
     const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
 

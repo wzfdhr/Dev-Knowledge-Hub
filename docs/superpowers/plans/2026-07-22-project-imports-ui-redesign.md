@@ -67,7 +67,7 @@ export interface ImportSourceSwitcherProps {
 }
 ```
 
-- [ ] **Step 1: Write the failing source-switching tests**
+- [x] **Step 1: Write the failing source-switching tests**
 
 Create `src/client/components/import-source-switcher.test.tsx` with real interactions:
 
@@ -142,7 +142,7 @@ describe("ImportSourceSwitcher", () => {
 });
 ```
 
-- [ ] **Step 2: Run the component test and verify RED**
+- [x] **Step 2: Run the component test and verify RED**
 
 Run:
 
@@ -152,7 +152,7 @@ npx vitest run src/client/components/import-source-switcher.test.tsx
 
 Expected: FAIL because `./import-source-switcher` does not exist.
 
-- [ ] **Step 3: Implement the controlled source switcher**
+- [x] **Step 3: Implement the controlled source switcher**
 
 Create `src/client/components/import-source-switcher.tsx`. The component must:
 
@@ -183,7 +183,7 @@ For `upload`, render `.import-folder-action` with the folder icon, one concise p
 
 For `git` and `local`, render a semantic `<form>` that calls `event.preventDefault()` and `onSubmitAlternative()`. Preserve the exact labels and placeholders already used by `ProjectImportsPage`. Render `errorMessage` inside an Ant Design `Alert` or the existing `ErrorState` directly below the fields. Keep the submitted values fully controlled by props.
 
-- [ ] **Step 4: Run the component tests and verify GREEN**
+- [x] **Step 4: Run the component tests and verify GREEN**
 
 Run:
 
@@ -193,7 +193,7 @@ npx vitest run src/client/components/import-source-switcher.test.tsx
 
 Expected: 4 tests PASS with no React warnings.
 
-- [ ] **Step 5: Typecheck the new component contract**
+- [x] **Step 5: Typecheck the new component contract**
 
 Run:
 
@@ -203,7 +203,7 @@ npm run typecheck
 
 Expected: exit code `0`.
 
-- [ ] **Step 6: Commit Task 1**
+- [x] **Step 6: Commit Task 1**
 
 ```bash
 git add src/client/components/import-source-switcher.tsx src/client/components/import-source-switcher.test.tsx
@@ -235,7 +235,7 @@ export interface ImportHistoryProps {
 }
 ```
 
-- [ ] **Step 1: Write failing progress-state tests**
+- [x] **Step 1: Write failing progress-state tests**
 
 Create `src/client/components/import-progress.test.tsx`:
 
@@ -268,7 +268,7 @@ describe("ImportProgress", () => {
 });
 ```
 
-- [ ] **Step 2: Write failing history tests**
+- [x] **Step 2: Write failing history tests**
 
 Create `src/client/components/import-history.test.tsx` with these cases:
 
@@ -302,7 +302,7 @@ test("renders a compact empty state", () => {
 });
 ```
 
-- [ ] **Step 3: Run both tests and verify RED**
+- [x] **Step 3: Run both tests and verify RED**
 
 Run:
 
@@ -312,7 +312,7 @@ npx vitest run src/client/components/import-progress.test.tsx src/client/compone
 
 Expected: FAIL because history does not exist and progress still renders the full idle stage list.
 
-- [ ] **Step 4: Implement compact progress states**
+- [x] **Step 4: Implement compact progress states**
 
 Modify `ImportProgress` so `progress === null` or `progress.status === "idle"` returns:
 
@@ -331,7 +331,7 @@ For non-idle states, render `.import-progress-compact` with:
 - A compact `.import-stage-track` containing all five labels and active/complete classes.
 - Existing transfer/rate/ETA formatting and `aria-live="polite"`.
 
-- [ ] **Step 5: Implement the history component**
+- [x] **Step 5: Implement the history component**
 
 Create `ImportHistory` with a `<section aria-labelledby="import-history-title">`, an overflow wrapper, and semantic table:
 
@@ -344,7 +344,7 @@ Create `ImportHistory` with a `<section aria-labelledby="import-history-title">`
 
 Map source labels as `upload -> 项目文件夹`, `git -> Git HTTPS`, `local -> 服务器路径`. Map statuses as `succeeded -> 成功`, `failed -> 失败`, `running -> 进行中`, `cancelled -> 已取消`. Put `failureCode` below the failed status when present. Reuse `formatBytes` from `import-report.tsx`.
 
-- [ ] **Step 6: Run tests and verify GREEN**
+- [x] **Step 6: Run tests and verify GREEN**
 
 Run:
 
@@ -354,7 +354,7 @@ npx vitest run src/client/components/import-progress.test.tsx src/client/compone
 
 Expected: all progress and history tests PASS.
 
-- [ ] **Step 7: Commit Task 2**
+- [x] **Step 7: Commit Task 2**
 
 ```bash
 git add src/client/components/import-progress.tsx src/client/components/import-progress.test.tsx src/client/components/import-history.tsx src/client/components/import-history.test.tsx
@@ -373,7 +373,7 @@ git commit -m "feat(imports): compact progress and history"
 - Consumes: `ImportSourceSwitcher`, `ImportSourceKind`, `ImportHistory`, existing `ImportProgress`, `FolderFilterReport`, and `ImportResultReport`.
 - Produces: unchanged `ProjectImportsPage({ api, projectId })` public component.
 
-- [ ] **Step 1: Add a failing page-level inline source test**
+- [x] **Step 1: Add a failing page-level inline source test**
 
 Add to the existing `describe("repository replacement")` block in `src/client/app.test.tsx`:
 
@@ -403,7 +403,7 @@ test("configures every source inline and only submits the selected source", asyn
 
 Change the existing replacement test to switch to the required source inline, submit it, and verify the existing read-only-history copy without opening a modal.
 
-- [ ] **Step 2: Run the focused page tests and verify RED**
+- [x] **Step 2: Run the focused page tests and verify RED**
 
 Run:
 
@@ -413,7 +413,7 @@ npx vitest run src/client/app.test.tsx -t "repository replacement"
 
 Expected: FAIL because Git and local forms still live in the modal.
 
-- [ ] **Step 3: Replace modal composition with the inline workspace**
+- [x] **Step 3: Replace modal composition with the inline workspace**
 
 In `ProjectImportsPage`:
 
@@ -458,7 +458,7 @@ onSuccess: (value) => {
 
 7. Shorten the page header paragraph to: `管理项目资料来源并创建可追溯的内容版本。`
 
-- [ ] **Step 4: Preserve replacement and upload regression tests**
+- [x] **Step 4: Preserve replacement and upload regression tests**
 
 Update only selectors affected by the new composition. Keep all assertions proving:
 
@@ -467,7 +467,7 @@ Update only selectors affected by the new composition. Keep all assertions provi
 - Invalidated sessions require re-selection.
 - Successful upload writes `devkh:last-snapshot`, reports local/server filtering, and never publishes.
 
-- [ ] **Step 5: Run integration tests and verify GREEN**
+- [x] **Step 5: Run integration tests and verify GREEN**
 
 Run:
 
@@ -477,7 +477,7 @@ npx vitest run src/client/app.test.tsx src/client/components/import-source-switc
 
 Expected: all tests PASS with no unhandled query or React state warnings.
 
-- [ ] **Step 6: Commit Task 3**
+- [x] **Step 6: Commit Task 3**
 
 ```bash
 git add src/client/pages/project-imports-page.tsx src/client/app.test.tsx
@@ -496,7 +496,7 @@ git commit -m "feat(imports): integrate compact source workspace"
 - Consumes: class names established by Tasks 1-3.
 - Produces: stable desktop/mobile layout with scoped horizontal history scrolling.
 
-- [ ] **Step 1: Add failing E2E layout assertions before styling**
+- [x] **Step 1: Add failing E2E layout assertions before styling**
 
 Immediately after navigating to `资料上传` in `tests/e2e/console.spec.ts`, add the empty-workspace assertions:
 
@@ -527,7 +527,7 @@ for (const viewport of [
 await page.setViewportSize({ width: 1440, height: 1024 });
 ```
 
-- [ ] **Step 2: Run the focused E2E test and verify RED**
+- [x] **Step 2: Run the focused E2E test and verify RED**
 
 Run:
 
@@ -537,7 +537,7 @@ npx playwright test tests/e2e/console.spec.ts --grep "folder import"
 
 Expected: FAIL on the inline source/table/layout contract before CSS and integration are complete.
 
-- [ ] **Step 3: Replace legacy imports CSS with the compact workspace styles**
+- [x] **Step 3: Replace legacy imports CSS with the compact workspace styles**
 
 In `src/client/responsive.css`, remove obsolete rules for:
 
@@ -562,7 +562,7 @@ Add stable rules for:
 
 Use the existing palette plus green success and red failure tokens. Do not add gradients, oversized cards, more than `7px` radius, or font sizes based on viewport width.
 
-- [ ] **Step 4: Add mobile rules**
+- [x] **Step 4: Add mobile rules**
 
 At `max-width: 760px`:
 
@@ -578,7 +578,7 @@ At `max-width: 760px`:
 
 At `max-width: 420px`, reduce source-tab internal padding and ensure labels wrap without reducing font size below `10px`.
 
-- [ ] **Step 5: Run browser acceptance and inspect screenshots**
+- [x] **Step 5: Run browser acceptance and inspect screenshots**
 
 Run:
 
@@ -588,7 +588,7 @@ npx playwright test tests/e2e/console.spec.ts --grep "folder import"
 
 Expected: PASS and write four nonblank imports screenshots. Inspect each screenshot for text overlap, hidden controls, nested-card appearance, and page-level overflow.
 
-- [ ] **Step 6: Run the complete client verification gate**
+- [x] **Step 6: Run the complete client verification gate**
 
 Run:
 
@@ -601,7 +601,7 @@ npm run build
 
 Expected: every command exits `0`; Vitest reports zero failed files/tests; build emits the Vite client and TypeScript server output.
 
-- [ ] **Step 7: Review the final diff scope**
+- [x] **Step 7: Review the final diff scope**
 
 Run:
 
@@ -613,7 +613,7 @@ git diff --stat 897fd87..HEAD
 
 Expected: no whitespace errors; only the planned client files, tests, and docs are part of the feature commits. `vite.config.ts`, `vite.config.test.ts`, and `data/` remain outside this feature's staged scope.
 
-- [ ] **Step 8: Commit Task 4**
+- [x] **Step 8: Commit Task 4**
 
 ```bash
 git add src/client/responsive.css tests/e2e/console.spec.ts
@@ -624,12 +624,12 @@ git commit -m "feat(imports): polish responsive compact workspace"
 
 ## Final Acceptance Checklist
 
-- [ ] Source tabs switch inline without a network request.
-- [ ] Git and server paths submit only from explicit commands.
-- [ ] Folder selection still filters locally and requires confirmation.
-- [ ] Existing replacement and resumable-upload behavior remains green.
-- [ ] Idle progress is compact; running, failed, and completed states remain legible and trustworthy.
-- [ ] Recent imports use a semantic table with an isolated loading/error/empty state.
-- [ ] Desktop and mobile screenshots match the approved compact administration direction.
-- [ ] No document-level horizontal overflow at `320`, `390`, `768`, or `1280` pixels.
-- [ ] Typecheck, lint, client Vitest, build, and focused Playwright pass.
+- [x] Source tabs switch inline without a network request.
+- [x] Git and server paths submit only from explicit commands.
+- [x] Folder selection still filters locally and requires confirmation.
+- [x] Existing replacement and resumable-upload behavior remains green.
+- [x] Idle progress is compact; running, failed, and completed states remain legible and trustworthy.
+- [x] Recent imports use a semantic table with an isolated loading/error/empty state.
+- [x] Desktop and mobile screenshots match the approved compact administration direction.
+- [x] No document-level horizontal overflow at `320`, `390`, `768`, or `1280` pixels.
+- [x] Typecheck, lint, client Vitest, build, and focused Playwright pass.

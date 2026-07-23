@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { sourceRefSchema, type ArtifactManifest } from "../../../shared/api-contracts.js";
+import { frontendProjectProfileSchema } from "../../../shared/frontend-project-profile.js";
 import type { AppStore, PipelineStageRunRecord } from "../../persistence/store.js";
 import {
   assertFrontendCandidateValid,
@@ -119,14 +120,22 @@ export async function loadFrontendCandidatePreview(input: {
     });
     return input.reader.getJson(value);
   };
-  const [graph, pages, search, quality, visualization, validation] = await Promise.all([
+  const [graph, pages, projectProfile, search, quality, visualization, validation] = await Promise.all([
     load("graph", "frontend-graph-v2").then((value) => frontendGraphV2Schema.parse(value)),
     load("synthesize", "frontend-knowledge-pages-v2").then((value) => knowledgePagesSchema.parse(value)),
+    load("synthesize", "frontend-project-profile").then((value) => frontendProjectProfileSchema.parse(value)),
     load("index", "frontend-search-index-v2").then((value) => searchSchema.parse(value)),
     load("lint", "frontend-knowledge-quality-v2").then((value) => qualitySchema.parse(value)),
     load("viz", "frontend-visualization-v2").then((value) => visualizationSchema.parse(value)),
     load("validate", "frontend-validation-v2").then((value) => frontendValidationV2Schema.parse(value))
   ]);
+  if (projectProfile.snapshotId !== build.snapshotId
+    || projectProfile.analyzerManifestDigest !== packageValue.analyzerManifestDigest
+    || projectProfile.profileDigest !== packageValue.projectProfileDigest
+    || packageValue.projectProfileArtifactId !== validation.projectProfileArtifactId
+    || projectProfile.profileDigest !== validation.projectProfileDigest) {
+    throw new FrontendPreviewUnavailableError("Frontend project profile provenance does not match its package");
+  }
   try {
     assertFrontendCandidateValid(validation);
   } catch {
@@ -144,7 +153,7 @@ export async function loadFrontendCandidatePreview(input: {
   }
   return {
     build: { id: build.id, snapshotId: build.snapshotId, commitSha: build.commitSha, status: build.status },
-    graph, pages: pages.pages, search: search.documents, quality, visualization, validation
+    graph, pages: pages.pages, projectProfile, search: search.documents, quality, visualization, validation
   };
 }
 

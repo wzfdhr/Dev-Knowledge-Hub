@@ -15,6 +15,12 @@ describe("schema exports", () => {
         "sourceFiles",
         "sourceBlobs",
         "sourceAnalysisArtifacts",
+        "workspacePatternGroups",
+        "workspacePatternEvidence",
+        "workspaceDecisions",
+        "workspaceOutcomes",
+        "workspaceExperienceReviews",
+        "workspaceStandards",
         "uploadSessions",
         "uploadSessionEntries",
         "uploadIdempotencyKeys",
@@ -37,7 +43,7 @@ describe("schema exports", () => {
     );
   });
 
-  test("keeps source blobs generation-scoped while source file references remain expandable", () => {
+  test("contracts source file references onto verified workspace blob identities", () => {
     const blobs = getTableConfig(schema.sourceBlobs);
     const files = getTableConfig(schema.sourceFiles);
 
@@ -48,8 +54,9 @@ describe("schema exports", () => {
       "source_blobs_generation_check",
       "source_blobs_status_check"
     ]));
-    expect(files.columns.find((column) => column.name === "source_blob_id")?.notNull).toBe(false);
-    expect(files.foreignKeys.map((key) => key.getName())).toContain("source_files_source_blob_workspace_fk");
+    expect(blobs.uniqueConstraints.map((item) => item.name)).toContain("source_blobs_reference_identity_unique");
+    expect(files.columns.find((column) => column.name === "source_blob_id")?.notNull).toBe(true);
+    expect(files.foreignKeys.map((key) => key.getName())).toContain("source_files_source_blob_identity_fk");
   });
 
   test("keeps upload sessions workspace scoped with durable manifest and idempotency contracts", () => {
@@ -105,6 +112,55 @@ describe("schema exports", () => {
     ]));
     expect(getTableConfig(schema.buildStageRuns).name).toBe("build_stage_runs");
     expect(getTableConfig(schema.knowledgeArtifacts).name).toBe("knowledge_artifacts");
+  });
+
+  test("keeps source provenance explicit in the typed snapshot schema", () => {
+    const config = getTableConfig(schema.sourceSnapshots);
+    const names = config.columns.map((column) => column.name);
+
+    expect(names).toEqual(expect.arrayContaining([
+      "source_kind",
+      "git_commit_sha",
+      "content_version",
+      "attestation",
+      "linked_git_commit_sha",
+      "remote_identity_digest"
+    ]));
+    expect(config.checks.map((check) => check.name)).toContain("source_snapshots_provenance_shape_check");
+  });
+
+  test("keeps frontend experience rows workspace scoped and lifecycle constrained", () => {
+    const groups = getTableConfig(schema.workspacePatternGroups);
+    const evidence = getTableConfig(schema.workspacePatternEvidence);
+    const reviews = getTableConfig(schema.workspaceExperienceReviews);
+    const reviewItems = getTableConfig(schema.workspaceExperienceReviewItems);
+
+    expect(groups.checks.map((item) => item.name)).toEqual(expect.arrayContaining([
+      "workspace_pattern_groups_state_check",
+      "workspace_pattern_groups_no_self_supersession_check"
+    ]));
+    expect(evidence.foreignKeys.map((key) => key.getName())).toEqual(expect.arrayContaining([
+      "workspace_pattern_evidence_group_workspace_fk",
+      "workspace_pattern_evidence_project_workspace_fk",
+      "workspace_pattern_evidence_release_workspace_fk"
+    ]));
+    expect(reviews.checks.map((item) => item.name)).toContain("workspace_experience_reviews_basis_check");
+    expect(reviewItems.checks.map((item) => item.name)).toEqual(expect.arrayContaining([
+      "workspace_experience_review_items_shape_check",
+      "workspace_experience_review_items_priority_check"
+    ]));
+  });
+
+  test("keeps workspace MCP tokens owner-bound, scoped, and short-lived", () => {
+    const tokens = getTableConfig(schema.workspaceMcpTokens);
+
+    expect(tokens.checks.map((item) => item.name)).toEqual(expect.arrayContaining([
+      "workspace_mcp_tokens_scopes_check",
+      "workspace_mcp_tokens_expiry_check"
+    ]));
+    expect(tokens.foreignKeys.map((key) => key.getName())).toContain(
+      "workspace_mcp_tokens_owner_workspace_fk"
+    );
   });
 
   test("keeps source analysis cache workspace-scoped and content-addressed", () => {

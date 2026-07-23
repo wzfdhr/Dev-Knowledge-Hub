@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { calculateSearchResultTrust, MIN_SEARCH_RESULT_TRUST } from "../knowledge/trust.js";
+import { normalizeSnapshotProvenance } from "../source-provenance.js";
 
 import {
   boundedKnowledgePage,
@@ -87,6 +88,8 @@ import type {
   RemediationRecord,
   RemediationListOptions,
   WorkspaceKnowledgeSearchRecord,
+  WorkspaceMcpTokenRecord,
+  CreateWorkspaceMcpTokenInput,
   WorkspaceProjectOverviewRecord,
   WorkspaceRecord
 } from "./store.js";
@@ -127,6 +130,32 @@ import { transitionRemediation } from "../knowledge/remediation.js";
 import type { RemediationState } from "../knowledge/remediation.js";
 import type { CodeIndex } from "../knowledge/intelligence.js";
 import { validateKnowledgeGraph } from "../knowledge/pipeline/graph.js";
+import {
+  declaredDecisionInputSchema,
+  experienceReviewItemInputSchema,
+  experienceReviewEventSchema,
+  observedPatternEvidenceInputSchema,
+  verifiedOutcomeInputSchema,
+  workspaceStandardInputSchema,
+  type DeclaredDecisionEvidence,
+  type DeclaredDecisionInput,
+  type ExperienceProjection,
+  type ExperienceProjectionInput,
+  type ExperienceReviewEvent,
+  type ExperienceReviewItem,
+  type ExperienceReviewItemInput,
+  type ExperienceState,
+  type ExperienceTransitionInput,
+  type ObservedPatternEvidence,
+  type ObservedPatternEvidenceInput,
+  type VerifiedOutcomeEvidence,
+  type VerifiedOutcomeInput,
+  type WorkspaceStandard,
+  type WorkspaceStandardInput
+} from "../../shared/frontend-experience.js";
+import { transitionExperience } from "../knowledge/frontend/experience-lifecycle.js";
+import type { VisibleExperienceCandidate } from "../knowledge/frontend/experience-query.js";
+import type { ExperienceLintRecord } from "../knowledge/frontend/experience-lint.js";
 
 export class MemoryAppStore implements AppStore {
   private workspace: WorkspaceRecord | null = null;
@@ -148,9 +177,20 @@ export class MemoryAppStore implements AppStore {
   }>();
   readonly auditEvents: AuditEventRecord[] = [];
   readonly mcpTokens: McpTokenRecord[] = [];
+  readonly workspaceMcpTokens: WorkspaceMcpTokenRecord[] = [];
   readonly feedback: AgentFeedbackRecord[] = [];
   readonly remediations: RemediationRecord[] = [];
   readonly remediationEvents: RemediationEventRecord[] = [];
+  private readonly experienceGroups: Array<{
+    id: string; workspaceId: string; capability: string; state: ExperienceState;
+    supersededById: string | null; createdAt: Date; updatedAt: Date;
+  }> = [];
+  readonly experienceEvidence: ObservedPatternEvidence[] = [];
+  readonly experienceDecisions: DeclaredDecisionEvidence[] = [];
+  readonly experienceOutcomes: VerifiedOutcomeEvidence[] = [];
+  readonly experienceReviewItems: ExperienceReviewItem[] = [];
+  readonly experienceReviews: ExperienceReviewEvent[] = [];
+  readonly workspaceStandards: WorkspaceStandard[] = [];
   readonly encryptedCredentials: EncryptedCredentialRecord[] = [];
   readonly sourceSnapshots: SourceSnapshotRecord[] = [];
   readonly sourceFiles: SourceFileRecord[] = [];
@@ -1690,6 +1730,105 @@ export class MemoryAppStore implements AppStore {
     }
   }
 
+  async createWorkspaceMcpTokenWithAudit(
+    input: CreateWorkspaceMcpTokenInput,
+    actorId: string
+  ): Promise<WorkspaceMcpTokenRecord> {
+    const actor = this.members.find((member) => member.id === actorId
+      && member.workspaceId === input.workspaceId && member.disabledAt === null);
+    const now = new Date();
+    const expiresAt = input.expiresAt ?? new Date(now.getTime() + 30 * 24 * 60 * 60 * 1_000);
+    if (!actor || actor.id !== input.userId || actor.sessionVersion !== input.sessionVersion
+      || expiresAt <= now || expiresAt.getTime() - now.getTime() > 30 * 24 * 60 * 60 * 1_000
+      || input.scopes.length === 0
+      || input.scopes.some((scope) => !["workspace.patterns.read", "workspace.solutions.read"].includes(scope))) {
+      throw new Error("Workspace MCP token owner or expiry is invalid");
+    }
+    const record: WorkspaceMcpTokenRecord = {
+      ...input, id: randomUUID(), expiresAt, createdAt: now, lastUsedAt: null, revokedAt: null
+    };
+    this.workspaceMcpTokens.push(record);
+    await this.recordAudit({
+      workspaceId: input.workspaceId, actorId, action: "workspace_mcp_token.created",
+      resourceType: "workspace_mcp_token", resourceId: record.id
+    });
+    return structuredClone(record);
+  }
+
+  async listWorkspaceMcpTokens(
+    workspaceId: string,
+    userId: string,
+    pagination?: Pagination
+  ): Promise<WorkspaceMcpTokenRecord[]> {
+    const { limit, offset } = normalizePagination(pagination);
+    return this.workspaceMcpTokens.filter((token) =>
+      token.workspaceId === workspaceId && token.userId === userId
+    ).sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime()
+      || right.id.localeCompare(left.id)).slice(offset, offset + limit)
+      .map((token) => structuredClone(token));
+  }
+
+  async countWorkspaceMcpTokens(workspaceId: string, userId: string): Promise<number> {
+    return this.workspaceMcpTokens.filter((token) =>
+      token.workspaceId === workspaceId && token.userId === userId
+    ).length;
+  }
+
+  async findWorkspaceMcpTokenByHash(tokenHash: string): Promise<WorkspaceMcpTokenRecord | null> {
+    const token = this.workspaceMcpTokens.find((candidate) => candidate.tokenHash === tokenHash);
+    return token ? structuredClone(token) : null;
+  }
+
+  async touchWorkspaceMcpToken(tokenId: string): Promise<void> {
+    const token = this.workspaceMcpTokens.find((candidate) => candidate.id === tokenId);
+    if (token && token.revokedAt === null) token.lastUsedAt = new Date();
+  }
+
+  async revokeWorkspaceMcpTokenWithAudit(
+    workspaceId: string,
+    userId: string,
+    tokenId: string,
+    actorId: string
+  ): Promise<WorkspaceMcpTokenRecord | null> {
+    if (actorId !== userId) return null;
+    const token = this.workspaceMcpTokens.find((candidate) => candidate.id === tokenId
+      && candidate.workspaceId === workspaceId && candidate.userId === userId);
+    if (!token) return null;
+    token.revokedAt ??= new Date();
+    await this.recordAudit({
+      workspaceId, actorId, action: "workspace_mcp_token.revoked",
+      resourceType: "workspace_mcp_token", resourceId: token.id
+    });
+    return structuredClone(token);
+  }
+
+  async rotateWorkspaceMcpTokenWithAudit(
+    workspaceId: string,
+    userId: string,
+    tokenId: string,
+    replacement: Pick<WorkspaceMcpTokenRecord, "tokenHash" | "tokenPrefix">,
+    actorId: string
+  ): Promise<{ previous: WorkspaceMcpTokenRecord; replacement: WorkspaceMcpTokenRecord } | null> {
+    if (actorId !== userId) return null;
+    const previous = this.workspaceMcpTokens.find((candidate) => candidate.id === tokenId
+      && candidate.workspaceId === workspaceId && candidate.userId === userId && candidate.revokedAt === null);
+    const actor = this.members.find((member) => member.id === userId
+      && member.workspaceId === workspaceId && member.disabledAt === null);
+    if (!previous || !actor || actor.sessionVersion !== previous.sessionVersion) return null;
+    const next = await this.createWorkspaceMcpTokenWithAudit({
+      workspaceId, userId, name: previous.name, tokenHash: replacement.tokenHash,
+      tokenPrefix: replacement.tokenPrefix, scopes: [...previous.scopes],
+      sessionVersion: actor.sessionVersion
+    }, actorId);
+    previous.revokedAt = new Date();
+    await this.recordAudit({
+      workspaceId, actorId, action: "workspace_mcp_token.rotated",
+      resourceType: "workspace_mcp_token", resourceId: previous.id,
+      metadata: { replacementTokenId: next.id }
+    });
+    return { previous: structuredClone(previous), replacement: next };
+  }
+
   async createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord> {
     const now = new Date();
     const record: AgentFeedbackRecord = {
@@ -2416,9 +2555,10 @@ export class MemoryAppStore implements AppStore {
     );
     if (existing) return existing;
     this.assertActiveSourceBlobBindings(files);
-    this.sourceSnapshots.push(snapshot);
+    const normalizedSnapshot = normalizeSnapshotProvenance(snapshot);
+    this.sourceSnapshots.push(normalizedSnapshot);
     this.sourceFiles.push(...files);
-    return snapshot;
+    return normalizedSnapshot;
   }
 
   async createSnapshotWithGitSynchronizationLease(
@@ -2449,9 +2589,10 @@ export class MemoryAppStore implements AppStore {
       );
       if (!persisted) {
         this.assertActiveSourceBlobBindings(input.files);
-        this.sourceSnapshots.push(input.snapshot);
+        const normalizedSnapshot = normalizeSnapshotProvenance(input.snapshot);
+        this.sourceSnapshots.push(normalizedSnapshot);
         this.sourceFiles.push(...input.files);
-        persisted = input.snapshot;
+        persisted = normalizedSnapshot;
         if (pendingUploadSessionId) this.pendingSnapshotUploadSessions.set(persisted.id, pendingUploadSessionId);
         if (pendingImportReportId) this.pendingSnapshotImportReports.set(persisted.id, pendingImportReportId);
       }
@@ -3522,6 +3663,373 @@ export class MemoryAppStore implements AppStore {
     return [...primary, ...neighbors, ...text].sort((left, right) =>
       right.score - left.score || left.title.localeCompare(right.title) || left.pageId.localeCompare(right.pageId)
     ).slice(0, 50);
+  }
+
+  async saveObservedPatternEvidence(
+    input: ObservedPatternEvidenceInput
+  ): Promise<ObservedPatternEvidence> {
+    const parsed = observedPatternEvidenceInputSchema.parse(input);
+    if (parsed.sourceEligibility === "unverified_upload") {
+      throw new Error("Unverified upload evidence cannot enter workspace experience");
+    }
+    const existing = this.experienceEvidence.find((item) =>
+      item.id === parsed.id && item.workspaceId === parsed.workspaceId
+    );
+    if (existing) return structuredClone(existing);
+    const project = this.projects.find((item) =>
+      item.id === parsed.projectId && item.workspaceId === parsed.workspaceId
+    );
+    const sourceRelease = this.releases.find((item) =>
+      item.id === parsed.releaseId && item.workspaceId === parsed.workspaceId
+      && item.snapshotId === parsed.snapshotId && item.publishedAt !== null
+    );
+    const repository = sourceRelease && this.repositories.find((item) =>
+      item.id === sourceRelease.repositoryId && item.workspaceId === parsed.workspaceId
+      && item.projectId === parsed.projectId
+    );
+    if (!project || !sourceRelease || !repository) {
+      throw new Error("Experience evidence must reference a published release in the same workspace project");
+    }
+    let group = this.experienceGroups.find((item) => item.id === parsed.patternGroupId);
+    if (group && (group.workspaceId !== parsed.workspaceId || group.capability !== parsed.capability)) {
+      throw new Error("Experience pattern group crosses workspace or capability boundaries");
+    }
+    if (!group) {
+      const now = new Date();
+      group = {
+        id: parsed.patternGroupId, workspaceId: parsed.workspaceId, capability: parsed.capability,
+        state: "candidate", supersededById: null, createdAt: now, updatedAt: now
+      };
+      this.experienceGroups.push(group);
+    }
+    const record: ObservedPatternEvidence = {
+      ...parsed,
+      revokedAt: null,
+      createdAt: new Date()
+    };
+    this.experienceEvidence.push(record);
+    return structuredClone(record);
+  }
+
+  async createExperienceDecisionWithAudit(
+    input: DeclaredDecisionInput
+  ): Promise<DeclaredDecisionEvidence> {
+    const parsed = declaredDecisionInputSchema.parse(input);
+    const actor = this.members.find((item) =>
+      item.id === parsed.actorId && item.workspaceId === parsed.workspaceId
+      && item.role === "admin" && item.disabledAt === null
+    );
+    const group = this.experienceGroups.find((item) =>
+      item.id === parsed.patternGroupId && item.workspaceId === parsed.workspaceId
+    );
+    const basis = this.experienceEvidence.filter((item) =>
+      parsed.basisEvidenceIds.includes(item.id) && item.workspaceId === parsed.workspaceId
+      && item.patternGroupId === parsed.patternGroupId
+    );
+    if (!actor || !group || basis.length !== new Set(parsed.basisEvidenceIds).size) {
+      throw new Error("Experience decision basis is inaccessible or incomplete");
+    }
+    const existing = this.experienceDecisions.find((item) => item.id === parsed.id);
+    if (existing) return structuredClone(existing);
+    const record = { ...parsed, createdAt: new Date() };
+    this.experienceDecisions.push(record);
+    await this.recordAudit({
+      workspaceId: parsed.workspaceId, actorId: parsed.actorId,
+      action: "experience.decision_created", resourceType: "experience", resourceId: parsed.patternGroupId,
+      metadata: { decisionId: parsed.id, decision: parsed.decision }
+    });
+    return structuredClone(record);
+  }
+
+  async recordExperienceOutcome(input: VerifiedOutcomeInput): Promise<VerifiedOutcomeEvidence> {
+    const parsed = verifiedOutcomeInputSchema.parse(input);
+    const group = this.experienceGroups.find((item) =>
+      item.id === parsed.patternGroupId && item.workspaceId === parsed.workspaceId
+    );
+    const actor = this.members.find((item) =>
+      item.id === parsed.recordedBy && item.workspaceId === parsed.workspaceId && item.disabledAt === null
+    );
+    const evidence = parsed.evidenceId === null ? null : this.experienceEvidence.find((item) =>
+      item.id === parsed.evidenceId && item.workspaceId === parsed.workspaceId
+      && item.patternGroupId === parsed.patternGroupId
+    );
+    if (!group || !actor || (parsed.evidenceId !== null && !evidence)) {
+      throw new Error("Experience outcome references an inaccessible group or evidence");
+    }
+    if (evidence && parsed.sourceVersion !== evidence.contentVersion) {
+      throw new Error("Experience outcome source version does not match evidence");
+    }
+    const existing = this.experienceOutcomes.find((item) => item.id === parsed.id);
+    if (existing) return structuredClone(existing);
+    const record = { ...parsed, createdAt: new Date() };
+    this.experienceOutcomes.push(record);
+    return structuredClone(record);
+  }
+
+  async createExperienceReviewItem(input: ExperienceReviewItemInput): Promise<ExperienceReviewItem> {
+    const parsed = experienceReviewItemInputSchema.parse(input);
+    const actor = this.members.find((item) =>
+      item.id === parsed.reportedBy && item.workspaceId === parsed.workspaceId && item.disabledAt === null
+    );
+    const group = this.experienceGroups.find((item) =>
+      item.id === parsed.patternGroupId && item.workspaceId === parsed.workspaceId
+    );
+    const evidence = parsed.evidenceId === null ? null : this.experienceEvidence.find((item) =>
+      item.id === parsed.evidenceId && item.workspaceId === parsed.workspaceId
+      && item.patternGroupId === parsed.patternGroupId
+    );
+    const outcome = parsed.outcomeId === null ? null : this.experienceOutcomes.find((item) =>
+      item.id === parsed.outcomeId && item.workspaceId === parsed.workspaceId
+      && item.patternGroupId === parsed.patternGroupId
+    );
+    const currentProject = parsed.currentProjectId === null ? null : this.projects.find((item) =>
+      item.id === parsed.currentProjectId && item.workspaceId === parsed.workspaceId
+    );
+    if (!actor || !group || (parsed.evidenceId !== null && !evidence)
+      || (parsed.outcomeId !== null && !outcome) || (parsed.currentProjectId !== null && !currentProject)) {
+      throw new Error("Experience review item references inaccessible context");
+    }
+    const existing = this.experienceReviewItems.find((item) =>
+      item.id === parsed.id && item.workspaceId === parsed.workspaceId
+    );
+    if (existing) return structuredClone(existing);
+    const record = { ...parsed, createdAt: new Date() };
+    this.experienceReviewItems.push(record);
+    return structuredClone(record);
+  }
+
+  async listExperienceReviewItems(
+    workspaceId: string,
+    patternGroupId?: string
+  ): Promise<ExperienceReviewItem[]> {
+    return this.experienceReviewItems.filter((item) =>
+      item.workspaceId === workspaceId && (!patternGroupId || item.patternGroupId === patternGroupId)
+    ).sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime()
+      || left.id.localeCompare(right.id)).map((item) => structuredClone(item));
+  }
+
+  async listExperienceLintRecords(workspaceId: string): Promise<ExperienceLintRecord[]> {
+    return this.experienceGroups.filter((group) => group.workspaceId === workspaceId).map((group) => ({
+      id: group.id,
+      state: group.state,
+      supersededById: group.supersededById,
+      evidence: this.experienceEvidence.filter((item) =>
+        item.workspaceId === workspaceId && item.patternGroupId === group.id
+      ).map((item) => {
+        const release = this.releases.find((candidate) =>
+          candidate.workspaceId === workspaceId && candidate.id === item.releaseId
+        );
+        const repositoryId = release?.repositoryId;
+        const latest = repositoryId ? this.sourceSnapshots.filter((snapshot) =>
+          snapshot.workspaceId === workspaceId && snapshot.repositoryId === repositoryId
+          && !this.pendingSnapshotUploadSessions.has(snapshot.id)
+          && !this.pendingSnapshotImportReports.has(snapshot.id)
+        ).sort((left, right) => right.commitTimestamp.getTime() - left.commitTimestamp.getTime()
+          || right.id.localeCompare(left.id))[0] : undefined;
+        return {
+          id: item.id, contentVersion: item.contentVersion,
+          citations: structuredClone(item.citations), revokedAt: item.revokedAt,
+          fresh: !latest || latest.id === item.snapshotId
+        };
+      }),
+      decisions: this.experienceDecisions.filter((item) =>
+        item.workspaceId === workspaceId && item.patternGroupId === group.id
+      ).map((item) => ({
+        id: item.id, decision: item.decision, basisEvidenceIds: [...item.basisEvidenceIds],
+        applicability: structuredClone(item.applicability)
+      })),
+      outcomes: this.experienceOutcomes.filter((item) =>
+        item.workspaceId === workspaceId && item.patternGroupId === group.id
+      ).map((item) => ({
+        id: item.id, evidenceId: item.evidenceId, sourceVersion: item.sourceVersion,
+        authority: item.authority, outcome: item.outcome
+      }))
+    })).sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  async listVisibleExperienceCandidates(input: {
+    workspaceId: string;
+    userId: string;
+    currentProjectId: string;
+  }): Promise<VisibleExperienceCandidate[]> {
+    const projects = await this.listAccessibleProjects(input.workspaceId, input.userId, { limit: 100 });
+    const accessibleProjectIds = new Set(projects.filter((project) =>
+      project.archivedAt === null && project.id !== input.currentProjectId
+    ).map((project) => project.id));
+    return this.experienceGroups.filter((group) => group.workspaceId === input.workspaceId).flatMap((group) => {
+      const evidence = this.experienceEvidence.filter((item) =>
+        item.workspaceId === input.workspaceId && item.patternGroupId === group.id
+        && item.revokedAt === null && accessibleProjectIds.has(item.projectId)
+      ).flatMap((item) => {
+        const sourceRelease = this.releases.find((release) =>
+          release.id === item.releaseId && release.workspaceId === input.workspaceId
+          && release.publishedAt !== null
+        );
+        if (!sourceRelease?.publishedAt) return [];
+        const repository = this.repositories.find((candidate) =>
+          candidate.id === sourceRelease.repositoryId && candidate.workspaceId === input.workspaceId
+          && candidate.projectId === item.projectId && candidate.archivedAt === null
+        );
+        if (!repository) return [];
+        const snapshots = this.sourceSnapshots.filter((snapshot) =>
+          snapshot.workspaceId === input.workspaceId && snapshot.repositoryId === repository.id
+        ).sort((left, right) => right.commitTimestamp.getTime() - left.commitTimestamp.getTime()
+          || right.id.localeCompare(left.id));
+        return [{
+          id: item.id, projectId: item.projectId, releaseId: item.releaseId,
+          sourceEligibility: item.sourceEligibility, title: item.title,
+          observedFact: item.observedFact, contentVersion: item.contentVersion,
+          citations: item.citations, releasePublishedAt: sourceRelease.publishedAt,
+          fresh: snapshots.length === 0 || snapshots[0]!.id === item.snapshotId
+        }];
+      });
+      if (evidence.length === 0) return [];
+      const visibleEvidenceIds = new Set(evidence.map((item) => item.id));
+      const decisions = this.experienceDecisions.filter((decision) =>
+        decision.workspaceId === input.workspaceId && decision.patternGroupId === group.id
+        && decision.basisEvidenceIds.every((id) => visibleEvidenceIds.has(id))
+      ).map((decision) => ({
+        id: decision.id, decision: decision.decision,
+        basisEvidenceIds: [...decision.basisEvidenceIds], applicability: structuredClone(decision.applicability),
+        createdAt: decision.createdAt
+      }));
+      const outcomes = this.experienceOutcomes.filter((outcome) =>
+        outcome.workspaceId === input.workspaceId && outcome.patternGroupId === group.id
+        && outcome.evidenceId !== null && visibleEvidenceIds.has(outcome.evidenceId)
+      ).map((outcome) => ({
+        authority: outcome.authority, outcome: outcome.outcome,
+        evidenceId: outcome.evidenceId, sourceVersion: outcome.sourceVersion
+      }));
+      const standards = this.workspaceStandards.filter((standard) =>
+        standard.workspaceId === input.workspaceId && standard.patternGroupId === group.id
+        && standard.supersededById === null
+      ).map((standard) => ({
+        id: standard.id, title: standard.title, body: standard.body, createdAt: standard.createdAt
+      }));
+      const visibleDecisionIds = new Set(decisions.map((item) => item.id));
+      const reviews = this.experienceReviews.filter((review) =>
+        review.workspaceId === input.workspaceId && review.patternGroupId === group.id
+        && review.basisEvidenceIds.every((id) => visibleEvidenceIds.has(id))
+        && (review.decisionId === null || visibleDecisionIds.has(review.decisionId))
+      ).map((review) => ({
+        id: review.id, fromState: review.fromState, toState: review.toState,
+        basisEvidenceIds: [...review.basisEvidenceIds], decisionId: review.decisionId,
+        createdAt: review.createdAt
+      }));
+      return [{
+        experienceId: group.id, capability: group.capability, state: group.state,
+        supersededById: group.supersededById, evidence, decisions, outcomes, standards, reviews
+      }];
+    }).sort((left, right) => left.experienceId.localeCompare(right.experienceId));
+  }
+
+  async transitionExperienceWithAudit(input: ExperienceTransitionInput): Promise<ExperienceReviewEvent> {
+    const group = this.experienceGroups.find((item) =>
+      item.id === input.patternGroupId && item.workspaceId === input.workspaceId
+    );
+    const actor = this.members.find((item) =>
+      item.id === input.actorId && item.workspaceId === input.workspaceId
+      && item.role === "admin" && item.disabledAt === null
+    );
+    if (!group || !actor) throw new Error("Experience transition is not authorized");
+    if (input.supersededById === group.id) throw new Error("Experience cannot supersede itself");
+    if (input.supersededById && !this.experienceGroups.some((item) =>
+      item.id === input.supersededById && item.workspaceId === input.workspaceId
+      && item.state !== "deprecated"
+    )) throw new Error("Superseding experience is unavailable");
+    const evidence = this.experienceEvidence.filter((item) =>
+      item.workspaceId === input.workspaceId && item.patternGroupId === input.patternGroupId
+    );
+    const decisions = this.experienceDecisions.filter((item) =>
+      item.workspaceId === input.workspaceId && item.patternGroupId === input.patternGroupId
+    );
+    transitionExperience({ state: group.state, evidence, decisions }, input);
+    const record = experienceReviewEventSchema.parse({
+      id: randomUUID(), workspaceId: input.workspaceId, patternGroupId: input.patternGroupId,
+      actorId: input.actorId, fromState: group.state, toState: input.to, reason: input.reason,
+      basisEvidenceIds: [...new Set(input.basisEvidenceIds)], decisionId: input.decisionId,
+      createdAt: new Date()
+    });
+    group.state = input.to;
+    group.supersededById = input.supersededById ?? group.supersededById;
+    group.updatedAt = new Date();
+    this.experienceReviews.push(record);
+    await this.recordAudit({
+      workspaceId: input.workspaceId, actorId: input.actorId,
+      action: "experience.transitioned", resourceType: "experience", resourceId: input.patternGroupId,
+      metadata: { fromState: record.fromState, toState: record.toState, reviewId: record.id }
+    });
+    return structuredClone(record);
+  }
+
+  async listExperienceReviewEvents(
+    workspaceId: string,
+    patternGroupId: string
+  ): Promise<ExperienceReviewEvent[]> {
+    return this.experienceReviews.filter((item) =>
+      item.workspaceId === workspaceId && item.patternGroupId === patternGroupId
+    ).sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())
+      .map((item) => structuredClone(item));
+  }
+
+  async createWorkspaceStandardWithAudit(input: WorkspaceStandardInput): Promise<WorkspaceStandard> {
+    const parsed = workspaceStandardInputSchema.parse(input);
+    const actor = this.members.find((item) =>
+      item.id === parsed.authoredBy && item.workspaceId === parsed.workspaceId
+      && item.role === "admin" && item.disabledAt === null
+    );
+    const group = this.experienceGroups.find((item) =>
+      item.id === parsed.patternGroupId && item.workspaceId === parsed.workspaceId
+    );
+    if (!actor || !group) throw new Error("Workspace standard is not authorized");
+    if (parsed.supersededById && !this.workspaceStandards.some((item) =>
+      item.id === parsed.supersededById && item.workspaceId === parsed.workspaceId
+    )) throw new Error("Superseding workspace standard is unavailable");
+    const existing = this.workspaceStandards.find((item) => item.id === parsed.id);
+    if (existing) return structuredClone(existing);
+    const record = { ...parsed, createdAt: new Date() };
+    this.workspaceStandards.push(record);
+    await this.recordAudit({
+      workspaceId: parsed.workspaceId, actorId: parsed.authoredBy,
+      action: "experience.standard_created", resourceType: "experience", resourceId: parsed.patternGroupId,
+      metadata: { standardId: parsed.id }
+    });
+    return structuredClone(record);
+  }
+
+  async listExperienceProjection(input: ExperienceProjectionInput): Promise<ExperienceProjection[]> {
+    const accessible = new Set((await this.listAccessibleProjects(input.workspaceId, input.userId, { limit: 100 }))
+      .filter((project) => project.archivedAt === null && project.id !== input.currentProjectId)
+      .map((project) => project.id));
+    const query = input.query.trim().toLocaleLowerCase();
+    return this.experienceGroups.filter((group) => group.workspaceId === input.workspaceId).flatMap((group) => {
+      const evidence = this.experienceEvidence.filter((item) =>
+        item.workspaceId === input.workspaceId && item.patternGroupId === group.id
+        && accessible.has(item.projectId) && item.revokedAt === null
+        && this.releases.some((release) =>
+          release.id === item.releaseId && release.workspaceId === input.workspaceId
+          && release.publishedAt !== null
+        )
+        && !this.experienceOutcomes.some((outcome) =>
+          outcome.workspaceId === input.workspaceId && outcome.evidenceId === item.id
+          && outcome.sourceVersion === item.contentVersion
+          && (outcome.authority === "signed_ci" && ["failed", "rolled_back"].includes(outcome.outcome)
+            || outcome.authority === "admin_confirmed" && outcome.outcome === "rolled_back")
+        )
+      ).sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime()
+        || left.id.localeCompare(right.id));
+      if (evidence.length === 0) return [];
+      const haystack = evidence.map((item) => `${item.title}\n${item.observedFact}`).join("\n").toLocaleLowerCase();
+      if (query && !haystack.includes(query)) return [];
+      return [{
+        experienceId: group.id,
+        capability: group.capability,
+        state: group.state,
+        title: evidence[0]!.title,
+        observedFacts: evidence.map((item) => item.observedFact),
+        evidenceCount: evidence.length
+      }];
+    }).sort((left, right) => left.title.localeCompare(right.title));
   }
 
   async knowledgeMetadata(workspaceId: string, releaseId: string): Promise<KnowledgeMetadata> {

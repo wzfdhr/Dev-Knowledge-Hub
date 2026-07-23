@@ -46,7 +46,7 @@ export function ProjectLayout({ api, workspaceRole }: { api: ApiClient; workspac
   return <ProjectContext.Provider value={{ project, projectId }}>
     <div className="project-workbench">
       <header className="project-bar">
-        <div><p className="eyebrow">项目工作台</p><h1>{project.name}</h1></div>
+        <div><p className="eyebrow">项目工作台</p><h2>{project.name}</h2></div>
         <div className="project-meta"><span>{project.slug}</span><span>团队知识持续更新</span></div>
       </header>
       <nav className="project-tabs" aria-label="项目导航">

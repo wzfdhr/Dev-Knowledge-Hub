@@ -3,6 +3,10 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 
 import { frontendIrSchema, type FrontendIR } from "../../../shared/frontend-ir.js";
+import {
+  frontendProjectProfileSchema,
+  type FrontendProjectProfile
+} from "../../../shared/frontend-project-profile.js";
 
 import type { BuildRecord } from "../build-service.js";
 import { type ArtifactStore } from "../pipeline/artifact-store.js";
@@ -32,6 +36,10 @@ import type {
 import {
   ARTIFACT_KINDS,
   EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+  FRONTEND_PROJECT_PROFILE_ARTIFACT_KIND,
+  FRONTEND_PROJECT_PROFILE_SCHEMA_VERSION,
+  FRONTEND_PATTERN_CANDIDATES_ARTIFACT_KIND,
+  FRONTEND_PATTERN_CANDIDATES_SCHEMA_VERSION,
   FRONTEND_V2_GRAPH_SCHEMA_VERSION,
   FRONTEND_V2_IR_SCHEMA_VERSION,
   assertFrontendCandidateValid,
@@ -51,6 +59,14 @@ import { generateFrontendKnowledge } from "./knowledge-generator.js";
 import { assessFrontendKnowledgeQuality } from "./quality-assessment.js";
 import { frontendSourceReferenceIsValid, loadFrontendSourceDescriptors } from "./reference-validation.js";
 import { buildFrontendSearchDocuments } from "./search.js";
+import { deriveFrontendProjectProfile } from "./project-profile.js";
+import type { FrontendProjectManifest } from "./project-manifest.js";
+import { sourceProvenanceForSnapshotIdentity } from "../../source-provenance.js";
+import {
+  extractObservedPatterns,
+  frontendPatternCandidatesSchema,
+  type FrontendPatternCandidates
+} from "./patterns.js";
 
 const SHADOW_FAMILIES = ["knowledge-v1", "frontend-v2"] as const;
 const UPSTREAM_STAGES: Record<Exclude<BuildStage, "convert">, readonly BuildStage[]> = {
@@ -307,6 +323,40 @@ async function frontendUpstreamValue(
   throw new Error(`Frontend shadow upstream ${stage} artifact is unavailable`);
 }
 
+async function frontendProjectProfileArtifact(
+  input: { store: ShadowStore; artifactStore: ArtifactStore },
+  manifestIds: readonly string[]
+): Promise<{ manifest: ArtifactManifest; value: FrontendProjectProfile }> {
+  for (const artifactId of manifestIds) {
+    const manifest = await input.store.findArtifactById(artifactId);
+    if (manifest?.kind === FRONTEND_PROJECT_PROFILE_ARTIFACT_KIND
+      && manifest.schemaVersion === FRONTEND_PROJECT_PROFILE_SCHEMA_VERSION) {
+      return {
+        manifest,
+        value: frontendProjectProfileSchema.parse(await input.artifactStore.getJson(manifest))
+      };
+    }
+  }
+  throw new Error("Frontend project profile artifact is unavailable");
+}
+
+async function frontendPatternCandidatesArtifact(
+  input: { store: ShadowStore; artifactStore: ArtifactStore },
+  manifestIds: readonly string[]
+): Promise<{ manifest: ArtifactManifest; value: FrontendPatternCandidates }> {
+  for (const artifactId of manifestIds) {
+    const manifest = await input.store.findArtifactById(artifactId);
+    if (manifest?.kind === FRONTEND_PATTERN_CANDIDATES_ARTIFACT_KIND
+      && manifest.schemaVersion === FRONTEND_PATTERN_CANDIDATES_SCHEMA_VERSION) {
+      return {
+        manifest,
+        value: frontendPatternCandidatesSchema.parse(await input.artifactStore.getJson(manifest))
+      };
+    }
+  }
+  throw new Error("Frontend pattern candidates artifact is unavailable");
+}
+
 function irFromGraph(value: ReturnType<typeof buildFrontendGraph>): FrontendIR {
   return {
     schemaVersion: 2,
@@ -494,6 +544,8 @@ export function createFrontendShadowStageExecutor(input: {
       sourceStorageMode
     };
     let value: unknown;
+    let projectProfile: FrontendProjectProfile | null = null;
+    let patternCandidates: FrontendPatternCandidates | null = null;
     switch (run.stage) {
       case "extract":
         value = {
@@ -513,11 +565,39 @@ export function createFrontendShadowStageExecutor(input: {
         break;
       case "synthesize": {
         const graph = frontendGraphV2Schema.parse(await frontendUpstreamValue(input, upstreamIds, "graph"));
+        const runs = await input.store.listPipelineStageRuns(run.workspaceId, run.projectId, run.buildId);
+        const extract = await frontendUpstreamValue(
+          input,
+          completedRun(runs, "extract").outputManifestIds,
+          "extract"
+        ) as { projectAnalysis?: { projectManifest?: FrontendProjectManifest } };
+        const manifest = extract.projectAnalysis?.projectManifest ?? {
+          workspace: null,
+          packages: [],
+          tsconfigs: [],
+          ignoredPaths: []
+        };
+        projectProfile = deriveFrontendProjectProfile({
+          ir: irFromGraph(graph),
+          manifest,
+          sourceProvenance: sourceProvenanceForSnapshotIdentity(snapshot)
+        });
         value = generateFrontendKnowledge(irFromGraph(graph));
         break;
       }
       case "index": {
         const knowledge = await frontendUpstreamValue(input, upstreamIds, "synthesize") as ReturnType<typeof generateFrontendKnowledge>;
+        const profile = await frontendProjectProfileArtifact(input, upstreamIds);
+        const runs = await input.store.listPipelineStageRuns(run.workspaceId, run.projectId, run.buildId);
+        const graphRun = completedRun(runs, "graph");
+        const extractRun = completedRun(runs, "extract");
+        const graph = frontendGraphV2Schema.parse(await frontendUpstreamValue(
+          input, graphRun.outputManifestIds, "graph"
+        ));
+        const ir = frontendIrSchema.parse(await frontendUpstreamValue(
+          input, extractRun.outputManifestIds, "extract"
+        ));
+        patternCandidates = extractObservedPatterns({ profile: profile.value, graph, ir });
         value = {
           schemaVersion: 2,
           snapshotId: run.snapshotId,
@@ -551,6 +631,17 @@ export function createFrontendShadowStageExecutor(input: {
           documents: Array<{ citations: Array<{ snapshotId: string; path: string; startLine: number; endLine: number; blobHash: string }> }>;
         };
         const quality = await frontendUpstreamValue(input, upstreamIds, "lint") as ReturnType<typeof assessFrontendKnowledgeQuality>;
+        const profile = await frontendProjectProfileArtifact(input, upstreamIds);
+        const patterns = await frontendPatternCandidatesArtifact(input, upstreamIds);
+        if (profile.value.snapshotId !== run.snapshotId
+          || profile.value.analyzerManifestDigest !== analyzerManifestDigest) {
+          throw new Error("Frontend project profile provenance does not match validation");
+        }
+        if (patterns.value.snapshotId !== run.snapshotId
+          || patterns.value.profileDigest !== profile.value.profileDigest
+          || patterns.value.analyzerManifestDigest !== analyzerManifestDigest) {
+          throw new Error("Frontend pattern candidate provenance does not match validation");
+        }
         const graphReferences = [
           ...graph.nodes.flatMap((node) => node.sourceRefs),
           ...graph.edges.flatMap((edge) => edge.sourceRefs)
@@ -587,7 +678,10 @@ export function createFrontendShadowStageExecutor(input: {
           issueCount: quality.issues.length,
           graphReferenceCount: graphReferences.length,
           checkedReferenceCount: references.length,
-          invalidReferenceCount
+          invalidReferenceCount,
+          projectProfileArtifactId: profile.manifest.id,
+          projectProfileDigest: profile.value.profileDigest,
+          patternCandidatesArtifactId: patterns.manifest.id
         };
         break;
       }
@@ -604,6 +698,9 @@ export function createFrontendShadowStageExecutor(input: {
             ...baseValue,
             irSchemaVersion: FRONTEND_V2_IR_SCHEMA_VERSION,
             graphSchemaVersion: FRONTEND_V2_GRAPH_SCHEMA_VERSION,
+            projectProfileArtifactId: validation.projectProfileArtifactId,
+            projectProfileDigest: validation.projectProfileDigest,
+            patternCandidatesArtifactId: validation.patternCandidatesArtifactId,
             artifacts: await packageArtifacts(input.store, run, legacyManifest, sourceStorageMode)
           };
         break;
@@ -623,9 +720,40 @@ export function createFrontendShadowStageExecutor(input: {
       value,
       actorId: input.actorId
     });
+    const profileArtifact = projectProfile ? await input.artifactStore.putJson({
+      manifest: {
+        id: randomUUID(), workspaceId: run.workspaceId, projectId: run.projectId,
+        snapshotId: run.snapshotId, buildId: run.buildId, stage: "synthesize",
+        kind: FRONTEND_PROJECT_PROFILE_ARTIFACT_KIND,
+        schemaVersion: FRONTEND_PROJECT_PROFILE_SCHEMA_VERSION,
+        inputDigest: run.inputDigest, contentDigest: "0".repeat(64), storageKey: "pending",
+        sourceRefs: projectProfile.sourceRefs, producer: "deterministic", createdAt: new Date().toISOString()
+      },
+      value: projectProfile,
+      actorId: input.actorId
+    }) : null;
+    const patternArtifact = patternCandidates ? await input.artifactStore.putJson({
+      manifest: {
+        id: randomUUID(), workspaceId: run.workspaceId, projectId: run.projectId,
+        snapshotId: run.snapshotId, buildId: run.buildId, stage: "index",
+        kind: FRONTEND_PATTERN_CANDIDATES_ARTIFACT_KIND,
+        schemaVersion: FRONTEND_PATTERN_CANDIDATES_SCHEMA_VERSION,
+        inputDigest: run.inputDigest, contentDigest: "0".repeat(64), storageKey: "pending",
+        sourceRefs: patternCandidates.candidates.flatMap((candidate) => candidate.sourceRefs),
+        producer: "deterministic", createdAt: new Date().toISOString()
+      },
+      value: patternCandidates,
+      actorId: input.actorId
+    }) : null;
     return {
-      outputManifestIds: [legacyManifest.id, companion.manifest.id],
+      outputManifestIds: [
+        legacyManifest.id,
+        companion.manifest.id,
+        ...(profileArtifact ? [profileArtifact.manifest.id] : []),
+        ...(patternArtifact ? [patternArtifact.manifest.id] : [])
+      ],
       reused: legacyResult.reused === true && companion.reused
+        && (profileArtifact?.reused ?? true) && (patternArtifact?.reused ?? true)
     };
   };
 }

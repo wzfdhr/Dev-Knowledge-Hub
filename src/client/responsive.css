@@ -508,4 +508,76 @@
   .source-options .ant-btn {
     width: 100%;
   }
+
+  .page-header-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .experience-view-switch {
+    overflow-x: auto;
+  }
+
+  .experience-state-band,
+  .experience-list article > header,
+  .experience-list article > footer,
+  .experience-reference > div:first-child {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .experience-review-layout,
+  .codex-solution-form,
+  .experience-impact-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .experience-review-layout > aside {
+    max-height: 240px;
+    padding-right: 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    overflow-y: auto;
+  }
+
+  .experience-review-layout > section {
+    padding: 22px 0;
+  }
+
+  .experience-context-band dl > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 3px;
+  }
+
+  .experience-context-band,
+  .codex-solution-preview {
+    min-width: 0;
+  }
+
+  .experience-citations span,
+  .experience-context-band code {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+}
+
+@media (max-width: 430px) {
+  .workspace-experiences-page,
+  .project-codex-page {
+    overflow-x: clip;
+  }
+
+  .experience-review-actions .button,
+  .experience-lint-bar .button,
+  .codex-solution-form .ant-btn,
+  .page-header-actions label,
+  .page-header-actions select,
+  .page-header-actions .button {
+    width: 100%;
+  }
+
+  .experience-lint-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
 }

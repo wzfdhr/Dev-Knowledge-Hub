@@ -1,10 +1,12 @@
 import type {
-  ApiErrorShape, Build, PipelineStageRun, Feedback, McpConnection, McpToken, KnowledgePageRecord, KnowledgeKernelComparison,
-  ArchivedRepository, KnowledgeMetadata, ProjectKnowledgeQuality, Release, Repository, RepositoryStatus, SearchResult, Session, SnapshotChangeSummary, SnapshotSummary, SourceExcerpt,
-  UploadSnapshotSummary, ImportReport, TeamMember, ProjectMember, Project, ProjectSummary, ProjectActivity, CodexConnectionPack,
-  Remediation, RemediationEvent, RemediationState,
-  WorkspaceOverview, WorkspaceSearchResult, MfaStatus, ProjectGraphFormat, ProjectGraphResponse,
-  FrontendPreviewResponse, GraphSourceRef, ImportProgress
+  ApiErrorShape, ArchivedRepository, Build, CodexConnectionPack, ExperienceReviewItemDto,
+  Feedback, FrontendExperienceLintResponse, FrontendPreviewResponse, FrontendSolutionContext, GraphSourceRef, ImportProgress,
+  ImportReport, KnowledgeKernelComparison, KnowledgeMetadata, KnowledgePageRecord, McpConnection,
+  McpToken, MfaStatus, PipelineStageRun, Project, ProjectActivity, ProjectGraphFormat,
+  ProjectGraphResponse, ProjectKnowledgeQuality, ProjectMember, ProjectSummary, Release, Remediation,
+  RemediationEvent, RemediationState, Repository, RepositoryStatus, SearchResult, Session,
+  SnapshotChangeSummary, SnapshotSummary, SourceExcerpt, TeamMember, UploadSnapshotSummary,
+  WorkspaceExperienceLibraryResponse, WorkspaceMcpToken, WorkspaceOverview, WorkspaceSearchResult
 } from "./types";
 import type { ModelConfig, ModelProvider } from "./types";
 import type { AgentFeedbackStatus } from "../../server/persistence/store";
@@ -166,6 +168,30 @@ export interface ApiClient {
   createMcpToken(name: string, projectId: string, scopes?: McpToken["scopes"]): Promise<McpToken & { token: string }>;
   revokeMcpToken(id: string): Promise<{ token: McpToken }>;
   rotateMcpToken(id: string): Promise<{ previous: McpToken; replacement: McpToken; token: string }>;
+  getWorkspaceMcpConnection(): Promise<McpConnection>;
+  listWorkspaceMcpTokens(pagination: PaginationParams): Promise<{ tokens: WorkspaceMcpToken[] } & PaginatedResponse>;
+  createWorkspaceMcpToken(
+    name: string,
+    scopes?: WorkspaceMcpToken["scopes"]
+  ): Promise<WorkspaceMcpToken & { token: string }>;
+  revokeWorkspaceMcpToken(id: string): Promise<{ token: WorkspaceMcpToken }>;
+  rotateWorkspaceMcpToken(id: string): Promise<{
+    previous: WorkspaceMcpToken; replacement: WorkspaceMcpToken; token: string;
+  }>;
+  listWorkspaceExperiences(input: {
+    currentProjectId?: string;
+    query?: string;
+  }): Promise<WorkspaceExperienceLibraryResponse>;
+  listExperienceReviewItems(): Promise<{ reviewItems: ExperienceReviewItemDto[] }>;
+  runExperienceLint(): Promise<FrontendExperienceLintResponse>;
+  previewFrontendSolution(
+    projectId: string,
+    input: { task: string; changedPaths?: string[] }
+  ): Promise<{ context: FrontendSolutionContext }>;
+  reviewExperience(
+    experienceId: string,
+    input: { action: string; reason: string; basisEvidenceIds: string[] }
+  ): Promise<unknown>;
   getModelConfig(): Promise<{ config: ModelConfig | null }>;
   updateModelConfig(input: { provider: ModelProvider; model: string; apiKey: string }): Promise<{ config: ModelConfig }>;
   getMfaStatus(): Promise<MfaStatus>;
@@ -478,6 +504,29 @@ export const api: ApiClient = {
   createMcpToken: (name, projectId, scopes) => request("/api/mcp/tokens", { method: "POST", body: json({ name, projectId, ...(scopes ? { scopes } : {}) }) }),
   revokeMcpToken: (id) => request(`/api/mcp/tokens/${id}/revoke`, { method: "POST" }),
   rotateMcpToken: (id) => request(`/api/mcp/tokens/${encodeURIComponent(id)}/rotate`, { method: "POST" }),
+  getWorkspaceMcpConnection: () => request("/api/workspace/mcp/connection"),
+  listWorkspaceMcpTokens: (pagination) => request(listPath("/api/workspace/mcp/tokens", pagination)),
+  createWorkspaceMcpToken: (name, scopes) => request("/api/workspace/mcp/tokens", {
+    method: "POST", body: json({ name, ...(scopes ? { scopes } : {}) })
+  }),
+  revokeWorkspaceMcpToken: (id) => request(`/api/workspace/mcp/tokens/${encodeURIComponent(id)}/revoke`, { method: "POST" }),
+  rotateWorkspaceMcpToken: (id) => request(`/api/workspace/mcp/tokens/${encodeURIComponent(id)}/rotate`, { method: "POST" }),
+  listWorkspaceExperiences: (input) => {
+    const params = new URLSearchParams();
+    if (input.currentProjectId) params.set("currentProjectId", input.currentProjectId);
+    if (input.query) params.set("query", input.query);
+    return request(`/api/knowledge/experiences${params.size ? `?${params}` : ""}`);
+  },
+  listExperienceReviewItems: () => request("/api/knowledge/experience-review-items"),
+  runExperienceLint: () => request("/api/knowledge/experience-lint", { method: "POST" }),
+  previewFrontendSolution: (projectId, input) => request(
+    `/api/projects/${encodeURIComponent(projectId)}/frontend-solution-context`,
+    { method: "POST", body: json(input) }
+  ),
+  reviewExperience: (experienceId, input) => request(
+    `/api/knowledge/experiences/${encodeURIComponent(experienceId)}/reviews`,
+    { method: "POST", body: json({ ...input, decisionId: null, supersededById: null }) }
+  ),
   getModelConfig: () => request("/api/settings/model"),
   updateModelConfig: (input) => request("/api/settings/model", { method: "PUT", body: json(input) }),
   getMfaStatus: () => request("/api/settings/mfa"),

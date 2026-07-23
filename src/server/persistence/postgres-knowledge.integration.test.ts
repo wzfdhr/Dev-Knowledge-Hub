@@ -11,7 +11,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { Pool, type PoolClient } from "pg";
 import { afterAll, describe, expect, test, vi } from "vitest";
 
-import { runMigrations } from "../../db/migrate";
+import { runMigrations as runAllMigrations } from "../../db/migrate";
 import { requireIsolatedTestDatabase } from "../../test/integration-database";
 import { buildServer } from "../app";
 import { syncRepository } from "../git/snapshot";
@@ -44,6 +44,7 @@ import {
   EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
   createVerifiedFrontendReleaseDraft
 } from "../knowledge/frontend/compatibility";
+import { frontendProjectProfileDigest } from "../../shared/frontend-project-profile";
 import {
   createFrontendShadowStageExecutor,
   createFrontendShadowStageInputPlanner,
@@ -65,13 +66,120 @@ const databaseUrl = process.env.TEST_DATABASE_URL
 const integration = databaseUrl ? describe : describe.skip;
 let pool: Pool | null = null;
 let temporaryRoot: string | null = null;
+let compatibilityMigrationRoot: string | null = null;
 const retrievalFixtureRoots: string[] = [];
 const execute = promisify(execFile);
 
-function schemaScopedDatabaseUrl(connectionString: string, schema: string): string {
+async function runMigrations(target: Pool, directory?: string): Promise<string[]> {
+  if (directory) return runAllMigrations(target, directory);
+  if (!compatibilityMigrationRoot) {
+    compatibilityMigrationRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-forward-compatible-migrations-"));
+    const names = (await readdir(path.resolve("drizzle")))
+      .filter((name) => name.endsWith(".sql") && name !== "0035_source_blobs_contract.sql");
+    await Promise.all(names.map((name) => cp(
+      path.resolve("drizzle", name),
+      path.join(compatibilityMigrationRoot!, name)
+    )));
+  }
+  return runAllMigrations(target, compatibilityMigrationRoot);
+}
+
+function schemaScopedDatabaseUrl(
+  connectionString: string,
+  schema: string,
+  settings: Record<string, string> = {}
+): string {
   const url = new URL(connectionString);
-  url.searchParams.set("options", `-c search_path=${schema},public`);
+  const options = [`-c search_path=${schema},public`];
+  for (const [name, value] of Object.entries(settings)) options.push(`-c ${name}=${value}`);
+  url.searchParams.set("options", options.join(" "));
   return url.toString();
+}
+
+const sourceBlobContractMigrationName = "0035_source_blobs_contract.sql";
+
+async function createSourceBlobContractFixture() {
+  if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required");
+  pool ??= new Pool({ connectionString: databaseUrl });
+  const sharedPool = pool;
+  const schema = `source_blob_contract_${randomUUID().replaceAll("-", "")}`;
+  const contractRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-contract-"));
+  const scopedPool = new Pool({ connectionString: schemaScopedDatabaseUrl(databaseUrl, schema) });
+  const authorizedPool = new Pool({
+    connectionString: schemaScopedDatabaseUrl(databaseUrl, schema, {
+      "devkh.source_blob_contract_authorized": "true"
+    })
+  });
+
+  try {
+    await sharedPool.query(`CREATE SCHEMA ${schema}`);
+    await runMigrations(scopedPool);
+    const store = new PostgresAppStore(scopedPool);
+    const setup = await store.createInitialSetup("source-blob-contract@example.com", "hash");
+    const repository = await store.createRepository(
+      setup!.workspace.id, { kind: "upload", name: "Contract source" }
+    );
+    const snapshotId = randomUUID();
+    const sourceBlobId = randomUUID();
+    const contentHash = "a".repeat(64);
+    await scopedPool.query(
+      `INSERT INTO source_snapshots
+         (id, workspace_id, repository_id, commit_sha, ref, commit_timestamp, storage_path,
+          source_kind, git_commit_sha, content_version, attestation,
+          linked_git_commit_sha, remote_identity_digest)
+       VALUES ($1, $2, $3, $4, 'upload', now(), '/tmp/source-blob-contract',
+          'upload', NULL, $4, 'unverified', NULL, NULL)`,
+      [snapshotId, setup!.workspace.id, repository!.id, "b".repeat(40)]
+    );
+    await scopedPool.query(
+      `INSERT INTO source_blobs
+         (id, workspace_id, content_hash, generation, byte_size, status, storage_key)
+       VALUES ($1, $2, $3, 1, 12, 'active', $4)`,
+      [sourceBlobId, setup!.workspace.id, contentHash, `blobs/${setup!.workspace.id}/aa/${contentHash}/1`]
+    );
+    const sourceFileId = randomUUID();
+    await scopedPool.query(
+      `INSERT INTO source_files
+         (id, workspace_id, snapshot_id, path, content_hash, byte_size, source_blob_id)
+       VALUES ($1, $2, $3, 'src/index.ts', $4, 12, $5)`,
+      [sourceFileId, setup!.workspace.id, snapshotId, contentHash, sourceBlobId]
+    );
+    await cp(
+      path.resolve("drizzle", sourceBlobContractMigrationName),
+      path.join(contractRoot, sourceBlobContractMigrationName)
+    );
+
+    return {
+      authorizedPool,
+      contentHash,
+      contractRoot,
+      scopedPool,
+      sourceBlobId,
+      sourceFileId,
+      async close() {
+        await authorizedPool.end();
+        await scopedPool.end();
+        await sharedPool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
+        await rm(contractRoot, { recursive: true, force: true });
+      }
+    };
+  } catch (error) {
+    await authorizedPool.end();
+    await scopedPool.end();
+    await sharedPool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
+    await rm(contractRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function expectSourceBlobContractRollback(scopedPool: Pool): Promise<void> {
+  expect((await scopedPool.query(
+    "SELECT 1 FROM schema_migrations WHERE name = $1", [sourceBlobContractMigrationName]
+  )).rows).toHaveLength(0);
+  expect((await scopedPool.query<{ is_nullable: string }>(
+    `SELECT is_nullable FROM information_schema.columns
+     WHERE table_schema = current_schema() AND table_name = 'source_files' AND column_name = 'source_blob_id'`
+  )).rows[0]?.is_nullable).toBe("YES");
 }
 
 class RecordedPipelineQueue implements PipelineStageJobQueue {
@@ -662,6 +770,161 @@ integration("PostgreSQL cited knowledge integration", () => {
     );
     expect(extension.rows).toHaveLength(1);
   }, 30_000);
+
+  test(databaseUrl
+    ? "rejects a wrong-workspace source blob reference transactionally"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    const fixture = await createSourceBlobContractFixture();
+    try {
+      const wrongWorkspaceId = randomUUID();
+      const wrongWorkspaceBlobId = randomUUID();
+      await fixture.scopedPool.query(
+        "INSERT INTO workspaces (id, name, slug) VALUES ($1, 'Wrong workspace', $2)",
+        [wrongWorkspaceId, `wrong-workspace-${randomUUID()}`]
+      );
+      await fixture.scopedPool.query(
+        `INSERT INTO source_blobs
+           (id, workspace_id, content_hash, generation, byte_size, status, storage_key)
+         VALUES ($1, $2, $3, 1, 12, 'active', $4)`,
+        [
+          wrongWorkspaceBlobId,
+          wrongWorkspaceId,
+          fixture.contentHash,
+          `blobs/${wrongWorkspaceId}/aa/${fixture.contentHash}/1`
+        ]
+      );
+      await fixture.scopedPool.query(
+        "ALTER TABLE source_files DROP CONSTRAINT source_files_source_blob_workspace_fk"
+      );
+      await fixture.scopedPool.query(
+        "UPDATE source_files SET source_blob_id = $2 WHERE id = $1",
+        [fixture.sourceFileId, wrongWorkspaceBlobId]
+      );
+
+      await expect(runAllMigrations(fixture.authorizedPool, fixture.contractRoot))
+        .rejects.toThrow(/identity mismatch/i);
+      await expectSourceBlobContractRollback(fixture.scopedPool);
+    } finally {
+      await fixture.close();
+    }
+  }, 60_000);
+
+  test(databaseUrl
+    ? "rejects an invalid source blob generation transactionally"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    const fixture = await createSourceBlobContractFixture();
+    try {
+      await fixture.scopedPool.query(
+        "ALTER TABLE source_blobs DROP CONSTRAINT source_blobs_generation_check"
+      );
+      await fixture.scopedPool.query(
+        "UPDATE source_blobs SET generation = 0 WHERE id = $1",
+        [fixture.sourceBlobId]
+      );
+
+      await expect(runAllMigrations(fixture.authorizedPool, fixture.contractRoot))
+        .rejects.toThrow(/identity mismatch/i);
+      await expectSourceBlobContractRollback(fixture.scopedPool);
+    } finally {
+      await fixture.close();
+    }
+  }, 60_000);
+
+  test(databaseUrl
+    ? "fails closed before atomically contracting verified source blob references"
+    : "skipped explicitly: TEST_DATABASE_URL is not configured", async () => {
+    if (!databaseUrl) return;
+    pool ??= new Pool({ connectionString: databaseUrl });
+    const schema = `source_blob_contract_${randomUUID().replaceAll("-", "")}`;
+    const contractRoot = await mkdtemp(path.join(os.tmpdir(), "devkh-source-blob-contract-"));
+    await pool.query(`CREATE SCHEMA ${schema}`);
+    const scopedPool = new Pool({ connectionString: schemaScopedDatabaseUrl(databaseUrl, schema) });
+    const authorizedPool = new Pool({
+      connectionString: schemaScopedDatabaseUrl(databaseUrl, schema, {
+        "devkh.source_blob_contract_authorized": "true"
+      })
+    });
+    try {
+      await runMigrations(scopedPool);
+      const store = new PostgresAppStore(scopedPool);
+      const setup = await store.createInitialSetup("source-blob-contract@example.com", "hash");
+      const repository = await store.createRepository(
+        setup!.workspace.id, { kind: "upload", name: "Contract source" }
+      );
+      const snapshotId = randomUUID();
+      const sourceBlobId = randomUUID();
+      const contentHash = "a".repeat(64);
+      await scopedPool.query(
+        `INSERT INTO source_snapshots
+           (id, workspace_id, repository_id, commit_sha, ref, commit_timestamp, storage_path,
+            source_kind, git_commit_sha, content_version, attestation,
+            linked_git_commit_sha, remote_identity_digest)
+         VALUES ($1, $2, $3, $4, 'upload', now(), '/tmp/source-blob-contract',
+            'upload', NULL, $4, 'unverified', NULL, NULL)`,
+        [snapshotId, setup!.workspace.id, repository!.id, "b".repeat(40)]
+      );
+      await scopedPool.query(
+        `INSERT INTO source_blobs
+           (id, workspace_id, content_hash, generation, byte_size, status, storage_key)
+         VALUES ($1, $2, $3, 1, 12, 'active', $4)`,
+        [sourceBlobId, setup!.workspace.id, contentHash, `blobs/${setup!.workspace.id}/aa/${contentHash}/1`]
+      );
+      const sourceFileId = randomUUID();
+      await scopedPool.query(
+        `INSERT INTO source_files
+           (id, workspace_id, snapshot_id, path, content_hash, byte_size, source_blob_id)
+         VALUES ($1, $2, $3, 'src/index.ts', $4, 12, $5)`,
+        [sourceFileId, setup!.workspace.id, snapshotId, contentHash, sourceBlobId]
+      );
+      const migrationName = sourceBlobContractMigrationName;
+      await cp(path.resolve("drizzle", migrationName), path.join(contractRoot, migrationName));
+
+      await expect(runAllMigrations(scopedPool, contractRoot)).rejects.toThrow(/not authorized/i);
+      await expectSourceBlobContractRollback(scopedPool);
+
+      await scopedPool.query("UPDATE source_files SET source_blob_id = NULL WHERE id = $1", [sourceFileId]);
+      await expect(runAllMigrations(authorizedPool, contractRoot)).rejects.toThrow(/missing source_blob_id/i);
+      await scopedPool.query(
+        "UPDATE source_files SET source_blob_id = $2, content_hash = repeat('c', 64) WHERE id = $1",
+        [sourceFileId, sourceBlobId]
+      );
+      await expect(runAllMigrations(authorizedPool, contractRoot)).rejects.toThrow(/identity mismatch/i);
+      await scopedPool.query("UPDATE source_files SET content_hash = $2 WHERE id = $1", [sourceFileId, contentHash]);
+
+      const fencingToken = randomUUID();
+      await scopedPool.query(
+        `UPDATE source_blobs
+         SET status = 'tombstoned', fencing_token = $2, tombstoned_at = now()
+         WHERE id = $1`,
+        [sourceBlobId, fencingToken]
+      );
+      await expect(runAllMigrations(authorizedPool, contractRoot))
+        .rejects.toThrow(/referenced source blob is non-active or fenced/i);
+      await expectSourceBlobContractRollback(scopedPool);
+      await scopedPool.query(
+        `UPDATE source_blobs
+         SET status = 'active', fencing_token = NULL, tombstoned_at = NULL
+         WHERE id = $1`,
+        [sourceBlobId]
+      );
+
+      await expect(runAllMigrations(authorizedPool, contractRoot)).resolves.toEqual([migrationName]);
+      expect((await scopedPool.query<{ is_nullable: string }>(
+        `SELECT is_nullable FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'source_files' AND column_name = 'source_blob_id'`
+      )).rows[0]?.is_nullable).toBe("NO");
+      await expect(scopedPool.query(
+        "UPDATE source_files SET content_hash = repeat('d', 64) WHERE id = $1", [sourceFileId]
+      )).rejects.toMatchObject({ constraint: "source_files_source_blob_identity_fk" });
+    } finally {
+      await authorizedPool.end();
+      await scopedPool.end();
+      await pool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`).catch(() => undefined);
+      await rm(contractRoot, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   test(databaseUrl
     ? "upgrades published legacy and pipeline-package v1 releases from migration 0030 without changing them"
@@ -1372,7 +1635,12 @@ integration("PostgreSQL cited knowledge integration", () => {
         ]);
       for (const run of firstRuns) {
         const manifests = await Promise.all(run.outputManifestIds.map((id) => store.findArtifactById(id)));
-        expect(manifests).toHaveLength(run.stage === "convert" ? 1 : 2);
+        const expectedManifestCount = run.stage === "convert"
+          ? 1
+          : run.stage === "synthesize" || run.stage === "index"
+            ? 3
+            : 2;
+        expect(manifests).toHaveLength(expectedManifestCount);
         for (const family of ["knowledge-v1", "frontend-v2"] as const) {
           const expected = ARTIFACT_KINDS[run.stage][family];
           expect(manifests).toEqual(expect.arrayContaining([
@@ -2318,6 +2586,61 @@ integration("PostgreSQL cited knowledge integration", () => {
       };
 
       const first = await createReadyBuildAndRun();
+      const unknownProfileValue = { state: "unknown" as const, reason: "unresolved" as const };
+      const projectProfilePayload = {
+        schemaVersion: 1 as const,
+        snapshotId,
+        sourceProvenance: {
+          schemaVersion: 1 as const,
+          kind: "upload" as const,
+          gitCommitSha: null,
+          contentVersion: "f".repeat(40),
+          ref: "upload" as const,
+          attestation: "unverified" as const
+        },
+        analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+        framework: unknownProfileValue,
+        rendering: unknownProfileValue,
+        router: unknownProfileValue,
+        state: unknownProfileValue,
+        data: unknownProfileValue,
+        formLibrary: unknownProfileValue,
+        tooling: unknownProfileValue,
+        styles: unknownProfileValue,
+        visualizations: unknownProfileValue,
+        tests: unknownProfileValue,
+        workspace: unknownProfileValue,
+        sourceRefs: []
+      };
+      const projectProfile = {
+        ...projectProfilePayload,
+        profileDigest: frontendProjectProfileDigest(projectProfilePayload)
+      };
+      const savedProjectProfile = await artifactStore.putJson({
+        manifest: {
+          id: randomUUID(), workspaceId: setup!.workspace.id, projectId: repository!.projectId,
+          snapshotId, buildId: first.build.id, stage: "synthesize", kind: "frontend-project-profile",
+          schemaVersion: 1, inputDigest: "6".repeat(64), contentDigest: "0".repeat(64),
+          storageKey: "pending", sourceRefs: [], producer: "deterministic",
+          createdAt: new Date().toISOString()
+        },
+        value: projectProfile
+      });
+      const savedPatternCandidates = await artifactStore.putJson({
+        manifest: {
+          id: randomUUID(), workspaceId: setup!.workspace.id, projectId: repository!.projectId,
+          snapshotId, buildId: first.build.id, stage: "index", kind: "frontend-pattern-candidates",
+          schemaVersion: 1, inputDigest: "7".repeat(64), contentDigest: "0".repeat(64),
+          storageKey: "pending", sourceRefs: [], producer: "deterministic",
+          createdAt: new Date().toISOString()
+        },
+        value: {
+          schemaVersion: 1, snapshotId,
+          analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
+          profileDigest: projectProfile.profileDigest,
+          candidates: []
+        }
+      });
       const packagedArtifacts = Object.fromEntries(await Promise.all(BUILD_STAGES.map(async (stage) => {
         const families = stage === "package"
           ? ["knowledge-v1"] as const
@@ -2340,9 +2663,14 @@ integration("PostgreSQL cited knowledge integration", () => {
             analyzerManifestDigest: EMPTY_FRONTEND_ANALYZER_MANIFEST_DIGEST,
             upstreamManifestIds: [], sourceArtifactId: "integration-validation-source",
             valid: true, pageCount: 1, issueCount: 0,
-            graphReferenceCount: 1, checkedReferenceCount: 1, invalidReferenceCount: 0
+            graphReferenceCount: 1, checkedReferenceCount: 1, invalidReferenceCount: 0,
+            projectProfileArtifactId: savedProjectProfile.manifest.id,
+            projectProfileDigest: projectProfile.profileDigest,
+            patternCandidatesArtifactId: savedPatternCandidates.manifest.id
           } : { schemaVersion: expected.schemaVersion, stage, kind: expected.kind }
         })).manifest));
+        if (stage === "synthesize") manifests.push(savedProjectProfile.manifest);
+        if (stage === "index") manifests.push(savedPatternCandidates.manifest);
         if (stage !== "package") {
           const stageRun = await store.createStageRun({
             workspaceId: setup!.workspace.id, projectId: repository!.projectId, snapshotId,
@@ -2371,6 +2699,9 @@ integration("PostgreSQL cited knowledge integration", () => {
           upstreamManifestIds: packagedArtifacts.validate,
           sourceArtifactId: packagedArtifacts.package[0]!,
           irSchemaVersion: 2, graphSchemaVersion: 2,
+          projectProfileArtifactId: savedProjectProfile.manifest.id,
+          projectProfileDigest: projectProfile.profileDigest,
+          patternCandidatesArtifactId: savedPatternCandidates.manifest.id,
           artifacts: packagedArtifacts
         }
       });
@@ -3149,6 +3480,7 @@ afterAll(async () => {
   await pool?.end();
   await Promise.all([
     ...(temporaryRoot ? [temporaryRoot] : []),
+    ...(compatibilityMigrationRoot ? [compatibilityMigrationRoot] : []),
     ...retrievalFixtureRoots
   ].map((directory) => rm(directory, { recursive: true, force: true })));
 });

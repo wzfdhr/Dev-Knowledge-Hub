@@ -226,6 +226,376 @@ export function parseFrontendEvaluationDatasets(inputs) {
   return cases;
 }
 
+export const FRONTEND_EXPERIENCE_CAPABILITIES = Object.freeze([
+  "react-routing",
+  "state-api",
+  "forms-auth",
+  "charts",
+  "impact-testing"
+]);
+
+const EXPERIENCE_DECISIONS = new Set(["recommend", "reject", "abstain", "no_result"]);
+const EXPERIENCE_SOURCE_ELIGIBILITY = new Set(["git", "git_linked", "admin_attested", "unverified_upload"]);
+const EXPERIENCE_LIFECYCLES = new Set(["verified", "recommended", "standard", "deprecated"]);
+const EXPERIENCE_EVIDENCE_STATES = new Set(["active", "revoked"]);
+const EXPERIENCE_RECOMMENDABLE_LIFECYCLES = new Set(["recommended", "standard"]);
+const EXPERIENCE_ELIGIBLE_SOURCES = new Set(["git", "git_linked", "admin_attested"]);
+
+function parseExperienceConditions(value, field, id) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error(`Frontend experience case ${id} has invalid ${field}`);
+  return value.map((raw) => {
+    const item = object(raw, `Frontend experience case ${id} has invalid ${field}`);
+    return {
+      key: nonEmptyString(item.key, `${field}.key`, id),
+      value: nonEmptyString(item.value, `${field}.value`, id)
+    };
+  });
+}
+
+function parseExperienceCandidate(value, id) {
+  const item = object(value, `Frontend experience case ${id} has invalid candidate`);
+  const candidate = {
+    id: nonEmptyString(item.id, "candidate.id", id),
+    sourceProjectId: nonEmptyString(item.sourceProjectId, "candidate.sourceProjectId", id),
+    releaseId: nonEmptyString(item.releaseId, "candidate.releaseId", id),
+    evidenceId: nonEmptyString(item.evidenceId, "candidate.evidenceId", id),
+    sourceEligibility: nonEmptyString(item.sourceEligibility, "candidate.sourceEligibility", id),
+    lifecycle: nonEmptyString(item.lifecycle, "candidate.lifecycle", id),
+    evidenceState: nonEmptyString(item.evidenceState, "candidate.evidenceState", id),
+    required: parseExperienceConditions(item.required, "candidate.required", id),
+    forbidden: parseExperienceConditions(item.forbidden, "candidate.forbidden", id)
+  };
+  if (!EXPERIENCE_SOURCE_ELIGIBILITY.has(candidate.sourceEligibility)) {
+    throw new Error(`Frontend experience case ${id} has invalid candidate.sourceEligibility`);
+  }
+  if (!EXPERIENCE_LIFECYCLES.has(candidate.lifecycle)) {
+    throw new Error(`Frontend experience case ${id} has invalid candidate.lifecycle`);
+  }
+  if (!EXPERIENCE_EVIDENCE_STATES.has(candidate.evidenceState)) {
+    throw new Error(`Frontend experience case ${id} has invalid candidate.evidenceState`);
+  }
+  return candidate;
+}
+
+function parseExperienceCase(value, declaredSplit, line, datasetName) {
+  const item = object(value, `Frontend experience ${datasetName} line ${line} must be an object`);
+  const id = nonEmptyString(item.id, "id", `line-${line}`);
+  const split = nonEmptyString(item.split, "split", id);
+  const capability = nonEmptyString(item.capability, "capability", id);
+  if (!SPLITS.has(split) || split !== declaredSplit) throw new Error(`Frontend experience case ${id} has invalid split`);
+  if (!FRONTEND_EXPERIENCE_CAPABILITIES.includes(capability)) {
+    throw new Error(`Frontend experience case ${id} has invalid capability`);
+  }
+  if (!LOCALES.has(item.locale)) throw new Error(`Frontend experience case ${id} has invalid locale`);
+  const profile = object(item.currentProjectProfile, `Frontend experience case ${id} has invalid currentProjectProfile`);
+  if (Object.values(profile).some((profileValue) => typeof profileValue !== "string" || !profileValue.trim())) {
+    throw new Error(`Frontend experience case ${id} has invalid currentProjectProfile value`);
+  }
+  if (!Array.isArray(item.candidates)) throw new Error(`Frontend experience case ${id} has invalid candidates`);
+  const candidates = item.candidates.map((candidate) => parseExperienceCandidate(candidate, id));
+  if (new Set(candidates.map((candidate) => candidate.id)).size !== candidates.length) {
+    throw new Error(`Frontend experience case ${id} has duplicate candidate id`);
+  }
+  const expectedDecision = nonEmptyString(item.expectedDecision, "expectedDecision", id);
+  if (!EXPERIENCE_DECISIONS.has(expectedDecision)) {
+    throw new Error(`Frontend experience case ${id} has invalid expectedDecision`);
+  }
+  const parsed = {
+    id,
+    split,
+    capability,
+    locale: item.locale,
+    query: nonEmptyString(item.query, "query", id),
+    currentProjectId: nonEmptyString(item.currentProjectId, "currentProjectId", id),
+    currentProjectProfile: Object.fromEntries(Object.entries(profile).map(([key, profileValue]) => [key, profileValue.trim()])),
+    visibleReleaseIds: stringArray(item.visibleReleaseIds, "visibleReleaseIds", id),
+    visibleEvidenceIds: stringArray(item.visibleEvidenceIds, "visibleEvidenceIds", id),
+    invisibleEvidenceIds: stringArray(item.invisibleEvidenceIds, "invisibleEvidenceIds", id),
+    candidates,
+    expectedDecision,
+    expectedRecommendationIds: stringArray(item.expectedRecommendationIds, "expectedRecommendationIds", id),
+    expectedRejectionReasons: stringArray(item.expectedRejectionReasons, "expectedRejectionReasons", id),
+    expectedUnknownKeys: stringArray(item.expectedUnknownKeys, "expectedUnknownKeys", id),
+    abstentionRequired: item.abstentionRequired
+  };
+  if (typeof parsed.abstentionRequired !== "boolean") {
+    throw new Error(`Frontend experience case ${id} has invalid abstentionRequired`);
+  }
+  if (parsed.expectedDecision === "recommend" && !parsed.expectedRecommendationIds.length) {
+    throw new Error(`Frontend experience case ${id} recommendation requires expectedRecommendationIds`);
+  }
+  if (parsed.expectedDecision === "no_result" && candidates.length) {
+    throw new Error(`Frontend experience case ${id} no_result must not declare candidates`);
+  }
+  if (parsed.abstentionRequired !== (parsed.expectedDecision === "abstain")) {
+    throw new Error(`Frontend experience case ${id} abstentionRequired must match expectedDecision`);
+  }
+  return parsed;
+}
+
+export function parseFrontendExperienceEvaluationDatasets(inputs) {
+  if (!Array.isArray(inputs) || !inputs.length) throw new Error("Frontend experience evaluation datasets must not be empty");
+  const cases = [];
+  const ids = new Set();
+  for (const input of inputs) {
+    if (!input || typeof input !== "object" || !SPLITS.has(input.split)) {
+      throw new Error("Frontend experience evaluation dataset has invalid metadata");
+    }
+    const lines = String(input.content ?? "").split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+    if (!lines.length) throw new Error(`Frontend experience evaluation dataset ${input.name} must not be empty`);
+    for (let index = 0; index < lines.length; index += 1) {
+      let value;
+      try {
+        value = JSON.parse(lines[index]);
+      } catch (error) {
+        throw new Error(`Frontend experience ${input.name} line ${index + 1} is not valid JSON`, { cause: error });
+      }
+      const item = parseExperienceCase(value, input.split, index + 1, input.name);
+      if (ids.has(item.id)) throw new Error(`Frontend experience evaluation datasets have duplicate id: ${item.id}`);
+      ids.add(item.id);
+      cases.push(item);
+    }
+  }
+  return cases;
+}
+
+function frontendExperienceNegativeKinds(item) {
+  const reasons = new Set(item.expectedRejectionReasons);
+  const kinds = [];
+  if (reasons.has("REQUIRED_CONDITION_MISMATCH") || reasons.has("FORBIDDEN_CONDITION_MATCH")) kinds.push("hard-conflict");
+  if (reasons.has("REQUIRED_CONDITION_UNKNOWN")) kinds.push("required-unknown");
+  if (item.expectedDecision === "no_result") kinds.push("no-result");
+  if (reasons.has("SOURCE_INELIGIBLE")) kinds.push("source-ineligible");
+  if (reasons.has("RELEASE_NOT_VISIBLE") || reasons.has("EVIDENCE_NOT_VISIBLE")) kinds.push("unauthorized");
+  if (reasons.has("EVIDENCE_REVOKED")) kinds.push("revoked");
+  return kinds;
+}
+
+export function validateFrontendExperienceEvaluationSuite(cases) {
+  if (!Array.isArray(cases) || !cases.length) throw new Error("Frontend experience evaluation suite must not be empty");
+  const capabilities = FRONTEND_EXPERIENCE_CAPABILITIES.map((capability) => {
+    const scoped = cases.filter((item) => item.capability === capability);
+    return {
+      capability,
+      train: scoped.filter((item) => item.split === "train").length,
+      heldOut: scoped.filter((item) => item.split === "held-out").length
+    };
+  });
+  const insufficient = capabilities.filter((item) => item.train < 12 || item.heldOut < 8);
+  if (insufficient.length) {
+    throw new Error(`Frontend experience capability coverage is insufficient: ${insufficient.map((item) => item.capability).join(", ")}`);
+  }
+  const chineseRate = cases.filter((item) => item.locale === "zh-CN").length / cases.length;
+  const negativeRate = cases.filter((item) => item.expectedDecision !== "recommend").length / cases.length;
+  if (chineseRate < 0.4) throw new Error(`Frontend experience Chinese coverage ${chineseRate.toFixed(4)} is below 0.40`);
+  if (negativeRate < 0.25) throw new Error(`Frontend experience negative coverage ${negativeRate.toFixed(4)} is below 0.25`);
+  const negativeKinds = [...new Set(cases.flatMap(frontendExperienceNegativeKinds))].sort();
+  const requiredKinds = ["hard-conflict", "required-unknown", "no-result", "source-ineligible", "unauthorized", "revoked"];
+  for (const split of SPLITS) {
+    const splitKinds = new Set(cases.filter((item) => item.split === split).flatMap(frontendExperienceNegativeKinds));
+    const missing = requiredKinds.filter((kind) => !splitKinds.has(kind));
+    if (missing.length) throw new Error(`Frontend experience ${split} is missing negative kinds: ${missing.join(", ")}`);
+  }
+  return { total: cases.length, chineseRate, negativeRate, capabilities, negativeKinds };
+}
+
+function decideFrontendExperienceCase(item) {
+  const recommendations = [];
+  const rejected = [];
+  const unknownKeys = new Set();
+  const reject = (candidate, reason, unknownKey = null) => {
+    rejected.push({ candidateId: candidate.id, reason, ...(unknownKey ? { unknownKey } : {}) });
+    if (unknownKey) unknownKeys.add(unknownKey);
+  };
+  for (const candidate of item.candidates) {
+    if (candidate.sourceProjectId === item.currentProjectId) {
+      reject(candidate, "CURRENT_PROJECT_EXCLUDED");
+      continue;
+    }
+    if (!item.visibleReleaseIds.includes(candidate.releaseId)) {
+      reject(candidate, "RELEASE_NOT_VISIBLE");
+      continue;
+    }
+    if (!item.visibleEvidenceIds.includes(candidate.evidenceId)) {
+      reject(candidate, "EVIDENCE_NOT_VISIBLE");
+      continue;
+    }
+    if (!EXPERIENCE_ELIGIBLE_SOURCES.has(candidate.sourceEligibility)) {
+      reject(candidate, "SOURCE_INELIGIBLE");
+      continue;
+    }
+    if (!EXPERIENCE_RECOMMENDABLE_LIFECYCLES.has(candidate.lifecycle)) {
+      reject(candidate, "LIFECYCLE_INELIGIBLE");
+      continue;
+    }
+    if (candidate.evidenceState === "revoked") {
+      reject(candidate, "EVIDENCE_REVOKED");
+      continue;
+    }
+    const unknownRequired = candidate.required.find((condition) => item.currentProjectProfile[condition.key] === undefined);
+    if (unknownRequired) {
+      reject(candidate, "REQUIRED_CONDITION_UNKNOWN", unknownRequired.key);
+      continue;
+    }
+    if (candidate.required.some((condition) => item.currentProjectProfile[condition.key] !== condition.value)) {
+      reject(candidate, "REQUIRED_CONDITION_MISMATCH");
+      continue;
+    }
+    if (candidate.forbidden.some((condition) => item.currentProjectProfile[condition.key] === condition.value)) {
+      reject(candidate, "FORBIDDEN_CONDITION_MATCH");
+      continue;
+    }
+    recommendations.push(candidate.id);
+  }
+  const decision = recommendations.length
+    ? "recommend"
+    : item.candidates.length === 0
+      ? "no_result"
+      : unknownKeys.size
+        ? "abstain"
+        : "reject";
+  return {
+    caseId: item.id,
+    decision,
+    recommendationIds: recommendations,
+    rejected,
+    unknownKeys: [...unknownKeys].sort()
+  };
+}
+
+function sameStrings(left, right) {
+  return stableJson([...new Set(left)].sort()) === stableJson([...new Set(right)].sort());
+}
+
+export function evaluateFrontendExperience(cases) {
+  if (!Array.isArray(cases) || !cases.length) throw new Error("Frontend experience evaluation requires cases");
+  const observations = cases.map(decideFrontendExperienceCase);
+  let expectedRecommendations = 0;
+  let predictedRecommendations = 0;
+  let trueRecommendations = 0;
+  let hardConflictCases = 0;
+  let hardConflictRecommendations = 0;
+  let revokedCases = 0;
+  let revokedRecommendations = 0;
+  let unknownCases = 0;
+  let unknownAbstentions = 0;
+  let currentProjectRecommendations = 0;
+  let unauthorizedCases = 0;
+  let unauthorizedRecommendations = 0;
+  let sourceCandidates = 0;
+  let sourceCorrect = 0;
+  let validPartitions = 0;
+  let matchingContracts = 0;
+  const failures = [];
+
+  for (let index = 0; index < cases.length; index += 1) {
+    const item = cases[index];
+    const observation = observations[index];
+    const expected = new Set(item.expectedRecommendationIds);
+    expectedRecommendations += expected.size;
+    predictedRecommendations += observation.recommendationIds.length;
+    trueRecommendations += observation.recommendationIds.filter((id) => expected.has(id)).length;
+    const expectedReasons = new Set(item.expectedRejectionReasons);
+    const actualReasons = observation.rejected.map((entry) => entry.reason);
+    const hardConflict = expectedReasons.has("REQUIRED_CONDITION_MISMATCH") || expectedReasons.has("FORBIDDEN_CONDITION_MATCH");
+    if (hardConflict) {
+      hardConflictCases += 1;
+      if (observation.recommendationIds.length) hardConflictRecommendations += 1;
+    }
+    if (expectedReasons.has("EVIDENCE_REVOKED")) {
+      revokedCases += 1;
+      if (observation.recommendationIds.length) revokedRecommendations += 1;
+    }
+    if (item.abstentionRequired) {
+      unknownCases += 1;
+      if (observation.decision === "abstain" && sameStrings(observation.unknownKeys, item.expectedUnknownKeys)) unknownAbstentions += 1;
+    }
+    currentProjectRecommendations += observation.recommendationIds.filter((id) => item.candidates.some(
+      (candidate) => candidate.id === id && candidate.sourceProjectId === item.currentProjectId
+    )).length;
+    const unauthorized = item.candidates.some((candidate) => !item.visibleReleaseIds.includes(candidate.releaseId)
+      || !item.visibleEvidenceIds.includes(candidate.evidenceId));
+    if (unauthorized) {
+      unauthorizedCases += 1;
+      if (observation.recommendationIds.length) unauthorizedRecommendations += 1;
+    }
+    for (const candidate of item.candidates) {
+      sourceCandidates += 1;
+      const expectedEligible = EXPERIENCE_ELIGIBLE_SOURCES.has(candidate.sourceEligibility);
+      const actualSourceRejected = observation.rejected.some((entry) => entry.candidateId === candidate.id && entry.reason === "SOURCE_INELIGIBLE");
+      if (expectedEligible !== actualSourceRejected) sourceCorrect += 1;
+    }
+    const partitionIds = [...observation.recommendationIds, ...observation.rejected.map((entry) => entry.candidateId)];
+    if (partitionIds.length === item.candidates.length && new Set(partitionIds).size === item.candidates.length) validPartitions += 1;
+    const matches = observation.decision === item.expectedDecision
+      && sameStrings(observation.recommendationIds, item.expectedRecommendationIds)
+      && sameStrings(actualReasons, item.expectedRejectionReasons)
+      && sameStrings(observation.unknownKeys, item.expectedUnknownKeys);
+    if (matches) matchingContracts += 1;
+    else failures.push({ caseId: item.id, expectedDecision: item.expectedDecision, observation });
+  }
+  return {
+    protocolVersion: 1,
+    caseIds: cases.map((item) => item.id),
+    observations,
+    denominators: {
+      totalCases: cases.length,
+      expectedRecommendations,
+      predictedRecommendations,
+      hardConflictCases,
+      revokedCases,
+      unknownCases,
+      unauthorizedCases,
+      sourceCandidates
+    },
+    metrics: {
+      sourceProvenanceAccuracy: sourceCandidates ? sourceCorrect / sourceCandidates : 1,
+      hardConflictRecommendationRate: hardConflictCases ? hardConflictRecommendations / hardConflictCases : 0,
+      revokedEvidenceRecommendationRate: revokedCases ? revokedRecommendations / revokedCases : 0,
+      recommendationApplicabilityPrecision: predictedRecommendations ? trueRecommendations / predictedRecommendations : 1,
+      requiredUnknownAbstentionRecall: unknownCases ? unknownAbstentions / unknownCases : 1,
+      currentProjectPriorLeakRate: currentProjectRecommendations,
+      unauthorizedEvidenceRecommendationRate: unauthorizedCases ? unauthorizedRecommendations / unauthorizedCases : 0,
+      responsePartitionValidity: validPartitions / cases.length,
+      expectedContractMatchRate: matchingContracts / cases.length
+    },
+    failures
+  };
+}
+
+export function evaluateFrontendExperienceBySplit(cases) {
+  return {
+    train: evaluateFrontendExperience(cases.filter((item) => item.split === "train")),
+    heldOut: evaluateFrontendExperience(cases.filter((item) => item.split === "held-out")),
+    all: evaluateFrontendExperience(cases)
+  };
+}
+
+export function assertFrontendExperienceQualityGate(report) {
+  if (!report?.denominators?.totalCases) throw new Error("Frontend experience quality gate did not execute cases");
+  const minimums = {
+    sourceProvenanceAccuracy: 1,
+    recommendationApplicabilityPrecision: 0.95,
+    requiredUnknownAbstentionRecall: 0.95,
+    responsePartitionValidity: 1,
+    expectedContractMatchRate: 1
+  };
+  for (const [metric, minimum] of Object.entries(minimums)) {
+    if (!Number.isFinite(report.metrics?.[metric]) || report.metrics[metric] < minimum) {
+      throw new Error(`Frontend experience quality gate ${metric} ${report.metrics?.[metric] ?? "missing"} is below ${minimum}`);
+    }
+  }
+  for (const metric of [
+    "hardConflictRecommendationRate",
+    "revokedEvidenceRecommendationRate",
+    "currentProjectPriorLeakRate",
+    "unauthorizedEvidenceRecommendationRate"
+  ]) {
+    if (report.metrics?.[metric] !== 0) throw new Error(`Frontend experience quality gate ${metric} must be zero`);
+  }
+}
+
 export async function validateFrontendFixtureReferences(cases, fixturesRoot) {
   const root = path.resolve(fixturesRoot);
   for (const item of cases) {
@@ -852,8 +1222,51 @@ export async function main() {
   }, null, 2));
 }
 
+export async function mainFrontendExperience() {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const inputs = await Promise.all(FRONTEND_EXPERIENCE_CAPABILITIES.flatMap((capability) => [
+    loadDataset(root, `evaluation/frontend/train/experience-${capability}.jsonl`, "train"),
+    loadDataset(root, `evaluation/frontend/held-out/experience-${capability}.jsonl`, "held-out")
+  ]));
+  const cases = parseFrontendExperienceEvaluationDatasets(inputs);
+  const datasetDigest = digestFrontendEvaluationDatasets(inputs);
+  const suite = validateFrontendExperienceEvaluationSuite(cases);
+  const splitReports = evaluateFrontendExperienceBySplit(cases);
+  for (const [split, report] of Object.entries(splitReports)) {
+    try {
+      assertFrontendExperienceQualityGate(report);
+    } catch (error) {
+      throw new Error(`Frontend experience ${split} quality gate failed: ${error.message}`, { cause: error });
+    }
+  }
+  const output = {
+    dataset: "frontend-experience-v1",
+    datasetDigest,
+    status: "quality-gate-passed",
+    qualityGateEnforced: true,
+    qualityGateReports: ["train", "heldOut", "all"],
+    suite,
+    splitReports,
+    report: splitReports.all
+  };
+  const outputPath = path.join(root, "artifacts/frontend-experience-evaluation.json");
+  await mkdir(path.dirname(outputPath), { recursive: true });
+  await writeFile(outputPath, `${JSON.stringify(output, null, 2)}\n`);
+  console.log(JSON.stringify({
+    dataset: output.dataset,
+    datasetDigest,
+    status: output.status,
+    totalCases: suite.total,
+    chineseRate: suite.chineseRate,
+    negativeRate: suite.negativeRate,
+    metrics: output.report.metrics,
+    report: path.relative(root, outputPath)
+  }, null, 2));
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch((error) => {
+  const selectedMain = process.argv.includes("--experience") ? mainFrontendExperience : main;
+  selectedMain().catch((error) => {
     console.error(error.message);
     process.exitCode = 1;
   });

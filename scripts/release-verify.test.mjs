@@ -19,22 +19,12 @@ import {
   finalizeRecoveryEvidence,
   loadPhaseMergeApprovalProvenance,
   parseReleaseScope,
-  requiresTrustedVerifierBootstrap,
   runContainerVerification,
   runReleaseSteps,
   validatePhaseMergeApprovalProvenance,
   validateSourceBlobContractGateManifest
 } from "./release-verify.mjs";
 import { validatePostContractBaselineGrammar } from "./verify-post-contract-database.mjs";
-
-const testWithSourceBlobContract = existsSync("drizzle/0035_source_blobs_contract.sql") ? test : test.skip;
-
-test("requires the trusted verifier only after the bootstrap commit is configured", () => {
-  expect(requiresTrustedVerifierBootstrap({ GITHUB_ACTIONS: "true" })).toBe(false);
-  expect(requiresTrustedVerifierBootstrap({
-    DEVKH_FK17_TRUSTED_BOOTSTRAP_COMMIT: "a".repeat(40)
-  })).toBe(true);
-});
 
 function createPendingEvidence(root) {
   const document = readFileSync(join(process.cwd(), "docs/operations/recovery-evidence.md"), "utf8");
@@ -317,7 +307,7 @@ describe("release verification orchestrator", () => {
     })).rejects.toThrow(/gate manifest, digest, candidate commit, and approver/i);
   });
 
-  testWithSourceBlobContract("keeps the migration-only container path when the approved base contains the contract", async () => {
+  test("keeps the migration-only container path when the approved base contains the contract", async () => {
     const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
     await expect(assertSourceBlobContractReleaseGates({
       DEVKH_RELEASE_APPROVED_BASE: currentCommit
@@ -336,7 +326,7 @@ describe("release verification orchestrator", () => {
     })).rejects.toThrow(/gate manifest, digest, candidate commit, and approver/i);
   });
 
-  testWithSourceBlobContract.each([
+  test.each([
     ["a pull request whose trusted base already contains the unchanged contract", (trusted, candidate) => ({
       repository: { full_name: "example/devkh" },
       pull_request: { base: { sha: trusted, repo: { full_name: "example/devkh" } } },
@@ -370,7 +360,7 @@ describe("release verification orchestrator", () => {
     expect(loadApprovalProvenance).toHaveBeenCalledWith(trustedCommit, expect.any(Object));
   });
 
-  testWithSourceBlobContract("rejects a second main push after an unapproved contract introduction", async () => {
+  test("rejects a second main push after an unapproved contract introduction", async () => {
     const unauthorizedContractCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
     const candidateCommit = createSyntheticDescendant(unauthorizedContractCommit);
     await expect(assertPostContractRuntimeCi({
@@ -512,7 +502,7 @@ describe("release verification orchestrator", () => {
     }, { gitOutput })).toThrow(/trusted bootstrap verifier|candidate gate workflow/i);
   });
 
-  testWithSourceBlobContract("allows a codex/mvp push only when its prior commit already contains the unchanged contract", async () => {
+  test("allows a codex/mvp push only when its prior commit already contains the unchanged contract", async () => {
     const head = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
     const priorCommit = createSyntheticTrustedBaselineCommit(head);
     const currentCommit = createSyntheticDescendant(priorCommit);
@@ -537,7 +527,7 @@ describe("release verification orchestrator", () => {
     });
   });
 
-  testWithSourceBlobContract("rejects an introducing protected-main push whose predecessor lacks 0035", async () => {
+  test("rejects an introducing protected-main push whose predecessor lacks 0035", async () => {
     const candidateCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
     const introducingBase = spawnSync(
       "git", ["rev-parse", "79c833b7bcd88c5147ff7ee7aba9786bf89032ed^"], { encoding: "utf8" }
@@ -587,7 +577,7 @@ describe("release verification orchestrator", () => {
     })).toThrow(/baseline/i);
   });
 
-  testWithSourceBlobContract.each([
+  test.each([
     ["CTE-wrapped write", "WITH injected AS (INSERT INTO public.workspaces (name, slug) VALUES ('x', 'x') RETURNING id) SELECT * FROM injected;"],
     ["no-op application delete", "DELETE FROM public.workspaces WHERE false;"],
     ["table-as-select write", "CREATE TABLE public.injected AS SELECT * FROM public.workspaces;"],
@@ -604,7 +594,7 @@ describe("release verification orchestrator", () => {
       .toThrow(/executable statement/i);
   });
 
-  testWithSourceBlobContract("does not let caller flags turn an introducing contract PR into ordinary runtime CI", async () => {
+  test("does not let caller flags turn an introducing contract PR into ordinary runtime CI", async () => {
     const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
     const introducingBase = spawnSync(
       "git", ["rev-parse", "79c833b7bcd88c5147ff7ee7aba9786bf89032ed^"], { encoding: "utf8" }

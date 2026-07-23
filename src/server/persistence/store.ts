@@ -25,6 +25,24 @@ import type {
 } from "../../shared/api-contracts.js";
 import type { RemediationState } from "../knowledge/remediation.js";
 import type { FrontendKnowledgeMode } from "../knowledge/frontend/rollout-mode.js";
+import type { VisibleExperienceCandidate } from "../knowledge/frontend/experience-query.js";
+import type { ExperienceLintRecord } from "../knowledge/frontend/experience-lint.js";
+import type {
+  DeclaredDecisionEvidence,
+  DeclaredDecisionInput,
+  ExperienceProjection,
+  ExperienceProjectionInput,
+  ExperienceReviewItem,
+  ExperienceReviewItemInput,
+  ExperienceReviewEvent,
+  ExperienceTransitionInput,
+  ObservedPatternEvidence,
+  ObservedPatternEvidenceInput,
+  VerifiedOutcomeEvidence,
+  VerifiedOutcomeInput,
+  WorkspaceStandard,
+  WorkspaceStandardInput
+} from "../../shared/frontend-experience.js";
 
 export interface WorkspaceRecord {
   id: string;
@@ -349,6 +367,33 @@ export interface McpTokenRotation {
   replacement: McpTokenRecord;
 }
 
+export const WORKSPACE_MCP_TOKEN_SCOPES = [
+  "workspace.patterns.read", "workspace.solutions.read"
+] as const;
+export type WorkspaceMcpTokenScope = (typeof WORKSPACE_MCP_TOKEN_SCOPES)[number];
+
+export interface WorkspaceMcpTokenRecord {
+  id: string;
+  workspaceId: string;
+  userId: string;
+  name: string;
+  tokenHash: string;
+  tokenPrefix: string;
+  scopes: WorkspaceMcpTokenScope[];
+  sessionVersion: number;
+  expiresAt: Date;
+  createdAt: Date;
+  lastUsedAt: Date | null;
+  revokedAt: Date | null;
+}
+
+export interface CreateWorkspaceMcpTokenInput extends Omit<
+  WorkspaceMcpTokenRecord,
+  "id" | "createdAt" | "lastUsedAt" | "revokedAt" | "expiresAt"
+> {
+  expiresAt?: Date;
+}
+
 export type AgentFeedbackStatus = (typeof AGENT_FEEDBACK_STATUSES)[number];
 
 export interface AgentFeedbackRecord {
@@ -505,6 +550,12 @@ export interface SourceSnapshotRecord {
   remoteUrl: string | null;
   commitTimestamp: Date;
   storagePath: string;
+  sourceKind?: "git" | "upload";
+  gitCommitSha?: string | null;
+  contentVersion?: string | null;
+  attestation?: "unverified" | "admin_attested" | "git_linked" | null;
+  linkedGitCommitSha?: string | null;
+  remoteIdentityDigest?: string | null;
 }
 
 export interface SourceFileRecord {
@@ -990,7 +1041,25 @@ export interface KnowledgeStore {
   ): Promise<ReleaseRecord[]>;
 }
 
-export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, PipelineArtifactStore, PipelineSearchDocumentStore, SourceAnalysisArtifactStore, SourceBlobCatalog {
+export interface ExperienceStore {
+  saveObservedPatternEvidence(input: ObservedPatternEvidenceInput): Promise<ObservedPatternEvidence>;
+  createExperienceDecisionWithAudit(input: DeclaredDecisionInput): Promise<DeclaredDecisionEvidence>;
+  recordExperienceOutcome(input: VerifiedOutcomeInput): Promise<VerifiedOutcomeEvidence>;
+  createExperienceReviewItem(input: ExperienceReviewItemInput): Promise<ExperienceReviewItem>;
+  listExperienceReviewItems(workspaceId: string, patternGroupId?: string): Promise<ExperienceReviewItem[]>;
+  listExperienceLintRecords(workspaceId: string): Promise<ExperienceLintRecord[]>;
+  listVisibleExperienceCandidates(input: {
+    workspaceId: string;
+    userId: string;
+    currentProjectId: string;
+  }): Promise<VisibleExperienceCandidate[]>;
+  transitionExperienceWithAudit(input: ExperienceTransitionInput): Promise<ExperienceReviewEvent>;
+  listExperienceReviewEvents(workspaceId: string, patternGroupId: string): Promise<ExperienceReviewEvent[]>;
+  createWorkspaceStandardWithAudit(input: WorkspaceStandardInput): Promise<WorkspaceStandard>;
+  listExperienceProjection(input: ExperienceProjectionInput): Promise<ExperienceProjection[]>;
+}
+
+export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, PipelineArtifactStore, PipelineSearchDocumentStore, SourceAnalysisArtifactStore, SourceBlobCatalog, ExperienceStore {
   listPipelineStageRuns(
     workspaceId: string,
     projectId: string,
@@ -1200,6 +1269,31 @@ export interface AppStore extends BuildPersistence, KnowledgeStore, GraphStore, 
     replacement: Pick<McpTokenRecord, "tokenHash" | "tokenPrefix"> & { scopes?: McpTokenScope[] },
     actorId: string
   ): Promise<McpTokenRotation | null>;
+  createWorkspaceMcpTokenWithAudit(
+    input: CreateWorkspaceMcpTokenInput,
+    actorId: string
+  ): Promise<WorkspaceMcpTokenRecord>;
+  listWorkspaceMcpTokens(
+    workspaceId: string,
+    userId: string,
+    pagination?: Pagination
+  ): Promise<WorkspaceMcpTokenRecord[]>;
+  countWorkspaceMcpTokens(workspaceId: string, userId: string): Promise<number>;
+  findWorkspaceMcpTokenByHash(tokenHash: string): Promise<WorkspaceMcpTokenRecord | null>;
+  touchWorkspaceMcpToken(tokenId: string): Promise<void>;
+  revokeWorkspaceMcpTokenWithAudit(
+    workspaceId: string,
+    userId: string,
+    tokenId: string,
+    actorId: string
+  ): Promise<WorkspaceMcpTokenRecord | null>;
+  rotateWorkspaceMcpTokenWithAudit(
+    workspaceId: string,
+    userId: string,
+    tokenId: string,
+    replacement: Pick<WorkspaceMcpTokenRecord, "tokenHash" | "tokenPrefix">,
+    actorId: string
+  ): Promise<{ previous: WorkspaceMcpTokenRecord; replacement: WorkspaceMcpTokenRecord } | null>;
   createFeedback(input: CreateFeedbackInput): Promise<AgentFeedbackRecord>;
   reportFeedbackWithAudit(input: CreateFeedbackInput): Promise<AgentFeedbackRecord>;
   listFeedback(

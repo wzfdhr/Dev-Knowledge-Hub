@@ -741,10 +741,6 @@ export function assertTrustedVerifierBootstrap(env, options = {}) {
   };
 }
 
-export function requiresTrustedVerifierBootstrap(env) {
-  return Boolean(env.DEVKH_FK17_TRUSTED_BOOTSTRAP_COMMIT?.trim());
-}
-
 export async function stageTrustedBaseline(sql, root = tmpdir()) {
   const directory = await mkdtemp(join(root, "devkh-post-contract-baseline-"));
   const sourcePath = join(directory, "trusted-source.sql");
@@ -1008,7 +1004,8 @@ export async function runContainerVerification(options = {}) {
 
 export async function main(args = process.argv.slice(2)) {
   const scope = parseReleaseScope(args);
-  const trustedBootstrap = requiresTrustedVerifierBootstrap(process.env)
+  const trustedBootstrap = (process.env.GITHUB_ACTIONS === "true"
+    || scope === "container" || scope === "runtime-container" || scope === "all")
     ? assertTrustedVerifierBootstrap(process.env)
     : undefined;
   if (scope === "verify" || scope === "all") await runReleaseSteps(VERIFY_STEPS);

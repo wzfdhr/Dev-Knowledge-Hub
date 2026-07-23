@@ -270,6 +270,8 @@ export async function bootstrapServer(
     knowledgeKernelMode: env.knowledgeKernelMode,
     frontendKnowledgeMode: env.frontendKnowledgeMode,
     sourceStorageMode: env.sourceStorageMode,
+    workspaceSolutionPlanningEnabled: env.workspaceSolutionPlanningEnabled,
+    frontendExperienceRecommendationsEnabled: env.frontendExperienceRecommendationsEnabled,
     sourceBlobStore
   });
   const reportBackgroundError = dependencies.reportBackgroundError

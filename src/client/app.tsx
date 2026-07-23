@@ -21,6 +21,7 @@ import { ProjectCollaborationPage } from "./pages/project-collaboration-page";
 import { ProjectVersionsPage } from "./pages/project-versions-page";
 import { ProjectGraphPage } from "./pages/project-graph-page";
 import { ProjectFrontendMapPage } from "./pages/project-frontend-map-page";
+import { ProjectKnowledgeQualityPage } from "./pages/project-knowledge-quality-page";
 import { SystemSettingsPage } from "./pages/system-settings-page";
 import { WorkspaceExperiencesPage } from "./pages/workspace-experiences-page";
 
@@ -64,7 +65,7 @@ export function App({ api = defaultApi }: { api?: ApiClient }) {
       <Route path="sources" element={<ProjectImportsPage api={api} />} />
       <Route path="production" element={<ProjectVersionsPage api={api} />} />
       <Route path="knowledge/pages" element={<KnowledgePage api={api} />} />
-      <Route path="knowledge/quality" element={<Navigate to="../pages" replace />} />
+      <Route path="knowledge/quality" element={<ProjectKnowledgeQualityPage api={api} />} />
       <Route path="knowledge/graph" element={<ProjectGraphPage api={api} />} />
       <Route path="knowledge/frontend" element={<ProjectFrontendMapPage api={api} />} />
       <Route path="settings/team" element={<ProjectCollaborationPage api={api} />} />

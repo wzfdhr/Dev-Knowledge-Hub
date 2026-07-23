@@ -2102,6 +2102,32 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     };
   });
 
+  server.get("/api/projects/:projectId/releases", { preHandler: requireAdmin }, async (request, reply) => {
+    const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
+    const query = z.object(paginationQuerySchema).safeParse(request.query);
+    if (!params.success || !query.success) {
+      return sendError(reply, 400, "INVALID_REQUEST", "Invalid project release query");
+    }
+    await requireProjectRole("reader", params.data.projectId, request, reply);
+    if (reply.sent) return;
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repository = await options.store.currentRepository(admin.workspaceId, params.data.projectId);
+    if (!repository || repository.projectId !== params.data.projectId) {
+      return { releases: [], ...paginationMetadata(0, query.data.offset ?? 0, 0) };
+    }
+    const [releases, total] = await Promise.all([
+      options.store.listReleases(admin.workspaceId, repository.id, query.data),
+      options.store.countReleases(admin.workspaceId, repository.id)
+    ]);
+    return {
+      releases: await Promise.all(releases.map(async (release) => ({
+        ...release,
+        commitSha: (await options.store.findSnapshotById(admin.workspaceId, release.snapshotId))?.commitSha ?? null
+      }))),
+      ...paginationMetadata(total, query.data.offset ?? 0, releases.length)
+    };
+  });
+
   server.get("/api/projects/:projectId/remediations", { preHandler: requireAdmin }, async (request, reply) => {
     const params = z.object({ projectId: z.uuid() }).safeParse(request.params);
     const query = remediationListQuerySchema.safeParse(request.query);

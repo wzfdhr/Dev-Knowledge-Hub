@@ -1747,3 +1747,136 @@
   color: var(--muted);
   font-size: 11px;
 }
+
+.quality-release-select {
+  min-width: 180px;
+}
+
+.quality-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.quality-summary-grid article {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 12px;
+  padding: 17px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.quality-summary-grid article > svg {
+  width: 36px;
+  height: 36px;
+  padding: 9px;
+  border-radius: 7px;
+  background: #edf4fd;
+  color: #2860a1;
+}
+
+.quality-summary-grid article span {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.quality-summary-grid small,
+.quality-summary-grid em {
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  overflow-wrap: anywhere;
+}
+
+.quality-summary-grid strong {
+  margin: 3px 0;
+  font-size: 20px;
+}
+
+.quality-metadata-panel {
+  margin-bottom: 18px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.quality-metadata-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.quality-metadata-grid > div {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.quality-metadata-grid h3 {
+  display: flex;
+  justify-content: space-between;
+  margin: 0;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  background: #f7f8fa;
+}
+
+.quality-metadata-grid h3 span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.metadata-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(120px, 0.7fr) minmax(0, 1.3fr);
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #edf0f3;
+}
+
+.metadata-row:last-child {
+  border-bottom: 0;
+}
+
+.metadata-row > span {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.metadata-row strong,
+.metadata-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metadata-row small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.truncated-path {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.truncated-path code {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: #536277;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

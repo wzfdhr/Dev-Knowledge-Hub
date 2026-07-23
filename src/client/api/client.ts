@@ -145,6 +145,8 @@ export interface ApiClient {
   getBuildComparison(id: string): Promise<{ buildId: string; comparison: KnowledgeKernelComparison }>;
   startBuild(snapshotId: string, options?: { allowLlm?: boolean }): Promise<{ build: Build; created: boolean }>;
   cancelBuild(id: string): Promise<{ build: Build }>;
+  listProjectReleases(projectId: string, pagination: PaginationParams):
+    Promise<{ releases: Release[] } & PaginatedResponse>;
   listReleases(pagination: PaginationParams): Promise<{ releases: Release[] } & PaginatedResponse>;
   getRelease(id: string): Promise<{ release: Release }>;
   currentRelease(): Promise<{ release: Release }>;
@@ -471,6 +473,10 @@ export const api: ApiClient = {
     body: json({ snapshotId, ...(options?.allowLlm ? { allowLlm: true } : {}) })
   }),
   cancelBuild: (id) => request(`/api/builds/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
+  listProjectReleases: (projectId, pagination) => request(listPath(
+    `/api/projects/${encodeURIComponent(projectId)}/releases`,
+    pagination
+  )),
   listReleases: (pagination) => request(listPath("/api/releases", pagination)),
   getRelease: (id) => request(`/api/releases/${encodeURIComponent(id)}`),
   currentRelease: () => request("/api/releases/current"),

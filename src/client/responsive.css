@@ -873,13 +873,35 @@ body,
 }
 
 @media (max-width: 1000px) {
+  .quality-summary-grid,
   .recent-knowledge-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .quality-summary-grid article:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .quality-metadata-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
 @media (max-width: 760px) {
+  .quality-summary-grid,
   .recent-knowledge-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .quality-summary-grid article:last-child {
+    grid-column: auto;
+  }
+
+  .quality-release-select {
+    width: 100%;
+  }
+
+  .metadata-row {
     grid-template-columns: minmax(0, 1fr);
   }
 

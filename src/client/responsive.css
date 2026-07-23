@@ -917,7 +917,7 @@ body,
 
 @media (max-width: 430px) {
   .global-knowledge-search-page {
-    padding: 22px 16px 42px;
+    padding: 64px 16px 42px;
     overflow-x: clip;
   }
 

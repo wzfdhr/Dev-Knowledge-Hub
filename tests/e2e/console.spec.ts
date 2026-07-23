@@ -240,6 +240,53 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   await retainedKnowledgePage.click();
   await expect(page.locator(".knowledge-document")).toContainText(retainedKnowledgeTitle);
 
+  await page.goto("/knowledge");
+  await expect(page.getByRole("heading", { name: "知识搜索" })).toBeVisible();
+  await page.getByRole("searchbox", { name: "跨项目搜索" }).fill("add");
+  const workspaceResult = page.locator(".global-search-results a").first();
+  await expect(workspaceResult).toBeVisible();
+  await workspaceResult.click();
+  await expect(page.getByRole("heading", { name: "知识库", level: 1 })).toBeVisible();
+
+  await page.goto(`/projects/${projectId}/knowledge/quality`);
+  await expect(page.getByRole("heading", { name: "知识质量" })).toBeVisible();
+  await expect(page.getByLabel("质量分析版本")).toHaveValue(releaseBeforeShadow);
+  await expect(page.locator(".quality-metadata-panel")).toContainText("add");
+
+  for (const view of [
+    { path: "/knowledge", heading: "知识搜索", screenshot: "workspace-search" },
+    { path: `/projects/${projectId}/knowledge/quality`, heading: "知识质量", screenshot: "knowledge-quality" }
+  ]) {
+    for (const viewport of [
+      { width: 1440, height: 1024 },
+      { width: 768, height: 900 },
+      { width: 390, height: 844 },
+      { width: 320, height: 700 }
+    ]) {
+      await page.setViewportSize(viewport);
+      await page.goto(view.path);
+      await expect(page.getByRole("heading", { name: view.heading })).toBeVisible();
+      if (view.path === "/knowledge" && viewport.width <= 390) {
+        const navigationBox = await page.getByRole("button", { name: "打开导航" }).boundingBox();
+        const headerBox = await page.locator(".global-knowledge-search-page .page-header").boundingBox();
+        expect(navigationBox).not.toBeNull();
+        expect(headerBox).not.toBeNull();
+        expect(navigationBox!.y + navigationBox!.height).toBeLessThanOrEqual(headerBox!.y);
+      }
+      const viewOverflow = await page.evaluate(() =>
+        document.documentElement.scrollWidth - document.documentElement.clientWidth
+      );
+      expect(viewOverflow).toBeLessThanOrEqual(0);
+      if (viewport.width === 1440 || viewport.width === 390) {
+        await page.screenshot({
+          path: `test-results/${view.screenshot}-${viewport.width}x${viewport.height}.png`,
+          fullPage: true
+        });
+      }
+    }
+  }
+  await page.setViewportSize({ width: 1440, height: 1024 });
+
   await page.goto(`/projects/${projectId}/codex`);
   await expect(page.getByRole("heading", { name: "Codex 接入" })).toBeVisible();
   await page.getByLabel("Token 名称").fill("Playwright agent");

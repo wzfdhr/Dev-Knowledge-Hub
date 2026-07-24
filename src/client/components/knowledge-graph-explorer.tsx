@@ -157,7 +157,7 @@ export function KnowledgeGraphExplorer({
         <span className="knowledge-graph-zoom" aria-live="polite">缩放 {Math.round(zoom * 100)}%</span>
       </div>
     </header>
-    <p className="knowledge-graph-view-note" role="status">默认按可读比例显示；可切换查看完整图谱。</p>
+    <p className="knowledge-graph-view-note">默认按可读比例显示；可切换查看完整图谱。</p>
     <div
       ref={canvasRef}
       className="knowledge-graph-canvas"

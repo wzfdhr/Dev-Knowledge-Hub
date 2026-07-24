@@ -6,6 +6,7 @@ const NODE_HEIGHT = 48;
 const NODE_GAP_X = 248;
 const NODE_GAP_Y = 76;
 const PADDING = 40;
+const MIN_READABLE_ZOOM = 0.75;
 
 const kindOrder: Record<KnowledgeGraphNode["kind"], number> = {
   module: 0,
@@ -44,6 +45,26 @@ export interface GraphLayout {
   edges: PositionedGraphEdge[];
   width: number;
   height: number;
+}
+
+export interface GraphViewportSize {
+  width: number;
+  height: number;
+}
+
+export type GraphViewportMode = "readable" | "overview";
+
+export interface GraphViewport {
+  zoom: number;
+}
+
+export function graphViewport(
+  layout: Pick<GraphLayout, "width" | "height">,
+  viewport: GraphViewportSize,
+  mode: GraphViewportMode
+): GraphViewport {
+  const fit = Math.min(viewport.width / layout.width, viewport.height / layout.height);
+  return { zoom: mode === "overview" ? fit : Math.min(1, Math.max(MIN_READABLE_ZOOM, fit)) };
 }
 
 function compareNodes(left: KnowledgeGraphNode, right: KnowledgeGraphNode): number {

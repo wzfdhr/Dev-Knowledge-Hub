@@ -484,7 +484,7 @@ export interface CodexConnectionPack {
   agentsMarkdown: string;
   checkCommand: string;
 }
-export type ModelProvider = "openai" | "anthropic";
+export type ModelProvider = "openai" | "anthropic" | "deepseek";
 export interface ModelConfig {
   provider: ModelProvider;
   model: string;

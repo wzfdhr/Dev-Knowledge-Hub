@@ -1573,4 +1573,34 @@ describe("model settings", () => {
     });
     expect(await screen.findByText("模型设置已保存。")).toBeVisible();
   });
+
+  test("enables the internal DeepSeek mode with a fixed model and masked key", async () => {
+    const user = userEvent.setup();
+    const updateModelConfig = vi.fn().mockResolvedValue({
+      config: { provider: "deepseek", model: "deepseek-v4-flash", hasApiKey: true }
+    });
+    const api = {
+      getRepository: vi.fn().mockRejectedValue(Object.assign(new Error("none"), { status: 404 })),
+      getModelConfig: vi.fn().mockResolvedValue({ config: null }),
+      updateModelConfig,
+      getMfaStatus: vi.fn().mockResolvedValue({ enabled: false, pending: false, lockedUntil: null }),
+      getMcpConnection: vi.fn().mockResolvedValue({ endpoint: "/mcp", transport: "streamable-http", authorization: "bearer", stdioCommand: "npm run mcp:stdio", tools: [] }),
+      listMcpTokens: vi.fn().mockResolvedValue({ tokens: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<SettingsPage api={api} />);
+    await user.click(await screen.findByRole("checkbox", { name: "内部启用 DeepSeek" }));
+
+    expect(screen.getByText("deepseek-v4-flash")).toBeVisible();
+    expect(screen.queryByLabelText("服务商")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("模型")).not.toBeInTheDocument();
+    const apiKey = screen.getByLabelText("API Key");
+    expect(apiKey).toHaveAttribute("autocomplete", "new-password");
+    await user.type(apiKey, "deepseek-key");
+    await user.click(screen.getByRole("button", { name: "保存模型设置" }));
+
+    expect(updateModelConfig).toHaveBeenCalledWith({
+      provider: "deepseek", model: "deepseek-v4-flash", apiKey: "deepseek-key"
+    });
+  });
 });

@@ -6,6 +6,8 @@ import { errorMessage, type ApiClient } from "../api/client";
 import type { ModelProvider } from "../api/types";
 import { ErrorState, Loading } from "../components/ui";
 
+const DEEPSEEK_MODEL = "deepseek-v4-flash";
+
 function WorkspaceMcpForm({ api }: { api: ApiClient }) {
   const supported = typeof api.listWorkspaceMcpTokens === "function";
   const queryClient = useQueryClient();
@@ -50,8 +52,13 @@ function ModelForm({ api }: { api: ApiClient }) {
     setProvider(config.data.config.provider);
     setModel(config.data.config.model);
   }, [config.data]);
+  const deepseekEnabled = provider === "deepseek";
+  const hasActiveApiKey = config.data?.config?.hasApiKey === true
+    && (deepseekEnabled ? config.data.config.provider === "deepseek" : config.data.config.provider !== "deepseek");
   const update = useMutation({
-    mutationFn: () => api.updateModelConfig({ provider, model, apiKey }),
+    mutationFn: () => api.updateModelConfig({
+      provider, model: deepseekEnabled ? DEEPSEEK_MODEL : model, apiKey
+    }),
     onSuccess: (value) => {
       setProvider(value.config.provider);
       setModel(value.config.model);
@@ -63,9 +70,15 @@ function ModelForm({ api }: { api: ApiClient }) {
   if (config.error) return <ErrorState message={errorMessage(config.error)} retry={() => void config.refetch()} />;
   return <form className="form-stack" onSubmit={(event) => { event.preventDefault(); update.mutate(); }}>
     <div className="model-grid">
-      <label>服务商<select value={provider} onChange={(event) => setProvider(event.target.value as ModelProvider)}><option value="openai">兼容 OpenAI</option><option value="anthropic">Anthropic</option></select></label>
-      <label>模型<input required value={model} onChange={(event) => setModel(event.target.value)} placeholder={provider === "anthropic" ? "claude-sonnet-4-5" : "gpt-5-mini"} /></label>
-      <label>API Key <span>{config.data?.config?.hasApiKey ? "（留空以保留）" : ""}</span><input aria-label="API Key" name="model-api-key" required={!config.data?.config?.hasApiKey} type="password" autoComplete="new-password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={config.data?.config?.hasApiKey ? "已安全存储" : "启用所必需"} /></label>
+      <label><input type="checkbox" checked={deepseekEnabled} onChange={(event) => {
+        setProvider(event.target.checked ? "deepseek" : "openai");
+        setModel(event.target.checked ? DEEPSEEK_MODEL : "gpt-5-mini");
+      }} /> 内部启用 DeepSeek</label>
+      {deepseekEnabled ? <div className="form-stack"><span>服务商：DeepSeek</span><strong>{DEEPSEEK_MODEL}</strong></div> : <>
+        <label>服务商<select value={provider} onChange={(event) => setProvider(event.target.value as ModelProvider)}><option value="openai">兼容 OpenAI</option><option value="anthropic">Anthropic</option></select></label>
+        <label>模型<input required value={model} onChange={(event) => setModel(event.target.value)} placeholder={provider === "anthropic" ? "claude-sonnet-4-5" : "gpt-5-mini"} /></label>
+      </>}
+      <label>API Key <span>{hasActiveApiKey ? "（留空以保留）" : ""}</span><input aria-label="API Key" name="model-api-key" required={!hasActiveApiKey} type="password" autoComplete="new-password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={hasActiveApiKey ? "已安全存储" : "启用所必需"} /></label>
     </div>
     {update.error && <ErrorState message={errorMessage(update.error)} />}
     {update.isSuccess && <p className="success-message">模型设置已保存。</p>}

@@ -12,6 +12,7 @@ import {
   LastProjectAdminError,
   LastWorkspaceAdminError,
   knowledgeMatchReason,
+  modelCredentialName,
   normalizeSourceBlobGcCandidateLimit,
   normalizePagination,
   sourceBlobGcCursor
@@ -192,6 +193,7 @@ export class MemoryAppStore implements AppStore {
   readonly experienceReviews: ExperienceReviewEvent[] = [];
   readonly workspaceStandards: WorkspaceStandard[] = [];
   readonly encryptedCredentials: EncryptedCredentialRecord[] = [];
+  private readonly modelSettings = new Map<string, Pick<ModelConfigRecord, "provider" | "model">>();
   readonly sourceSnapshots: SourceSnapshotRecord[] = [];
   readonly sourceFiles: SourceFileRecord[] = [];
   readonly sourceBlobs: SourceBlobRecord[] = [];
@@ -2717,6 +2719,16 @@ export class MemoryAppStore implements AppStore {
   }
 
   async getModelConfig(workspaceId: string): Promise<ModelConfigRecord | null> {
+    const setting = this.modelSettings.get(workspaceId);
+    if (setting) {
+      const credential = this.encryptedCredentials.find((candidate) =>
+        candidate.workspaceId === workspaceId
+        && candidate.repositoryId === null
+        && candidate.name === modelCredentialName(setting.provider)
+      );
+      if (!credential) return null;
+      return { workspaceId, ...setting, encryptedApiKey: credential.ciphertext };
+    }
     const credential = this.encryptedCredentials.find((candidate) =>
       candidate.workspaceId === workspaceId
       && candidate.repositoryId === null
@@ -2736,10 +2748,11 @@ export class MemoryAppStore implements AppStore {
     input: { provider: ModelProvider; model: string; encryptedApiKey?: string },
     actorId: string
   ): Promise<ModelConfigRecord> {
+    const credentialName = modelCredentialName(input.provider);
     const existing = this.encryptedCredentials.find((candidate) =>
       candidate.workspaceId === workspaceId
       && candidate.repositoryId === null
-      && candidate.name === "model-provider"
+      && candidate.name === credentialName
     );
     if (!existing && !input.encryptedApiKey) throw new Error("An API key is required");
     if (existing) {
@@ -2747,10 +2760,11 @@ export class MemoryAppStore implements AppStore {
       if (input.encryptedApiKey) existing.ciphertext = input.encryptedApiKey;
     } else {
       this.encryptedCredentials.push({
-        id: randomUUID(), workspaceId, repositoryId: null, name: "model-provider",
+        id: randomUUID(), workspaceId, repositoryId: null, name: credentialName,
         ciphertext: input.encryptedApiKey!, metadata: { provider: input.provider, model: input.model }
       });
     }
+    this.modelSettings.set(workspaceId, { provider: input.provider, model: input.model });
     await this.recordAudit({
       workspaceId, actorId, action: "model_config.updated",
       resourceType: "model_config", metadata: { provider: input.provider, model: input.model }

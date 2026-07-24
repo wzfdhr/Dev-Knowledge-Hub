@@ -137,3 +137,14 @@ test("creates user-bound workspace MCP tokens without widening project token sco
   expect(sql).toMatch(/interval '30 days'/);
   expect(sql).not.toContain("ALTER TABLE mcp_tokens");
 });
+
+test("separates the active model provider from each provider credential", async () => {
+  const sql = await readFile(path.join(resolveMigrationDirectory(), "0039_model_provider_settings.sql"), "utf8");
+
+  expect(sql).toContain("CREATE TABLE workspace_model_settings");
+  expect(sql).toMatch(/workspace_id uuid PRIMARY KEY REFERENCES workspaces\(id\) ON DELETE CASCADE/);
+  expect(sql).toMatch(/provider IN \('openai', 'anthropic', 'deepseek'\)/);
+  expect(sql).toMatch(/INSERT INTO workspace_model_settings/);
+  expect(sql).toMatch(/name = 'model-provider'/);
+  expect(sql).not.toMatch(/DROP TABLE|DELETE FROM|TRUNCATE/);
+});

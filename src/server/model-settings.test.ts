@@ -85,6 +85,36 @@ describe("model settings", () => {
     expect(store.encryptedCredentials[0].ciphertext).toBe(ciphertext);
   });
 
+  test("stores the DeepSeek credential separately from an existing generic provider credential", async () => {
+    const { app, store, masterKey, cookie } = await context();
+    const genericKey = "generic-key-that-must-remain-isolated";
+    const deepseekKey = "deepseek-key-that-must-remain-isolated";
+    await app.inject({
+      method: "PUT", url: "/api/settings/model", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { provider: "openai", model: "gpt-5-mini", apiKey: genericKey }
+    });
+    const genericCiphertext = store.encryptedCredentials[0].ciphertext;
+
+    const saved = await app.inject({
+      method: "PUT", url: "/api/settings/model", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { provider: "deepseek", model: "deepseek-v4-flash", apiKey: deepseekKey }
+    });
+
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json()).toEqual({
+      config: { provider: "deepseek", model: "deepseek-v4-flash", hasApiKey: true }
+    });
+    expect(store.encryptedCredentials).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "model-provider", ciphertext: genericCiphertext }),
+      expect.objectContaining({ name: "model-provider-deepseek" })
+    ]));
+    expect(store.encryptedCredentials).toHaveLength(2);
+    const deepseekCredential = store.encryptedCredentials.find(({ name }) => name === "model-provider-deepseek");
+    expect(deepseekCredential).toBeDefined();
+    expect(decryptSecret(deepseekCredential!.ciphertext, masterKey)).toBe(deepseekKey);
+    expect(JSON.stringify(saved.json())).not.toContain(deepseekKey);
+  });
+
   test("reports an unconfigured model without creating fake state", async () => {
     const { app, cookie } = await context();
     const response = await app.inject({

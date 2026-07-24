@@ -2419,7 +2419,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.put("/api/settings/model", { preHandler: requireAdministrator }, async (request, reply) => {
     const parsed = z.object({
-      provider: z.enum(["openai", "anthropic"]),
+      provider: z.enum(["openai", "anthropic", "deepseek"]),
       model: z.string().trim().min(1).max(200),
       apiKey: z.string().max(10_000).optional().default("")
     }).safeParse(request.body);

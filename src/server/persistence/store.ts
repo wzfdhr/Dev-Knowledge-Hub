@@ -527,7 +527,11 @@ export interface EncryptedCredentialRecord {
   metadata: Record<string, string>;
 }
 
-export type ModelProvider = "openai" | "anthropic";
+export type ModelProvider = "openai" | "anthropic" | "deepseek";
+
+export function modelCredentialName(provider: ModelProvider): string {
+  return provider === "deepseek" ? "model-provider-deepseek" : "model-provider";
+}
 
 export interface ModelConfigRecord {
   workspaceId: string;

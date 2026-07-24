@@ -32,6 +32,7 @@ import {
   type ProjectRecord
 } from "./persistence/store.js";
 import { decryptSecret, encryptSecret } from "./security/crypto.js";
+import { DEEPSEEK_MODEL } from "./knowledge/enhancer.js";
 import { DirtyWorktreeError, syncRepository } from "./git/snapshot.js";
 import { GitEgressDeniedError } from "./security/egress-policy.js";
 import { hashPassword, verifyPassword } from "./security/password.js";
@@ -2111,16 +2112,16 @@ export function buildServer(options: ServerOptions): FastifyInstance {
 
   server.put("/api/settings/model", { preHandler: requireAdministrator }, async (request, reply) => {
     const parsed = z.object({
-      provider: z.enum(["openai", "anthropic"]),
+      provider: z.enum(["openai", "anthropic", "deepseek"]),
       model: z.string().trim().min(1).max(200),
       apiKey: z.string().max(10_000).optional().default("")
     }).safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid model settings");
     const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const model = parsed.data.provider === "deepseek" ? DEEPSEEK_MODEL : parsed.data.model;
     try {
       const config = await options.store.upsertModelConfig(admin.workspaceId, {
-        provider: parsed.data.provider,
-        model: parsed.data.model,
+        provider: parsed.data.provider, model,
         ...(parsed.data.apiKey ? { encryptedApiKey: encryptSecret(parsed.data.apiKey, options.masterKey) } : {})
       }, admin.id);
       return modelConfigDto(config);

@@ -1404,6 +1404,22 @@ describe("MCP token disclosure", () => {
 });
 
 describe("model settings", () => {
+  test("marks the model API key as a new credential so browser password managers do not autofill it", async () => {
+    const api = {
+      getRepository: vi.fn().mockRejectedValue(Object.assign(new Error("none"), { status: 404 })),
+      getModelConfig: vi.fn().mockResolvedValue({ config: null }),
+      getMfaStatus: vi.fn().mockResolvedValue({ enabled: false, pending: false, lockedUntil: null }),
+      getMcpConnection: vi.fn().mockResolvedValue({ endpoint: "/mcp", transport: "streamable-http", authorization: "bearer", stdioCommand: "npm run mcp:stdio", tools: [] }),
+      listMcpTokens: vi.fn().mockResolvedValue({ tokens: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<SettingsPage api={api} />);
+
+    const apiKey = await screen.findByLabelText("API Key");
+    expect(apiKey).toHaveAttribute("autocomplete", "new-password");
+    expect(apiKey).toHaveAttribute("name", "model-api-key");
+  });
+
   test("loads sanitized config and preserves the key when the API key field is blank", async () => {
     const user = userEvent.setup();
     const updateModelConfig = vi.fn().mockResolvedValue({
@@ -1431,5 +1447,60 @@ describe("model settings", () => {
       provider: "anthropic", model: "claude-sonnet-4-5", apiKey: ""
     });
     expect(await screen.findByText("模型设置已保存。")).toBeVisible();
+  });
+
+  test("enables the internal DeepSeek mode with a fixed model and masked key", async () => {
+    const user = userEvent.setup();
+    const updateModelConfig = vi.fn().mockResolvedValue({
+      config: { provider: "deepseek", model: "deepseek-v4-flash", hasApiKey: true }
+    });
+    const api = {
+      getRepository: vi.fn().mockRejectedValue(Object.assign(new Error("none"), { status: 404 })),
+      getModelConfig: vi.fn().mockResolvedValue({ config: null }),
+      updateModelConfig,
+      getMfaStatus: vi.fn().mockResolvedValue({ enabled: false, pending: false, lockedUntil: null }),
+      getMcpConnection: vi.fn().mockResolvedValue({ endpoint: "/mcp", transport: "streamable-http", authorization: "bearer", stdioCommand: "npm run mcp:stdio", tools: [] }),
+      listMcpTokens: vi.fn().mockResolvedValue({ tokens: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<SettingsPage api={api} />);
+    await user.click(await screen.findByRole("checkbox", { name: "内部启用 DeepSeek" }));
+
+    expect(screen.getByText("deepseek-v4-flash")).toBeVisible();
+    expect(screen.queryByLabelText("服务商")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("模型")).not.toBeInTheDocument();
+    const apiKey = screen.getByLabelText("API Key");
+    expect(apiKey).toHaveAttribute("autocomplete", "new-password");
+    await user.type(apiKey, "deepseek-key");
+    await user.click(screen.getByRole("button", { name: "保存模型设置" }));
+
+    expect(updateModelConfig).toHaveBeenCalledWith({
+      provider: "deepseek", model: "deepseek-v4-flash", apiKey: "deepseek-key"
+    });
+  });
+
+  test("allows switching away from DeepSeek without re-entering a separately stored generic key", async () => {
+    const user = userEvent.setup();
+    const updateModelConfig = vi.fn().mockResolvedValue({
+      config: { provider: "openai", model: "gpt-5-mini", hasApiKey: true }
+    });
+    const api = {
+      getRepository: vi.fn().mockRejectedValue(Object.assign(new Error("none"), { status: 404 })),
+      getModelConfig: vi.fn().mockResolvedValue({
+        config: { provider: "deepseek", model: "deepseek-v4-flash", hasApiKey: true }
+      }),
+      updateModelConfig,
+      getMfaStatus: vi.fn().mockResolvedValue({ enabled: false, pending: false, lockedUntil: null }),
+      getMcpConnection: vi.fn().mockResolvedValue({ endpoint: "/mcp", transport: "streamable-http", authorization: "bearer", stdioCommand: "npm run mcp:stdio", tools: [] }),
+      listMcpTokens: vi.fn().mockResolvedValue({ tokens: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<SettingsPage api={api} />);
+    await user.click(await screen.findByRole("checkbox", { name: "内部启用 DeepSeek" }));
+    await user.click(screen.getByRole("button", { name: "保存模型设置" }));
+
+    expect(updateModelConfig).toHaveBeenCalledWith({
+      provider: "openai", model: "gpt-5-mini", apiKey: ""
+    });
   });
 });

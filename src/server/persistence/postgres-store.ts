@@ -9,6 +9,7 @@ import {
   LastProjectAdminError,
   LastWorkspaceAdminError,
   knowledgeMatchReason,
+  modelCredentialName,
   MAX_UPLOAD_ACCEPTED_BYTES,
   MAX_UPLOAD_ACCEPTED_FILES,
   normalizeSourceBlobGcCandidateLimit,
@@ -5208,18 +5209,27 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
   async getModelConfig(workspaceId: string): Promise<ModelConfigRecord | null> {
     const { rows } = await this.pool.query<{
       ciphertext: string;
-      metadata: { provider?: string; model?: string };
+      provider: ModelProvider;
+      model: string;
     }>(
-      `SELECT ciphertext, metadata FROM encrypted_credentials
-       WHERE workspace_id = $1 AND repository_id IS NULL AND name = 'model-provider'`,
+      `SELECT credential.ciphertext, setting.provider, setting.model
+       FROM workspace_model_settings setting
+       JOIN encrypted_credentials credential
+         ON credential.workspace_id = setting.workspace_id
+        AND credential.repository_id IS NULL
+        AND credential.name = CASE
+          WHEN setting.provider = 'deepseek' THEN 'model-provider-deepseek'
+          ELSE 'model-provider'
+        END
+       WHERE setting.workspace_id = $1`,
       [workspaceId]
     );
     const row = rows[0];
-    if (!row?.metadata.provider || !row.metadata.model) return null;
+    if (!row) return null;
     return {
       workspaceId,
-      provider: row.metadata.provider as ModelProvider,
-      model: row.metadata.model,
+      provider: row.provider,
+      model: row.model,
       encryptedApiKey: row.ciphertext
     };
   }
@@ -5230,11 +5240,12 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
     actorId: string
   ): Promise<ModelConfigRecord> {
     return this.transaction(async (client) => {
+      const credentialName = modelCredentialName(input.provider);
       const existing = await client.query<{ id: string; ciphertext: string }>(
         `SELECT id, ciphertext FROM encrypted_credentials
-         WHERE workspace_id = $1 AND repository_id IS NULL AND name = 'model-provider'
+         WHERE workspace_id = $1 AND repository_id IS NULL AND name = $2
          FOR UPDATE`,
-        [workspaceId]
+        [workspaceId, credentialName]
       );
       if (!existing.rows[0] && !input.encryptedApiKey) throw new Error("An API key is required");
       const metadata = JSON.stringify({ provider: input.provider, model: input.model });
@@ -5249,10 +5260,17 @@ export class PostgresAppStore implements AppStore, PipelineArtifactStore {
         await client.query(
           `INSERT INTO encrypted_credentials
            (workspace_id, repository_id, name, ciphertext, metadata)
-           VALUES ($1, NULL, 'model-provider', $2, $3::jsonb)`,
-          [workspaceId, input.encryptedApiKey, metadata]
+           VALUES ($1, NULL, $2, $3, $4::jsonb)`,
+          [workspaceId, credentialName, input.encryptedApiKey, metadata]
         );
       }
+      await client.query(
+        `INSERT INTO workspace_model_settings (workspace_id, provider, model)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (workspace_id) DO UPDATE
+         SET provider = EXCLUDED.provider, model = EXCLUDED.model, updated_at = now()`,
+        [workspaceId, input.provider, input.model]
+      );
       await this.insertAudit(client, {
         workspaceId, actorId, action: "model_config.updated", resourceType: "model_config",
         metadata: { provider: input.provider, model: input.model }

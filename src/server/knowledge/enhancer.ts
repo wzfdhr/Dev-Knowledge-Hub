@@ -4,6 +4,9 @@ import { generateText, type LanguageModel } from "ai";
 import type { BuildPurpose } from "./build-service.js";
 import type { Citation } from "./intelligence.js";
 
+export const DEEPSEEK_BASE_URL = "https://api.deepseek.com";
+export const DEEPSEEK_MODEL = "deepseek-v4-flash";
+
 export interface EnhancementRequest {
   slug: string;
   title: string;
@@ -66,6 +69,14 @@ export function openAiCompatibleEnhancer(options: {
 }): KnowledgeEnhancer {
   const provider = createOpenAI({ apiKey: options.apiKey, baseURL: options.baseUrl });
   return new AiSdkKnowledgeEnhancer(provider(options.model));
+}
+
+export function deepseekEnhancer(apiKey: string): KnowledgeEnhancer {
+  return openAiCompatibleEnhancer({
+    apiKey,
+    model: DEEPSEEK_MODEL,
+    baseUrl: DEEPSEEK_BASE_URL
+  });
 }
 
 export function anthropicEnhancer(options: { apiKey: string; model: string }): KnowledgeEnhancer {

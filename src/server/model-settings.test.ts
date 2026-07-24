@@ -115,6 +115,24 @@ describe("model settings", () => {
     expect(JSON.stringify(saved.json())).not.toContain(deepseekKey);
   });
 
+  test("ignores a client-selected DeepSeek model and saves the internal default", async () => {
+    const { app, store, cookie } = await context();
+
+    const saved = await app.inject({
+      method: "PUT", url: "/api/settings/model", headers: { cookie, ...csrfHeaders(cookie) },
+      payload: { provider: "deepseek", model: "untrusted-model-name", apiKey: "deepseek-key" }
+    });
+
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json()).toEqual({
+      config: { provider: "deepseek", model: "deepseek-v4-flash", hasApiKey: true }
+    });
+    expect(store.auditEvents.at(-1)).toMatchObject({
+      action: "model_config.updated",
+      metadata: { provider: "deepseek", model: "deepseek-v4-flash" }
+    });
+  });
+
   test("reports an unconfigured model without creating fake state", async () => {
     const { app, cookie } = await context();
     const response = await app.inject({

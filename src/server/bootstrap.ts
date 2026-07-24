@@ -16,7 +16,7 @@ import {
   type SnapshotFileMetadata
 } from "./knowledge/build-service.js";
 import { PgBossBuildJobQueue } from "./knowledge/job-queue.js";
-import { anthropicEnhancer, openAiCompatibleEnhancer, type KnowledgeEnhancer } from "./knowledge/enhancer.js";
+import { anthropicEnhancer, deepseekEnhancer, openAiCompatibleEnhancer, type KnowledgeEnhancer } from "./knowledge/enhancer.js";
 import { decryptSecret } from "./security/crypto.js";
 import { syncRepository } from "./git/snapshot.js";
 import { GitCommandTimeoutError } from "./git/remote.js";
@@ -204,6 +204,8 @@ export async function bootstrapServer(
     const apiKey = decryptSecret(config.encryptedApiKey, env.masterKey!);
     return config.provider === "anthropic"
       ? anthropicEnhancer({ apiKey, model: config.model })
+      : config.provider === "deepseek"
+        ? deepseekEnhancer(apiKey)
       : openAiCompatibleEnhancer({ apiKey, model: config.model });
   };
   const frontendModeForProject = async (

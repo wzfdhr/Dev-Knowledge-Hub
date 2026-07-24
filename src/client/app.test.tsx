@@ -1603,4 +1603,29 @@ describe("model settings", () => {
       provider: "deepseek", model: "deepseek-v4-flash", apiKey: "deepseek-key"
     });
   });
+
+  test("allows switching away from DeepSeek without re-entering a separately stored generic key", async () => {
+    const user = userEvent.setup();
+    const updateModelConfig = vi.fn().mockResolvedValue({
+      config: { provider: "openai", model: "gpt-5-mini", hasApiKey: true }
+    });
+    const api = {
+      getRepository: vi.fn().mockRejectedValue(Object.assign(new Error("none"), { status: 404 })),
+      getModelConfig: vi.fn().mockResolvedValue({
+        config: { provider: "deepseek", model: "deepseek-v4-flash", hasApiKey: true }
+      }),
+      updateModelConfig,
+      getMfaStatus: vi.fn().mockResolvedValue({ enabled: false, pending: false, lockedUntil: null }),
+      getMcpConnection: vi.fn().mockResolvedValue({ endpoint: "/mcp", transport: "streamable-http", authorization: "bearer", stdioCommand: "npm run mcp:stdio", tools: [] }),
+      listMcpTokens: vi.fn().mockResolvedValue({ tokens: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<SettingsPage api={api} />);
+    await user.click(await screen.findByRole("checkbox", { name: "内部启用 DeepSeek" }));
+    await user.click(screen.getByRole("button", { name: "保存模型设置" }));
+
+    expect(updateModelConfig).toHaveBeenCalledWith({
+      provider: "openai", model: "gpt-5-mini", apiKey: ""
+    });
+  });
 });

@@ -37,7 +37,7 @@ describe("schema exports", () => {
     );
   });
 
-  test("keeps source blobs generation-scoped while source file references remain expandable", () => {
+  test("contracts source file references onto verified workspace blob identities", () => {
     const blobs = getTableConfig(schema.sourceBlobs);
     const files = getTableConfig(schema.sourceFiles);
 
@@ -48,8 +48,9 @@ describe("schema exports", () => {
       "source_blobs_generation_check",
       "source_blobs_status_check"
     ]));
-    expect(files.columns.find((column) => column.name === "source_blob_id")?.notNull).toBe(false);
-    expect(files.foreignKeys.map((key) => key.getName())).toContain("source_files_source_blob_workspace_fk");
+    expect(blobs.uniqueConstraints.map((item) => item.name)).toContain("source_blobs_reference_identity_unique");
+    expect(files.columns.find((column) => column.name === "source_blob_id")?.notNull).toBe(true);
+    expect(files.foreignKeys.map((key) => key.getName())).toContain("source_files_source_blob_identity_fk");
   });
 
   test("keeps upload sessions workspace scoped with durable manifest and idempotency contracts", () => {

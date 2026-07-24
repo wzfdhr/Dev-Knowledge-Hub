@@ -239,6 +239,8 @@ export const sourceBlobs = pgTable("source_blobs", {
   unique("source_blobs_workspace_hash_generation_unique")
     .on(table.workspaceId, table.contentHash, table.generation),
   unique("source_blobs_id_workspace_unique").on(table.id, table.workspaceId),
+  unique("source_blobs_reference_identity_unique")
+    .on(table.id, table.workspaceId, table.contentHash, table.byteSize),
   uniqueIndex("source_blobs_live_workspace_hash_idx")
     .on(table.workspaceId, table.contentHash)
     .where(sql`${table.status} IN ('active', 'tombstoned')`),
@@ -257,7 +259,7 @@ export const sourceFiles = pgTable("source_files", {
   language: text("language"),
   contentHash: text("content_hash").notNull(),
   byteSize: integer("byte_size").notNull(),
-  sourceBlobId: uuid("source_blob_id"),
+  sourceBlobId: uuid("source_blob_id").notNull(),
   ...timestamps
 }, (table) => [
   uniqueIndex("source_files_id_workspace_idx").on(table.id, table.workspaceId),
@@ -268,9 +270,9 @@ export const sourceFiles = pgTable("source_files", {
     name: "source_files_snapshot_workspace_fk"
   }).onDelete("cascade"),
   foreignKey({
-    columns: [table.sourceBlobId, table.workspaceId],
-    foreignColumns: [sourceBlobs.id, sourceBlobs.workspaceId],
-    name: "source_files_source_blob_workspace_fk"
+    columns: [table.sourceBlobId, table.workspaceId, table.contentHash, table.byteSize],
+    foreignColumns: [sourceBlobs.id, sourceBlobs.workspaceId, sourceBlobs.contentHash, sourceBlobs.byteSize],
+    name: "source_files_source_blob_identity_fk"
   }).onDelete("restrict"),
   index("source_files_source_blob_idx").on(table.sourceBlobId)
 ]);

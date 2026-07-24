@@ -6,7 +6,11 @@ import { parse } from "yaml";
 
 describe("delivery database isolation", () => {
   test("keeps the FK17 bootstrap free of the source-blob migration", async () => {
-    await expect(readFile("drizzle/0035_source_blobs_contract.sql", "utf8")).rejects.toThrow();
+    expect(() => execFileSync(
+      "git",
+      ["cat-file", "-e", "origin/main:drizzle/0035_source_blobs_contract.sql"],
+      { stdio: "ignore" }
+    )).toThrow();
   });
 
   test("keeps the FK17 trust root bootstrap-compatible until its exact commit is configured", async () => {
@@ -67,6 +71,75 @@ describe("delivery database isolation", () => {
     );
     expect(compose.services.integration.build.target).toBe("integration");
     expect(ci.jobs.verify.env.TEST_DATABASE_URL).toContain("/devkh_test");
+  });
+
+  test("isolates source blob contract authorization to an explicit migration-only service", async () => {
+    const compose = parse(await readFile("docker-compose.yml", "utf8"));
+    const migration = compose.services["contract-migrate"];
+
+    expect(migration.profiles).toEqual(["source-blob-contract"]);
+    expect(migration.command).toEqual(["node", "dist/server/db/migrate.js"]);
+    expect(migration.environment.PGOPTIONS).toBe("-c devkh.source_blob_contract_authorized=true");
+    expect(migration.environment.DATABASE_URL).toContain("/dev_knowledge_hub");
+    expect(migration.restart).toBe("no");
+    expect(migration.read_only).toBe(true);
+    expect(migration).not.toHaveProperty("volumes");
+    expect(compose.services.app.environment).not.toHaveProperty("PGOPTIONS");
+  });
+
+  test("uses an already-contracted database fixture for ordinary CI without contract authorization", async () => {
+    const override = parse(await readFile("docker-compose.post-contract-ci.yml", "utf8"));
+    const baseline = await readFile("docker/post-contract-ci-baseline.sql", "utf8");
+    const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
+    const phaseMerge = parse(await readFile(".github/workflows/phase-merge.yml", "utf8"));
+    const ordinaryCommands = ci.jobs["container-smoke"].steps
+      .map((step) => step.run).filter(Boolean).join("\n");
+    const introducingCommands = phaseMerge.jobs["container-smoke"].steps
+      .map((step) => step.run).filter(Boolean).join("\n");
+
+    expect(override.services.postgres.volumes).toContain(
+      "${DEVKH_POST_CONTRACT_BASELINE_PATH:?trusted baseline required}:/docker-entrypoint-initdb.d/20-post-contract-baseline.sql:ro"
+    );
+    expect(baseline).toMatch(/source_blob_id uuid NOT NULL/);
+    expect(baseline).toContain("source_files_source_blob_identity_fk");
+    expect(baseline).toMatch(/INSERT INTO .*schema_migrations.*0035_source_blobs_contract\.sql/is);
+    expect(ordinaryCommands).toContain("/tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope \"$release_scope\"");
+    expect(ordinaryCommands).toContain("release_scope=runtime-container");
+    expect(introducingCommands).toContain("/tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope container");
+    expect(phaseMerge.jobs.merge.steps.some((step) => step.uses === "actions/upload-artifact@v4")).toBe(true);
+    expect(introducingCommands).not.toContain("phase-merge-approval");
+    const mergeCommands = phaseMerge.jobs.merge.steps.map((step) => step.run).filter(Boolean).join("\n");
+    expect(mergeCommands).toContain("phase-merge-approval.json");
+    expect(mergeCommands).toContain("git rev-parse HEAD");
+    expect(mergeCommands).toContain("$TRUSTED_BOOTSTRAP:.github/workflows/phase-merge.yml");
+    expect(mergeCommands).toContain("trustedBootstrapCommit");
+    expect(mergeCommands).toContain("trustedVerifierBlob");
+    expect(ci.jobs["container-smoke"].env).not.toHaveProperty("DEVKH_RELEASE_APPROVED_BASE");
+    expect(ci.jobs["container-smoke"].env).not.toHaveProperty("DEVKH_SOURCE_BLOB_CONTRACT_GATE_MANIFEST");
+  });
+
+  test("executes gate verifiers and dependencies only from the reviewed bootstrap revision", async () => {
+    const ci = parse(await readFile(".github/workflows/ci.yml", "utf8"));
+    const phaseMerge = parse(await readFile(".github/workflows/phase-merge.yml", "utf8"));
+    const jobs = [ci.jobs.verify, ci.jobs["container-smoke"], phaseMerge.jobs.verify, phaseMerge.jobs["container-smoke"]];
+
+    for (const job of jobs) {
+      const commands = job.steps.map((step) => step.run).filter(Boolean).join("\n");
+      expect(commands).toContain("DEVKH_FK17_BOOTSTRAP_COMMIT");
+      expect(commands).toContain("git archive");
+      expect(commands).toContain("/tmp/devkh-fk17-trusted");
+      expect(commands).toContain("npm ci --ignore-scripts");
+      expect(commands).toContain("node /tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope");
+      expect(commands).toContain("node /tmp/devkh-fk17-trusted/scripts/release-verify.mjs");
+    }
+    expect(JSON.stringify(ci)).toContain("${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}");
+    expect(JSON.stringify(phaseMerge)).toContain("${{ vars.DEVKH_FK17_BOOTSTRAP_COMMIT }}");
+    for (const checkout of [
+      ...ci.jobs.verify.steps.filter((step) => step.uses === "actions/checkout@v4"),
+      ...ci.jobs["container-smoke"].steps.filter((step) => step.uses === "actions/checkout@v4")
+    ]) {
+      expect(checkout.with?.["persist-credentials"]).toBe(false);
+    }
   });
 
   test("documents the public HTTPS base URL required by the Compose application", async () => {
@@ -168,9 +241,9 @@ describe("delivery database isolation", () => {
     ]));
     expect(phaseMerge.jobs["container-smoke"].env.RECOVERY_EVIDENCE_DEFER_FINALIZATION).toBe("true");
     expect(verifySteps).toContain("npx playwright install --with-deps chromium");
-    expect(verifySteps).toContain("npm run release:verify -- --scope verify");
+    expect(verifySteps).toContain("node /tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope verify");
     expect(smokeSteps).toContain("apt-get install -y restic");
-    expect(smokeSteps).toContain("npm run release:verify -- --scope container");
+    expect(smokeSteps).toContain("node /tmp/devkh-fk17-trusted/scripts/release-verify.mjs --scope \"$release_scope\"");
     expect(ci.jobs["container-smoke"].steps).toEqual(expect.arrayContaining([
       expect.objectContaining({ uses: "actions/upload-artifact@v4", if: "always()" })
     ]));
@@ -259,9 +332,14 @@ describe("delivery database isolation", () => {
 
     expect(workflow.on).toHaveProperty("workflow_dispatch");
     expect(workflow.on.workflow_dispatch.inputs).toHaveProperty("approved_base");
+    expect(workflow.on.workflow_dispatch.inputs).toHaveProperty("source_blob_contract_gate_manifest");
+    expect(workflow.on.workflow_dispatch.inputs).toHaveProperty("source_blob_contract_gate_manifest_sha256");
+    expect(workflow.on.workflow_dispatch.inputs).toHaveProperty("source_blob_contract_gate_artifact_run_id");
+    expect(workflow.on.workflow_dispatch.inputs).toHaveProperty("source_blob_contract_gate_artifact_name");
     expect(workflow.permissions.contents).toBe("read");
     expect(workflow.jobs.verify.permissions.contents).toBe("read");
     expect(workflow.jobs["container-smoke"].permissions.contents).toBe("read");
+    expect(workflow.jobs["container-smoke"].permissions.actions).toBe("read");
     expect(mergeJob.permissions.contents).toBe("write");
     expect(mergeJob.permissions["pull-requests"]).toBe("read");
     expect(mergeJob.needs).toEqual(["verify", "container-smoke"]);
@@ -283,8 +361,28 @@ describe("delivery database isolation", () => {
     const verifyCommands = workflow.jobs.verify.steps.map((step) => step.run).filter(Boolean).join("\n");
     const containerCommands = workflow.jobs["container-smoke"].steps
       .map((step) => step.run).filter(Boolean).join("\n");
+    const contractDetection = workflow.jobs["container-smoke"].steps.find(
+      (step) => step.name === "Detect source blob contract gate"
+    );
     expect(verifyCommands).toContain("git merge-base --is-ancestor");
     expect(containerCommands).toContain("git merge-base --is-ancestor");
+    expect(containerCommands).toContain("gh run download");
+    expect(containerCommands).toContain("git rev-parse \"$APPROVED_BASE:drizzle/0035_source_blobs_contract.sql\"");
+    expect(containerCommands).toContain("git rev-parse \"$APPROVED_HEAD:drizzle/0035_source_blobs_contract.sql\"");
+    expect(contractDetection.env).toMatchObject({
+      APPROVED_BASE: "${{ inputs.approved_base }}",
+      APPROVED_HEAD: "${{ inputs.approved_head }}"
+    });
+    expect(containerCommands).toContain("SOURCE_BLOB_GATE_ARTIFACT_RUN_ID");
+    expect(containerCommands).toContain("SOURCE_BLOB_GATE_ARTIFACT_NAME");
+    expect(workflow.jobs["container-smoke"].if).toContain("inputs.user_approved");
+    expect(workflow.jobs["container-smoke"].if).toContain("github.actor == github.repository_owner");
+    expect(workflow.jobs["container-smoke"].env).toMatchObject({
+      DEVKH_SOURCE_BLOB_CONTRACT_GATE_MANIFEST: "/tmp/devkh-source-blob-contract-gate/${{ inputs.source_blob_contract_gate_manifest }}",
+      DEVKH_SOURCE_BLOB_CONTRACT_GATE_MANIFEST_SHA256: "${{ inputs.source_blob_contract_gate_manifest_sha256 }}",
+      DEVKH_SOURCE_BLOB_CONTRACT_CANDIDATE_COMMIT: "${{ inputs.approved_head }}",
+      DEVKH_SOURCE_BLOB_CONTRACT_EXPECTED_APPROVER: "${{ github.actor }}"
+    });
     const mergeCommands = mergeJob.steps.map((step) => step.run).filter(Boolean).join("\n");
     expect(mergeJob.steps).toEqual(expect.arrayContaining([
       expect.objectContaining({

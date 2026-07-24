@@ -19,7 +19,7 @@ Allow a workspace administrator to enable an internal DeepSeek mode from System 
 
 For `provider: "deepseek"`, the write endpoint ignores any client-selected model and persists `deepseek-v4-flash`. It requires a non-empty key if no DeepSeek credential exists. The provider implementation uses `https://api.deepseek.com` internally.
 
-Existing `model-provider` credentials remain the backward-compatible credential identity for OpenAI-compatible and Anthropic settings. DeepSeek uses the separate `model-provider-deepseek` identity. This prevents a blank-key update for another provider from preserving and later sending a DeepSeek key to a different endpoint.
+Migration `0039_model_provider_settings.sql` adds a workspace-scoped active-provider row containing only provider and model metadata. Existing `model-provider` credentials are backfilled into this row without decrypting or moving a secret. Existing OpenAI-compatible and Anthropic credentials retain the backward-compatible `model-provider` identity; DeepSeek uses the separate `model-provider-deepseek` identity. This lets the active provider switch without overwriting another provider's credential and prevents a blank-key update from sending a DeepSeek key to a different endpoint.
 
 ## Settings interaction
 

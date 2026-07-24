@@ -112,6 +112,35 @@ describe("project frontend mode stage planning", () => {
     }));
   });
 
+  test("keeps the legacy convert reader on normalized sources when source storage is shadow", async () => {
+    const referenceManifest = {
+      ...normalizedManifest,
+      id: "normalized-refs-1",
+      kind: "normalized-source-refs",
+      schemaVersion: 2
+    } as ArtifactManifest;
+    const run = {
+      ...convertRun,
+      outputManifestIds: [normalizedManifest.id, referenceManifest.id]
+    };
+    const manifests = new Map([
+      [normalizedManifest.id, normalizedManifest],
+      [referenceManifest.id, referenceManifest]
+    ]);
+    const planner = createFrontendModeStageInputPlanner({
+      findSnapshotById: vi.fn().mockResolvedValue(snapshot),
+      listPipelineStageRuns: vi.fn().mockResolvedValue([run]),
+      findArtifactById: vi.fn((id: string) => Promise.resolve(manifests.get(id) ?? null))
+    } as never, vi.fn().mockResolvedValue("legacy"), "shadow");
+
+    await expect(planner.nextInputDigest({
+      currentRun: run,
+      build,
+      nextStage: "extract",
+      outputManifestIds: run.outputManifestIds
+    })).resolves.toBe(knowledgeIrPipelineInputDigest(snapshot, build.purpose, [normalizedManifest.id]));
+  });
+
   test("selects only source references for an active convert reader", async () => {
     const referenceManifest = {
       ...normalizedManifest,

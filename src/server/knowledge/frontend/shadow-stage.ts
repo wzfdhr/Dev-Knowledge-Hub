@@ -659,7 +659,7 @@ export function createFrontendModeStageInputPlanner(
   modeForProject: (workspaceId: string, projectId: string) => Promise<FrontendKnowledgeMode>,
   sourceStorageMode: SourceStorageMode = "legacy"
 ): PipelineStageInputPlanner {
-  const legacy = createB02StageInputPlanner(store);
+  const legacy = createB02StageInputPlanner(store, sourceStorageMode);
   const shadow = createFrontendShadowStageInputPlanner(store, sourceStorageMode);
   return {
     async nextInputDigest(input) {

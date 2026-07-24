@@ -103,6 +103,26 @@ describe("KnowledgeGraphExplorer", () => {
     expect(transform).toHaveAttribute("transform", "translate(15 7.5)");
   });
 
+  test("defaults a wide graph to a readable view and lets people inspect the full graph", async () => {
+    const user = userEvent.setup();
+    render(<KnowledgeGraphExplorer
+      layout={{ ...layout, width: 5_000 }}
+      selectedNodeId={null}
+      onSelectNode={vi.fn()}
+    />);
+
+    expect(screen.getByRole("button", { name: "适合阅读" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看全图" })).toBeInTheDocument();
+    expect(screen.getByText("默认按可读比例显示；可切换查看完整图谱。")).toBeVisible();
+    expect(screen.getByText("缩放 75%")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "查看全图" }));
+    expect(screen.getByText("缩放 19%")).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "适合阅读" }));
+    expect(screen.getByText("缩放 75%")).toBeVisible();
+  });
+
   test("does not expose edge controls without an edge selection callback", () => {
     render(<KnowledgeGraphExplorer layout={layout} selectedNodeId={null} onSelectNode={vi.fn()} />);
 

@@ -2,7 +2,7 @@ import { describe, expect, expectTypeOf, test } from "vitest";
 
 import type { ApiClient } from "../../api/client";
 import type { KnowledgeGraph, KnowledgeGraphNode, ProjectGraphResponse } from "../../api/types";
-import { describeGraphReduction, filterGraph, layoutGraph } from "./graph-view-model";
+import { describeGraphReduction, filterGraph, graphViewport, layoutGraph } from "./graph-view-model";
 
 export function jsonNodesFromGraphResponse(response: ProjectGraphResponse<"json" | "tree">) {
   if (response.format !== "json" || response.data === null) return [];
@@ -124,6 +124,13 @@ describe("knowledge graph view model", () => {
     expect(layoutGraph(visible)).toEqual(layoutGraph(visible));
     expect(layoutGraph(reversedVisible)).toEqual(layoutGraph(visible));
     expect(layoutGraph(visible).nodes.slice(0, 2).map((node) => node.id)).toEqual(["module-api", "module-web"]);
+  });
+
+  test("keeps a wide graph readable by default while allowing a full overview", () => {
+    const wideLayout = { nodes: [], edges: [], width: 5_000, height: 240 };
+
+    expect(graphViewport(wideLayout, { width: 960, height: 520 }, "readable").zoom).toBe(0.75);
+    expect(graphViewport(wideLayout, { width: 960, height: 520 }, "overview").zoom).toBeCloseTo(0.192);
   });
 
   test("preserves the graph format and data relationship in API client return types", () => {

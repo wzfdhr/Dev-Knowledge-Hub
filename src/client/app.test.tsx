@@ -1529,6 +1529,22 @@ describe("MCP token disclosure", () => {
 });
 
 describe("model settings", () => {
+  test("marks the model API key as a new credential so browser password managers do not autofill it", async () => {
+    const api = {
+      getRepository: vi.fn().mockRejectedValue(Object.assign(new Error("none"), { status: 404 })),
+      getModelConfig: vi.fn().mockResolvedValue({ config: null }),
+      getMfaStatus: vi.fn().mockResolvedValue({ enabled: false, pending: false, lockedUntil: null }),
+      getMcpConnection: vi.fn().mockResolvedValue({ endpoint: "/mcp", transport: "streamable-http", authorization: "bearer", stdioCommand: "npm run mcp:stdio", tools: [] }),
+      listMcpTokens: vi.fn().mockResolvedValue({ tokens: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<SettingsPage api={api} />);
+
+    const apiKey = await screen.findByLabelText("API Key");
+    expect(apiKey).toHaveAttribute("autocomplete", "new-password");
+    expect(apiKey).toHaveAttribute("name", "model-api-key");
+  });
+
   test("loads sanitized config and preserves the key when the API key field is blank", async () => {
     const user = userEvent.setup();
     const updateModelConfig = vi.fn().mockResolvedValue({

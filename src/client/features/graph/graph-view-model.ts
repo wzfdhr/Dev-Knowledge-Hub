@@ -124,15 +124,6 @@ export function describeGraphReduction(graph: FilteredGraph): string | null {
     : null;
 }
 
-function parentModuleIds(graph: FilteredGraph): Map<string, string> {
-  const modules = new Set(graph.nodes.filter((node) => node.kind === "module").map((node) => node.id));
-  const parents = new Map<string, string>();
-  for (const edge of [...graph.edges].sort((left, right) => left.id.localeCompare(right.id))) {
-    if (edge.kind === "contains" && !edge.candidate && modules.has(edge.fromNodeId)) parents.set(edge.toNodeId, edge.fromNodeId);
-  }
-  return parents;
-}
-
 function edgePath(from: PositionedGraphNode, to: PositionedGraphNode): string {
   const fromX = from.x + from.width;
   const fromY = from.y + from.height / 2;
@@ -143,38 +134,39 @@ function edgePath(from: PositionedGraphNode, to: PositionedGraphNode): string {
 }
 
 export function layoutGraph(graph: FilteredGraph): GraphLayout {
-  const modules = graph.nodes.filter((node) => node.kind === "module").sort(compareNodes);
-  const moduleIndex = new Map(modules.map((node, index) => [node.id, index]));
-  const parents = parentModuleIds(graph);
-  const childCounts = new Map<string, number>();
-  const ungrouped = graph.nodes.filter((node) => node.kind !== "module" && !parents.has(node.id)).sort(compareNodes);
-  const positionedModules: PositionedGraphNode[] = modules.map((node, index) => ({
-    ...node, x: PADDING + index * NODE_GAP_X, y: PADDING, width: NODE_WIDTH, height: NODE_HEIGHT
-  }));
-  const positionedChildren = graph.nodes.filter((node) => node.kind !== "module" && parents.has(node.id)).sort(compareNodes).map((node) => {
-    const parentId = parents.get(node.id)!;
-    const index = childCounts.get(parentId) ?? 0;
-    childCounts.set(parentId, index + 1);
-    return {
-      ...node,
-      x: PADDING + (moduleIndex.get(parentId) ?? modules.length) * NODE_GAP_X,
-      y: PADDING + NODE_GAP_Y + index * NODE_GAP_Y,
-      width: NODE_WIDTH,
-      height: NODE_HEIGHT
-    };
+  const ordered = [...graph.nodes].sort(compareNodes);
+  const byId = new Map(ordered.map((node) => [node.id, node]));
+  const outgoing = new Map<string, string[]>();
+  const indegree = new Map(ordered.map((node) => [node.id, 0]));
+  for (const edge of graph.edges) {
+    if (edge.candidate || !byId.has(edge.fromNodeId) || !byId.has(edge.toNodeId)) continue;
+    outgoing.set(edge.fromNodeId, [...(outgoing.get(edge.fromNodeId) ?? []), edge.toNodeId]);
+    indegree.set(edge.toNodeId, (indegree.get(edge.toNodeId) ?? 0) + 1);
+  }
+  const rank = new Map<string, number>();
+  const queue = ordered.filter((node) => indegree.get(node.id) === 0).map((node) => node.id);
+  for (let index = 0; index < queue.length; index += 1) {
+    const id = queue[index]!;
+    const nextRank = rank.get(id) ?? 0;
+    for (const target of outgoing.get(id) ?? []) {
+      rank.set(target, Math.max(rank.get(target) ?? 0, nextRank + 1));
+      indegree.set(target, (indegree.get(target) ?? 1) - 1);
+      if (indegree.get(target) === 0) queue.push(target);
+    }
+  }
+  let trailingRank = Math.max(0, ...rank.values()) + 1;
+  for (const node of ordered) if (!rank.has(node.id) && !queue.includes(node.id)) rank.set(node.id, trailingRank++);
+  const rows = new Map<number, number>();
+  const nodes = ordered.map((node) => {
+    const layer = rank.get(node.id) ?? 0;
+    const row = rows.get(layer) ?? 0;
+    rows.set(layer, row + 1);
+    return { ...node, x: PADDING + layer * NODE_GAP_X, y: PADDING + row * NODE_GAP_Y, width: NODE_WIDTH, height: NODE_HEIGHT };
   });
-  const positionedUngrouped = ungrouped.map((node, index) => ({
-    ...node,
-    x: PADDING + (modules.length + Math.floor(index / 4)) * NODE_GAP_X,
-    y: PADDING + (index % 4) * NODE_GAP_Y,
-    width: NODE_WIDTH,
-    height: NODE_HEIGHT
-  }));
-  const nodes = [...positionedModules, ...positionedChildren, ...positionedUngrouped];
-  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const positionedById = new Map(nodes.map((node) => [node.id, node]));
   const edges = [...graph.edges].sort((left, right) => left.id.localeCompare(right.id)).flatMap((edge) => {
-    const from = byId.get(edge.fromNodeId);
-    const to = byId.get(edge.toNodeId);
+    const from = positionedById.get(edge.fromNodeId);
+    const to = positionedById.get(edge.toNodeId);
     return from && to ? [{ ...edge, path: edgePath(from, to) }] : [];
   });
   const maxX = Math.max(PADDING + NODE_WIDTH, ...nodes.map((node) => node.x + node.width));

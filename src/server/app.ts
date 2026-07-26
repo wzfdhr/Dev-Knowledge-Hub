@@ -73,6 +73,10 @@ import {
   loadFrontendCandidatePreview
 } from "./knowledge/frontend/preview.js";
 import { createVerifiedFrontendReleaseDraft } from "./knowledge/frontend/compatibility.js";
+import {
+  FrontendReleaseGraphUnavailableError,
+  loadPublishedFrontendGraph
+} from "./knowledge/frontend/release-graph.js";
 import { compareFrontendKnowledge } from "./knowledge/frontend/comparison.js";
 import { deriveFrontendChangeImpact } from "./knowledge/frontend/change-impact.js";
 import {
@@ -1739,6 +1743,32 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       repositoryId: repository.id,
       releaseId: query.data.releaseId
     });
+    const release = query.data.releaseId
+      ? await options.store.getRelease(admin.workspaceId, query.data.releaseId)
+      : await options.store.currentRelease(admin.workspaceId, repository.id);
+    if (!release || release.repositoryId !== repository.id || !release.publishedAt) {
+      return { release: null, format: query.data.format, data: null };
+    }
+    if (release.releaseArtifactFamily === "frontend-v2") {
+      if (query.data.format !== "json") {
+        return sendError(reply, 409, "FRONTEND_GRAPH_EXPORT_UNAVAILABLE", "Frontend graph export is not available yet");
+      }
+      if (!options.qualityArtifactReader) {
+        return sendError(reply, 503, "FRONTEND_GRAPH_UNAVAILABLE", "Frontend graph artifacts are unavailable");
+      }
+      try {
+        const graph = await loadPublishedFrontendGraph({
+          release, workspaceId: admin.workspaceId, projectId: params.data.projectId,
+          store: options.store, reader: options.qualityArtifactReader
+        });
+        return { release, format: query.data.format, data: { family: "frontend-v2", graph } };
+      } catch (error) {
+        if (error instanceof FrontendReleaseGraphUnavailableError || error instanceof z.ZodError) {
+          return sendError(reply, 409, "FRONTEND_GRAPH_UNAVAILABLE", "Published frontend graph package is incomplete or invalid");
+        }
+        throw error;
+      }
+    }
     if (!selected) return { release: null, format: query.data.format, data: null };
     const graph = exportKnowledgeGraph(selected.graph);
     const data = query.data.format === "mermaid"
@@ -1748,7 +1778,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         : query.data.format === "tree"
           ? graph.tree
           : graph.graph;
-    return { release: selected.release, format: query.data.format, data };
+    return { release: selected.release, format: query.data.format, data: query.data.format === "json" ? { family: "knowledge-v1", graph: data } : data };
   });
 
   server.get("/api/projects/:projectId/knowledge-quality", { preHandler: requireAdmin }, async (request, reply) => {

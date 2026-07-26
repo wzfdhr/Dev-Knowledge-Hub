@@ -126,6 +126,30 @@ describe("knowledge graph view model", () => {
     expect(layoutGraph(visible).nodes.slice(0, 2).map((node) => node.id)).toEqual(["module-api", "module-web"]);
   });
 
+  test("places independent fact branches in distinct relationship layers", () => {
+    const visible = filterGraph({ graph: graph({
+      nodes: [
+        { id: "route", projectId: "project", snapshotId: "snapshot", kind: "module", name: "Route", qualifiedName: "route", candidate: false, sourceRefs: [], attributes: {} },
+        { id: "page-a", projectId: "project", snapshotId: "snapshot", kind: "symbol", name: "Page A", qualifiedName: "a", candidate: false, sourceRefs: [], attributes: {} },
+        { id: "page-b", projectId: "project", snapshotId: "snapshot", kind: "symbol", name: "Page B", qualifiedName: "b", candidate: false, sourceRefs: [], attributes: {} },
+        { id: "component-a", projectId: "project", snapshotId: "snapshot", kind: "symbol", name: "Component A", qualifiedName: "ca", candidate: false, sourceRefs: [], attributes: {} },
+        { id: "component-b", projectId: "project", snapshotId: "snapshot", kind: "symbol", name: "Component B", qualifiedName: "cb", candidate: false, sourceRefs: [], attributes: {} }
+      ],
+      edges: [
+        { id: "route-a", fromNodeId: "route", toNodeId: "page-a", kind: "depends_on", candidate: false, confidence: 1, sourceRefs: [] },
+        { id: "route-b", fromNodeId: "route", toNodeId: "page-b", kind: "depends_on", candidate: false, confidence: 1, sourceRefs: [] },
+        { id: "page-component-a", fromNodeId: "page-a", toNodeId: "component-a", kind: "depends_on", candidate: false, confidence: 1, sourceRefs: [] },
+        { id: "page-component-b", fromNodeId: "page-b", toNodeId: "component-b", kind: "depends_on", candidate: false, confidence: 1, sourceRefs: [] }
+      ]
+    }), query: "", enabledKinds: new Set(["module", "symbol"]), includeCandidates: false });
+    const nodes = new Map(layoutGraph(visible).nodes.map((node) => [node.id, node]));
+
+    expect(nodes.get("route")!.x).toBeLessThan(nodes.get("page-a")!.x);
+    expect(nodes.get("page-a")!.x).toBe(nodes.get("page-b")!.x);
+    expect(nodes.get("page-a")!.y).not.toBe(nodes.get("page-b")!.y);
+    expect(nodes.get("component-a")!.x).toBeGreaterThan(nodes.get("page-a")!.x);
+  });
+
   test("keeps a wide graph readable by default while allowing a full overview", () => {
     const wideLayout = { nodes: [], edges: [], width: 5_000, height: 240 };
 

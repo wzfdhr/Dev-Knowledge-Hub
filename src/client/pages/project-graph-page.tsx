@@ -17,7 +17,7 @@ const graphKindLabels: Record<(typeof graphKinds)[number], string> = {
 function displayGraph(value: unknown): { family: "knowledge-v1" | "frontend-v2"; graph: KnowledgeGraph } | null {
   if (!value || typeof value !== "object") return null;
   const payload = value as { family?: string; graph?: unknown };
-  const graph = payload.graph && typeof payload.graph === "object" ? payload.graph as { snapshotId?: string; nodes?: Array<Record<string, unknown>>; edges?: Array<Record<string, unknown>> } : null;
+  const graph = (payload.graph && typeof payload.graph === "object" ? payload.graph : value) as { snapshotId?: string; nodes?: Array<Record<string, unknown>>; edges?: Array<Record<string, unknown>> };
   if (payload.family === "frontend-v2" && graph?.nodes && graph.edges) {
     const kind = (value: unknown): KnowledgeGraph["nodes"][number]["kind"] =>
       ["route", "page", "layout", "application_entry", "workspace_package"].includes(String(value)) ? "module"

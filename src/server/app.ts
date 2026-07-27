@@ -1778,7 +1778,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
         : query.data.format === "tree"
           ? graph.tree
           : graph.graph;
-    return { release: selected.release, format: query.data.format, data: query.data.format === "json" ? { family: "knowledge-v1", graph: data } : data };
+    return { release: selected.release, format: query.data.format, data };
   });
 
   server.get("/api/projects/:projectId/knowledge-quality", { preHandler: requireAdmin }, async (request, reply) => {

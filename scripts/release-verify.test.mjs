@@ -540,7 +540,7 @@ describe("release verification orchestrator", () => {
   testWithSourceBlobContract("rejects an introducing protected-main push whose predecessor lacks 0035", async () => {
     const candidateCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
     const introducingBase = spawnSync(
-      "git", ["rev-parse", "origin/main"], { encoding: "utf8" }
+      "git", ["merge-base", "HEAD", "origin/main"], { encoding: "utf8" }
     ).stdout.trim();
     await expect(assertPostContractRuntimeCi({
       GITHUB_ACTIONS: "true",
@@ -607,7 +607,7 @@ describe("release verification orchestrator", () => {
   testWithSourceBlobContract("does not let caller flags turn an introducing contract PR into ordinary runtime CI", async () => {
     const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
     const introducingBase = spawnSync(
-      "git", ["rev-parse", "origin/main"], { encoding: "utf8" }
+      "git", ["merge-base", "HEAD", "origin/main"], { encoding: "utf8" }
     ).stdout.trim();
     await expect(assertPostContractRuntimeCi({
       GITHUB_ACTIONS: "true",

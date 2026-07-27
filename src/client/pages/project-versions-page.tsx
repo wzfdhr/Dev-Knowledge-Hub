@@ -214,7 +214,7 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
       setReviewBuild(null);
       await invalidate();
       if (variables.navigateToKnowledge) {
-        navigate(`/knowledge?releaseId=${encodeURIComponent(result.release.id)}`);
+        navigate(`/projects/${projectId}/knowledge/pages?releaseId=${encodeURIComponent(result.release.id)}`);
       }
     }
   });
@@ -224,13 +224,13 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
 
   const handlePrimary = () => {
     if (reviewBuild) {
-      createRelease.mutate({ buildId: reviewBuild.id, value: version });
+      createRelease.mutate({ buildId: reviewBuild.id, value: version, navigateToKnowledge: true });
       return;
     }
     if (!action) return;
-    if (action.kind === "connect") navigate("../imports");
+    if (action.kind === "connect") navigate(`/projects/${projectId}/sources`);
     if (action.kind === "sync") {
-      if (repository?.kind === "upload") navigate("../imports");
+      if (repository?.kind === "upload") navigate(`/projects/${projectId}/sources`);
       else sync.mutate();
     }
     if (["start-build", "retry-build"].includes(action.kind) && effectiveSnapshotId) {
@@ -249,7 +249,7 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
     if (!reviewBuild) return;
     const draft = releases.find((release) => release.buildId === reviewBuild.id);
     if (draft) {
-      navigate(`/knowledge?releaseId=${encodeURIComponent(draft.id)}`);
+      navigate(`/projects/${projectId}/knowledge/pages?releaseId=${encodeURIComponent(draft.id)}`);
       return;
     }
     createRelease.mutate({
@@ -268,7 +268,7 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
 
   if (repositoryQuery.isLoading) return <Loading label="正在加载操作台" />;
   return <div className="page versions-page">
-    <header className="page-header"><div><p className="eyebrow">构建与发布</p><h1>知识版本</h1><p>构建、审核并发布可供团队和 Codex 使用的不可变知识版本。</p></div>
+    <header className="page-header"><div><p className="eyebrow">构建与发布</p><h1>知识生产</h1><p>构建、审核并发布可供团队和 Codex 使用的不可变知识版本。</p></div>
       {!blockingError && !requiredLoading && (reviewBuild || canRunAction) && <div className="page-header-actions">
         {!reviewBuild && canUseLlm && ["start-build", "retry-build"].includes(action?.kind ?? "") && <label className="llm-build-option"><input type="checkbox" checked={allowLlm} onChange={(event) => setAllowLlm(event.target.checked)} /><span>本次构建使用 LLM 增强</span></label>}
         <button className="button primary command" onClick={handlePrimary} disabled={sync.isPending || start.isPending || publish.isPending || createRelease.isPending}>

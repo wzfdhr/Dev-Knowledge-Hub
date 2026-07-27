@@ -1,3 +1,5 @@
+import { Link } from "react-router-dom";
+
 import type { FolderImportReport } from "../api/folder-import";
 import type { UploadSnapshotSummary } from "../api/types";
 
@@ -39,14 +41,17 @@ export function FolderFilterReport({ report }: { report: FolderImportReport }) {
 
 export function ImportResultReport({
   upload,
-  localIgnored
+  localIgnored,
+  nextHref
 }: {
   upload: UploadSnapshotSummary;
   localIgnored?: FolderImportReport["ignored"] | null;
+  nextHref?: string;
 }) {
   return <section className="import-report import-result" aria-labelledby="import-result-title">
     <div className="import-section-heading"><div><p className="eyebrow">导入完成</p><h2 id="import-result-title">内容版本已就绪</h2></div><span className="mono">{upload.sourceVersion.slice(0, 12)}</span></div>
-    <p>已采集 {upload.fileCount} 个源码文件{localIgnored?.total ? <>；<strong>本地预过滤 {localIgnored.total} 个文件</strong></> : null}；<strong>服务端二次过滤 {upload.ignored.total} 个文件</strong>{upload.assetCount ? `；已登记 ${upload.assetCount} 个未由服务端验证的资源` : ""}。下一步可前往项目概览构建知识。</p>
+    <p>已采集 {upload.fileCount} 个源码文件{localIgnored?.total ? <>；<strong>本地预过滤 {localIgnored.total} 个文件</strong></> : null}；<strong>服务端二次过滤 {upload.ignored.total} 个文件</strong>{upload.assetCount ? `；已登记 ${upload.assetCount} 个未由服务端验证的资源` : ""}。</p>
+    <div className="import-result-next"><div><strong>资料已接入，正式知识尚未变化</strong><span>下一步在知识生产中开始构建、创建草稿并人工发布。</span></div>{nextHref && <Link className="button primary" to={nextHref}>进入知识生产</Link>}</div>
     {localIgnored?.total ? <ReasonList reasons={localIgnored.reasons} /> : null}
     {upload.ignored.total ? <ReasonList reasons={upload.ignored.reasons} /> : null}
   </section>;

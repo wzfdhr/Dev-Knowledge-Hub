@@ -14,11 +14,13 @@ import { SystemSettingsPage as SettingsPage } from "./pages/system-settings-page
 import { ProjectCodexPage } from "./pages/project-codex-page";
 import { ProjectImportsPage } from "./pages/project-imports-page";
 import { ProjectGraphPage } from "./pages/project-graph-page";
+import { ProjectKnowledgeQualityPage } from "./pages/project-knowledge-quality-page";
 import { MembersPage } from "./pages/members-page";
 import { governanceErrorMessage } from "./components/quality-governance-panel";
 import { derivePrimaryAction, ProjectVersionsPage as OverviewPage } from "./pages/project-versions-page";
 import { ApiError, type ApiClient } from "./api/client";
 import { App } from "./app";
+import { projectLegacyRedirects } from "./features/project-routes";
 import { ErrorState } from "./components/ui";
 import { AppShell } from "./components/app-shell";
 import { ImportProgress } from "./components/import-progress";
@@ -60,6 +62,18 @@ function renderAppAt(api: ApiClient, path: string) {
 }
 
 describe("shared console copy", () => {
+  test("keeps every legacy project URL mapped to its new task area", () => {
+    expect(projectLegacyRedirects).toEqual({
+      imports: "../sources",
+      versions: "../production",
+      knowledge: "../knowledge/pages",
+      graph: "../knowledge/graph",
+      "frontend-map": "../knowledge/frontend",
+      collaboration: "../settings/team",
+      codex: "../settings/codex"
+    });
+  });
+
   test("hides workspace administration from non-admin navigation and labels the real role", () => {
     renderPage(<Routes><Route element={<AppShell email="member@example.com" role="member" onLogout={() => {}} />}>
       <Route index element={<p>Workspace</p>} />
@@ -142,14 +156,14 @@ describe("shared console copy", () => {
     renderAppAt(api, "/projects/project-1/collaboration");
 
     await waitFor(() => expect(api.listProjects).toHaveBeenCalledOnce(), { timeout: 5_000 });
-    expect(await screen.findByRole("heading", { name: "AHeart Admin" }, { timeout: 5_000 })).toBeVisible();
+    expect(await screen.findByText("AHeart Admin", { selector: ".project-name" }, { timeout: 5_000 })).toBeVisible();
     expect(screen.getByRole("navigation", { name: "项目导航" })).toBeVisible();
     expect(screen.getByRole("link", { name: "项目概览" })).toHaveAttribute("href", "/projects/project-1/overview");
-    expect(screen.getByRole("link", { name: "资料上传" })).toHaveAttribute("href", "/projects/project-1/imports");
-    expect(screen.getByRole("link", { name: "知识图谱" })).toHaveAttribute("href", "/projects/project-1/graph");
-    expect(screen.getByRole("link", { name: "知识版本" })).toHaveAttribute("href", "/projects/project-1/versions");
-    expect(screen.getByRole("link", { name: "团队协作" })).toHaveAttribute("href", "/projects/project-1/collaboration");
-    expect(screen.getByRole("link", { name: "Codex 接入" })).toHaveAttribute("href", "/projects/project-1/codex");
+    expect(screen.getByRole("link", { name: "资料接入" })).toHaveAttribute("href", "/projects/project-1/sources");
+    expect(screen.getByRole("link", { name: "知识生产" })).toHaveAttribute("href", "/projects/project-1/production");
+    expect(screen.getByRole("link", { name: "知识资料" })).toHaveAttribute("href", "/projects/project-1/knowledge/pages");
+    expect(screen.getByRole("link", { name: "项目设置" })).toHaveAttribute("href", "/projects/project-1/settings/team");
+    expect(within(screen.getByRole("navigation", { name: "项目导航" })).getAllByRole("link")).toHaveLength(5);
     expect(await screen.findByRole("heading", { name: "团队协作" })).toBeVisible();
   });
 
@@ -165,9 +179,9 @@ describe("shared console copy", () => {
       getRepository: vi.fn().mockRejectedValue(new ApiError(404, "REPOSITORY_NOT_FOUND", "No repository"))
     } as unknown as ApiClient;
 
-    renderAppAt(api, "/projects/project-1/imports");
+    renderAppAt(api, "/projects/project-1/sources");
 
-    expect(await screen.findByRole("heading", { name: "资料上传" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "资料接入" })).toBeVisible();
     expect(screen.getByRole("button", { name: "选择项目文件夹" })).toBeVisible();
     expect(screen.getByText("选择资料来源后开始导入")).toBeVisible();
     expect(screen.queryByText("读取文件")).not.toBeInTheDocument();
@@ -204,13 +218,13 @@ describe("shared console copy", () => {
 
     renderAppAt(api, "/projects/project-1/overview");
     expect(await screen.findByRole("heading", { name: "项目概览" })).toBeVisible();
-    expect(screen.getByRole("link", { name: "上传新资料" })).toHaveAttribute("href", "/projects/project-1/imports");
-    expect(screen.getByRole("link", { name: "管理知识版本" })).toHaveAttribute("href", "/projects/project-1/versions");
+    expect(screen.getByRole("link", { name: "开始构建" })).toHaveAttribute("href", "/projects/project-1/production");
+    expect(screen.getAllByRole("link", { name: "开始构建" })).toHaveLength(1);
     expect(screen.queryByRole("heading", { name: "最近构建" })).not.toBeInTheDocument();
     cleanup();
 
-    renderAppAt(api, "/projects/project-1/versions");
-    expect(await screen.findByRole("heading", { name: "知识版本" })).toBeVisible();
+    renderAppAt(api, "/projects/project-1/production");
+    expect(await screen.findByRole("heading", { name: "知识生产" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "最近构建" })).toBeVisible();
   });
 
@@ -322,7 +336,7 @@ describe("shared console copy", () => {
     expect(await screen.findByRole("link", { name: "项目中心" })).toBeVisible();
     expect(screen.getByRole("navigation", { name: "主导航" })).toBeVisible();
     expect(screen.getByRole("link", { name: "项目中心" })).toBeVisible();
-    expect(screen.getByRole("link", { name: "知识库" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "知识搜索" })).toBeVisible();
     expect(screen.getByRole("link", { name: "反馈" })).toBeVisible();
     expect(screen.getByRole("link", { name: "成员" })).toBeVisible();
     expect(screen.getByRole("link", { name: "设置" })).toBeVisible();
@@ -353,7 +367,7 @@ describe("operations page copy", () => {
     } as unknown as ApiClient;
 
     renderPage(<OverviewPage api={overviewApi} />);
-    expect(await screen.findByRole("heading", { name: "知识版本" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "知识生产" })).toBeVisible();
     expect(screen.getByRole("button", { name: "同步仓库" })).toBeVisible();
     cleanup();
 
@@ -388,7 +402,7 @@ describe("operations page copy", () => {
     } as unknown as ApiClient;
 
     renderPage(<KnowledgePage api={knowledgeApi} />);
-    expect(await screen.findByRole("heading", { name: "知识库" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "知识资料" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "模块：math" }));
     await user.click(screen.getByRole("button", { name: /src\/math.ts 第 16 至 18 行/i }));
     expect(await screen.findByText(`Commit ${"a".repeat(12)}`)).toBeVisible();
@@ -570,20 +584,20 @@ describe("overview primary command", () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
     });
-    render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={["/"]}>
+    render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={["/projects/project-1/production"]}>
       <Location />
       <Routes>
-        <Route path="/" element={<OverviewPage api={api} />} />
-        <Route path="/knowledge" element={<p>Knowledge route</p>} />
+        <Route path="/projects/:projectId/production" element={<OverviewPage api={api} />} />
+        <Route path="/projects/:projectId/knowledge/pages" element={<p>Knowledge route</p>} />
       </Routes>
     </MemoryRouter></QueryClientProvider>);
 
     await user.click(await screen.findByRole("button", { name: "审核就绪构建" }));
-    await user.click(screen.getByRole("button", { name: "查看知识" }));
+    await user.click(screen.getByRole("button", { name: "创建版本草稿" }));
 
     await waitFor(() => expect(createRelease).toHaveBeenCalledWith("build", "1.0.0"));
     expect(await screen.findByText("Knowledge route")).toBeVisible();
-    expect(screen.getByTestId("location")).toHaveTextContent("/knowledge?releaseId=release-1");
+    expect(screen.getByTestId("location")).toHaveTextContent("/projects/project-1/knowledge/pages?releaseId=release-1");
   });
 
   test("keeps EventSource alive for native reconnect and reports connection state", async () => {
@@ -654,7 +668,7 @@ describe("overview primary command", () => {
     renderPage(<KnowledgePage api={emptyKnowledgeApi} />);
     expect(await screen.findByText("尚未接入资料不会影响其他项目或已发布版本。"))
       .toBeVisible();
-    expect(screen.getByRole("link", { name: "前往资料上传" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "接入资料" })).toHaveAttribute("href", "/projects/project-1/sources");
     cleanup();
 
     const graphApi = {
@@ -925,6 +939,7 @@ describe("knowledge citations", () => {
 
     expect(api.getSource).toHaveBeenCalledWith({ path: "src/math.ts", startLine: 16, endLine: 18, releaseId: "release-1" });
     expect(await screen.findByText(/export function add/)).toBeVisible();
+    expect(api.getKnowledgeMetadata).not.toHaveBeenCalled();
     expect(screen.getByText(`Commit ${"a".repeat(12)}`)).toBeVisible();
     expect(screen.getByText(`Blob ${"b".repeat(12)}`)).toBeVisible();
   });
@@ -962,7 +977,66 @@ describe("knowledge citations", () => {
     expect(screen.getByText(`${"a".repeat(12)} → ${"b".repeat(12)}`)).toBeVisible();
   });
 
-  test("displays backend symbol and dependency metadata", async () => {
+  test("keeps a persistent review bar on draft knowledge and publishes from project context", async () => {
+    const user = userEvent.setup();
+    const publishRelease = vi.fn().mockResolvedValue({ release: {
+      id: "release-1", buildId: "build-1", snapshotId: "snapshot-old", version: "1.0.0",
+      createdAt: "2026-07-11", publishedAt: "2026-07-22"
+    } });
+    const api = {
+      getRepositoryStatus: vi.fn().mockResolvedValue({
+        repository: { id: "repo" },
+        latestSnapshot: { id: "snapshot-old", commitSha: "a".repeat(40), ref: "main", commitTimestamp: "2026-07-11" }
+      }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [{
+        id: "release-1", buildId: "build-1", snapshotId: "snapshot-old", commitSha: "a".repeat(40),
+        version: "1.0.0", createdAt: "2026-07-11", publishedAt: null
+      }] }),
+      listKnowledgePages: vi.fn().mockResolvedValue({ pages: [] }),
+      searchKnowledge: vi.fn().mockResolvedValue({ results: [] }),
+      publishRelease
+    } as unknown as ApiClient;
+
+    renderPageAt(<Routes>
+      <Route path="/projects/:projectId/knowledge/pages" element={<KnowledgePage api={api} />} />
+    </Routes>, "/projects/project-1/knowledge/pages?releaseId=release-1");
+
+    const reviewBar = await screen.findByRole("region", { name: "草稿审核" });
+    expect(within(reviewBar).getByText("版本 1.0.0 · 未发布")).toBeVisible();
+    expect(within(reviewBar).getByRole("link", { name: "返回知识生产" })).toHaveAttribute("href", "/projects/project-1/production");
+    await user.click(within(reviewBar).getByRole("button", { name: "发布版本" }));
+    await waitFor(() => expect(publishRelease).toHaveBeenCalledWith("release-1"));
+    const publishedStatus = await screen.findByRole("status");
+    expect(publishedStatus).toHaveTextContent("版本已发布");
+    expect(publishedStatus).toHaveFocus();
+    expect(screen.queryByRole("region", { name: "草稿审核" })).not.toBeInTheDocument();
+  });
+
+  test("does not offer draft publication to read-only project members", async () => {
+    const api = {
+      getRepositoryStatus: vi.fn().mockResolvedValue({
+        repository: { id: "repo" },
+        latestSnapshot: { id: "snapshot-old", commitSha: "a".repeat(40), ref: "main", commitTimestamp: "2026-07-11" }
+      }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [{
+        id: "release-1", buildId: "build-1", snapshotId: "snapshot-old", commitSha: "a".repeat(40),
+        version: "1.0.0", createdAt: "2026-07-11", publishedAt: null
+      }] }),
+      listKnowledgePages: vi.fn().mockResolvedValue({ pages: [] }),
+      session: vi.fn().mockResolvedValue({ admin: { id: "reader-1", role: "reader" } }),
+      listProjectMembers: vi.fn().mockResolvedValue({ members: [{ id: "reader-1", role: "reader" }] })
+    } as unknown as ApiClient;
+
+    renderPageAt(<Routes>
+      <Route path="/projects/:projectId/knowledge/pages" element={<KnowledgePage api={api} />} />
+    </Routes>, "/projects/project-1/knowledge/pages?releaseId=release-1");
+
+    expect(await screen.findByRole("region", { name: "草稿审核" })).toBeVisible();
+    await waitFor(() => expect(api.listProjectMembers).toHaveBeenCalledWith("project-1"));
+    expect(screen.queryByRole("button", { name: "发布版本" })).not.toBeInTheDocument();
+  });
+
+  test("displays backend symbol and dependency metadata only on the quality page", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const api = {
       getRepositoryStatus: vi.fn().mockResolvedValue({ repository: { id: "repo" }, latestSnapshot: { id: "snap", commitSha: "a".repeat(40), ref: "main", commitTimestamp: "2026-07-11" } }),
@@ -974,15 +1048,25 @@ describe("knowledge citations", () => {
           { source: "math", target: "util", kind: "imports", path: "src/math.ts", startLine: 1, endLine: 1 },
           { source: "math", target: "util", kind: "module-dependency", path: "src/math.ts", startLine: 1, endLine: 1 }
         ]
-      })
+      }),
+      getProjectKnowledgeQuality: vi.fn().mockResolvedValue({
+        repository: { id: "repo" }, latestSnapshot: null, currentRelease: null, latestBuild: null,
+        pendingFeedbackCount: 0, indexedTextBytes: 1024,
+        knowledge: { pageCount: 12, chunkCount: 24, citationCount: 36 },
+        remediation: { open: 0, accepted: 0, rebuilding: 0, resolved: 0, dismissed: 0 },
+        qualityPipeline: null, assessment: null, change: null, diagnostics: [{ code: "PUBLISHED" }]
+      }),
+      listProjectRemediations: vi.fn().mockResolvedValue({ remediations: [] })
     } as unknown as ApiClient;
 
-    renderPage(<KnowledgePage api={api} />);
+    renderPage(<ProjectKnowledgeQualityPage api={api} projectId="project-1" />);
 
     expect(await screen.findByText("add")).toBeVisible();
-    expect(screen.getByText("function · src/math.ts:16-18")).toBeVisible();
+    expect(screen.getByText("function")).toBeVisible();
+    expect(screen.getByTitle("src/math.ts:16-18")).toBeVisible();
     expect(screen.getAllByText("math → util")).toHaveLength(2);
-    expect(screen.getByText("imports · src/math.ts:1")).toBeVisible();
+    expect(screen.getByText("imports")).toBeVisible();
+    expect(screen.getAllByTitle("src/math.ts:1")).toHaveLength(2);
     expect(consoleError.mock.calls.flat().join(" ")).not.toContain("same key");
     consoleError.mockRestore();
   });
@@ -1039,10 +1123,10 @@ describe("knowledge citations", () => {
     } as unknown as ApiClient;
     localStorage.setItem("devkh:active-project-id", "project-1");
 
-    renderPage(<KnowledgePage api={api} />);
+    renderPage(<ProjectKnowledgeQualityPage api={api} projectId="project-1" />);
 
     const governance = await screen.findByRole("region", { name: "质量治理" });
-    expect(within(governance).getByText("模块文档覆盖不足")).toBeVisible();
+    expect(await within(governance).findByText("模块文档覆盖不足")).toBeVisible();
     await user.selectOptions(within(governance).getByLabelText("严重度"), "warning");
     await waitFor(() => expect(listProjectRemediations).toHaveBeenLastCalledWith("project-1", {
       limit: 50, offset: 0, severity: "warning"
@@ -1401,7 +1485,11 @@ describe("repository replacement", () => {
     await waitFor(() => expect(uploadFolder).toHaveBeenCalledTimes(3));
 
     expect(connectRepository).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText("内容版本已就绪")).toBeVisible();
+    const resultHeading = await screen.findByText("内容版本已就绪");
+    expect(resultHeading).toBeVisible();
+    await waitFor(() => expect(resultHeading.closest("[tabindex='-1']")).toHaveFocus());
+    expect(screen.getByText("资料已接入，正式知识尚未变化")).toBeVisible();
+    expect(screen.getByRole("link", { name: "进入知识生产" })).toHaveAttribute("href", "/projects/project/production");
   });
 
   test.each(["UPLOAD_SESSION_STATE", "IDEMPOTENCY_KEY_REUSED"])("requires a new folder selection for terminal %s upload errors", async (code) => {

@@ -18,13 +18,13 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   await expect(page.getByRole("heading", { name: "项目中心" })).toBeVisible();
 
   const projectRow = page.locator(".project-directory-row").filter({ hasText: "默认项目" });
-  await projectRow.getByRole("button", { name: /切换|打开/ }).click();
+  await projectRow.getByRole("button", { name: "进入项目" }).click();
   await expect(page.getByRole("heading", { name: "项目概览" })).toBeVisible();
   const projectId = new URL(page.url()).pathname.split("/")[2];
   expect(projectId).toBeTruthy();
 
-  await page.getByRole("link", { name: "资料上传" }).click();
-  await expect(page.getByRole("heading", { name: "资料上传" })).toBeVisible();
+  await page.getByRole("link", { name: "资料接入" }).click();
+  await expect(page.getByRole("heading", { name: "资料接入" })).toBeVisible();
   await expect(page.getByText("当前来源：", { exact: false })).toBeVisible();
   await expect(page.getByRole("button", { name: "选择项目文件夹" })).toBeVisible();
   await expect(page.getByText("暂无导入记录")).toBeVisible();
@@ -105,12 +105,12 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   }
   await page.setViewportSize({ width: 1440, height: 1024 });
 
-  await page.getByRole("link", { name: "知识版本" }).click();
+  await page.getByRole("link", { name: "知识生产", exact: true }).click();
   await page.getByRole("button", { name: "开始构建知识" }).click();
   await expect(page.getByRole("button", { name: "审核就绪构建" })).toBeVisible({ timeout: 30_000 });
   await page.getByRole("button", { name: "审核就绪构建" }).click();
   await page.getByRole("textbox", { name: "版本", exact: true }).fill("1.0.0");
-  await page.getByRole("button", { name: "查看知识" }).click();
+  await page.getByRole("button", { name: "创建版本草稿" }).click();
 
   const pageButton = page.locator(".page-tree button").first();
   await expect(pageButton).toBeVisible();
@@ -120,14 +120,14 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   await citation.click();
   await expect(page.getByRole("complementary", { name: "来源代码" })).toContainText("Commit");
 
-  await page.goto(`/projects/${projectId}/versions`);
   await page.getByRole("button", { name: "发布版本" }).click();
+  await expect(page.getByRole("status")).toContainText("版本已发布");
   await expect(page.getByText("1.0.0").first()).toBeVisible();
 
   const graphFixture = await request.post("/__test__/graph");
   expect(graphFixture.ok()).toBeTruthy();
 
-  await page.goto(`/projects/${projectId}/graph`);
+  await page.goto(`/projects/${projectId}/knowledge/graph`);
   await expect(page.getByRole("heading", { name: "知识图谱" })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "搜索图谱" })).toBeVisible();
   const graphNodes = page.locator(".knowledge-graph-node-list button");
@@ -137,13 +137,13 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   await page.screenshot({ path: "test-results/graph-1440x1024.png", fullPage: true });
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto(`/projects/${projectId}/graph`);
+  await page.goto(`/projects/${projectId}/knowledge/graph`);
   await expect(page.getByRole("heading", { name: "知识图谱" })).toBeVisible();
   const graphOverflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(graphOverflow).toBeLessThanOrEqual(0);
   await page.screenshot({ path: "test-results/graph-390x844.png", fullPage: true });
   await page.setViewportSize({ width: 1440, height: 1024 });
-  await page.goto(`/projects/${projectId}/versions`);
+  await page.goto(`/projects/${projectId}/production`);
 
   const releaseBeforeShadow = await page.evaluate(async (activeProjectId) => {
     const response = await fetch("/api/releases/current", {
@@ -186,7 +186,7 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   const frontendShadowBody = await frontendShadow.json();
   expect(frontendShadowBody).toMatchObject({ stageCount: 10, releaseIdBefore: releaseBeforeShadow, releaseIdAfter: releaseBeforeShadow });
   await page.setViewportSize({ width: 1440, height: 1024 });
-  await page.goto(`/projects/${projectId}/frontend-map`);
+  await page.goto(`/projects/${projectId}/knowledge/frontend`);
   await expect(page.getByRole("heading", { name: "React 前端地图" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "候选包可供验收" })).toBeVisible();
   const frontendSearch = await page.evaluate(async (activeProjectId) => {
@@ -213,7 +213,7 @@ test("folder import, project release, Codex, and collaboration workflow", async 
 
   for (const viewport of [{ width: 390, height: 844 }, { width: 320, height: 700 }]) {
     await page.setViewportSize(viewport);
-    await page.goto(`/projects/${projectId}/frontend-map`);
+    await page.goto(`/projects/${projectId}/knowledge/frontend`);
     await expect(page.getByRole("heading", { name: "React 前端地图" })).toBeVisible();
     const layout = await page.evaluate(() => ({
       overflow: document.documentElement.scrollWidth - window.innerWidth,
@@ -231,8 +231,8 @@ test("folder import, project release, Codex, and collaboration workflow", async 
     await page.screenshot({ path: `test-results/frontend-map-${viewport.width}x${viewport.height}.png`, fullPage: true });
   }
   await page.setViewportSize({ width: 1440, height: 1024 });
-  await page.goto(`/projects/${projectId}/knowledge`);
-  await expect(page.getByRole("heading", { name: "知识库", level: 1 })).toBeVisible();
+  await page.goto(`/projects/${projectId}/knowledge/pages`);
+  await expect(page.getByRole("heading", { name: "知识资料", level: 1 })).toBeVisible();
   await expect(page.getByText("版本 1.0.0", { exact: true })).toBeVisible();
   const retainedKnowledgePage = page.locator(".page-tree button").first();
   await expect(retainedKnowledgePage).toBeVisible();
@@ -240,7 +240,7 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   await retainedKnowledgePage.click();
   await expect(page.locator(".knowledge-document")).toContainText(retainedKnowledgeTitle);
 
-  await page.goto(`/projects/${projectId}/codex`);
+  await page.goto(`/projects/${projectId}/settings/codex`);
   await expect(page.getByRole("heading", { name: "Codex 接入" })).toBeVisible();
   await page.getByLabel("Token 名称").fill("Playwright agent");
   await page.getByRole("button", { name: "创建 Token" }).click();
@@ -249,7 +249,7 @@ test("folder import, project release, Codex, and collaboration workflow", async 
   await dialog.getByRole("button", { name: "我已保存" }).click();
   await expect(page.locator(".codex-token-list")).toContainText("Playwright agent");
 
-  await page.goto(`/projects/${projectId}/collaboration`);
+  await page.goto(`/projects/${projectId}/settings/team`);
   await expect(page.getByRole("heading", { name: "团队协作" })).toBeVisible();
   await expect(page.locator(".member-list-heading")).toContainText("成员项目角色加入时间操作");
   const adminMemberRow = page.locator(".member-row").filter({ hasText: "admin@example.com" });

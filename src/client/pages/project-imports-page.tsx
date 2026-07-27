@@ -64,6 +64,7 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
   const projectId = explicitProjectId ?? params.projectId ?? "";
   const queryClient = useQueryClient();
   const folderInput = useRef<HTMLInputElement>(null);
+  const resultRef = useRef<HTMLDivElement>(null);
   const repository = useQuery({ queryKey: projectKeys.repository(projectId), queryFn: api.getRepository, retry: false });
   const importHistory = useQuery({
     queryKey: ["import-reports", projectId],
@@ -82,6 +83,9 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
   const [token, setToken] = useState("");
 
   useEffect(() => { folderInput.current?.setAttribute("webkitdirectory", ""); }, []);
+  useEffect(() => {
+    if (result) resultRef.current?.focus();
+  }, [result]);
   useEffect(() => {
     if (currentRepository) setSourceKind(currentRepository.kind);
   }, [currentRepository?.id, currentRepository?.kind]);
@@ -182,7 +186,7 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
   if (repository.error && !missingRepository) return <div className="page"><ErrorState message={errorMessage(repository.error)} retry={() => void repository.refetch()} /></div>;
 
   return <div className="page project-imports-page">
-    <header className="page-header"><div><p className="eyebrow">项目资料</p><h1>资料上传</h1><p>管理项目资料来源并创建可追溯的内容版本。</p></div></header>
+    <header className="page-header"><div><p className="eyebrow">项目资料</p><h1>资料接入</h1><p>管理项目资料来源并创建可追溯的内容版本。</p></div></header>
     <div className="project-imports-workspace">
       <input ref={folderInput} className="visually-hidden" aria-label="项目文件夹" type="file" multiple onChange={(event) => {
         const files = Array.from(event.target.files ?? []);
@@ -205,7 +209,7 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
       {currentRepository && <p className="import-replacement-note">旧来源和已发布知识会保留为只读历史，新来源不会自动发布。</p>}
       <ImportProgress progress={progress} />
       {report && <div className="import-report-row"><FolderFilterReport report={report} /><div className="import-confirm-panel"><h2>确认上传这些资料</h2><p>{currentRepository && currentRepository.kind !== "upload" ? "当前资料来源会保留为只读归档，完成上传后切换到新内容版本。" : "上传完成后仍需人工构建并发布，当前线上知识不会自动变化。"}</p><Button type="primary" loading={upload.isPending} disabled={!report.acceptedFiles.length} onClick={uploadFolder}>确认并开始上传</Button></div></div>}
-      {result && <ImportResultReport upload={result} localIgnored={completedFilter} />}
+      {result && <div ref={resultRef} tabIndex={-1}><ImportResultReport upload={result} localIgnored={completedFilter} nextHref={`/projects/${projectId}/production`} /></div>}
       {upload.error && <ErrorState {...uploadFailure(upload.error)} {...(isTerminalUploadSessionError(upload.error) ? {} : { retry: uploadFolder })} />}
       <ImportHistory
         reports={importHistory.data?.reports ?? []}

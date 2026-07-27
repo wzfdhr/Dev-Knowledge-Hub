@@ -7,7 +7,7 @@ import { APP_NAME } from "../../shared/contracts";
 
 const navigation = [
   { to: "/projects", label: "项目中心", icon: FolderKanban },
-  { to: "/knowledge", label: "知识库", icon: BookOpen },
+  { to: "/knowledge", label: "知识搜索", icon: BookOpen },
   { to: "/feedback", label: "反馈", icon: MessageSquareText },
   { to: "/members", label: "成员", icon: Users },
   { to: "/settings", label: "设置", icon: Settings }

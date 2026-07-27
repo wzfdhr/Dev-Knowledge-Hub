@@ -369,6 +369,39 @@ describe("PostgresAppStore source blob locking", () => {
     expect(query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO source_files"))).toBe(false);
     expect(query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
   });
+
+  test("writes normalized upload provenance required by the snapshot contract", async () => {
+    const snapshot = {
+      id: "snapshot-upload", workspace_id: "workspace-1", repository_id: "repository-1",
+      commit_sha: "a".repeat(40), ref: `upload/${"a".repeat(40)}`, remote_url: null,
+      commit_timestamp: new Date("2026-07-27T00:00:00.000Z"), storage_path: "/tmp/snapshot"
+    };
+    const query = vi.fn(async (sql: string, _values?: unknown[]) => {
+      void _values;
+      return {
+        rows: sql.includes("INSERT INTO source_snapshots") ? [snapshot] : []
+      };
+    });
+    const client = { query, release: vi.fn() };
+    const store = new PostgresAppStore({ connect: vi.fn(async () => client) } as never);
+
+    await store.createSnapshot({
+      snapshot: {
+        id: snapshot.id, workspaceId: snapshot.workspace_id, repositoryId: snapshot.repository_id,
+        commitSha: snapshot.commit_sha, ref: snapshot.ref, remoteUrl: null,
+        commitTimestamp: snapshot.commit_timestamp, storagePath: snapshot.storage_path
+      },
+      files: []
+    });
+
+    const insert = query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO source_snapshots"));
+    expect(insert?.[0]).toContain("source_kind");
+    expect(insert?.[0]).toContain("content_version");
+    expect(insert?.[0]).toContain("attestation");
+    expect(insert?.[1]).toEqual(expect.arrayContaining([
+      "upload", null, snapshot.commit_sha, "unverified", null, null
+    ]));
+  });
 });
 
 const stageRow = {

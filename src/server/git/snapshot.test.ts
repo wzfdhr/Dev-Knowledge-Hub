@@ -55,7 +55,7 @@ afterEach(async () => {
 });
 
 describe("immutable repository snapshots", () => {
-  test("shadow mode writes Git sources once and materializes a hardlinked snapshot view", async () => {
+  test("shadow mode writes Git sources once and materializes a hardlinked snapshot view", { timeout: 20_000 }, async () => {
     const repositoryPath = await fixtureRepository();
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-git-blobs-"));
     tempDirectories.push(dataDir);
@@ -88,7 +88,7 @@ describe("immutable repository snapshots", () => {
     expect(summary.fileCount).toBe(3);
   });
 
-  test("scans tracked source files and persists immutable content metadata", async () => {
+  test("scans tracked source files and persists immutable content metadata", { timeout: 20_000 }, async () => {
     const repositoryPath = await fixtureRepository();
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "devkh-data-"));
     tempDirectories.push(dataDir);

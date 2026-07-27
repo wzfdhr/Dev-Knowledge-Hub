@@ -41,7 +41,7 @@
     "@ant-design/v5-patch-for-react-19": "^1.0.3",
     "@fastify/cookie": "^11.0.2",
     "@fastify/multipart": "^10.1.0",
-    "@fastify/static": "^9.3.0",
+    "@fastify/static": "^10.1.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@tanstack/react-query": "^5.101.2",
     "@vue/compiler-sfc": "^3.5.13",

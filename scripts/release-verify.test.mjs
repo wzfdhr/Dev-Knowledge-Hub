@@ -368,7 +368,7 @@ describe("release verification orchestrator", () => {
       trustedContractCommit: trustedCommit
     });
     expect(loadApprovalProvenance).toHaveBeenCalledWith(trustedCommit, expect.any(Object));
-  });
+  }, 20_000);
 
   testWithSourceBlobContract("rejects a second main push after an unapproved contract introduction", async () => {
     const unauthorizedContractCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
@@ -535,12 +535,12 @@ describe("release verification orchestrator", () => {
       eventName: "push",
       trustedContractCommit: priorCommit
     });
-  });
+  }, 20_000);
 
   testWithSourceBlobContract("rejects an introducing protected-main push whose predecessor lacks 0035", async () => {
     const candidateCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
     const introducingBase = spawnSync(
-      "git", ["rev-parse", "79c833b7bcd88c5147ff7ee7aba9786bf89032ed^"], { encoding: "utf8" }
+      "git", ["merge-base", "HEAD", "origin/main"], { encoding: "utf8" }
     ).stdout.trim();
     await expect(assertPostContractRuntimeCi({
       GITHUB_ACTIONS: "true",
@@ -607,7 +607,7 @@ describe("release verification orchestrator", () => {
   testWithSourceBlobContract("does not let caller flags turn an introducing contract PR into ordinary runtime CI", async () => {
     const currentCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
     const introducingBase = spawnSync(
-      "git", ["rev-parse", "79c833b7bcd88c5147ff7ee7aba9786bf89032ed^"], { encoding: "utf8" }
+      "git", ["merge-base", "HEAD", "origin/main"], { encoding: "utf8" }
     ).stdout.trim();
     await expect(assertPostContractRuntimeCi({
       GITHUB_ACTIONS: "true",

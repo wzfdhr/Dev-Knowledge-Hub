@@ -7,6 +7,7 @@ RUN npm ci
 COPY tsconfig.json tsconfig.node.json vite.config.ts index.html ./
 COPY src ./src
 COPY drizzle ./drizzle
+COPY evaluation ./evaluation
 RUN npm run build
 
 FROM mcr.microsoft.com/playwright:v1.61.1-noble AS e2e
@@ -53,5 +54,7 @@ FROM runtime AS integration
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/src ./src
 COPY --from=build --chown=node:node /app/drizzle ./drizzle
+COPY --from=build --chown=node:node /app/evaluation ./evaluation
 COPY --from=build --chown=node:node /app/tsconfig.json /app/tsconfig.node.json /app/vite.config.ts ./
+COPY --chown=node:node Dockerfile vitest.config.ts ./
 COPY --chown=node:node scripts ./scripts

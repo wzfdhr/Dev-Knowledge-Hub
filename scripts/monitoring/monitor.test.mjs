@@ -16,6 +16,7 @@ function fixture({
   importCounts = "0|0",
   shadowPipelineFailures = "0",
   observationProjectId = "",
+  observationStartedAt = "",
   expectedCandidateCommit = "",
   runtimeCandidateCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   expectedSourceStorageMode = "",
@@ -58,6 +59,7 @@ function fixture({
       MAX_SHADOW_PIPELINE_FAILURES_24H: "1",
       DEVKH_MONITOR_NOW_EPOCH_SECONDS: "100000",
       ...(observationProjectId ? { OBSERVATION_PROJECT_ID: observationProjectId } : {}),
+      ...(observationStartedAt ? { OBSERVATION_STARTED_AT: observationStartedAt } : {}),
       ...(expectedCandidateCommit ? { OBSERVATION_CANDIDATE_COMMIT: expectedCandidateCommit } : {}),
       ...(expectedSourceStorageMode ? { OBSERVATION_SOURCE_STORAGE_MODE: expectedSourceStorageMode } : {})
     }
@@ -186,6 +188,17 @@ test("scopes import and shadow failure checks to the configured observation proj
     assert.equal(status.observationProjectId, projectId);
     const dockerArgs = readFileSync(join(value.root, "docker-args.log"), "utf8");
     assert.match(dockerArgs, new RegExp(`project_id = '${projectId}'::uuid`));
+  } finally { rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("counts shadow pipeline failures only from the observation start time", () => {
+  const startedAt = "2026-07-27T08:10:00Z";
+  const value = fixture({ observationStartedAt: startedAt });
+  try {
+    const result = spawnSync(monitorScript, [], { env: value.environment, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const dockerArgs = readFileSync(join(value.root, "docker-args.log"), "utf8");
+    assert.match(dockerArgs, new RegExp(`updated_at >= '${startedAt}'::timestamptz`));
   } finally { rmSync(value.root, { recursive: true, force: true }); }
 });
 

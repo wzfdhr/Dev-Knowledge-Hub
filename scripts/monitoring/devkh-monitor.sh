@@ -35,6 +35,15 @@ if [[ -n "${OBSERVATION_PROJECT_ID:-}" ]]; then
   observation_project_filter=" AND project_id = '${OBSERVATION_PROJECT_ID}'::uuid"
 fi
 
+observation_started_at_filter=""
+if [[ -n "${OBSERVATION_STARTED_AT:-}" ]]; then
+  [[ "$OBSERVATION_STARTED_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
+    printf 'OBSERVATION_STARTED_AT must be a UTC ISO-8601 timestamp with whole seconds\n' >&2
+    exit 64
+  }
+  observation_started_at_filter=" AND updated_at >= '${OBSERVATION_STARTED_AT}'::timestamptz"
+fi
+
 [[ "$COMPOSE_DIR" == /* ]] || {
   printf 'COMPOSE_DIR must be an absolute path\n' >&2
   exit 64
@@ -108,7 +117,7 @@ check_shadow_pipeline_failures() {
     WITH latest_stage_attempt AS (
       SELECT DISTINCT ON (build_job_id, stage) build_job_id, stage, status
       FROM build_stage_runs
-      WHERE updated_at >= now() - interval '24 hours'${observation_project_filter}
+      WHERE updated_at >= now() - interval '24 hours'${observation_project_filter}${observation_started_at_filter}
       ORDER BY build_job_id, stage, attempt DESC
     )
     SELECT count(*)

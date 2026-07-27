@@ -12,6 +12,20 @@ set -uo pipefail
 : "${MAX_IMPORT_FAILURE_RATE_PERCENT:?missing MAX_IMPORT_FAILURE_RATE_PERCENT}"
 : "${MAX_SHADOW_PIPELINE_FAILURES_24H:?missing MAX_SHADOW_PIPELINE_FAILURES_24H}"
 
+if [[ -n "${OBSERVATION_CANDIDATE_COMMIT:-}" ]]; then
+  [[ "$OBSERVATION_CANDIDATE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+    printf 'OBSERVATION_CANDIDATE_COMMIT must be a lowercase 40-character SHA\n' >&2
+    exit 64
+  }
+fi
+
+if [[ -n "${OBSERVATION_SOURCE_STORAGE_MODE:-}" ]]; then
+  [[ "$OBSERVATION_SOURCE_STORAGE_MODE" =~ ^(legacy|shadow|active)$ ]] || {
+    printf 'OBSERVATION_SOURCE_STORAGE_MODE must be legacy, shadow, or active\n' >&2
+    exit 64
+  }
+fi
+
 observation_project_filter=""
 if [[ -n "${OBSERVATION_PROJECT_ID:-}" ]]; then
   [[ "$OBSERVATION_PROJECT_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]] || {
@@ -109,12 +123,42 @@ check_shadow_pipeline_failures() {
   (( failed_builds <= MAX_SHADOW_PIPELINE_FAILURES_24H )) || failures+=("shadow_pipeline_failures")
 }
 
+check_observation_candidate() {
+  [[ -n "${OBSERVATION_CANDIDATE_COMMIT:-}" ]] || return
+  local candidate
+  candidate="$(git -C "$COMPOSE_DIR" rev-parse HEAD 2>/dev/null)" || {
+    failures+=("candidate_commit")
+    return
+  }
+  [[ "$candidate" == "$OBSERVATION_CANDIDATE_COMMIT" ]] || failures+=("candidate_commit")
+}
+
+check_observation_source_storage_mode() {
+  [[ -n "${OBSERVATION_SOURCE_STORAGE_MODE:-}" ]] || return
+  local app_id runtime_mode
+  app_id="$(docker compose -f "$COMPOSE_DIR/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" ps -q app)" || {
+    failures+=("source_storage_mode")
+    return
+  }
+  [[ -n "$app_id" ]] || {
+    failures+=("source_storage_mode")
+    return
+  }
+  runtime_mode="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$app_id" | sed -n 's/^DEVKH_SOURCE_STORAGE_MODE=//p')" || {
+    failures+=("source_storage_mode")
+    return
+  }
+  [[ "$runtime_mode" == "$OBSERVATION_SOURCE_STORAGE_MODE" ]] || failures+=("source_storage_mode")
+}
+
 check_application
 check_containers
 check_disk
 check_backup
 check_import_failure_rate
 check_shadow_pipeline_failures
+check_observation_candidate
+check_observation_source_storage_mode
 
 if (( ${#failures[@]} )); then
   write_status failed

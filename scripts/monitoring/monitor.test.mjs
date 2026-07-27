@@ -15,7 +15,11 @@ function fixture({
   snapshots = [{ time: snapshotTime }],
   importCounts = "0|0",
   shadowPipelineFailures = "0",
-  observationProjectId = ""
+  observationProjectId = "",
+  expectedCandidateCommit = "",
+  runtimeCandidateCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  expectedSourceStorageMode = "",
+  runtimeSourceStorageMode = "shadow"
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "devkh-monitor-"));
   const bin = join(root, "bin");
@@ -32,7 +36,8 @@ function fixture({
   writeFileSync(backupEnv, "RESTIC_REPOSITORY=s3:https://example.invalid/devkh\nRESTIC_PASSWORD_FILE=/tmp/password\n");
   writeFileSync(join(root, "docker-compose.yml"), "services: {}\n");
   writeExecutable("curl", "#!/usr/bin/env sh\nexit 0\n");
-  writeExecutable("docker", `#!/usr/bin/env sh\nprintf '%s\\n' "$*" >> "${dockerArgsPath}"\ncase "$*" in *build_stage_runs*) printf '%s\\n' '${shadowPipelineFailures}' ;; *exec*) printf '%s\\n' '${importCounts}' ;; *) printf "app healthy\\npostgres healthy\\n" ;; esac\n`);
+  writeExecutable("git", `#!/usr/bin/env sh\nprintf '%s\\n' '${runtimeCandidateCommit}'\n`);
+  writeExecutable("docker", `#!/usr/bin/env sh\nprintf '%s\\n' "$*" >> "${dockerArgsPath}"\ncase "$*" in *build_stage_runs*) printf '%s\\n' '${shadowPipelineFailures}' ;; *inspect*) printf 'DEVKH_SOURCE_STORAGE_MODE=${runtimeSourceStorageMode}\\n' ;; *exec*) printf '%s\\n' '${importCounts}' ;; *) printf "app healthy\\npostgres healthy\\n" ;; esac\n`);
   writeExecutable("df", "#!/usr/bin/env sh\nprintf \"Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/vda 100 70 30 70%% /\\n\"\n");
   writeExecutable("restic", `#!/usr/bin/env sh\nprintf '%s\\n' '${JSON.stringify(snapshots)}'\n`);
 
@@ -52,7 +57,9 @@ function fixture({
       MAX_IMPORT_FAILURE_RATE_PERCENT: "25",
       MAX_SHADOW_PIPELINE_FAILURES_24H: "1",
       DEVKH_MONITOR_NOW_EPOCH_SECONDS: "100000",
-      ...(observationProjectId ? { OBSERVATION_PROJECT_ID: observationProjectId } : {})
+      ...(observationProjectId ? { OBSERVATION_PROJECT_ID: observationProjectId } : {}),
+      ...(expectedCandidateCommit ? { OBSERVATION_CANDIDATE_COMMIT: expectedCandidateCommit } : {}),
+      ...(expectedSourceStorageMode ? { OBSERVATION_SOURCE_STORAGE_MODE: expectedSourceStorageMode } : {})
     }
   };
 }
@@ -110,6 +117,32 @@ test("fails when the latest encrypted backup is stale", () => {
   } finally {
     rmSync(value.root, { recursive: true, force: true });
   }
+});
+
+test("fails and records evidence when the observed candidate commit drifts", () => {
+  const value = fixture({
+    expectedCandidateCommit: "b".repeat(40),
+    runtimeCandidateCommit: "a".repeat(40)
+  });
+  try {
+    const result = spawnSync(monitorScript, [], { env: value.environment, encoding: "utf8" });
+    assert.equal(result.status, 1, result.stderr);
+    const status = JSON.parse(readFileSync(join(value.root, "state", "status.json"), "utf8"));
+    assert.deepEqual(status.failures, ["candidate_commit"]);
+  } finally { rmSync(value.root, { recursive: true, force: true }); }
+});
+
+test("fails and records evidence when the observed source storage mode drifts", () => {
+  const value = fixture({
+    expectedSourceStorageMode: "shadow",
+    runtimeSourceStorageMode: "legacy"
+  });
+  try {
+    const result = spawnSync(monitorScript, [], { env: value.environment, encoding: "utf8" });
+    assert.equal(result.status, 1, result.stderr);
+    const status = JSON.parse(readFileSync(join(value.root, "state", "status.json"), "utf8"));
+    assert.deepEqual(status.failures, ["source_storage_mode"]);
+  } finally { rmSync(value.root, { recursive: true, force: true }); }
 });
 
 test("uses the newest remote snapshot instead of the first grouped result", () => {

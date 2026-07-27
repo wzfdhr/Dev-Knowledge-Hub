@@ -22,7 +22,7 @@ import {
 } from "../typescript-program.js";
 
 export const MAX_ANALYZER_OUTPUT_BYTES = 16 * 1024 * 1024;
-export const MAX_ANALYZER_OUTPUT_NODES = 100_000;
+export const MAX_ANALYZER_OUTPUT_NODES = 250_000;
 export const MAX_ANALYZER_OUTPUT_DEPTH = 256;
 
 export interface AnalyzerOutputStructureLimits {

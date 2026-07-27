@@ -279,7 +279,7 @@ describe("analyzer worker structural limits", () => {
 
   test("locks the production output limits and their exact structural boundaries", () => {
     expect(MAX_ANALYZER_OUTPUT_BYTES).toBe(16 * 1024 * 1024);
-    expect(MAX_ANALYZER_OUTPUT_NODES).toBe(100_000);
+    expect(MAX_ANALYZER_OUTPUT_NODES).toBe(250_000);
     expect(MAX_ANALYZER_OUTPUT_DEPTH).toBe(256);
 
     expect(() => assertAnalyzerOutputStructure(

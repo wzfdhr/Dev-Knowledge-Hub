@@ -1,8 +1,8 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-const productionApi = "https://izbp13w996yh3m83ypf3crz.tailf6e278.ts.net";
-const apiTarget = process.env.DEVKH_API_PROXY_TARGET ?? productionApi;
+const localApi = "http://127.0.0.1:3000";
+const apiTarget = process.env.DEVKH_API_PROXY_TARGET ?? localApi;
 
 function apiProxy(target: string) {
   return {

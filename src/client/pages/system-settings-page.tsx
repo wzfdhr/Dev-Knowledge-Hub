@@ -6,7 +6,7 @@ import { errorMessage, type ApiClient } from "../api/client";
 import type { ModelProvider } from "../api/types";
 import { ErrorState, Loading } from "../components/ui";
 
-const DEEPSEEK_MODEL = "deepseek-v4-flash";
+const DEEPSEEK_MODEL = "deepseek-chat";
 function ModelForm({ api }: { api: ApiClient }) {
   const config = useQuery({ queryKey: ["model-config"], queryFn: api.getModelConfig });
   const [provider, setProvider] = useState<ModelProvider>("openai");

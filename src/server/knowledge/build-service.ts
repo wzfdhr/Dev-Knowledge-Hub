@@ -371,6 +371,12 @@ export class BuildService {
           : this.enhancer
         : undefined;
       const output = await this.synthesize(index, enhancer, { purpose: original.purpose });
+      if (original.allowLlm && !enhancer) {
+        output.warnings.push({
+          code: "ENHANCER_UNAVAILABLE",
+          message: "LLM enhancement is not configured"
+        });
+      }
       await this.checkCancellation(original);
       await this.transition(buildId, status, "validating", { warnings: output.warnings });
       status = "validating";

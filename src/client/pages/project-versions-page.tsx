@@ -33,6 +33,25 @@ export function canEnableLlmBuild(
   return workspaceRole === "admin" || projectRole === "admin";
 }
 
+export function llmEnhancementStatus(build: Pick<Build, "allowLlm" | "warnings">): {
+  label: string;
+  detail: string;
+  tone: "success" | "warning" | "neutral";
+} {
+  if (!build.allowLlm) return { label: "未启用", detail: "本次使用基础生成。", tone: "neutral" };
+  const warning = build.warnings.find((item) => ["ENHANCER_FAILED", "ENHANCER_UNAVAILABLE"].includes(item.code ?? ""));
+  if (warning) return {
+    label: "LLM 未生效，已使用基础生成",
+    detail: warning.message ?? "LLM 增强不可用。",
+    tone: "warning"
+  };
+  return {
+    label: "LLM 增强成功",
+    detail: "已使用 LLM 为本次知识生成补充说明。",
+    tone: "success"
+  };
+}
+
 export function canCreateFrontendDraft(
   workspaceRole: "admin" | "member" | "reader" | undefined,
   projectRole: "admin" | "member" | "reader" | undefined
@@ -322,7 +341,7 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
       {activeBuild && <section className="panel active-build"><div className="section-heading"><div><p className="eyebrow">正在构建</p><h2>{statusLabel(activeBuild.status)}</h2></div><Status value={activeBuild.status} /></div><progress className="progress" aria-label="构建进度" max={100} value={progress} /><p className="muted">{sourceLabel} <span className="mono">{activeBuild.commitSha.slice(0, 12)}</span>。{eventState === "reconnecting" ? "正在重新连接构建更新" : eventState === "connected" ? "已连接实时更新" : "正在连接实时更新"}</p>{canContribute && <button className="button danger" onClick={() => cancel.mutate(activeBuild.id)} disabled={activeBuild.cancelRequested}><Square aria-hidden="true" />{activeBuild.cancelRequested ? "已请求取消" : "取消构建"}</button>}</section>}
       {failedBuild && <section className="panel failed-build" role="alert"><div className="section-heading"><div><p className="eyebrow">构建失败</p><h2>{failedBuild.errorMessage ?? "知识构建失败"}</h2></div><Status value="failed" /></div><p className="muted">当前已发布版本未受影响。重试会创建新的候选构建，不会覆盖现有版本。</p></section>}
       {reviewBuild && <section className="panel review-panel" aria-label="版本审核"><div><p className="eyebrow">等待审核</p><h2>构建 {reviewBuild.id.slice(0, 8)}</h2><p>选择草稿版本，然后检查生成的知识。</p></div><div className="review-actions"><button className="button" onClick={inspectKnowledge} disabled={createRelease.isPending}>查看知识</button>{canCreateActiveGraph && <div><button className="button primary" onClick={() => createFrontendRelease.mutate({ buildId: reviewBuild.id, value: version })} disabled={createFrontendRelease.isPending || !frontendDraft.ready}>创建 active 图谱草稿</button>{!frontendDraft.ready && <small className="muted">{frontendDraft.reason}</small>}</div>}<label>版本<input value={version} onChange={(event) => setVersion(event.target.value)} /></label></div></section>}
-      <section className="section"><div className="section-heading"><div><p className="eyebrow">历史记录</p><h2>最近构建</h2></div></div>{builds.length === 0 ? <Empty>{repository?.kind === "upload" ? "暂无构建，请先导入项目文件夹。" : "暂无构建，请先同步仓库。"}</Empty> : <><div className="table-wrap"><table><thead><tr><th>状态</th><th>{sourceLabel}</th><th>警告</th><th>构建</th></tr></thead><tbody>{builds.map((build) => <tr key={build.id}><td><Status value={build.status} /></td><td className="mono">{build.commitSha.slice(0, 12)}</td><td>{build.warnings.length}</td><td className="mono">{build.id.slice(0, 8)}</td></tr>)}</tbody></table></div>{buildsQuery.hasNextPage && <button className="button continuation" onClick={() => void buildsQuery.fetchNextPage()} disabled={buildsQuery.isFetchingNextPage}>{buildsQuery.isFetchingNextPage ? "正在加载构建..." : "加载更多构建"}</button>}</>}</section>
+      <section className="section"><div className="section-heading"><div><p className="eyebrow">历史记录</p><h2>最近构建</h2></div></div>{builds.length === 0 ? <Empty>{repository?.kind === "upload" ? "暂无构建，请先导入项目文件夹。" : "暂无构建，请先同步仓库。"}</Empty> : <><div className="table-wrap"><table><thead><tr><th>状态</th><th>{sourceLabel}</th><th>LLM 增强</th><th>警告</th><th>构建</th></tr></thead><tbody>{builds.map((build) => { const llm = llmEnhancementStatus(build); return <tr key={build.id}><td><Status value={build.status} /></td><td className="mono">{build.commitSha.slice(0, 12)}</td><td><span>{llm.label}</span>{llm.tone === "warning" && <small className="muted">{llm.detail}</small>}</td><td>{build.warnings.length}</td><td className="mono">{build.id.slice(0, 8)}</td></tr>; })}</tbody></table></div>{buildsQuery.hasNextPage && <button className="button continuation" onClick={() => void buildsQuery.fetchNextPage()} disabled={buildsQuery.isFetchingNextPage}>{buildsQuery.isFetchingNextPage ? "正在加载构建..." : "加载更多构建"}</button>}</>}</section>
     </>}
   </div>;
 }

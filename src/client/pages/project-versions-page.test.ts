@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { canCreateFrontendDraft, canEnableLlmBuild, frontendDraftAvailability, shadowPipelineMessage, shouldPollShadowPipeline, suggestNextReleaseVersion } from "./project-versions-page";
+import { canCreateFrontendDraft, canEnableLlmBuild, frontendDraftAvailability, llmEnhancementStatus, shadowPipelineMessage, shouldPollShadowPipeline, suggestNextReleaseVersion } from "./project-versions-page";
 
 describe("ProjectVersionsPage shadow pipeline status", () => {
   test("explains a failed shadow stage without reporting a formal build failure", () => {
@@ -21,6 +21,18 @@ describe("ProjectVersionsPage LLM build permission", () => {
     expect(canEnableLlmBuild("member", "admin")).toBe(true);
     expect(canEnableLlmBuild("member", "member")).toBe(false);
     expect(canEnableLlmBuild("reader", "reader")).toBe(false);
+  });
+
+  test("discloses a successful opted-in LLM enhancement", () => {
+    expect(llmEnhancementStatus({ allowLlm: true, warnings: [] })).toEqual({
+      label: "LLM 增强成功", detail: "已使用 LLM 为本次知识生成补充说明。", tone: "success"
+    });
+  });
+
+  test("discloses deterministic fallback and its reason", () => {
+    expect(llmEnhancementStatus({ allowLlm: true, warnings: [{ code: "ENHANCER_FAILED", message: "Not Found" }] })).toEqual({
+      label: "LLM 未生效，已使用基础生成", detail: "Not Found", tone: "warning"
+    });
   });
 });
 

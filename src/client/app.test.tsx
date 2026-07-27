@@ -1675,7 +1675,7 @@ describe("model settings", () => {
   test("enables the internal DeepSeek mode with a fixed model and masked key", async () => {
     const user = userEvent.setup();
     const updateModelConfig = vi.fn().mockResolvedValue({
-      config: { provider: "deepseek", model: "deepseek-v4-flash", hasApiKey: true }
+      config: { provider: "deepseek", model: "deepseek-chat", hasApiKey: true }
     });
     const api = {
       getRepository: vi.fn().mockRejectedValue(Object.assign(new Error("none"), { status: 404 })),
@@ -1689,7 +1689,7 @@ describe("model settings", () => {
     renderPage(<SettingsPage api={api} />);
     await user.click(await screen.findByRole("checkbox", { name: "内部启用 DeepSeek" }));
 
-    expect(screen.getByText("deepseek-v4-flash")).toBeVisible();
+    expect(screen.getByText("deepseek-chat")).toBeVisible();
     expect(screen.queryByLabelText("服务商")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("模型")).not.toBeInTheDocument();
     const apiKey = screen.getByLabelText("API Key");
@@ -1698,7 +1698,7 @@ describe("model settings", () => {
     await user.click(screen.getByRole("button", { name: "保存模型设置" }));
 
     expect(updateModelConfig).toHaveBeenCalledWith({
-      provider: "deepseek", model: "deepseek-v4-flash", apiKey: "deepseek-key"
+      provider: "deepseek", model: "deepseek-chat", apiKey: "deepseek-key"
     });
   });
 
@@ -1710,7 +1710,7 @@ describe("model settings", () => {
     const api = {
       getRepository: vi.fn().mockRejectedValue(Object.assign(new Error("none"), { status: 404 })),
       getModelConfig: vi.fn().mockResolvedValue({
-        config: { provider: "deepseek", model: "deepseek-v4-flash", hasApiKey: true }
+        config: { provider: "deepseek", model: "deepseek-chat", hasApiKey: true }
       }),
       updateModelConfig,
       getMfaStatus: vi.fn().mockResolvedValue({ enabled: false, pending: false, lockedUntil: null }),

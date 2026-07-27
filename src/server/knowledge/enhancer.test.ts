@@ -10,7 +10,7 @@ vi.mock("@ai-sdk/openai", () => ({ createOpenAI }));
 import { deepseekEnhancer } from "./enhancer";
 
 describe("DeepSeek knowledge enhancement", () => {
-  test("uses the fixed official endpoint and flash model", () => {
+  test("uses the fixed official endpoint and supported chat model", () => {
     const enhancer = deepseekEnhancer("deepseek-key");
 
     expect(enhancer).toBeDefined();
@@ -18,6 +18,6 @@ describe("DeepSeek knowledge enhancement", () => {
       apiKey: "deepseek-key",
       baseURL: "https://api.deepseek.com"
     });
-    expect(provider).toHaveBeenCalledWith("deepseek-v4-flash");
+    expect(provider).toHaveBeenCalledWith("deepseek-chat");
   });
 });

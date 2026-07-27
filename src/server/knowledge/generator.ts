@@ -22,7 +22,7 @@ export interface KnowledgePageDraft {
 }
 
 export interface KnowledgeWarning {
-  code: "ENHANCER_FAILED";
+  code: "ENHANCER_FAILED" | "ENHANCER_UNAVAILABLE";
   message: string;
 }
 

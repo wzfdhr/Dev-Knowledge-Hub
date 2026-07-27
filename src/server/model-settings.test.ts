@@ -97,12 +97,12 @@ describe("model settings", () => {
 
     const saved = await app.inject({
       method: "PUT", url: "/api/settings/model", headers: { cookie, ...csrfHeaders(cookie) },
-      payload: { provider: "deepseek", model: "deepseek-v4-flash", apiKey: deepseekKey }
+      payload: { provider: "deepseek", model: "deepseek-chat", apiKey: deepseekKey }
     });
 
     expect(saved.statusCode).toBe(200);
     expect(saved.json()).toEqual({
-      config: { provider: "deepseek", model: "deepseek-v4-flash", hasApiKey: true }
+      config: { provider: "deepseek", model: "deepseek-chat", hasApiKey: true }
     });
     expect(store.encryptedCredentials).toEqual(expect.arrayContaining([
       expect.objectContaining({ name: "model-provider", ciphertext: genericCiphertext }),
@@ -125,11 +125,11 @@ describe("model settings", () => {
 
     expect(saved.statusCode).toBe(200);
     expect(saved.json()).toEqual({
-      config: { provider: "deepseek", model: "deepseek-v4-flash", hasApiKey: true }
+      config: { provider: "deepseek", model: "deepseek-chat", hasApiKey: true }
     });
     expect(store.auditEvents.at(-1)).toMatchObject({
       action: "model_config.updated",
-      metadata: { provider: "deepseek", model: "deepseek-v4-flash" }
+      metadata: { provider: "deepseek", model: "deepseek-chat" }
     });
   });
 

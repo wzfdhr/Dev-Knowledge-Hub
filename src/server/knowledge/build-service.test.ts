@@ -250,6 +250,21 @@ describe("BuildService", () => {
     expect(enhancerForWorkspace).not.toHaveBeenCalled();
     expect(synthesize.mock.calls[0][1]).toBeUndefined();
   });
+
+  test("records that an opted-in LLM build used deterministic fallback when no enhancer is configured", async () => {
+    const persistence = new FakeBuildPersistence();
+    const service = new BuildService(persistence, new FakeQueue(), {
+      enhancerForWorkspace: async () => undefined
+    });
+    const { build } = await service.startBuild({ ...input(), allowLlm: true });
+
+    await service.process(build.id);
+
+    expect(persistence.builds[0]?.warnings).toContainEqual({
+      code: "ENHANCER_UNAVAILABLE",
+      message: "LLM enhancement is not configured"
+    });
+  });
   test("runs the durable state machine and persists validated knowledge", async () => {
     const persistence = new FakeBuildPersistence();
     const service = new BuildService(persistence, new FakeQueue());

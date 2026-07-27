@@ -5,7 +5,7 @@ import type { BuildPurpose } from "./build-service.js";
 import type { Citation } from "./intelligence.js";
 
 export const DEEPSEEK_BASE_URL = "https://api.deepseek.com";
-export const DEEPSEEK_MODEL = "deepseek-v4-flash";
+export const DEEPSEEK_MODEL = "deepseek-chat";
 
 export interface EnhancementRequest {
   slug: string;

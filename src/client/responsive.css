@@ -934,3 +934,111 @@ body,
     padding: 22px 16px;
   }
 }
+
+/* Contained desktop workspaces: long lists scroll in their own pane. */
+.quality-next-step {
+  margin-top: 18px;
+  padding: 12px 14px;
+  border-left: 3px solid var(--blue);
+  border-radius: 6px;
+  background: #f2f7fd;
+  color: #315479;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.quality-next-step strong {
+  display: block;
+  color: #1e4d84;
+  font-size: 13px;
+}
+
+.quality-next-step p {
+  margin: 3px 0 0;
+}
+
+@media (min-width: 761px) {
+  .knowledge-layout,
+  .feedback-layout,
+  .graph-workspace,
+  .quality-governance-layout {
+    min-height: 0;
+  }
+
+  .knowledge-layout,
+  .feedback-layout {
+    height: min(780px, calc(100dvh - 176px));
+  }
+
+  .page-tree,
+  .knowledge-document,
+  .source-panel,
+  .feedback-list,
+  .feedback-detail {
+    min-height: 0;
+  }
+
+  .page-tree {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .page-tree-list,
+  .feedback-list,
+  .graph-detail,
+  .quality-issue-list,
+  .quality-issue-detail {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+
+  .knowledge-document,
+  .source-panel,
+  .feedback-detail {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .quality-governance-layout {
+    height: min(560px, calc(100dvh - 360px));
+    flex-wrap: nowrap;
+  }
+
+  .quality-metadata-grid > div {
+    max-height: 480px;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+  }
+
+  .quality-metadata-grid h3 {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+}
+
+@media (min-width: 1001px) {
+  .graph-workspace {
+    height: min(780px, calc(100dvh - 250px));
+  }
+
+  .graph-main,
+  .graph-detail,
+  .graph-workspace > .source-panel {
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .graph-workspace:has(.source-panel) {
+    grid-template-rows: minmax(0, 1fr) minmax(180px, 42%);
+  }
+}
+
+@media (max-width: 760px) {
+  .page-tree-list {
+    display: contents;
+  }
+}

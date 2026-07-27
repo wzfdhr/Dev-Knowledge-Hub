@@ -403,6 +403,7 @@ describe("operations page copy", () => {
 
     renderPage(<KnowledgePage api={knowledgeApi} />);
     expect(await screen.findByRole("heading", { name: "知识资料" })).toBeVisible();
+    expect(screen.getByLabelText("知识页面").querySelector(".page-tree-list")).not.toBeNull();
     await user.click(screen.getByRole("button", { name: "模块：math" }));
     await user.click(screen.getByRole("button", { name: /src\/math.ts 第 16 至 18 行/i }));
     expect(await screen.findByText(`Commit ${"a".repeat(12)}`)).toBeVisible();
@@ -1169,6 +1170,7 @@ describe("knowledge citations", () => {
     expect(within(governance).getByText("src/payments.ts:12-24")).toBeVisible();
     expect(within(governance).getByText("build-1")).toBeVisible();
     expect(within(governance).getByText("引用完整")).toBeVisible();
+    expect(within(governance).getByText("下一步：接受处理或说明忽略")).toBeVisible();
     const actions = await within(governance).findByRole("group", { name: "质量问题操作" });
     await user.click(within(actions).getByRole("button", { name: "忽略" }));
     const dismissalReason = within(actions).getByLabelText("忽略理由");
@@ -1182,8 +1184,10 @@ describe("knowledge citations", () => {
     await waitFor(() => expect(api.transitionProjectRemediation).toHaveBeenLastCalledWith(
       "project-1", "remediation-1", { state: "accepted" }
     ));
+    expect(await within(governance).findByText("下一步：请求范围重建")).toBeVisible();
     await user.click(await within(governance).findByRole("button", { name: "请求范围重建" }));
     await waitFor(() => expect(api.requestProjectRemediationRebuild).toHaveBeenCalledWith("project-1", "remediation-1"));
+    expect(await within(governance).findByLabelText("当前操作指引")).toHaveTextContent("候选仍在生成，当前已发布版本不会变化。");
     await user.click(await within(governance).findByRole("button", { name: "标记已解决" }));
     await waitFor(() => expect(api.transitionProjectRemediation).toHaveBeenLastCalledWith(
       "project-1", "remediation-1", { state: "resolved" }

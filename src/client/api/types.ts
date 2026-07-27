@@ -136,6 +136,7 @@ export interface ImportProgress {
   totalBytes?: number;
   bytesPerSecond?: number;
   estimatedSeconds?: number;
+  coordination?: { retryAfterSeconds: number; attempt: number };
   detail?: string;
 }
 export interface SnapshotSummary {

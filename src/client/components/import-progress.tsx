@@ -54,6 +54,9 @@ export function ImportProgress({
   const activeIndex = stages.findIndex((stage) => stage.phase === visualPhase);
   const rate = formatRate(progress?.bytesPerSecond);
   const eta = formatEta(progress?.estimatedSeconds);
+  const coordination = progress.coordination
+    ? `第 ${progress.coordination.attempt} 次协调，约 ${progress.coordination.retryAfterSeconds} 秒后继续`
+    : null;
   const transfer = progress.processedFiles !== undefined && progress.totalFiles !== undefined
     ? `${progress.processedFiles}/${progress.totalFiles} 个文件${
       progress.processedBytes !== undefined && progress.totalBytes !== undefined
@@ -81,7 +84,7 @@ export function ImportProgress({
     </div>
     <div className="import-progress-meta" aria-live="polite">
       <span>{progress.detail ?? "正在处理导入内容。"}</span>
-      {(transfer || rate || eta) && <span>{[transfer, rate, eta].filter(Boolean).join(" · ")}</span>}
+      {(transfer || rate || eta || coordination) && <span>{[transfer, rate, eta, coordination].filter(Boolean).join(" · ")}</span>}
     </div>
   </section>;
 }

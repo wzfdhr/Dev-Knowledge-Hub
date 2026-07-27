@@ -29,6 +29,18 @@ describe("ImportProgress", () => {
     expect(screen.getByText(/约 18 秒/)).toBeVisible();
   });
 
+  test("shows upload coordination as live progress instead of an error", () => {
+    render(<ImportProgress progress={{
+      phase: "uploading", status: "running", percent: 42,
+      detail: "正在自动协调上传，资料不会丢失",
+      coordination: { retryAfterSeconds: 1, attempt: 1 }
+    }} />);
+
+    expect(screen.getByText("正在自动协调上传，资料不会丢失")).toBeVisible();
+    expect(screen.getByText("第 1 次协调，约 1 秒后继续")).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   test("marks a failed run as an alert", () => {
     render(<ImportProgress progress={{ phase: "validating", status: "failed", percent: 80, detail: "服务端校验失败" }} />);
     expect(screen.getByRole("alert")).toHaveTextContent("服务端校验失败");

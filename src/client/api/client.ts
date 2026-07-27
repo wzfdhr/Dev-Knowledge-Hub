@@ -66,9 +66,14 @@ function retryAfterMilliseconds(value: string | null): number {
   return Number.isFinite(timestamp) ? Math.min(60_000, Math.max(0, timestamp - Date.now())) : 1_000;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+interface RequestOptions extends RequestInit {
+  onRateLimit?(input: { retryAfterSeconds: number; attempt: number }): void;
+}
+
+async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const { onRateLimit, ...init } = options;
   const projectId = activeProjectId();
-  const csrf = init?.method && !["GET", "HEAD", "OPTIONS"].includes(init.method) ? csrfToken() : undefined;
+  const csrf = init.method && !["GET", "HEAD", "OPTIONS"].includes(init.method) ? csrfToken() : undefined;
   const retryRateLimit = path.includes("/upload-sessions");
   const fetchAttempt = async (rateLimitRetries = 0): Promise<Response> => {
     const response = await fetch(path, {
@@ -77,12 +82,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       headers: {
         ...(projectId ? { "x-devkh-project": projectId } : {}),
         ...(csrf ? { "x-devkh-csrf": csrf } : {}),
-        ...(typeof init?.body === "string" ? { "content-type": "application/json" } : {}),
-        ...init?.headers
+        ...(typeof init.body === "string" ? { "content-type": "application/json" } : {}),
+        ...init.headers
       }
     });
     if (!retryRateLimit || response.status !== 429 || rateLimitRetries >= 5) return response;
-    await new Promise((resolve) => setTimeout(resolve, retryAfterMilliseconds(response.headers.get("retry-after"))));
+    const delay = retryAfterMilliseconds(response.headers.get("retry-after"));
+    onRateLimit?.({ retryAfterSeconds: Math.max(1, Math.ceil(delay / 1_000)), attempt: rateLimitRetries + 1 });
+    await new Promise((resolve) => setTimeout(resolve, delay));
     return fetchAttempt(rateLimitRetries + 1);
   };
   const response = await fetchAttempt();
@@ -254,7 +261,7 @@ async function uploadFolderSession(
   let processedBytes = 0;
   let transferredBytesThisAttempt = 0;
   const startedAt = Date.now();
-  const reportTransfer = (detail: string) => {
+  const reportTransfer = (detail: string, coordination?: ImportProgress["coordination"]) => {
     const elapsedSeconds = Math.max((Date.now() - startedAt) / 1_000, 0.001);
     const bytesPerSecond = transferredBytesThisAttempt > 0
       ? Math.round(transferredBytesThisAttempt / elapsedSeconds)
@@ -268,8 +275,12 @@ async function uploadFolderSession(
       processedFiles, totalFiles, processedBytes, totalBytes,
       bytesPerSecond,
       estimatedSeconds: bytesPerSecond ? Math.ceil(remainingBytes / bytesPerSecond) : undefined,
+      coordination,
       detail
     });
+  };
+  const reportRateLimit = (coordination: NonNullable<ImportProgress["coordination"]>) => {
+    reportTransfer("正在自动协调上传，资料不会丢失", coordination);
   };
   const markVerified = (ordinal: number, byteSize: number, detail?: string) => {
     if (verified.has(ordinal)) return;
@@ -283,6 +294,7 @@ async function uploadFolderSession(
   let session: UploadSessionStart | undefined;
   try {
     session = await request<UploadSessionStart>(base, {
+      onRateLimit: reportRateLimit,
       method: "POST",
       headers: { "Idempotency-Key": resume.createKey },
       body: json({ repositoryId, entryCount: manifest.entries.length })
@@ -293,6 +305,7 @@ async function uploadFolderSession(
       const response = await request<{ entries: UploadManifestDecision[] }>(
         `${base}/${encodeURIComponent(session.id)}/manifest-pages/${page}`,
         {
+          onRateLimit: reportRateLimit,
           method: "PUT",
           headers: { "Idempotency-Key": `${resume.createKey}:manifest:${page}` },
           body: json({ entries: manifest.entries.slice(offset, offset + UPLOAD_MANIFEST_PAGE_SIZE) })
@@ -316,6 +329,7 @@ async function uploadFolderSession(
         }
         if (decision.trust !== "server_verified") {
           await request(`${base}/${encodeURIComponent(session.id)}/files/${decision.ordinal}`, {
+            onRateLimit: reportRateLimit,
             method: "PUT",
             headers: {
               "Idempotency-Key": `${resume.createKey}:file:${decision.ordinal}`,
@@ -334,6 +348,7 @@ async function uploadFolderSession(
       detail: "文件传输完成，正在执行服务端校验"
     });
     const result = await request<UploadSnapshotSummary>(`${base}/${encodeURIComponent(session.id)}/commit`, {
+      onRateLimit: reportRateLimit,
       method: "POST",
       headers: { "Idempotency-Key": `${resume.createKey}:commit` },
       body: json({ manifestDigest: manifest.manifestDigest })

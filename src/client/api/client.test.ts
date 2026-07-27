@@ -392,13 +392,20 @@ describe("project Codex API client", () => {
     const fetch = vi.fn(async () => responses.shift()!);
     vi.stubGlobal("fetch", fetch);
     vi.stubGlobal("localStorage", { getItem: vi.fn(() => null), setItem: vi.fn(), removeItem: vi.fn() });
+    const progress = vi.fn();
     const upload = api.uploadFolder("project-1", "repository-1", [{
       path: "src/index.ts", kind: "source",
       file: new File(["export {};"], "index.ts", { type: "text/typescript" })
-    }]);
+    }], { onProgress: progress });
 
     await expect(upload).resolves.toMatchObject({ snapshotId: "snapshot-1" });
     expect(fetch).toHaveBeenCalledTimes(5);
+    expect(progress).toHaveBeenCalledWith(expect.objectContaining({
+      phase: "uploading",
+      status: "running",
+      detail: "正在自动协调上传，资料不会丢失",
+      coordination: { retryAfterSeconds: 1, attempt: 1 }
+    }));
   });
 
   test("attaches the double-submit CSRF header to cookie-authenticated writes", async () => {

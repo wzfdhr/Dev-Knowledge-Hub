@@ -19,7 +19,7 @@ const legacyDatabaseStatNames = [
   "sourceAnalysisArtifactCount"
 ];
 const sourceBlobDatabaseStatNames = [
-  "sourceBlobCount", "sourceFileBlobReferenceCount", "referencedSourceBlobGenerationCount"
+  "sourceBlobCount", "sourceFileBlobReferenceCount", "referencedSourceBlobGenerationCount", "gitRepositoryCount"
 ];
 const legacyIntegrityNames = [
   "orphanedReleases",
@@ -208,9 +208,14 @@ export function validateRecoveryEvidence(evidence, options = {}) {
   requireExactFields(evidence.volumeArchiveSha256, volumeNames, "volumeArchiveSha256");
   requireExactFields(evidence.volumeFileCounts, volumeNames, "volumeFileCounts");
   for (const name of volumeNames) {
+    const emptyRepositoryVolumeIsExpected = name === "repositories"
+      && evidence.databaseStats?.gitRepositoryCount === 0;
     requireEvidence(
-      Number.isInteger(evidence.volumeFileCounts?.[name]) && evidence.volumeFileCounts[name] > 0,
-      `${name} restored file count must be positive`
+      Number.isInteger(evidence.volumeFileCounts?.[name])
+        && (emptyRepositoryVolumeIsExpected ? evidence.volumeFileCounts[name] >= 0 : evidence.volumeFileCounts[name] > 0),
+      emptyRepositoryVolumeIsExpected
+        ? "repositories restored file count must be non-negative when no active Git repositories exist"
+        : `${name} restored file count must be positive`
     );
     requireEvidence(
       sha256.test(evidence.volumeArchiveSha256?.[name] ?? ""),
@@ -223,8 +228,9 @@ export function validateRecoveryEvidence(evidence, options = {}) {
   requireExactFields(evidence.databaseStats, databaseStatNames, "databaseStats");
   for (const name of databaseStatNames) {
     requireEvidence(
-      Number.isInteger(evidence.databaseStats?.[name]) && evidence.databaseStats[name] > 0,
-      `${name} must be a positive integer`
+      Number.isInteger(evidence.databaseStats?.[name])
+        && (name === "gitRepositoryCount" ? evidence.databaseStats[name] >= 0 : evidence.databaseStats[name] > 0),
+      name === "gitRepositoryCount" ? "gitRepositoryCount must be a non-negative integer" : `${name} must be a positive integer`
     );
   }
   const integrityNames = sourceBlobEvidence

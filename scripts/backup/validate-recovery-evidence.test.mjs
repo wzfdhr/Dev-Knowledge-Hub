@@ -97,7 +97,8 @@ function validEvidence() {
       sourceAnalysisArtifactCount: 1,
       sourceBlobCount: 2,
       sourceFileBlobReferenceCount: 2,
-      referencedSourceBlobGenerationCount: 1
+      referencedSourceBlobGenerationCount: 1,
+      gitRepositoryCount: 1
     },
     integrity: {
       orphanedReleases: 0,
@@ -123,6 +124,7 @@ function legacyV2Evidence() {
   delete evidence.databaseStats.sourceBlobCount;
   delete evidence.databaseStats.sourceFileBlobReferenceCount;
   delete evidence.databaseStats.referencedSourceBlobGenerationCount;
+  delete evidence.databaseStats.gitRepositoryCount;
   delete evidence.integrity.unboundSourceFiles;
   delete evidence.integrity.invalidSourceBlobReferences;
   return evidence;
@@ -145,6 +147,16 @@ test("accepts a complete representative recovery evidence document", () => {
   const result = runValidator(validEvidence());
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).schemaVersion, 3);
+});
+
+test("accepts an empty repository archive when the restored database has no active Git repositories", () => {
+  const evidence = validEvidence();
+  evidence.volumeFileCounts.repositories = 0;
+  evidence.databaseStats.gitRepositoryCount = 0;
+
+  const result = runValidator(evidence);
+
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("requires and semantically validates the retained source blob record manifest", () => {

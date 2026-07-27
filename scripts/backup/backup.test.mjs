@@ -118,7 +118,7 @@ case " $* " in
   *" compose "*" exec "*) printf 'fake-pgdump\n' ;;
   *" compose "*" images -q app "*) printf 'devkh-recovery-image\n' ;;
   *" pg_restore "*) printf 'pg_restore %s\n' "$*" >> "$CALL_LOG" ;;
-  *" psql "*"workspaceCount"*) printf '{"workspaceCount":1,"userCount":1,"projectCount":1,"projectMemberCount":1,"snapshotCount":1,"releaseCount":1,"releaseChannelCount":1,"artifactCount":1,"sourceAnalysisArtifactCount":1,"sourceBlobCount":2,"sourceFileBlobReferenceCount":2,"referencedSourceBlobGenerationCount":1}\n' ;;
+  *" psql "*"workspaceCount"*) printf '{"workspaceCount":1,"userCount":1,"projectCount":1,"projectMemberCount":1,"snapshotCount":1,"releaseCount":1,"releaseChannelCount":1,"artifactCount":1,"sourceAnalysisArtifactCount":1,"sourceBlobCount":2,"sourceFileBlobReferenceCount":2,"referencedSourceBlobGenerationCount":1,"gitRepositoryCount":0}\n' ;;
   *" psql "*"recovery_database_ready"*)
     attempts=$(cat "$FAKE_DATABASE_READY_ATTEMPTS_FILE")
     if [ "$attempts" -lt "$FAKE_DATABASE_READY_FAILURES" ]; then
@@ -554,7 +554,7 @@ test("restore drill never writes production Docker volumes", () => {
         ephemeralDatabaseRestored: true,
         healthCheckPassed: true,
         volumeArchives: ["snapshots.tgz", "repositories.tgz", "sources.tgz", "artifacts.tgz"],
-        databaseStats: { workspaceCount: 1, userCount: 1, projectCount: 1, projectMemberCount: 1, snapshotCount: 1, releaseCount: 1, releaseChannelCount: 1, artifactCount: 1, sourceAnalysisArtifactCount: 1, sourceBlobCount: 2, sourceFileBlobReferenceCount: 2, referencedSourceBlobGenerationCount: 1 },
+        databaseStats: { workspaceCount: 1, userCount: 1, projectCount: 1, projectMemberCount: 1, snapshotCount: 1, releaseCount: 1, releaseChannelCount: 1, artifactCount: 1, sourceAnalysisArtifactCount: 1, sourceBlobCount: 2, sourceFileBlobReferenceCount: 2, referencedSourceBlobGenerationCount: 1, gitRepositoryCount: 0 },
         volumeFileCounts: { snapshots: 3, repositories: 1, sources: 1, artifacts: 1 },
         integrity: { orphanedReleases: 0, orphanedReleaseChannels: 0, crossWorkspaceProjectMembers: 0, projectMembersWithoutWorkspaceMembership: 0, orphanedArtifacts: 0, orphanedSourceAnalysisArtifacts: 0, unboundSourceFiles: 0, invalidSourceBlobReferences: 0 },
         blobReferenceCount: 2,

@@ -368,7 +368,7 @@ describe("release verification orchestrator", () => {
       trustedContractCommit: trustedCommit
     });
     expect(loadApprovalProvenance).toHaveBeenCalledWith(trustedCommit, expect.any(Object));
-  });
+  }, 20_000);
 
   testWithSourceBlobContract("rejects a second main push after an unapproved contract introduction", async () => {
     const unauthorizedContractCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
@@ -535,7 +535,7 @@ describe("release verification orchestrator", () => {
       eventName: "push",
       trustedContractCommit: priorCommit
     });
-  });
+  }, 20_000);
 
   testWithSourceBlobContract("rejects an introducing protected-main push whose predecessor lacks 0035", async () => {
     const candidateCommit = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();

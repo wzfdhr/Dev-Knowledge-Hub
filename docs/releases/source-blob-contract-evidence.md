@@ -2,7 +2,7 @@
 
 ## Current Status
 
-FK17 is implemented and tested locally only. The contract migration is **not authorized for merge, image publication, deployment, or production execution**. No production preflight, storage-mode change, or release action is recorded by this document.
+FK17 is integrated into the local `main` branch and tested locally. The contract migration is **not authorized for image publication, deployment, or production execution**. No production preflight, storage-mode change, or release action is recorded by this document.
 
 ## Immutable Release Identity
 

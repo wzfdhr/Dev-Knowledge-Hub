@@ -10,6 +10,7 @@ import { knowledgeSynthesisPipelineInputDigest } from "./synthesize-stage.js";
 import { tableSchemasPipelineInputDigest } from "./tables-stage.js";
 import type { PipelineStageInputPlanner } from "./worker.js";
 import type { PipelineArtifactStore, PipelineStageRunRecord, SourceSnapshotRecord } from "../../persistence/store.js";
+import type { SourceStorageMode } from "../frontend/compatibility.js";
 
 type B02StagePlannerStore = PipelineArtifactStore & {
   findSnapshotById(workspaceId: string, snapshotId: string): Promise<SourceSnapshotRecord | null>;
@@ -38,39 +39,58 @@ function assertSingleManifest(stage: string, manifestIds: readonly string[]): vo
   }
 }
 
-export function createB02StageInputPlanner(store: B02StagePlannerStore): PipelineStageInputPlanner {
+async function legacyConvertManifestIds(
+  store: B02StagePlannerStore,
+  manifestIds: readonly string[],
+  sourceStorageMode: SourceStorageMode
+): Promise<string[]> {
+  if (sourceStorageMode !== "shadow") return [...manifestIds];
+  const manifests = await Promise.all(manifestIds.map((id) => store.findArtifactById(id)));
+  return manifests.flatMap((manifest) => (
+    manifest?.kind === "normalized-sources" && manifest.schemaVersion === 1 ? [manifest.id] : []
+  ));
+}
+
+export function createB02StageInputPlanner(
+  store: B02StagePlannerStore,
+  sourceStorageMode: SourceStorageMode = "legacy"
+): PipelineStageInputPlanner {
   return {
     async nextInputDigest({ currentRun, build, nextStage, outputManifestIds }) {
       const snapshot = await store.findSnapshotById(currentRun.workspaceId, currentRun.snapshotId);
       if (!snapshot) throw new Error("Pipeline stage snapshot is unavailable");
       const runs = await store.listPipelineStageRuns(currentRun.workspaceId, currentRun.projectId, currentRun.buildId);
-      return nextB02InputDigest({ snapshot, build, currentRun, nextStage, outputManifestIds, runs });
+      return nextB02InputDigest({ snapshot, build, currentRun, nextStage, outputManifestIds, runs, store, sourceStorageMode });
     }
   };
 }
 
-function nextB02InputDigest(input: {
+async function nextB02InputDigest(input: {
   snapshot: SourceSnapshotRecord;
   build: BuildRecord;
   currentRun: PipelineStageRunRecord;
   nextStage: PipelineStageRunRecord["stage"];
   outputManifestIds: readonly string[];
   runs: readonly PipelineStageRunRecord[];
-}): string {
+  store: B02StagePlannerStore;
+  sourceStorageMode: SourceStorageMode;
+}): Promise<string> {
   switch (input.nextStage) {
     case "extract": {
       const convertManifestIds = latestOutputManifestIds(
         input.runs, "convert", input.currentRun, input.outputManifestIds
       );
-      assertSingleManifest("extract", convertManifestIds);
-      return knowledgeIrPipelineInputDigest(input.snapshot, input.build.purpose, convertManifestIds);
+      const legacyManifestIds = await legacyConvertManifestIds(input.store, convertManifestIds, input.sourceStorageMode);
+      assertSingleManifest("extract", legacyManifestIds);
+      return knowledgeIrPipelineInputDigest(input.snapshot, input.build.purpose, legacyManifestIds);
     }
     case "tables": {
       const convertManifestIds = latestOutputManifestIds(
         input.runs, "convert", input.currentRun, input.outputManifestIds
       );
-      assertSingleManifest("tables", convertManifestIds);
-      return tableSchemasPipelineInputDigest(input.snapshot, input.build.purpose, convertManifestIds);
+      const legacyManifestIds = await legacyConvertManifestIds(input.store, convertManifestIds, input.sourceStorageMode);
+      assertSingleManifest("tables", legacyManifestIds);
+      return tableSchemasPipelineInputDigest(input.snapshot, input.build.purpose, legacyManifestIds);
     }
     case "graph": {
       const extractManifestIds = latestOutputManifestIds(

@@ -210,11 +210,16 @@ export function validateRecoveryEvidence(evidence, options = {}) {
   for (const name of volumeNames) {
     const emptyRepositoryVolumeIsExpected = name === "repositories"
       && evidence.databaseStats?.gitRepositoryCount === 0;
+    const emptyUploadVolumeIsExpected = name === "sources"
+      && evidence.integrity?.unboundSourceFiles === 0;
+    const emptyVolumeIsExpected = emptyRepositoryVolumeIsExpected || emptyUploadVolumeIsExpected;
     requireEvidence(
       Number.isInteger(evidence.volumeFileCounts?.[name])
-        && (emptyRepositoryVolumeIsExpected ? evidence.volumeFileCounts[name] >= 0 : evidence.volumeFileCounts[name] > 0),
+        && (emptyVolumeIsExpected ? evidence.volumeFileCounts[name] >= 0 : evidence.volumeFileCounts[name] > 0),
       emptyRepositoryVolumeIsExpected
         ? "repositories restored file count must be non-negative when no active Git repositories exist"
+        : emptyUploadVolumeIsExpected
+          ? "sources restored file count must be non-negative when every source file is blob-bound"
         : `${name} restored file count must be positive`
     );
     requireEvidence(

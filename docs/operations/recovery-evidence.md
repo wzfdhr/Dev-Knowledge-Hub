@@ -101,8 +101,9 @@ GitHub `container-smoke` 使用临时本地 Restic 仓库执行同一套演练�
 `recovery-evidence` artifact 留存。CI 会先写入一组不含真实凭据的代表 workspace、成员、项目、
 快照、release channel 和 artifact，并要求所有数据库计数及四卷文件计数大于 `0`；空库不能通过。
 生产恢复演练中，若 `databaseStats.gitRepositoryCount` 为 `0`（项目只接入上传资料、没有活动 Git
-仓库），`repositories` 卷文件计数允许为 `0`；其余卷仍必须大于 `0`。只要存在活动 Git 仓库，
-`repositories` 卷文件计数也必须大于 `0`。
+仓库），`repositories` 卷文件计数允许为 `0`。若 `integrity.unboundSourceFiles` 为 `0`（所有资料
+都已绑定到 source blob，并由快照卷中的同 inode 视图覆盖），`sources` 上传卷文件计数也允许为 `0`。
+其他卷仍必须大于 `0`；只要存在活动 Git 仓库或未绑定资料，对应卷的文件计数必须大于 `0`。
 CI 在成功时删除临时仓库、恢复容器和外层 Compose 项目；失败时会保留临时仓库、恢复现场和 Compose 状态供取证，
 但在返回前必须删除 final/pending 两种名称下的 JSON/NDJSON 证据对。无条件上传的 artifact 只能保留不含现场路径
 或对象内容的 `status.json`/失败记录。CI runner 回收前，值班人员应从日志和该失败记录确认错误类别；不得把失败现场

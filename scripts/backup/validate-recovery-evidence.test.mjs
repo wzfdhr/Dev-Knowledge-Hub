@@ -159,6 +159,15 @@ test("accepts an empty repository archive when the restored database has no acti
   assert.equal(result.status, 0, result.stderr);
 });
 
+test("accepts an empty upload archive when every restored source file is blob-bound", () => {
+  const evidence = validEvidence();
+  evidence.volumeFileCounts.sources = 0;
+
+  const result = runValidator(evidence);
+
+  assert.equal(result.status, 0, result.stderr);
+});
+
 test("requires and semantically validates the retained source blob record manifest", () => {
   const missing = runValidator(validEvidence(), [], validSourceBlobRecords(), false);
   assert.notEqual(missing.status, 0);

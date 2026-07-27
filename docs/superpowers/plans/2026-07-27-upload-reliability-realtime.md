@@ -26,7 +26,7 @@
 **Interfaces:**
 - Produces: `UploadBodyConcurrencyState` 默认限制为 `{ global: 4, client: 2, session: 2 }`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 const state = new UploadBodyConcurrencyState();
@@ -35,25 +35,25 @@ expect(state.acquire("client", "session")).toEqual(expect.any(Function));
 expect(state.acquire("client", "session")).toBeNull();
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `npm test -- --run src/server/security/http.test.ts`
 
 Expected: failure because the default same-session limit remains 1.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```ts
 constructor(private readonly limits = { global: 4, client: 2, session: 2 }) {}
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `npm test -- --run src/server/security/http.test.ts`
 
 Expected: all HTTP security tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/server/security/http.ts src/server/security/http.test.ts
@@ -73,7 +73,7 @@ git commit -m "fix: avoid upload session concurrency races"
 - Produces: `ImportProgress.coordination?: { retryAfterSeconds: number; attempt: number }`.
 - Consumes: `UploadFolderOptions.onProgress(progress)`.
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 ```ts
 expect(progress).toContainEqual(expect.objectContaining({
@@ -88,13 +88,13 @@ render(<ImportProgress progress={{ phase: "uploading", status: "running", percen
 expect(screen.getByText("正在自动协调上传，资料不会丢失")).toBeInTheDocument();
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `npm test -- --run src/client/api/client.test.ts src/client/components/import-progress.test.tsx`
 
 Expected: failure because neither progress type nor coordination UI exists.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```ts
 coordination?: { retryAfterSeconds: number; attempt: number };
@@ -110,13 +110,13 @@ options.onRateLimit?.({ retryAfterSeconds: Math.ceil(delay / 1_000), attempt: ra
 
 `uploadFolderSession` passes `onRateLimit` for manifest, file and commit requests. Its callback emits the current counters plus `detail: "正在自动协调上传，资料不会丢失"`. `ImportProgress` renders that detail and `第 {attempt} 次协调，约 {retryAfterSeconds} 秒后继续` in its existing polite live region.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npm test -- --run src/client/api/client.test.ts src/client/components/import-progress.test.tsx`
 
 Expected: API and UI progress tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/client/api/types.ts src/client/api/client.ts src/client/components/import-progress.tsx src/client/api/client.test.ts src/client/components/import-progress.test.tsx
@@ -128,7 +128,7 @@ git commit -m "feat: show upload coordination progress"
 **Files:**
 - Verify only: changed files above
 
-- [ ] **Step 1: Run focused quality checks**
+- [x] **Step 1: Run focused quality checks**
 
 Run: `npx eslint src/server/security/http.ts src/server/security/http.test.ts src/client/api/types.ts src/client/api/client.ts src/client/api/client.test.ts src/client/components/import-progress.tsx src/client/components/import-progress.test.tsx && npm run build && npm test && npm run test:runtime && npm run delivery:verify && git diff --check`
 

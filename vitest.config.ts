@@ -6,6 +6,7 @@ export default defineConfig({
     exclude: [
       ...configDefaults.exclude,
       "**/.worktrees/**",
+      "data/**",
       "fixtures/frontend/**",
       "src/test/fixtures/**",
       "tests/e2e/**",

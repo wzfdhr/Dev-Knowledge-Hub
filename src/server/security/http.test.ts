@@ -72,6 +72,19 @@ describe("HTTP security policy", () => {
     second!();
   });
 
+  test("allows two buffered bodies from the same upload session before applying protection", () => {
+    const state = new UploadBodyConcurrencyState();
+    const first = state.acquire("client-a", "session-a");
+    const second = state.acquire("client-a", "session-a");
+
+    expect(first).toBeTypeOf("function");
+    expect(second).toBeTypeOf("function");
+    expect(state.acquire("client-a", "session-a")).toBeNull();
+
+    first!();
+    second!();
+  });
+
   test("sets defensive headers and rejects JSON bodies over 1 MiB", async () => {
     const app = buildServer(options());
 

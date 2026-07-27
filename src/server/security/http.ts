@@ -110,7 +110,7 @@ export class UploadBodyConcurrencyState {
   private readonly byClient = new Map<string, number>();
   private readonly bySession = new Map<string, number>();
 
-  constructor(private readonly limits = { global: 4, client: 2, session: 1 }) {}
+  constructor(private readonly limits = { global: 4, client: 2, session: 2 }) {}
 
   acquire(client: string, session: string): (() => void) | null {
     if (this.active >= this.limits.global

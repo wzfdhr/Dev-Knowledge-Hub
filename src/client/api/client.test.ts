@@ -5,6 +5,19 @@ import { api } from "./client";
 afterEach(() => vi.unstubAllGlobals());
 
 describe("release API client", () => {
+  test("creates a frontend-v2 draft through the verified release endpoint", async () => {
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      release: { id: "frontend-release", version: "1.1.0", releaseArtifactFamily: "frontend-v2" }
+    }), { status: 201, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetch);
+
+    await api.createFrontendReleaseDraft("build-1", "1.1.0");
+
+    expect(fetch).toHaveBeenCalledWith("/api/releases/frontend-v2", expect.objectContaining({
+      method: "POST", body: JSON.stringify({ buildId: "build-1", version: "1.1.0" }), credentials: "same-origin"
+    }));
+  });
+
   test("requests one exact encoded release ID", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({
       release: { id: "release / old", version: "0.1.0" }

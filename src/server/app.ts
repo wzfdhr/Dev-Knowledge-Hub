@@ -72,6 +72,11 @@ import {
   FrontendPreviewUnavailableError,
   loadFrontendCandidatePreview
 } from "./knowledge/frontend/preview.js";
+import { createVerifiedFrontendReleaseDraft } from "./knowledge/frontend/compatibility.js";
+import {
+  FrontendReleaseGraphUnavailableError,
+  loadPublishedFrontendGraph
+} from "./knowledge/frontend/release-graph.js";
 import { compareFrontendKnowledge } from "./knowledge/frontend/comparison.js";
 import { deriveFrontendChangeImpact } from "./knowledge/frontend/change-impact.js";
 import {
@@ -1738,6 +1743,32 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       repositoryId: repository.id,
       releaseId: query.data.releaseId
     });
+    const release = query.data.releaseId
+      ? await options.store.getRelease(admin.workspaceId, query.data.releaseId)
+      : await options.store.currentRelease(admin.workspaceId, repository.id);
+    if (!release || release.repositoryId !== repository.id || !release.publishedAt) {
+      return { release: null, format: query.data.format, data: null };
+    }
+    if (release.releaseArtifactFamily === "frontend-v2") {
+      if (query.data.format !== "json") {
+        return sendError(reply, 409, "FRONTEND_GRAPH_EXPORT_UNAVAILABLE", "Frontend graph export is not available yet");
+      }
+      if (!options.qualityArtifactReader) {
+        return sendError(reply, 503, "FRONTEND_GRAPH_UNAVAILABLE", "Frontend graph artifacts are unavailable");
+      }
+      try {
+        const graph = await loadPublishedFrontendGraph({
+          release, workspaceId: admin.workspaceId, projectId: params.data.projectId,
+          store: options.store, reader: options.qualityArtifactReader
+        });
+        return { release, format: query.data.format, data: { family: "frontend-v2", graph } };
+      } catch (error) {
+        if (error instanceof FrontendReleaseGraphUnavailableError || error instanceof z.ZodError) {
+          return sendError(reply, 409, "FRONTEND_GRAPH_UNAVAILABLE", "Published frontend graph package is incomplete or invalid");
+        }
+        throw error;
+      }
+    }
     if (!selected) return { release: null, format: query.data.format, data: null };
     const graph = exportKnowledgeGraph(selected.graph);
     const data = query.data.format === "mermaid"
@@ -2780,6 +2811,41 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       blobHash: sourceFile.contentHash,
       content: lines.slice(parsed.data.startLine - 1, parsed.data.endLine).join("\n")
     };
+  });
+
+  server.post("/api/releases/frontend-v2", { preHandler: requireContributor }, async (request, reply) => {
+    const parsed = z.object({ buildId: z.string().uuid(), version: z.string().trim().min(1) })
+      .safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "INVALID_REQUEST", "Invalid frontend release draft");
+    if (!options.qualityArtifactReader) {
+      return sendError(reply, 503, "FRONTEND_RELEASE_UNAVAILABLE", "Frontend release artifacts are unavailable");
+    }
+    const admin = (request as AuthenticatedRequest).sessionAdmin;
+    const repository = await requireRepositoryRole("member", request, reply);
+    if (!repository) return;
+    const runs = await options.store.listPipelineStageRuns(admin.workspaceId, repository.projectId, parsed.data.buildId);
+    const packageRun = runs.findLast((run) => run.stage === "package" && ["succeeded", "reused"].includes(run.status));
+    const packageArtifactId = packageRun
+      ? (await Promise.all(packageRun.outputManifestIds.map((id) => options.store.findArtifactById(id))))
+        .find((artifact) => artifact?.kind === "frontend-pipeline-package")?.id
+      : undefined;
+    if (!packageRun || !packageArtifactId) {
+      return sendError(reply, 409, "FRONTEND_RELEASE_NOT_READY", "Frontend package is not ready for release");
+    }
+    try {
+      const release = await createVerifiedFrontendReleaseDraft({
+        store: options.store, artifactReader: options.qualityArtifactReader,
+        workspaceId: admin.workspaceId, repositoryId: repository.id,
+        buildId: parsed.data.buildId, version: parsed.data.version,
+        packageStageRunId: packageRun.id, packageArtifactId
+      });
+      return reply.code(201).send({ release });
+    } catch (error) {
+      if (isReleaseVersionConflict(error)) {
+        return sendError(reply, 409, "RELEASE_VERSION_EXISTS", "A release with this version already exists");
+      }
+      return sendError(reply, 409, "FRONTEND_RELEASE_NOT_READY", error instanceof Error ? error.message : "Frontend release failed");
+    }
   });
 
   server.post("/api/releases", { preHandler: requireContributor }, async (request, reply) => {

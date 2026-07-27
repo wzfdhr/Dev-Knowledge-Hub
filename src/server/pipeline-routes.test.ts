@@ -9,6 +9,31 @@ import { authenticatedCookie, csrfHeaders } from "./test-support/csrf";
 const apps: ReturnType<typeof buildServer>[] = [];
 
 describe("pipeline build routes", () => {
+  test("validates frontend-v2 release draft requests before selecting a package", async () => {
+    const store = new MemoryAppStore();
+    const app = buildServer({
+      store,
+      masterKey: randomBytes(32).toString("base64"),
+      sessionSecret: "frontend-release-draft-session-secret",
+      dataDir: "/tmp/devkh-frontend-release-draft",
+      nodeEnv: "test"
+    });
+    apps.push(app);
+    await app.inject({
+      method: "POST", url: "/api/setup", payload: { email: "admin@example.com", password: "a secure admin password" }
+    });
+    const login = await app.inject({
+      method: "POST", url: "/api/session", payload: { email: "admin@example.com", password: "a secure admin password" }
+    });
+    const cookie = authenticatedCookie(login);
+    const response = await app.inject({
+      method: "POST", url: "/api/releases/frontend-v2", headers: { cookie, ...csrfHeaders(cookie) }, payload: {}
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: { code: "INVALID_REQUEST" } });
+  });
+
   test("keeps the legacy build status when a shadow stage fails", async () => {
     const store = new MemoryAppStore();
     const app = buildServer({

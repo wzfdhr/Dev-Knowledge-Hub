@@ -175,6 +175,20 @@ done
   exit 69
 }
 
+database_query_ready=0
+for _ in $(seq 1 30); do
+  if docker exec "$database_container" psql -U devkh -d postgres -At -v ON_ERROR_STOP=1 -c \
+    "SELECT 1 AS recovery_database_ready;" | grep -qx 1; then
+    database_query_ready=1
+    break
+  fi
+  sleep 1
+done
+(( database_query_ready == 1 )) || {
+  printf 'ephemeral recovery database did not accept queries\n' >&2
+  exit 69
+}
+
 if ! docker exec "$database_container" psql -U devkh -d postgres -At -v ON_ERROR_STOP=1 -c \
   "SELECT 1 FROM pg_database WHERE datname = 'dev_knowledge_hub';" | grep -qx 1; then
   docker exec "$database_container" createdb -U devkh dev_knowledge_hub

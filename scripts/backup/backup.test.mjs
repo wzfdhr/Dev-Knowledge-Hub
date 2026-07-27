@@ -77,6 +77,7 @@ function createFixture({
   resticRestoreDelay = "0",
   resticBackupBlock = false,
   resticRestoreBlock = false,
+  databaseReadyFailures = 0,
   sourceBlobManifestPaddingBytes = 0,
   requireManifestMode = false,
   snapshotArchiveEntries = null,
@@ -99,11 +100,13 @@ function createFixture({
   const passwordFile = join(root, "restic-password");
   const backupBlockFile = join(root, "backup.block");
   const restoreBlockFile = join(root, "restore.block");
+  const databaseReadyAttemptsFile = join(root, "database-ready-attempts");
   const sourceBlobManifestFile = join(root, "source-blob-manifests.json");
   const snapshotArchiveFile = join(root, "snapshot-attack.tgz");
   const systemTar = execFileSync("which", ["tar"], { encoding: "utf8" }).trim();
   execFileSync("mkdir", ["-p", bin]);
   writeFileSync(log, "");
+  writeFileSync(databaseReadyAttemptsFile, "0\n");
   writeFileSync(passwordFile, "test-only-password\n", { mode: 0o600 });
   writeFileSync(sourceBlobManifestFile, `${sourceBlobManifest}${" ".repeat(sourceBlobManifestPaddingBytes)}\n`, { mode: 0o600 });
   if (snapshotArchiveEntries) writeFileSync(snapshotArchiveFile, gzipTar(snapshotArchiveEntries), { mode: 0o600 });
@@ -116,6 +119,20 @@ case " $* " in
   *" compose "*" images -q app "*) printf 'devkh-recovery-image\n' ;;
   *" pg_restore "*) printf 'pg_restore %s\n' "$*" >> "$CALL_LOG" ;;
   *" psql "*"workspaceCount"*) printf '{"workspaceCount":1,"userCount":1,"projectCount":1,"projectMemberCount":1,"snapshotCount":1,"releaseCount":1,"releaseChannelCount":1,"artifactCount":1,"sourceAnalysisArtifactCount":1,"sourceBlobCount":2,"sourceFileBlobReferenceCount":2,"referencedSourceBlobGenerationCount":1}\n' ;;
+  *" psql "*"recovery_database_ready"*)
+    attempts=$(cat "$FAKE_DATABASE_READY_ATTEMPTS_FILE")
+    if [ "$attempts" -lt "$FAKE_DATABASE_READY_FAILURES" ]; then
+      printf '%s\n' $((attempts + 1)) > "$FAKE_DATABASE_READY_ATTEMPTS_FILE"
+      exit 1
+    fi
+    printf '1\n'
+    ;;
+  *" psql "*"SELECT 1 FROM pg_database"*)
+    attempts=$(cat "$FAKE_DATABASE_READY_ATTEMPTS_FILE")
+    if [ "$attempts" -lt "$FAKE_DATABASE_READY_FAILURES" ]; then exit 1; fi
+    printf '1\n'
+    ;;
+  *" createdb "*) exit 75 ;;
   *" psql "*"orphanedReleases"*)
     node -e 'const fs=require("node:fs"); const result=JSON.parse(process.env.FAKE_INTEGRITY_RESULT); if(process.env.FAKE_DERIVE_SOURCE_BLOB_INTEGRITY==="true"){const manifests=JSON.parse(fs.readFileSync(process.env.FAKE_SOURCE_BLOB_MANIFEST_PATH,"utf8")); const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i; const valid=(item)=>item.status==="active" ? item.fencingToken===null&&item.tombstonedAt===null&&item.trashedAt===null&&item.deletedAt===null : item.status==="tombstoned"&&uuid.test(item.fencingToken??"")&&typeof item.tombstonedAt==="string"&&item.trashedAt===null&&item.deletedAt===null; result.invalidSourceBlobReferences=manifests.filter((item)=>!valid(item)).length;} process.stdout.write(JSON.stringify(result)+"\n");' ;;
   *" psql "*"artifact_manifests"*) printf '[{"projectId":"33333333-3333-4333-8333-333333333333","snapshotId":"55555555-5555-4555-8555-555555555555","stage":"convert","storageKey":"%s","contentDigest":"218589323cbe80b7ed077e3ee36f1663e7cb5f8f4e4ad02c938ad8a5c2c5a6b9"}]\n' "$FAKE_ARTIFACT_STORAGE_KEY" ;;
@@ -233,6 +250,8 @@ fi
       RESTIC_RESTORE_DELAY: resticRestoreDelay,
       RESTIC_BACKUP_BLOCK_FILE: resticBackupBlock ? backupBlockFile : "",
       RESTIC_RESTORE_BLOCK_FILE: resticRestoreBlock ? restoreBlockFile : "",
+      FAKE_DATABASE_READY_FAILURES: String(databaseReadyFailures),
+      FAKE_DATABASE_READY_ATTEMPTS_FILE: databaseReadyAttemptsFile,
       RESTIC_BACKUP_SNAPSHOT_ID: backupSnapshotId,
       RESTIC_SNAPSHOTS_JSON: JSON.stringify(resticSnapshots),
       FAKE_INTEGRITY_RESULT: integrityResult,
@@ -494,7 +513,8 @@ test("restore drill never writes production Docker volumes", () => {
     const calls = readFileSync(fixture.log, "utf8");
     assert.match(calls, new RegExp(`restic snapshots --json[\\s\\S]*restic restore ${latestSnapshotId} --target`));
     assert.match(calls, /docker run .*postgres:16-bookworm pg_restore --list \/backup\/database\.pgdump/);
-    assert.match(calls, /docker exec .* createdb -U devkh dev_knowledge_hub/);
+    assert.match(calls, /docker exec .*recovery_database_ready/);
+    assert.doesNotMatch(calls, /docker exec .* createdb -U devkh dev_knowledge_hub/);
     assert.match(calls, /docker network create devkh-restore-drill-/);
     assert.match(calls, /docker exec -i devkh-restore-drill-.* pg_restore .*--exit-on-error/);
     assert.match(calls, /docker exec .* psql .*workspaceCount/);
@@ -570,6 +590,22 @@ test("restore drill never writes production Docker volumes", () => {
       assert.equal(BigInt(record.blobBlocks) * 512n, BigInt(record.blobAllocatedBytes));
       assert.equal(BigInt(record.viewBlocks) * 512n, BigInt(record.viewAllocatedBytes));
     }
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("restore drill waits for a successful PostgreSQL query before testing the recovery database", () => {
+  const fixture = createFixture({ databaseReadyFailures: 2 });
+
+  try {
+    const result = spawnSync(restoreDrillScript, [], {
+      env: fixture.environment,
+      encoding: "utf8"
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(fixture.environment.FAKE_DATABASE_READY_ATTEMPTS_FILE, "utf8").trim(), "2");
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }

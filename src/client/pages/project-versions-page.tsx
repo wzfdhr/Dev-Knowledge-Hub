@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { errorMessage, LIST_PAGE_SIZE, type ApiClient } from "../api/client";
-import type { Build, Release, Repository, SnapshotSummary } from "../api/types";
+import type { Build, PipelineStageRun, Release, Repository, SnapshotSummary } from "../api/types";
 import { Empty, ErrorState, Loading, Status } from "../components/ui";
 import { statusLabel } from "../copy";
 import { projectKeys, useFeedback } from "../hooks/use-domain";
@@ -38,6 +38,18 @@ export function canCreateFrontendDraft(
   projectRole: "admin" | "member" | "reader" | undefined
 ): boolean {
   return workspaceRole === "admin" || (workspaceRole === "member" && projectRole === "admin");
+}
+
+export function frontendDraftAvailability(stages: readonly PipelineStageRun[] | undefined): { ready: boolean; reason: string | null } {
+  if (!stages) return { ready: false, reason: "正在检查前端候选包状态。" };
+  if (stages.some((stage) => stage.stage === "package" && ["succeeded", "reused"].includes(stage.status))) {
+    return { ready: true, reason: null };
+  }
+  const parserFailure = stages.find((stage) => stage.stage === "extract" && stage.errorCode === "PARSER_RUNTIME_UNAVAILABLE");
+  if (parserFailure) {
+    return { ready: false, reason: "前端候选包未生成：解析器连接暂时中断。重新构建后再创建 active 图谱草稿。" };
+  }
+  return { ready: false, reason: "前端候选包尚未生成；完成影子构建后再创建 active 图谱草稿。" };
 }
 
 export function canRunProjectCommand(
@@ -176,6 +188,7 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
   const projectRole = projectMembersQuery.data?.members.find((member) => member.id === sessionQuery.data?.admin.id)?.role;
   const canUseLlm = canEnableLlmBuild(sessionQuery.data?.admin.role, projectRole);
   const canCreateActiveGraph = canCreateFrontendDraft(sessionQuery.data?.admin.role, projectRole);
+  const frontendDraft = frontendDraftAvailability(shadowPipelineQuery.data?.stages);
   const usesPermissionApi = typeof api.session === "function" && typeof api.listProjectMembers === "function";
   const canContribute = !usesPermissionApi || canRunProjectCommand("start-build", sessionQuery.data?.admin.role, projectRole);
   const canRunAction = Boolean(action && (!usesPermissionApi
@@ -189,8 +202,17 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
     setEventState("connecting");
     const source = new EventSource(`/api/builds/${encodeURIComponent(activeBuild.id)}/events`);
     source.onopen = () => setEventState("connected");
-    source.addEventListener("build", () => {
+    source.addEventListener("build", (event) => {
       setEventState("connected");
+      try {
+        const payload = JSON.parse((event as MessageEvent<string>).data) as { status?: string };
+        if (payload.status && terminal.has(payload.status)) {
+          source.close();
+          setEventState("idle");
+        }
+      } catch {
+        // A malformed event should not disable the browser's native reconnect behavior.
+      }
       void queryClient.invalidateQueries({ queryKey: projectKeys.builds(projectId) });
     });
     source.onerror = () => setEventState("reconnecting");
@@ -299,7 +321,7 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
       {feedbackQuery.error && <ErrorState message={`无法读取反馈数量：${errorMessage(feedbackQuery.error)}`} retry={() => void feedbackQuery.refetch()} />}
       {activeBuild && <section className="panel active-build"><div className="section-heading"><div><p className="eyebrow">正在构建</p><h2>{statusLabel(activeBuild.status)}</h2></div><Status value={activeBuild.status} /></div><progress className="progress" aria-label="构建进度" max={100} value={progress} /><p className="muted">{sourceLabel} <span className="mono">{activeBuild.commitSha.slice(0, 12)}</span>。{eventState === "reconnecting" ? "正在重新连接构建更新" : eventState === "connected" ? "已连接实时更新" : "正在连接实时更新"}</p>{canContribute && <button className="button danger" onClick={() => cancel.mutate(activeBuild.id)} disabled={activeBuild.cancelRequested}><Square aria-hidden="true" />{activeBuild.cancelRequested ? "已请求取消" : "取消构建"}</button>}</section>}
       {failedBuild && <section className="panel failed-build" role="alert"><div className="section-heading"><div><p className="eyebrow">构建失败</p><h2>{failedBuild.errorMessage ?? "知识构建失败"}</h2></div><Status value="failed" /></div><p className="muted">当前已发布版本未受影响。重试会创建新的候选构建，不会覆盖现有版本。</p></section>}
-      {reviewBuild && <section className="panel review-panel" aria-label="版本审核"><div><p className="eyebrow">等待审核</p><h2>构建 {reviewBuild.id.slice(0, 8)}</h2><p>选择草稿版本，然后检查生成的知识。</p></div><div className="review-actions"><button className="button" onClick={inspectKnowledge} disabled={createRelease.isPending}>查看知识</button>{canCreateActiveGraph && <button className="button primary" onClick={() => createFrontendRelease.mutate({ buildId: reviewBuild.id, value: version })} disabled={createFrontendRelease.isPending}>创建 active 图谱草稿</button>}<label>版本<input value={version} onChange={(event) => setVersion(event.target.value)} /></label></div></section>}
+      {reviewBuild && <section className="panel review-panel" aria-label="版本审核"><div><p className="eyebrow">等待审核</p><h2>构建 {reviewBuild.id.slice(0, 8)}</h2><p>选择草稿版本，然后检查生成的知识。</p></div><div className="review-actions"><button className="button" onClick={inspectKnowledge} disabled={createRelease.isPending}>查看知识</button>{canCreateActiveGraph && <div><button className="button primary" onClick={() => createFrontendRelease.mutate({ buildId: reviewBuild.id, value: version })} disabled={createFrontendRelease.isPending || !frontendDraft.ready}>创建 active 图谱草稿</button>{!frontendDraft.ready && <small className="muted">{frontendDraft.reason}</small>}</div>}<label>版本<input value={version} onChange={(event) => setVersion(event.target.value)} /></label></div></section>}
       <section className="section"><div className="section-heading"><div><p className="eyebrow">历史记录</p><h2>最近构建</h2></div></div>{builds.length === 0 ? <Empty>{repository?.kind === "upload" ? "暂无构建，请先导入项目文件夹。" : "暂无构建，请先同步仓库。"}</Empty> : <><div className="table-wrap"><table><thead><tr><th>状态</th><th>{sourceLabel}</th><th>警告</th><th>构建</th></tr></thead><tbody>{builds.map((build) => <tr key={build.id}><td><Status value={build.status} /></td><td className="mono">{build.commitSha.slice(0, 12)}</td><td>{build.warnings.length}</td><td className="mono">{build.id.slice(0, 8)}</td></tr>)}</tbody></table></div>{buildsQuery.hasNextPage && <button className="button continuation" onClick={() => void buildsQuery.fetchNextPage()} disabled={buildsQuery.isFetchingNextPage}>{buildsQuery.isFetchingNextPage ? "正在加载构建..." : "加载更多构建"}</button>}</>}</section>
     </>}
   </div>;

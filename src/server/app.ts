@@ -2544,7 +2544,14 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     let streaming = false;
     let lastSequence = 0;
     let closed = false;
+    let subscribed = false;
     const terminal = (event: BuildEvent) => ["ready", "published", "failed"].includes(event.status);
+    let unsubscribe = () => {};
+    const unsubscribeLive = () => {
+      if (!subscribed) return;
+      subscribed = false;
+      unsubscribe();
+    };
     const writeLive = (event: BuildEvent) => {
       if (closed || event.sequence <= lastSequence) return;
       if (!streaming) {
@@ -2554,25 +2561,29 @@ export function buildServer(options: ServerOptions): FastifyInstance {
       lastSequence = event.sequence;
       reply.raw.write(sseEvent(event));
       if (terminal(event)) {
-        closed = true;
-        reply.raw.end();
+        // The browser closes its EventSource after receiving a terminal event. Keeping the
+        // upstream response open until then avoids a proxy reporting a premature chunked close.
+        unsubscribeLive();
       }
     };
-    const unsubscribe = options.buildService?.subscribe(build.id, writeLive) ?? (() => {});
+    unsubscribe = options.buildService?.subscribe(build.id, writeLive) ?? (() => {});
+    subscribed = Boolean(options.buildService);
     const history = await options.store.listBuildEvents(admin.workspaceId, build.id, query.data);
     const replay = [...new Map([...history, ...buffered.values()]
       .map((event) => [event.sequence, event])).values()]
       .sort((left, right) => left.sequence - right.sequence);
     reply.header("content-type", "text/event-stream; charset=utf-8");
     reply.header("cache-control", "no-cache");
+    reply.header("x-accel-buffering", "no");
     if (query.data.once === "true" || !options.buildService || replay.some(terminal)) {
-      unsubscribe();
+      unsubscribeLive();
       return reply.send(replay.map(sseEvent).join(""));
     }
     reply.hijack();
     reply.raw.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-cache",
+      "x-accel-buffering": "no",
       connection: "keep-alive"
     });
     for (const event of replay) {
@@ -2587,7 +2598,7 @@ export function buildServer(options: ServerOptions): FastifyInstance {
     buffered.clear();
     request.raw.on("close", () => {
       closed = true;
-      unsubscribe();
+      unsubscribeLive();
     });
   });
 

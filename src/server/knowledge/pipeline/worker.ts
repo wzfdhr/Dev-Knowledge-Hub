@@ -55,8 +55,13 @@ const PARSER_RUNTIME_ERROR_CODES = new Set([
 const MAX_STAGE_ATTEMPTS = 3;
 const RETRY_DELAYS_MS = [5_000, 30_000] as const;
 
-function shouldRetry(run: PipelineStageRunRecord): boolean {
-  return RETRYABLE_STAGES.has(run.stage) && run.attempt < MAX_STAGE_ATTEMPTS;
+function shouldRetry(run: PipelineStageRunRecord, error?: unknown): boolean {
+  if (run.attempt >= MAX_STAGE_ATTEMPTS) return false;
+  if (RETRYABLE_STAGES.has(run.stage)) return true;
+  return run.stage === "extract"
+    && error instanceof Error
+    && "code" in error
+    && error.code === "PARSER_RUNTIME_UNAVAILABLE";
 }
 
 function retryDelayMs(run: PipelineStageRunRecord): number {
@@ -210,7 +215,7 @@ export class PipelineStageWorker {
           stageRunId: run.id,
           errorCode: pipelineErrorCode(error),
           errorDetail: error instanceof Error ? error.message.slice(0, 4_000) : "Pipeline stage failed",
-          ...(shouldRetry(run) ? { retry: {
+          ...(shouldRetry(run, error) ? { retry: {
             inputDigest: run.inputDigest,
             availableAt: new Date(Date.now() + retryDelayMs(run))
           } } : {})

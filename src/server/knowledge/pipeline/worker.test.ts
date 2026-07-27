@@ -273,8 +273,26 @@ describe("PipelineStageWorker", () => {
     await worker.process(queue.sent[0]!);
 
     expect(store.runs).toEqual([
-      expect.objectContaining({ status: "failed", errorCode: "PARSER_RUNTIME_UNAVAILABLE" })
+      expect.objectContaining({ status: "failed", errorCode: "PARSER_RUNTIME_UNAVAILABLE" }),
+      expect.objectContaining({ stage: "extract", attempt: 2, status: "queued" })
     ]);
+  });
+
+  test("retries a transient parser-unavailable extract stage", async () => {
+    const store = new FakePipelineStore();
+    const queue = new FakeQueue();
+    const worker = new PipelineStageWorker(store, queue, async () => {
+      throw Object.assign(new Error("Parser service closed the connection"), { code: "PARSER_RUNTIME_UNAVAILABLE" });
+    }, ["extract"]);
+    await worker.schedule(job);
+
+    await worker.process(queue.sent[0]!);
+
+    expect(store.runs).toEqual([
+      expect.objectContaining({ stage: "extract", attempt: 1, status: "failed", errorCode: "PARSER_RUNTIME_UNAVAILABLE" }),
+      expect.objectContaining({ stage: "extract", attempt: 2, status: "queued", inputDigest: digest })
+    ]);
+    expect(queue.sent).toHaveLength(2);
   });
 
   test("preserves a failed retryable attempt before queueing its next attempt", async () => {

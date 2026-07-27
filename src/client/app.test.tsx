@@ -633,6 +633,36 @@ describe("overview primary command", () => {
     expect(FakeEventSource.instance.close).not.toHaveBeenCalled();
   });
 
+  test("closes EventSource after it receives a terminal build event", async () => {
+    class FakeEventSource {
+      static instance: FakeEventSource;
+      onerror: (() => void) | null = null;
+      onopen: (() => void) | null = null;
+      close = vi.fn();
+      listeners = new Map<string, (event: MessageEvent) => void>();
+      constructor(readonly url: string) { FakeEventSource.instance = this; }
+      addEventListener(type: string, listener: (event: MessageEvent) => void) { this.listeners.set(type, listener); }
+    }
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const api = {
+      getRepository: vi.fn().mockResolvedValue({ repository: {
+        id: "repo", kind: "local", name: "Fixture", path: "/fixture", defaultBranch: "main"
+      } }),
+      listBuilds: vi.fn().mockResolvedValue({ builds: [{
+        id: "build", status: "synthesizing", snapshotId: "snap", commitSha: "a".repeat(40),
+        warnings: [], cancelRequested: false
+      }] }),
+      listReleases: vi.fn().mockResolvedValue({ releases: [] }),
+      listFeedback: vi.fn().mockResolvedValue({ feedback: [] })
+    } as unknown as ApiClient;
+
+    renderPage(<OverviewPage api={api} />);
+    await screen.findByText("生成中", { selector: "h2" });
+    FakeEventSource.instance.listeners.get("build")?.({ data: JSON.stringify({ status: "ready" }) } as MessageEvent);
+
+    expect(FakeEventSource.instance.close).toHaveBeenCalledTimes(1);
+  });
+
   test("shows failed build details with a targeted retry command", async () => {
     const api = {
       getRepository: vi.fn().mockResolvedValue({ repository: {

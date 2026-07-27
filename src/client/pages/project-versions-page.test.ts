@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { canEnableLlmBuild, shadowPipelineMessage, shouldPollShadowPipeline, suggestNextReleaseVersion } from "./project-versions-page";
+import { canCreateFrontendDraft, canEnableLlmBuild, shadowPipelineMessage, shouldPollShadowPipeline, suggestNextReleaseVersion } from "./project-versions-page";
 
 describe("ProjectVersionsPage shadow pipeline status", () => {
   test("explains a failed shadow stage without reporting a formal build failure", () => {
@@ -21,6 +21,15 @@ describe("ProjectVersionsPage LLM build permission", () => {
     expect(canEnableLlmBuild("member", "admin")).toBe(true);
     expect(canEnableLlmBuild("member", "member")).toBe(false);
     expect(canEnableLlmBuild("reader", "reader")).toBe(false);
+  });
+});
+
+describe("ProjectVersionsPage active frontend draft permission", () => {
+  test("limits active graph drafts to administrators", () => {
+    expect(canCreateFrontendDraft("admin", undefined)).toBe(true);
+    expect(canCreateFrontendDraft("member", "admin")).toBe(true);
+    expect(canCreateFrontendDraft("member", "member")).toBe(false);
+    expect(canCreateFrontendDraft("reader", "admin")).toBe(false);
   });
 });
 

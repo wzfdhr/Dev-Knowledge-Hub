@@ -15,7 +15,9 @@ import { ImportHistory } from "../components/import-history";
 import { FolderFilterReport, ImportResultReport } from "../components/import-report";
 import { ImportProgress } from "../components/import-progress";
 import { ImportSourceSwitcher, type ImportSourceKind } from "../components/import-source-switcher";
+import { CoreFlowErrorCard, CoreFlowErrorDialog } from "../components/core-flow-error-dialog";
 import { ErrorState, Loading } from "../components/ui";
+import { describeCoreFlowError, type CoreFlowErrorDescriptor } from "../errors/core-flow-error";
 import { keys, projectKeys } from "../hooks/use-domain";
 
 function idleProgress(): ImportProgressValue {
@@ -31,32 +33,6 @@ function isTerminalUploadSessionError(error: unknown) {
       "UPLOAD_SESSION_STATE",
       "IDEMPOTENCY_KEY_REUSED"
     ].includes(error.code);
-}
-
-function uploadFailure(error: unknown): { message: string; description: string } {
-  if (isTerminalUploadSessionError(error)) {
-    return {
-      message: "上传会话已失效，请重新选择项目文件夹",
-      description: "当前已发布知识不会自动变化。请先刷新导入历史确认处理结果；重新选择后会开始新的安全上传。"
-    };
-  }
-  if (!(error instanceof ApiError) || error.status >= 500 || ["TEMPORARY", "RATE_LIMITED"].includes(error.code)) {
-    return {
-      message: "上传暂时中断，已验证文件会保留约 24 小时",
-      description: "上传结果尚未确认，当前已发布知识不会自动变化。直接安全重试，或刷新后重新选择同一文件夹即可继续；不会重复上传已验证文件，也不会重复创建内容版本。"
-    };
-  }
-  const knownMessages: Record<string, string> = {
-    TOO_MANY_FILES: "可采集文件数量超过上限",
-    FOLDER_SIZE_LIMIT: "可采集源码总大小超过 2 GiB",
-    MANIFEST_INCOMPLETE: "文件清单不完整，请重新选择项目文件夹",
-    MANIFEST_DIGEST_MISMATCH: "文件夹内容已变化，请重新选择后再试",
-    PROJECT_ACCESS_DENIED: "你已没有该项目的上传权限"
-  };
-  return {
-    message: knownMessages[error.code] ?? "上传未完成，请检查项目文件夹后重试",
-    description: `当前已发布知识不会自动变化。请刷新导入历史确认处理结果，修正问题后可以安全重试。错误代码：${error.code}`
-  };
 }
 
 export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api: ApiClient; projectId?: string }) {
@@ -81,6 +57,8 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
   const [result, setResult] = useState<UploadSnapshotSummary | null>(null);
   const [location, setLocation] = useState("");
   const [token, setToken] = useState("");
+  const [uploadIssue, setUploadIssue] = useState<CoreFlowErrorDescriptor | null>(null);
+  const [uploadIssueOpen, setUploadIssueOpen] = useState(false);
 
   useEffect(() => { folderInput.current?.setAttribute("webkitdirectory", ""); }, []);
   useEffect(() => {
@@ -133,10 +111,14 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
       return summary;
     },
     onSuccess: (value) => {
+      setUploadIssue(null);
+      setUploadIssueOpen(false);
       setProgress((current) => ({ ...current, phase: "snapshot", status: "completed", percent: 100, detail: value.unchanged ? "内容没有变化" : "已创建新的内容版本" }));
       void rememberSnapshot(value, report);
     },
     onError: (error) => {
+      setUploadIssue(describeCoreFlowError("upload", error));
+      setUploadIssueOpen(true);
       setProgress((value) => ({ ...value, status: "failed" }));
       if (isTerminalUploadSessionError(error)) setReport(null);
     }
@@ -210,7 +192,8 @@ export function ProjectImportsPage({ api, projectId: explicitProjectId }: { api:
       <ImportProgress progress={progress} />
       {report && <div className="import-report-row"><FolderFilterReport report={report} /><div className="import-confirm-panel"><h2>确认上传这些资料</h2><p>{currentRepository && currentRepository.kind !== "upload" ? "当前资料来源会保留为只读归档，完成上传后切换到新内容版本。" : "上传完成后仍需人工构建并发布，当前线上知识不会自动变化。"}</p><Button type="primary" loading={upload.isPending} disabled={!report.acceptedFiles.length} onClick={uploadFolder}>确认并开始上传</Button></div></div>}
       {result && <div ref={resultRef} tabIndex={-1}><ImportResultReport upload={result} localIgnored={completedFilter} nextHref={`/projects/${projectId}/production`} /></div>}
-      {upload.error && <ErrorState {...uploadFailure(upload.error)} {...(isTerminalUploadSessionError(upload.error) ? {} : { retry: uploadFolder })} />}
+      {uploadIssue && <CoreFlowErrorCard descriptor={uploadIssue} onRetry={uploadIssue.retryable ? uploadFolder : undefined} />}
+      <CoreFlowErrorDialog descriptor={uploadIssue} open={uploadIssueOpen} onClose={() => setUploadIssueOpen(false)} onRetry={uploadIssue?.retryable ? uploadFolder : undefined} />
       <ImportHistory
         reports={importHistory.data?.reports ?? []}
         loading={importHistory.isLoading}

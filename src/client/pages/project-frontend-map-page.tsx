@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Activity, Boxes, FileCode2, GitBranch, Network, TestTube2, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import { errorMessage, type ApiClient } from "../api/client";
@@ -13,6 +13,8 @@ import { ToolingTests } from "../components/frontend-map/tooling-tests";
 import { VisualizationCatalog } from "../components/frontend-map/visualization-catalog";
 import { frontendPreviewErrorState, frontendPreviewState, type FrontendPreviewStateDescriptor } from "../components/frontend-map/frontend-preview-state";
 import { Empty, ErrorState, Loading } from "../components/ui";
+import { CoreFlowErrorCard, CoreFlowErrorDialog } from "../components/core-flow-error-dialog";
+import { describeCoreFlowError } from "../errors/core-flow-error";
 
 const views = [
   ["overview", "概览"], ["routes", "路由与页面"], ["components", "组件与设计系统"],
@@ -36,14 +38,19 @@ export function ProjectFrontendMapPage({ api }: { api: ApiClient }) {
   const { projectId = "" } = useParams();
   const [view, setView] = useState<View>("overview");
   const [citation, setCitation] = useState<GraphSourceRef | null>(null);
+  const [previewIssueDismissed, setPreviewIssueDismissed] = useState(false);
   const preview = useQuery({ queryKey: ["projects", projectId, "frontend-preview"], queryFn: () => api.getProjectFrontendPreview(projectId), enabled: Boolean(projectId), retry: false });
+  useEffect(() => { if (preview.error) setPreviewIssueDismissed(false); }, [preview.error]);
   const source = useQuery({
     queryKey: ["projects", projectId, "frontend-preview-source", preview.data?.preview?.build.id, citation],
     queryFn: () => api.getProjectFrontendPreviewSource(projectId, preview.data!.preview!.build.id, citation!),
     enabled: Boolean(citation && preview.data?.preview), retry: false
   });
   if (preview.isLoading) return <div className="page"><Loading label="正在加载 React 前端地图" /></div>;
-  if (preview.error) return <div className="page frontend-map-page"><header className="page-header"><div><p className="eyebrow">管理员影子预览</p><h1>React 前端地图</h1></div></header><PreviewState value={frontendPreviewErrorState(preview.error)} /><ErrorState message={errorMessage(preview.error)} retry={() => void preview.refetch()} /></div>;
+  if (preview.error) {
+    const issue = describeCoreFlowError("graph", preview.error);
+    return <div className="page frontend-map-page"><header className="page-header"><div><p className="eyebrow">管理员影子预览</p><h1>React 前端地图</h1></div></header><PreviewState value={frontendPreviewErrorState(preview.error)} /><CoreFlowErrorCard descriptor={issue} onRetry={() => void preview.refetch()} /><CoreFlowErrorDialog descriptor={issue} open={!previewIssueDismissed} onClose={() => setPreviewIssueDismissed(true)} onRetry={() => void preview.refetch()} /></div>;
+  }
   if (!preview.data || preview.data.status !== "ready") {
     return <div className="page frontend-map-page"><header className="page-header"><div><p className="eyebrow">管理员影子预览</p><h1>React 前端地图</h1><p>正式知识版本和 MCP 均未改变。</p></div></header>{preview.data ? <PreviewState value={frontendPreviewState(preview.data)} /> : <Empty>预览状态不可用。</Empty>}</div>;
   }

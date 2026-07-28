@@ -6,6 +6,8 @@ import { useNavigate, useParams } from "react-router-dom";
 import { errorMessage, LIST_PAGE_SIZE, type ApiClient } from "../api/client";
 import type { Build, PipelineStageRun, Release, Repository, SnapshotSummary } from "../api/types";
 import { Empty, ErrorState, Loading, Status } from "../components/ui";
+import { CoreFlowErrorCard, CoreFlowErrorDialog } from "../components/core-flow-error-dialog";
+import { describeCoreFlowError } from "../errors/core-flow-error";
 import { statusLabel } from "../copy";
 import { projectKeys, useFeedback } from "../hooks/use-domain";
 import "../progress.css";
@@ -172,6 +174,7 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
   const [version, setVersion] = useState("1.0.0");
   const [allowLlm, setAllowLlm] = useState(false);
   const [eventState, setEventState] = useState<"idle" | "connecting" | "connected" | "reconnecting">("idle");
+  const [operationIssueDismissed, setOperationIssueDismissed] = useState(false);
 
   const builds = buildsQuery.data?.pages.flatMap((page) => page.builds) ?? [];
   const releases = releasesQuery.data?.releases ?? [];
@@ -275,6 +278,14 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
   const cancel = useMutation({ mutationFn: api.cancelBuild, onSuccess: () => queryClient.invalidateQueries({ queryKey: projectKeys.builds(projectId) }) });
   const operationError = sync.error ?? start.error ?? createRelease.error ?? createFrontendRelease.error ?? publish.error ?? cancel.error;
 
+  useEffect(() => {
+    if (operationError) setOperationIssueDismissed(false);
+  }, [operationError]);
+  const operationIssue = operationError ? describeCoreFlowError(
+    createRelease.error || createFrontendRelease.error || publish.error ? "publish" : "build",
+    operationError
+  ) : null;
+
   const handlePrimary = () => {
     if (reviewBuild) {
       createRelease.mutate({ buildId: reviewBuild.id, value: version, navigateToKnowledge: true });
@@ -331,7 +342,7 @@ export function ProjectVersionsPage({ api }: { api: ApiClient }) {
     </header>
     {blockingError && <div className="state error blocking-error" role="alert"><TriangleAlert aria-hidden="true" /><span>{errorMessage(blockingError)}</span><button className="button" onClick={retryOverview}>重试总览数据</button></div>}
     {requiredLoading && <Loading label="正在加载构建和版本状态" />}
-    {!blockingError && operationError && <ErrorState message={errorMessage(operationError)} />}
+    {!blockingError && operationIssue && <><CoreFlowErrorCard descriptor={operationIssue} /><CoreFlowErrorDialog descriptor={operationIssue} open={!operationIssueDismissed} onClose={() => setOperationIssueDismissed(true)} /></>}
     {!blockingError && !requiredLoading && <>
       <section className="repo-strip" aria-label="仓库状态"><div><span>仓库</span><strong>{repository?.name ?? "未连接"}</strong></div><div><span>{repository?.kind === "upload" ? "来源" : "分支"}</span><strong><GitBranch aria-hidden="true" />{snapshot?.ref ?? repository?.defaultBranch ?? "-"}</strong></div><div><span>{sourceLabel}</span><strong className="mono">{commit?.slice(0, 12) ?? "暂无快照"}</strong></div><div><span>待同步</span><strong>{snapshot ? (snapshot.unchanged ? "没有变更" : `已采集 ${snapshot.fileCount} 个文件`) : repository ? repository.kind === "upload" ? "等待导入项目文件夹" : "需要同步" : "-"}</strong></div></section>
       <section className="metric-grid" aria-label="工作区摘要"><article><span>当前版本</span><strong>{releases.find((release) => release.publishedAt)?.version ?? "未发布"}</strong></article><article><span>人工待处理项</span><strong>{feedbackQuery.data?.pages.flatMap((page) => page.feedback).filter((item) => ["open", "acknowledged"].includes(item.status)).length ?? 0}</strong></article><article><span>构建数</span><strong>{builds.length}</strong></article><article><span>知识状态</span><strong>{latestBuild ? <Status value={latestBuild.status} /> : "尚未构建"}</strong></article></section>

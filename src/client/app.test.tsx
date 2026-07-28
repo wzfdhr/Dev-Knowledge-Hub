@@ -809,7 +809,11 @@ describe("overview primary command", () => {
 
     renderPageAt(<Routes><Route path="/projects/:projectId/graph" element={<ProjectGraphPage api={graphApi} />} /></Routes>, "/projects/project-1/graph");
 
-    expect(await screen.findByText("Graph read failed")).toBeVisible();
+    const dialog = await screen.findByRole("dialog", { name: "服务暂未完成本次操作" });
+    expect(screen.getByRole("alert", { name: "知识图谱错误详情" })).toBeVisible();
+    expect(within(dialog).getByText("数据安全")).toBeInTheDocument();
+    expect(within(dialog).getByText("GRAPH_UNAVAILABLE")).toBeInTheDocument();
+    expect(screen.queryByText("Graph read failed")).not.toBeInTheDocument();
   });
 
   test("ignores an older failure after the latest build is published", async () => {
@@ -1499,17 +1503,18 @@ describe("repository replacement", () => {
     const confirm = await screen.findByRole("button", { name: "确认并开始上传" });
     await user.click(confirm);
     await waitFor(() => expect(uploadFolder).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText("上传暂时中断，已验证文件会保留约 24 小时")).toBeVisible();
-    expect(screen.getByText(/重新选择同一文件夹.*不会重复上传已验证文件/)).toBeVisible();
-    expect(screen.getByText(/上传结果尚未确认.*已发布知识不会自动变化/)).toBeVisible();
-    expect(screen.getByText(/安全重试.*不会重复创建内容版本/)).toBeVisible();
-    expect(screen.getByRole("button", { name: "重试" })).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "重试" }));
+    const dialog = await screen.findByRole("dialog", { name: "上传提交暂未完成" });
+    expect(screen.getByRole("alert", { name: "资料接入错误详情" })).toBeVisible();
+    expect(within(dialog).getByText("数据安全")).toBeInTheDocument();
+    expect(within(dialog).getByText("TEMPORARY")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "安全重试" })).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "安全重试" }));
     await waitFor(() => expect(uploadFolder).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText("上传会话已失效，请重新选择项目文件夹")).toBeVisible();
-    expect(screen.getByText(/当前已发布知识不会自动变化/)).toBeVisible();
+    const terminalDialog = await screen.findByRole("dialog", { name: "上传会话已失效" });
+    expect(within(terminalDialog).getByText("刷新导入历史确认结果，再重新选择同一文件夹开始新的上传。")).toBeInTheDocument();
+    expect(within(terminalDialog).getByText("数据安全")).toBeInTheDocument();
     expect(screen.queryByText(/没有创建内容版本/)).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "安全重试" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "确认并开始上传" })).not.toBeInTheDocument();
 
     await user.upload(uploadInput, new File(["export {};"], "main.ts", { type: "text/typescript" }));
@@ -1542,8 +1547,9 @@ describe("repository replacement", () => {
     await user.upload(uploadInput, new File(["export {};"], "main.ts", { type: "text/typescript" }));
     await user.click(await screen.findByRole("button", { name: "确认并开始上传" }));
 
-    expect(await screen.findByText("上传会话已失效，请重新选择项目文件夹")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "重试" })).not.toBeInTheDocument();
+    const dialog = await screen.findByRole("dialog", { name: "上传会话已失效" });
+    expect(within(dialog).getByText("数据安全")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "安全重试" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "确认并开始上传" })).not.toBeInTheDocument();
 
     await user.upload(uploadInput, new File(["export {};"], "main.ts", { type: "text/typescript" }));

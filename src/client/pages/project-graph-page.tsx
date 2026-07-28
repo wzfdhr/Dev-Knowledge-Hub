@@ -7,6 +7,8 @@ import { errorMessage, type ApiClient } from "../api/client";
 import type { GraphSourceRef, KnowledgeGraph, SourceExcerpt } from "../api/types";
 import { KnowledgeGraphExplorer } from "../components/knowledge-graph-explorer";
 import { Empty, ErrorState, Loading } from "../components/ui";
+import { CoreFlowErrorCard, CoreFlowErrorDialog } from "../components/core-flow-error-dialog";
+import { describeCoreFlowError } from "../errors/core-flow-error";
 import { describeGraphReduction, filterGraph, layoutGraph } from "../features/graph/graph-view-model";
 
 const graphKinds = ["module", "symbol", "document", "table", "column", "command"] as const;
@@ -76,7 +78,9 @@ export function ProjectGraphPage({ api }: { api: ApiClient }) {
   const [citation, setCitation] = useState<GraphSourceRef | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportSuccess, setExportSuccess] = useState<string | null>(null);
+  const [graphIssueDismissed, setGraphIssueDismissed] = useState(false);
   const graph = useQuery({ queryKey: ["projects", projectId, "graph", "json"], queryFn: () => api.getProjectGraph(projectId, "json"), enabled: Boolean(projectId), retry: false });
+  useEffect(() => { if (graph.error) setGraphIssueDismissed(false); }, [graph.error]);
   const graphValue = displayGraph(graph.data?.data);
   const source = useQuery({
     queryKey: ["graph-source", citation, graph.data?.release?.id],
@@ -150,7 +154,10 @@ export function ProjectGraphPage({ api }: { api: ApiClient }) {
   };
 
   if (graph.isLoading) return <div className="page"><Loading label="正在加载知识图谱" /></div>;
-  if (graph.error) return <div className="page"><ErrorState message={errorMessage(graph.error)} retry={() => void graph.refetch()} /></div>;
+  if (graph.error) {
+    const issue = describeCoreFlowError("graph", graph.error);
+    return <div className="page project-graph-page"><header className="page-header"><div><p className="eyebrow">已发布知识</p><h1>知识图谱</h1></div></header><CoreFlowErrorCard descriptor={issue} onRetry={() => void graph.refetch()} /><CoreFlowErrorDialog descriptor={issue} open={!graphIssueDismissed} onClose={() => setGraphIssueDismissed(true)} onRetry={() => void graph.refetch()} /></div>;
+  }
   if (!graphValue) return <div className="page project-graph-page"><header className="page-header"><div><p className="eyebrow">已发布知识</p><h1>知识图谱</h1><p>完成资料导入、构建并发布 active 前端包后，这里会展示可追溯的关系。</p></div></header><Empty><span>当前没有已发布的 active 前端图谱。</span><span className="empty-state-note">尚未发布图谱不会影响现有资料或知识版本。</span></Empty></div>;
   const reduction = describeGraphReduction(visibleGraph!);
   const hasVisibleNodes = Boolean(layout?.nodes.length);

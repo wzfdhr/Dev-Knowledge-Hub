@@ -1,6 +1,6 @@
 # Pipeline Release Rollback
 
-This is a prepared rollback contingency for F05 and later, after a pipeline release has been formally activated. Before F05, the service rejects `DEVKH_KNOWLEDGE_KERNEL_MODE=active` and legacy remains the only formal read path, so do not perform a production mode switch in the current phase. The operation does not delete releases, builds, database rows, snapshots, or artifacts.
+This is the rollback contingency for F05 and later, after a pipeline release has been formally activated. `DEVKH_KNOWLEDGE_KERNEL_MODE=active` enables the staged pipeline worker for future builds, but it does not publish a release automatically: the existing draft-and-publish review boundary remains mandatory. The operation does not delete releases, builds, database rows, snapshots, or artifacts.
 
 1. Set `DEVKH_KNOWLEDGE_KERNEL_MODE=shadow` in the service environment and restart the application. This changes only the mode for future builds; published releases retain their own immutable provenance.
 2. Identify a previously published legacy release from the affected project. Do not use an unpublished release or a release with `kernelMode: "pipeline"`.

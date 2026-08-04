@@ -158,27 +158,35 @@ describe("production bootstrap", () => {
     await expect(schedulePostBuild({ id: "build-1" } as BuildRecord)).resolves.toBeUndefined();
   });
 
-  test("rejects active kernel mode before F05", async () => {
-    const deps = dependencies();
-    await expect(bootstrapProductionServer({
-      DATABASE_URL: "postgres://localhost/devkh",
-      DEVKH_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
-      DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars",
-      DEVKH_KNOWLEDGE_KERNEL_MODE: "active"
-    }, deps)).rejects.toThrow(/active.*F05/i);
-
-    expect(deps.createDatabase).not.toHaveBeenCalled();
-    expect(deps.createQualityPipelineWorker).not.toHaveBeenCalled();
-    expect(deps.createBuildService).not.toHaveBeenCalled();
-  });
-
-  test("queues the deterministic shadow convert stage after a durable build", async () => {
+  test("starts the staged pipeline worker in F05 active mode", async () => {
     const deps = dependencies();
     await bootstrapProductionServer({
       DATABASE_URL: "postgres://localhost/devkh",
       DEVKH_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
       DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars",
-      DEVKH_KNOWLEDGE_KERNEL_MODE: "shadow"
+      DEVKH_KNOWLEDGE_KERNEL_MODE: "active",
+      DEVKH_FRONTEND_KNOWLEDGE_MODE: "active",
+      DEVKH_SOURCE_STORAGE_MODE: "active"
+    }, deps);
+
+    expect(deps.createQualityPipelineWorker).toHaveBeenCalledOnce();
+    expect(deps.createBuildService).toHaveBeenCalledOnce();
+    const sourceBlobStore = vi.mocked(deps.createSourceBlobStore).mock.results[0]!.value;
+    expect(sourceBlobStore.verifyHardlinkSupport).toHaveBeenCalledOnce();
+    expect(deps.buildServer).toHaveBeenCalledWith(expect.objectContaining({
+      knowledgeKernelMode: "active",
+      frontendKnowledgeMode: "active",
+      sourceStorageMode: "active"
+    }));
+  });
+
+  test.each(["shadow", "active"] as const)("queues the deterministic pipeline stage in %s mode after a durable build", async (kernelMode) => {
+    const deps = dependencies();
+    await bootstrapProductionServer({
+      DATABASE_URL: "postgres://localhost/devkh",
+      DEVKH_MASTER_KEY: Buffer.alloc(32, 7).toString("base64"),
+      DEVKH_SESSION_SECRET: "production-session-secret-at-least-32-chars",
+      DEVKH_KNOWLEDGE_KERNEL_MODE: kernelMode
     }, deps);
 
     const initialPipelineStage = vi.mocked(deps.createBuildService).mock.calls[0]![3]!;

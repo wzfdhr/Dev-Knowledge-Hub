@@ -4,6 +4,8 @@ Private, clean-room developer knowledge service that snapshots a repository, bui
 
 This package is private and `UNLICENSED`. No permission is granted to copy, redistribute, or publish it.
 
+For the current Chinese product workflow, navigation, roles, review boundary, LLM status, graph behavior, and common recovery paths, see [知识库使用说明](docs/知识库使用说明.md).
+
 ## Requirements
 
 - Node.js 22.13.0 or newer and npm 11 for local development
@@ -94,13 +96,19 @@ Integration cleanup must target only `TEST_DATABASE_URL`; never point it at `dev
 
 ## Operating workflow
 
-1. Open the console and complete one-time admin setup.
-2. Enter a project from Project Center and open **Data Upload**. Select the original project folder; the browser filters dependencies, build output, binary files, and sensitive files before direct folder upload. Git HTTPS and server-local paths remain alternative sources.
-3. Open **Knowledge Versions**, build the immutable source snapshot, review the cited draft, and explicitly publish it.
-4. Open the project's **Codex Integration** page, create a project-scoped MCP token, and install the generated `.codex/config.toml` and `AGENTS.md` snippets. Token plaintext is shown once.
-5. Use **Team Collaboration** to inspect workspace members and project-isolated audit activity. Review reported gaps in Feedback; acknowledge before rebuilding. Rebuild never auto-publishes.
+The project workbench is intentionally organized around five areas:
 
-Folder imports accept up to 50,000 accepted files and 2 GiB of accepted source. Dependency and build directories are excluded before their contents are read or uploaded; the server repeats the same filtering before it creates an immutable snapshot. ZIP imports are not supported.
+1. **项目概览 / Project Overview** shows the lifecycle and exactly one recommended next action.
+2. **资料接入 / Sources** connects a local folder, Git HTTPS repository, or server-local path. A successful import means the source is available; it never changes published knowledge.
+3. **知识生产 / Production** creates an immutable snapshot, builds knowledge, exposes stage status and failures, creates a draft, and supports safe retry.
+4. **知识资料 / Knowledge** is the reading and review surface. It includes pages, quality, graph, and (for administrators) frontend map. A persistent draft-review bar makes the remaining publish action explicit.
+5. **项目设置 / Settings** contains team collaboration and project-scoped Codex integration.
+
+The lifecycle is always **接入资料 → 创建快照 → 构建知识 → 审核草稿 → 发布版本**. Only an explicit publish changes the version served to search and MCP. Uploading, rebuilding, retrying, and reviewing a draft never replace published knowledge automatically.
+
+Folder imports accept up to 50,000 accepted files and 2 GiB of accepted source. Dependency and build directories are excluded before their contents are read or uploaded; the server repeats the same filtering before it creates an immutable snapshot. ZIP imports are not supported. Interrupted uploads retain verified files for approximately 24 hours and can be safely resumed by selecting the same folder again.
+
+In **项目设置 → Codex 接入**, create a project-scoped MCP token and install the generated `.codex/config.toml` and `AGENTS.md` snippets. Token plaintext is shown once. Use **团队协作** to inspect workspace members and project-isolated audit activity. Review reported gaps in Feedback; acknowledge before rebuilding. Rebuild never auto-publishes.
 
 `SIGTERM` and `SIGINT` stop HTTP intake, close active MCP sessions, drain pg-boss, and close the database pool. Compose grants 30 seconds for this path.
 
@@ -187,6 +195,10 @@ CI runs these gates with PostgreSQL 16 and uploads Playwright artifacts on failu
 - **MCP returns `UNAUTHORIZED`:** rotate/recreate the token under the project's Codex Integration page and update the client environment. Revoked tokens stop working immediately.
 - **MCP returns `UNPUBLISHED`:** publish a ready release in the console; drafts are not agent-visible.
 - **Citations cannot be read:** restore the matching immutable snapshot volume and database backup together.
-- **Build interrupted:** the restarted worker fails interrupted active builds and safely reenqueues only queued builds with present snapshots. Persisted queued work is also reconciled periodically after dispatch failures.
+- **Upload temporarily interrupted:** verified files remain available for approximately 24 hours. Safely retry or reselect the same folder; the published release is unchanged.
+- **Build interrupted or failed:** inspect the build detail and its failed stage, then retry after correcting the cause. A retry creates a new attempt and preserves failure evidence; it never auto-publishes.
+- **Graph or frontend map has no content:** first check that the relevant build and frontend candidate package completed. Re-uploading the same source is not a refresh mechanism.
+- **LLM enhancement did not take effect:** inspect the build warning. The system falls back to deterministic base generation, which remains reviewable.
+- **Build-event connection drops:** the browser reconnects and the page continues polling build state. Refreshing the page does not alter the build or published version.
 
 See [architecture](docs/architecture.md), [security](docs/security.md), [HTTP/MCP API](docs/api.md), [commercialization roadmap](docs/commercialization-roadmap.md), and [clean-room provenance](docs/provenance.md).
